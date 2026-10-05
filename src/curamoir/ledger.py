@@ -21,12 +21,19 @@ class Ledger:
     def __init__(self, path):
         self._path = Path(path)
 
-    def record(self, job, reason, message, **fields):
-        """Append one entry. Never rewrites or reorders existing lines."""
+    def record(self, job, reason, message, kind="job", **fields):
+        """Append one entry. Never rewrites or reorders existing lines.
+
+        `kind` separates the two record types that coexist here:
+        "job" is the one-per-exit line E0-R9 guarantees; "guard" is one per
+        guardrail that fired, which E13-R3's dogfood log reads and of which a
+        single run may produce several or none.
+        """
         entry = {
             "at": datetime.now(timezone.utc).isoformat(),
+            "kind": kind,
             "job": job,
-            "reason": str(reason),
+            "reason": str(reason) if reason is not None else None,
             "message": message,
             **fields,
         }

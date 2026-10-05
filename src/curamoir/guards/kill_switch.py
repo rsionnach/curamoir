@@ -8,7 +8,7 @@ acquired, so a paused repo never takes a lock it will not use.
 """
 
 from curamoir.guards.reasons import Reason
-from curamoir.guards.result import Refusal
+from curamoir.guards.result import Degraded, Refusal
 
 PAUSE_FILE = "PAUSE"
 PAUSED_LABEL = "curamoir:paused"
@@ -38,7 +38,25 @@ class KillSwitch:
                     ),
                 )
 
-        if self._repo_labels is not None and PAUSED_LABEL in self._read_labels():
+        if self._repo_labels is not None:
+            try:
+                labels = list(self._repo_labels() or [])
+            except Exception as error:
+                # Not a pause: a gh outage must not halt a month of scheduled
+                # work. Not silence either — the check did not run, and that is
+                # a gap the brief must be able to report.
+                return Degraded(
+                    reason=Reason.PAUSED,
+                    message=(
+                        f"could not read repository labels ({error}); "
+                        f"the {PAUSED_LABEL!r} kill switch was NOT checked. "
+                        "The local PAUSE file was checked and is absent."
+                    ),
+                )
+        else:
+            labels = []
+
+        if PAUSED_LABEL in labels:
             return Refusal(
                 reason=Reason.PAUSED,
                 message=(
@@ -48,21 +66,3 @@ class KillSwitch:
             )
 
         return None
-
-    def _read_labels(self):
-        """Labels, or none at all if they cannot be read.
-
-        A failed lookup must not read as a pause: the local PAUSE file is the
-        source of truth, and a GitHub outage must not silently halt a month of
-        scheduled work.
-
-        KNOWN GAP: this swallow is currently silent. A guard receives only the
-        context and has no route to the ledger, so a degraded check leaves no
-        trace. Guards that depend on the network (this one, and E0-R6's PR cap)
-        need a "degraded" signal distinct from "allowed". Recorded on E0-R9,
-        which owns what the ledger must contain.
-        """
-        try:
-            return list(self._repo_labels() or [])
-        except Exception:
-            return []

@@ -17,7 +17,7 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
-from curamoir.guards import Gateway, JobContext
+from curamoir.guards import Degraded, Gateway, JobContext
 from curamoir.ledger import Ledger
 
 
@@ -28,6 +28,7 @@ class GuardRun:
     refusal: object
     ledger: list
     performed: bool
+    degraded: object = None
 
     def assert_refused(self, reason):
         if self.refusal is None:
@@ -109,9 +110,15 @@ class Harness:
 
         outcome = gateway.perform(context, lambda: performed.append(job))
 
-        refused = outcome is not None and hasattr(outcome, "reason")
+        degraded = [
+            entry for entry in ledger.entries() if entry.get("severity") == "degraded"
+        ]
+        refused = outcome is not None and not isinstance(outcome, Degraded)
         return GuardRun(
             refusal=outcome if refused else None,
             ledger=ledger.entries(),
             performed=bool(performed),
+            degraded=Degraded(
+                reason=degraded[0]["reason"], message=degraded[0]["message"]
+            ) if degraded else None,
         )

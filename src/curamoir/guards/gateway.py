@@ -1,7 +1,7 @@
 """The chokepoint every cúramóir side effect passes through."""
 
 from curamoir.guards.reasons import Reason
-from curamoir.guards.result import Refusal
+from curamoir.guards.result import Degraded, Refusal
 
 
 def guard_name(guard):
@@ -36,12 +36,23 @@ class Gateway:
                     reason=Reason.GUARD_ERROR,
                     message=f"{guard_name(guard)} failed: {error}",
                 )
+            if isinstance(refusal, Degraded):
+                # Allow, but never silently: a guardrail that could not run is
+                # a gap in protection the brief has to be able to report.
+                self._record(context, refusal, severity="degraded")
+                continue
             if refusal is not None:
-                if self._ledger is not None:
-                    self._ledger.record(
-                        job=context.job,
-                        reason=refusal.reason,
-                        message=refusal.message,
-                    )
+                self._record(context, refusal, severity="refused")
                 return refusal
         return action()
+
+    def _record(self, context, outcome, severity):
+        if self._ledger is None:
+            return
+        self._ledger.record(
+            kind="guard",
+            job=context.job,
+            reason=outcome.reason,
+            message=outcome.message,
+            severity=severity,
+        )
