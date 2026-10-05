@@ -84,6 +84,19 @@ class Harness:
     def current_branch(self):
         return self._git("rev-parse", "--abbrev-ref", "HEAD")
 
+    def checkout(self, branch):
+        """Create and switch to a branch in the throwaway repo."""
+        self._git("checkout", "-b", branch)
+        return branch
+
+    def rename_branch(self, new_name):
+        """Rename the current branch, for repos whose default is not `main`."""
+        self._git("branch", "-m", new_name)
+        return new_name
+
+    def local_branches(self):
+        return self._git("for-each-ref", "--format=%(refname:short)", "refs/heads").split()
+
     def ledger(self):
         return Ledger(self._ledger_path)
 
