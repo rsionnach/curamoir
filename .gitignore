@@ -2,3 +2,14 @@
 # Dolt database files (added by bd init)
 .dolt/
 *.db
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+*.egg-info/
+
+# Working copy of the spec. Deliberately untracked: rsionnach/curamoir is a
+# public repo and the spec is not ready to publish. Remove this line when it is.
+docs/curamoir-spec.md
