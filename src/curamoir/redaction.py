@@ -1,0 +1,90 @@
+"""E0-R7: redaction for everything cúramóir writes.
+
+Briefs, handoffs, issues and PR bodies pass through `redact` before being
+written. Making this the only write path for those artefacts is deliberate: a
+later epic cannot forget to call something it has to go through.
+
+LIMITS, stated plainly and repeated in docs/security.md (E13-R2b):
+
+- Pattern-based redaction catches shapes it knows. An unrecognised secret
+  format passes through untouched.
+- It reduces exposure; it does not guarantee absence. A brief is committed and
+  may become a public issue (E9-R3), so the real protection is not putting
+  secrets in a repo cúramóir can read.
+
+Each pattern preserves the surrounding context — the key's NAME survives, only
+its value is replaced — because a brief reading "[REDACTED]" with no indication
+of what was removed is not actionable.
+"""
+
+import re
+from pathlib import Path
+
+PLACEHOLDER = "[REDACTED]"
+
+# Ordered: specific vendor shapes first, generic assignments last, so a known
+# key is labelled precisely rather than caught by the catch-all.
+_PATTERNS = (
+    # Anthropic
+    (re.compile(r"sk-ant-[A-Za-z0-9_\-]{8,}"), PLACEHOLDER),
+    # OpenAI-style
+    (re.compile(r"\bsk-[A-Za-z0-9]{20,}"), PLACEHOLDER),
+    # GitHub (classic, fine-grained, app, refresh, OAuth)
+    (re.compile(r"\bgh[pousr]_[A-Za-z0-9]{16,}"), PLACEHOLDER),
+    (re.compile(r"\bgithub_pat_[A-Za-z0-9_]{20,}"), PLACEHOLDER),
+    # AWS access key id, and Google API keys
+    (re.compile(r"\bAKIA[0-9A-Z]{16}\b"), PLACEHOLDER),
+    (re.compile(r"\bAIza[0-9A-Za-z_\-]{35}\b"), PLACEHOLDER),
+    # Slack
+    (re.compile(r"\bxox[abprs]-[A-Za-z0-9\-]{10,}"), PLACEHOLDER),
+    # PEM private keys: the whole block, not just the header
+    (
+        re.compile(
+            r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----",
+            re.DOTALL,
+        ),
+        PLACEHOLDER,
+    ),
+    # Bearer tokens and JWTs
+    (re.compile(r"(?i)\b(bearer)\s+[A-Za-z0-9._\-]{16,}"), r"\1 " + PLACEHOLDER),
+    (re.compile(r"\beyJ[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{4,}\.[A-Za-z0-9_\-]{4,}"), PLACEHOLDER),
+    # Credentials embedded in a URL
+    (re.compile(r"\b([a-z][a-z0-9+.\-]*://[^\s:/@]+):[^\s/@]+@"), r"\1:" + PLACEHOLDER + "@"),
+    # Generic: a secret-looking NAME assigned a long-enough value. The name is
+    # kept so the reader knows what was removed.
+    (
+        re.compile(
+            r"(?i)\b([A-Za-z0-9_.\-]*(?:password|passwd|secret|token|api[_\-]?key|"
+            r"access[_\-]?key|private[_\-]?key|credential)[A-Za-z0-9_.\-]*)"
+            r"(\s*[:=]\s*)"
+            r"[\"']?([^\s\"',]{8,})[\"']?"
+        ),
+        r"\1\2" + PLACEHOLDER,
+    ),
+)
+
+
+def redact(text):
+    """Return `text` with recognised secrets replaced by a placeholder.
+
+    Idempotent: redacting already-redacted text is a no-op, because the
+    placeholder matches none of the patterns.
+    """
+    if not text:
+        return text
+    for pattern, replacement in _PATTERNS:
+        text = pattern.sub(replacement, text)
+    return text
+
+
+def write_artefact(path, text, encoding="utf-8"):
+    """Write one of cúramóir's generated artefacts, redacted.
+
+    The single write path E0-R7 calls for. Briefs (E9-R3), handoffs (E8-R1),
+    issue bodies and PR bodies (E6-R2, E3-R3) all go through here, so redaction
+    is structural rather than something each epic has to remember.
+    """
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(redact(text), encoding=encoding)
+    return target
