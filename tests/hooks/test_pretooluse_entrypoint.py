@@ -1,0 +1,99 @@
+"""The hook as Claude Code actually invokes it: a subprocess, JSON on stdin.
+
+Verified against the current hook contract (DEC-5):
+  input   {"hook_event_name": "PreToolUse", "tool_name": "Bash",
+           "tool_input": {"command": ...}, "cwd": ...}
+  block   {"hookSpecificOutput": {"hookEventName": "PreToolUse",
+           "permissionDecision": "deny", "permissionDecisionReason": ...}}
+  allow   exit 0 with no decision — normal permission flow applies.
+
+permissionDecisionReason is the channel the message reaches the agent through,
+which is why E0-R5's "name the safe alternative" lands there.
+"""
+
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
+def run_hook(command, env=None, cwd=None, tool_name="Bash"):
+    payload = {
+        "hook_event_name": "PreToolUse",
+        "tool_name": tool_name,
+        "tool_input": {"command": command},
+        "cwd": str(cwd or REPO_ROOT),
+    }
+    environment = {**os.environ, "PYTHONPATH": str(REPO_ROOT / "src")}
+    environment.pop("CURAMOIR_JOB", None)
+    environment.update(env or {})
+    result = subprocess.run(
+        [sys.executable, "-m", "curamoir.hooks.pretooluse"],
+        input=json.dumps(payload),
+        capture_output=True,
+        text=True,
+        env=environment,
+        cwd=str(REPO_ROOT),
+    )
+    decision = json.loads(result.stdout)["hookSpecificOutput"] if result.stdout.strip() else None
+    return result, decision
+
+
+def test_a_destructive_command_inside_a_job_is_denied_with_a_reason():
+    result, decision = run_hook("git reset --hard", env={"CURAMOIR_JOB": "sweep"})
+
+    assert result.returncode == 0, result.stderr
+    assert decision["hookEventName"] == "PreToolUse"
+    assert decision["permissionDecision"] == "deny"
+    assert "stash" in decision["permissionDecisionReason"]
+
+
+def test_an_ordinary_command_produces_no_decision():
+    result, decision = run_hook("git status", env={"CURAMOIR_JOB": "sweep"})
+
+    assert result.returncode == 0, result.stderr
+    assert decision is None
+
+
+def test_outside_a_job_nothing_is_denied():
+    result, decision = run_hook("git reset --hard")
+
+    assert result.returncode == 0, result.stderr
+    assert decision is None
+
+
+def test_the_supervisor_lock_is_the_fallback_when_env_is_scrubbed(tmp_path):
+    """CLAUDE_CODE_SUBPROCESS_ENV_SCRUB can strip CURAMOIR_JOB, so the lock the
+    runner already maintains (E0-R2) is the second signal. Without it a scrubbed
+    environment would silently stop enforcing."""
+    (tmp_path / ".curamoir" / "state").mkdir(parents=True)
+    (tmp_path / ".curamoir" / "state" / "lock").write_text("{}", encoding="utf-8")
+
+    result, decision = run_hook("rm -rf build/", cwd=tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    assert decision["permissionDecision"] == "deny"
+
+
+def test_a_non_bash_tool_is_ignored():
+    result, decision = run_hook("irrelevant", env={"CURAMOIR_JOB": "sweep"}, tool_name="Read")
+
+    assert decision is None
+
+
+def test_malformed_input_does_not_crash_the_hook():
+    """A hook that raises adds noise to every tool call and, because hooks fail
+    open, protects nothing anyway. Exit clean and let normal flow apply."""
+    environment = {**os.environ, "PYTHONPATH": str(REPO_ROOT / "src")}
+    result = subprocess.run(
+        [sys.executable, "-m", "curamoir.hooks.pretooluse"],
+        input="this is not json",
+        capture_output=True,
+        text=True,
+        env=environment,
+    )
+
+    assert result.returncode == 0, result.stderr

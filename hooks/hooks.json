@@ -1,0 +1,29 @@
+{
+  "_comment": [
+    "cúramóir hooks. Verify field names against current Claude Code documentation",
+    "before editing: hook event names and the PreToolUse response schema change",
+    "between releases.",
+    "",
+    "The denylist hook (E0-R5) is scoped to Bash by `matcher` so it is not",
+    "invoked for other tools, and carries a short explicit `timeout`. The default",
+    "is 600s, and a timed-out command hook fails OPEN — so an unbounded timeout",
+    "would stall every Bash call for ten minutes while protecting nothing.",
+    "",
+    "Guards promoted from rules (E4-R4b) register separately with matcher",
+    "'Edit|Write'. SessionStart / Stop / PreCompact handoff hooks are Epic 8's."
+  ],
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 -m curamoir.hooks.pretooluse",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  }
+}

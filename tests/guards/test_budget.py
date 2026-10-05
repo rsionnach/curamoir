@@ -13,7 +13,6 @@ from datetime import datetime, timezone
 
 from curamoir.budget import Budget, PriceTable
 from curamoir.guards import Reason
-from curamoir.ledger import Ledger
 
 # Verified 2026-10-05. Ships with a "verify prices" note (E11-R1).
 PRICES = PriceTable({
