@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+# PreToolUse hook entry point (E0-R5), invoked by Claude Code via hooks/hooks.json.
+#
+# This wrapper exists because the hook must work when cúramóir is INSTALLED as a
+# plugin, where the plugin is an unpacked directory rather than a pip install and
+# `curamoir` is not on the interpreter's import path. ${CLAUDE_PLUGIN_ROOT} is
+# resolved by Claude Code in the hook `command` and also exported to this process.
+#
+# It must never fail noisily: command hooks fail OPEN, so a wrapper that errors
+# protects nothing while adding noise to every Bash call.
+set -u
+
+root="${CLAUDE_PLUGIN_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+
+for interpreter in python3 python; do
+  if command -v "$interpreter" >/dev/null 2>&1; then
+    PYTHONPATH="${root}/src${PYTHONPATH:+:${PYTHONPATH}}" \
+      exec "$interpreter" -m curamoir.hooks.pretooluse
+  fi
+done
+
+# No interpreter: emit no decision and let the normal permission flow apply.
+exit 0

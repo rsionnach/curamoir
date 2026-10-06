@@ -50,7 +50,20 @@ def test_every_handler_is_a_command_handler_with_a_command():
             assert handler["command"].strip()
 
 
-def test_the_registered_command_points_at_the_module_that_exists():
+def test_the_registered_command_points_at_an_executable_that_exists():
+    """Previously this asserted the command named the module directly, which
+    encoded a bug: that form only works when `curamoir` is already importable,
+    which is false for an installed plugin. The command now goes through a
+    wrapper rooted at ${CLAUDE_PLUGIN_ROOT} — see tests/plugin/test_hook_wiring.py.
+    """
+    import os
+
+    root = HOOKS.parents[1]
     handlers = [h for entry in pretooluse_entries() for h in entry["hooks"]]
 
-    assert any("curamoir.hooks.pretooluse" in h["command"] for h in handlers)
+    assert handlers
+    for handler in handlers:
+        relative = handler["command"].replace('"${CLAUDE_PLUGIN_ROOT}"/', "")
+        target = root / relative
+        assert target.is_file(), f"hook command target missing: {relative}"
+        assert os.access(target, os.X_OK), f"hook command target not executable: {relative}"

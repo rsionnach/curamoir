@@ -1,0 +1,18 @@
+{
+  "name": "curamoir",
+  "displayName": "cúramóir",
+  "version": "0.1.0",
+  "description": "Entropy management for agent-written codebases: holds the line while you are away, and hands you a brief when you return.",
+  "author": {
+    "name": "Rob Fox"
+  },
+  "repository": "https://github.com/rsionnach/curamoir",
+  "license": "MIT",
+  "keywords": [
+    "entropy",
+    "code-quality",
+    "unattended",
+    "handoff",
+    "beads"
+  ]
+}

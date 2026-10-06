@@ -1,13 +1,19 @@
 {
   "_comment": [
-    "cúramóir hooks. Verify field names against current Claude Code documentation",
-    "before editing: hook event names and the PreToolUse response schema change",
-    "between releases.",
+    "cúramóir hooks. Verified against the live hooks and manifest references",
+    "2026-10-06. Re-verify before editing: hook event names and the PreToolUse",
+    "response schema change between releases.",
     "",
-    "The denylist hook (E0-R5) is scoped to Bash by `matcher` so it is not",
+    "The denylist hook (E0-R5) is scoped to Bash by `matcher`, so it is not",
     "invoked for other tools, and carries a short explicit `timeout`. The default",
-    "is 600s, and a timed-out command hook fails OPEN — so an unbounded timeout",
+    "is 600s and a timed-out command hook fails OPEN, so an unbounded timeout",
     "would stall every Bash call for ten minutes while protecting nothing.",
+    "",
+    "The command goes through scripts/curamoir-hook-pretooluse rather than",
+    "`python3 -m curamoir.hooks.pretooluse`, because an installed plugin is an",
+    "unpacked directory and `curamoir` is not on the import path. The wrapper",
+    "sets it from ${CLAUDE_PLUGIN_ROOT}. The variable is quoted so a plugin path",
+    "containing a space survives.",
     "",
     "Guards promoted from rules (E4-R4b) register separately with matcher",
     "'Edit|Write'. SessionStart / Stop / PreCompact handoff hooks are Epic 8's."
@@ -19,7 +25,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 -m curamoir.hooks.pretooluse",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}\"/scripts/curamoir-hook-pretooluse",
             "timeout": 5
           }
         ]

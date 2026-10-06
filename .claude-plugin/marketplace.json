@@ -1,0 +1,15 @@
+{
+  "name": "curamoir",
+  "description": "cúramóir — entropy management for agent-written codebases, for solo developers who work in bursts.",
+  "owner": {
+    "name": "Rob Fox",
+    "url": "https://github.com/rsionnach"
+  },
+  "plugins": [
+    {
+      "name": "curamoir",
+      "source": ".",
+      "description": "Holds a codebase's quality steady while you are away, and reduces re-entry cost to a single short read."
+    }
+  ]
+}
