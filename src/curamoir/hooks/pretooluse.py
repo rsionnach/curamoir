@@ -11,8 +11,16 @@ Two properties matter more than the logic:
 - **It is fast.** It runs on every Bash call during a job. No imports beyond the
   standard library, no network, no model.
 
-Delegates to `dcg` when that is installed and configured, rather than keeping a
-second copy of the denylist (E0-R5).
+Delegates to `dcg` when that is installed and not switched off, rather than
+keeping a second copy of the denylist (E0-R5).
+
+NOTE ON THE CONTROL SURFACE: E0-R5 names the config key
+`guardrails.use_dcg_if_present`, but this hook cannot read `curamoir.yaml` —
+it is deliberately stdlib-only, because PyYAML is not guaranteed present for an
+installed plugin, and it runs on every Bash call so it must not pay a config
+parse. The switch is therefore the environment variable `CURAMOIR_USE_DCG`
+(default on), which the runner sets from the config key. Documented here because
+a docstring that quotes a key the code never reads is worse than no docstring.
 """
 
 import json
@@ -69,7 +77,8 @@ def _delegate_to_dcg(command):
     """`dcg`'s verdict, or None to fall back to our own list.
 
     E0-R5: "If `dcg` is installed and `use_dcg_if_present` is true, delegate to
-    it instead of duplicating the list."
+    it instead of duplicating the list." The switch reaching this hook is
+    CURAMOIR_USE_DCG, not the config key directly — see the module docstring.
     """
     if os.environ.get("CURAMOIR_USE_DCG", "1") != "1":
         return None

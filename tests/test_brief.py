@@ -266,3 +266,26 @@ def test_a_failed_issue_post_does_not_lose_the_written_brief(tmp_path):
 
     assert path.is_file()
     assert "cúramóir brief" in path.read_text(encoding="utf-8")
+
+
+def test_a_repo_with_no_handoff_does_not_claim_an_absurd_absence(tmp_path):
+    """The sentinel for "no handoff" was 10000 and it was rendered verbatim, so
+    the brief said "Away 10000 day(s)" — a falsehood on the face of the artefact
+    most likely to be read by a stranger (E9-R5)."""
+    rendered = render_brief(build_brief(prepared(tmp_path)))
+
+    assert "10000" not in rendered
+    assert "unknown" in rendered.lower() or "no previous" in rendered.lower()
+
+
+def test_the_brief_threshold_and_cadence_come_from_config(tmp_path):
+    """E9-R1's threshold and `cadence.brief` were only arguments to a Python
+    function; nothing read the config, so the documented `weekly` mode was
+    unreachable in practice."""
+    from curamoir.brief import due_for_brief_from_config
+
+    repo = prepared(tmp_path, handoff_age_days=1)
+    (repo / ".curamoir" / "curamoir.yaml").write_text(
+        "version: 1\ncadence:\n  brief: weekly\n", encoding="utf-8")
+
+    assert due_for_brief_from_config(repo) is True

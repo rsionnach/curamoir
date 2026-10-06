@@ -24,7 +24,9 @@ modules:
     - dist/
     - "*.egg-info/"
     - docs/
-    - tests/fixtures/
+    # Excluded from GRADING, not from the sweep: a test suite graded as
+    # production code would skew every module's grade.
+    - tests/
 
 models:
   # Verify current model ids before relying on these. cheap runs the sweep,
@@ -114,6 +116,16 @@ guardrails:
   branch_prefix: "curamoir/"
   command_denylist: default
   use_dcg_if_present: true
+
+handoff:
+  # Budget for the state injected at session start. Claude Code hard-limits the
+  # injection to 10,000 characters; ~4 characters per token is the usual
+  # approximation, so this is bounded by both.
+  session_start_token_budget: 1500
+  # Dated handoffs kept in .curamoir/handoff/history/.
+  keep_history: 10
+  # Days away before a brief is generated, when cadence.brief is on_return.
+  brief_threshold_days: 5
 
 rules:
   # ast-grep patterns survive reformatting and can match a proposed edit before

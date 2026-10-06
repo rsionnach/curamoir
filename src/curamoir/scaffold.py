@@ -15,9 +15,13 @@ and re-runs init by habit must not lose it, so a second run writes
 from pathlib import Path
 
 # Never modules: build artefacts, packaging metadata, docs, and vendored code.
+# Never modules. `tests` is here per DEC-2 item 3: a test suite graded as
+# production code would skew every module's grade and waste review passes on it.
+# Note the asymmetry — tests are excluded from GRADING, not from the sweep.
 NEVER_MODULES = (
-    "build", "dist", "docs", "site-packages", "node_modules", "venv", ".venv",
-    "__pycache__", ".git", ".curamoir", ".tox", ".mypy_cache", ".pytest_cache",
+    "build", "dist", "docs", "tests", "test", "site-packages", "node_modules",
+    "venv", ".venv", "__pycache__", ".git", ".curamoir", ".tox", ".mypy_cache",
+    ".pytest_cache", "fixtures",
 )
 PYTHON_MARKERS = ("pyproject.toml", "setup.py", "setup.cfg", "Pipfile", "requirements.txt")
 TYPESCRIPT_MARKERS = ("tsconfig.json", "package.json")

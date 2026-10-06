@@ -29,6 +29,7 @@ import sys
 from pathlib import Path
 
 from curamoir.hooks._entry import repo_from, read_payload
+from curamoir.repo_config import config_value
 
 # ~4 characters per token: the standard rough approximation. Tokenising properly
 # would mean a dependency and a model call to save a few hundred characters.
@@ -63,6 +64,14 @@ def build_context(repo, token_budget=DEFAULT_TOKEN_BUDGET):
 
     budget = min(token_budget * CHARS_PER_TOKEN, HARD_CHARACTER_LIMIT)
     return _assemble(parts, budget)
+
+
+def token_budget_for(repo):
+    """The configured SessionStart injection budget (E8-R3's "configurable")."""
+    budget = config_value(
+        repo, "handoff", "session_start_token_budget", default=DEFAULT_TOKEN_BUDGET
+    )
+    return budget if isinstance(budget, (int, float)) and budget > 0 else DEFAULT_TOKEN_BUDGET
 
 
 def should_inject(payload):
@@ -120,7 +129,7 @@ def main(stdin=None, stdout=None):
         repo = repo_from(payload)
         if not (repo / ".curamoir").is_dir() or not should_inject(payload):
             return 0
-        context = build_context(repo)
+        context = build_context(repo, token_budget=token_budget_for(repo))
         if not context:
             return 0
         json.dump(

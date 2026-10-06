@@ -40,7 +40,8 @@ DEFAULTS = {
         # and treats its immediate subpackages as modules.
         "strategy": "auto",
         "include": [],
-        "exclude": ["build/", "dist/", "*.egg-info/", "docs/", "tests/fixtures/"],
+        # DEC-2 item 3. `tests/` is excluded from GRADING, not from the sweep.
+        "exclude": ["build/", "dist/", "*.egg-info/", "docs/", "tests/"],
     },
     "models": {
         "cheap": "claude-sonnet-5",
@@ -93,6 +94,14 @@ DEFAULTS = {
         "command_denylist": "default",
         "use_dcg_if_present": True,
     },
+    "handoff": {
+        # E8-R3: the SessionStart injection budget. Characters are what Claude
+        # Code actually limits (10,000), and ~4 chars/token is the usual
+        # approximation, so this is bounded by both.
+        "session_start_token_budget": 1500,
+        "keep_history": 10,
+        "brief_threshold_days": 5,
+    },
     "rules": {"matcher": "ast-grep"},
     "smoke": {
         "command": "bash scripts/quickstart.sh",
@@ -136,10 +145,18 @@ SCHEMA = {
         "max_per_run": NUMBER,
     },
     "guardrails": {
-        "default_branch_writes": ("never", "allow"),
+        # Only `never` exists. §6.3 documents only `never`, and
+        # DefaultBranchGuard unconditionally refuses — admitting an `allow` the
+        # code does not implement would be a promise the schema cannot keep.
+        "default_branch_writes": ("never",),
         "branch_prefix": STRING,
         "command_denylist": STRING,
         "use_dcg_if_present": BOOLEAN,
+    },
+    "handoff": {
+        "session_start_token_budget": NUMBER,
+        "keep_history": NUMBER,
+        "brief_threshold_days": NUMBER,
     },
     "rules": {"matcher": ("ast-grep", "regex")},
     "smoke": {"command": STRING, "container": STRING},

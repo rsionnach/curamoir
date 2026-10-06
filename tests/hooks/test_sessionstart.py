@@ -191,3 +191,26 @@ def test_malformed_input_injects_nothing_and_exits_clean(tmp_path):
 
     assert result.returncode == 0
     assert result.stdout.strip() == ""
+
+
+def test_the_token_budget_is_read_from_config(tmp_path):
+    """E8-R3 says "configurable". It was configurable only in the Python
+    signature: main() called build_context(repo) and never read the config, and
+    writing the key would have been rejected as unknown."""
+    from curamoir.hooks.sessionstart import token_budget_for
+
+    repo = prepared(tmp_path, handoff="# handoff\n\nstate\n")
+    (repo / ".curamoir" / "curamoir.yaml").write_text(
+        "version: 1\nhandoff:\n  session_start_token_budget: 300\n", encoding="utf-8")
+
+    assert token_budget_for(repo) == 300
+
+
+def test_the_budget_from_config_actually_bounds_the_injection(tmp_path):
+    repo = prepared(tmp_path, handoff="# handoff\n\n" + ("a decision line\n" * 2000))
+    (repo / ".curamoir" / "curamoir.yaml").write_text(
+        "version: 1\nhandoff:\n  session_start_token_budget: 200\n", encoding="utf-8")
+
+    context = context_of(run({"hook_event_name": "SessionStart", "source": "startup"}, repo))
+
+    assert len(context) <= 200 * 4 + 400, f"{len(context)} characters"

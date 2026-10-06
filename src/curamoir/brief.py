@@ -20,11 +20,16 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from curamoir.redaction import write_artefact
+from curamoir.repo_config import config_value
 
 WORD_LIMIT = 600
 MAX_FIRST_TASK_MINUTES = 90
 DEFAULT_THRESHOLD_DAYS = 5
 NOT_YET = "not available yet"
+# Sentinel for "no handoff at all". Large enough to trigger a brief, and never
+# rendered as a number — "Away 10000 day(s)" is a falsehood on the face of the
+# artefact a stranger is most likely to read.
+UNKNOWN_ABSENCE = 10_000
 
 
 def due_for_brief(repo, threshold_days=DEFAULT_THRESHOLD_DAYS, cadence="on_return", now=None):
@@ -37,6 +42,23 @@ def due_for_brief(repo, threshold_days=DEFAULT_THRESHOLD_DAYS, cadence="on_retur
     if cadence == "weekly":
         return True
     return _absence_days(Path(repo), now) >= threshold_days
+
+
+def due_for_brief_from_config(repo, now=None):
+    """`due_for_brief` with the repo's own cadence and threshold.
+
+    E9-R1's threshold and `cadence.brief` were previously only arguments to a
+    Python function, so the documented `weekly` mode was unreachable however it
+    was configured.
+    """
+    return due_for_brief(
+        repo,
+        threshold_days=config_value(
+            repo, "handoff", "brief_threshold_days", default=DEFAULT_THRESHOLD_DAYS
+        ),
+        cadence=config_value(repo, "cadence", "brief", default="on_return"),
+        now=now,
+    )
 
 
 def build_brief(repo, now=None):
@@ -66,7 +88,9 @@ def render_brief(brief):
         "",
         "## Since you were here",
         "",
-        f"- Away {brief['absence_days']} day(s).",
+        f"- Away {brief['absence_days']} day(s)."
+        if brief["absence_days"] < UNKNOWN_ABSENCE
+        else "- No previous handoff, so the length of the absence is unknown.",
     ]
     lines.append(f"- Jobs run: {brief['jobs'] if brief['jobs'] is not None else NOT_YET}.")
     lines.append(f"- Spend this period: {brief['spend'] if brief['spend'] is not None else NOT_YET}.")
@@ -148,7 +172,7 @@ def _absence_days(repo, now=None):
     if not handoff.is_file():
         # No handoff is either a fresh install or a very long absence. Both are
         # exactly when a brief helps, so report an absence that triggers one.
-        return 10_000
+        return UNKNOWN_ABSENCE
     written = datetime.fromtimestamp(handoff.stat().st_mtime, tz=timezone.utc)
     return max(0, (moment - written).days)
 

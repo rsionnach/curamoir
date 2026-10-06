@@ -14,9 +14,12 @@ when you return.
 
 **Every correction you make twice becomes a rule the agent can't break.**
 
-> **Status: pre-release, under construction.** Epic 0 (guardrails) and the
-> plugin skeleton are implemented. The jobs that use them — sweep, review,
-> brief, handoff — are not built yet. Not usable in anger.
+> **Status: pre-release, under construction.** Working today: the guardrails,
+> the plugin skeleton, session handoffs and the away-brief — so `/curamoir:init`,
+> `/curamoir:status`, `/curamoir:doctor`, `/curamoir:handoff` and
+> `/curamoir:brief` all do something real. Not yet built: the sweep, the r5
+> review, grades, the promotion ladder and the scheduled runner, which is most
+> of why you would want this. Nothing runs unattended yet.
 
 ## Install
 
@@ -37,11 +40,11 @@ Each command is namespaced under the plugin, so they all read `/curamoir:<name>`
 
 | Command | What it does |
 |---|---|
-| `/curamoir:init` | Scaffold `.curamoir/` in a repo, detecting language and module layout |
-| `/curamoir:status` | Lock, pause, spend, grades, next jobs, open PRs, handoff age — no model calls |
-| `/curamoir:doctor` | Validate config, check hooks fire, report actionable fixes |
-| `/curamoir:handoff` | Write a session handoff by hand, with an optional note |
-| `/curamoir:brief` | Generate the away-brief on demand |
+| `/curamoir:init` | Scaffold `.curamoir/` in a repo, detecting language and module layout — **working** |
+| `/curamoir:status` | Lock, pause, spend, grades, next jobs, open PRs, handoff age — no model calls — **working** |
+| `/curamoir:doctor` | Validate config, run every hook, report actionable fixes — **working** |
+| `/curamoir:handoff` | Write a session handoff by hand, with a note and an intended next step — **working** |
+| `/curamoir:brief` | Generate the away-brief on demand — **working** |
 | `/curamoir:review` | Run the r5 review on a module interactively |
 | `/curamoir:promote` | Promote a principle to a rule, or a rule to a guard |
 | `/curamoir:demote` | Retire a rule or guard, recorded |
@@ -51,7 +54,7 @@ Each command is namespaced under the plugin, so they all read `/curamoir:<name>`
 | `/curamoir:smoke` | Run the quickstart smoke test on demand |
 | `/curamoir:schedule` | Write a local cron or launchd entry for the scheduled jobs |
 
-None of these are implemented yet. They land with their epics, and this table is
+The first five are implemented. The rest land with their epics, and this table is
 the checklist (E1-R6).
 
 ## What it deliberately does not do

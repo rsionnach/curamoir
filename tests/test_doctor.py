@@ -137,3 +137,30 @@ def test_modules_detected_is_reported_so_bad_detection_is_visible(tmp_path):
     modules = by_name(findings, "module")
     assert modules
     assert "src/app" in modules[0].detail
+
+
+def test_doctor_checks_every_registered_hook_not_just_one(tmp_path):
+    """E1-R4: "verify EACH hook fires (dry-run)". Epic 8 added four hook events
+    on the same branch and doctor was not revisited, so four of five were not
+    reported at all — neither ok nor absent."""
+    import json
+    from pathlib import Path
+
+    registered = json.loads(
+        (Path(__file__).resolve().parents[1] / "hooks" / "hooks.json").read_text(encoding="utf-8")
+    )["hooks"].keys()
+
+    findings = diagnose(initialised(tmp_path), tools={"python3": True, "yaml": True})
+    checked = " ".join(f.check for f in findings)
+
+    for event in registered:
+        assert event in checked, f"doctor never mentions the {event} hook"
+
+
+def test_every_hook_check_actually_runs_the_hook(tmp_path):
+    findings = diagnose(initialised(tmp_path), tools={"python3": True, "yaml": True})
+
+    hooks = [f for f in findings if "hook" in f.check.lower()]
+    assert len(hooks) >= 5, [f.check for f in hooks]
+    for finding in hooks:
+        assert finding.level == "ok", f"{finding.check}: {finding.detail}"

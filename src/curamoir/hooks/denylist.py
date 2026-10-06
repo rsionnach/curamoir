@@ -7,8 +7,10 @@ criterion: an agent told only "no" retries the same thing or invents worse.
 Scope is the spec's: "during any cúramóir job". The developer's own destructive
 commands in their own session are their business.
 
-If `dcg` is installed and `use_dcg_if_present` is true, delegate to it rather
-than maintaining a second copy of this list (E0-R5).
+If `dcg` is installed and not switched off, delegate to it rather than
+maintaining a second copy of this list (E0-R5). The switch reaching the hook is
+the CURAMOIR_USE_DCG environment variable rather than the config key E0-R5
+names, because this hook is deliberately stdlib-only — see pretooluse.py.
 """
 
 import re

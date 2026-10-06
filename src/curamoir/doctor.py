@@ -14,6 +14,7 @@ rules still run (DEC-3). Reporting either as a failure teaches the developer to
 ignore the output, which costs more than the check is worth.
 """
 
+import json
 import shutil
 import subprocess
 import sys
@@ -58,7 +59,7 @@ def diagnose(repo, tools=None):
     findings.append(_check_config(base))
     findings.extend(_check_modules(repo))
     findings.append(_check_pause(base))
-    findings.append(_check_hook(repo))
+    findings.extend(_check_hooks(repo))
     findings.extend(_check_tools(tools))
 
     return sorted(findings, key=lambda f: LEVEL_ORDER[f.level])
@@ -159,43 +160,146 @@ def _check_pause(base):
     return Finding("pause", "ok", "not paused")
 
 
-def _check_hook(repo):
-    """Run the hook rather than merely checking that hooks.json exists.
+# One probe per hook event: the payload to send, and what proves it worked.
+# Driven off hooks.json rather than hardcoded, so registering a sixth event
+# cannot leave doctor silently ignoring it — which is how four of five events
+# went unchecked after Epic 8 landed.
+_HOOK_PROBES = {
+    "PreToolUse": {
+        "script": "curamoir-hook-pretooluse",
+        "payload": {
+            "hook_event_name": "PreToolUse", "tool_name": "Bash",
+            "tool_input": {"command": "git reset --hard"},
+        },
+        "env": {"CURAMOIR_JOB": "doctor"},
+        "expect": "deny",
+        "proves": "fires and denies a destructive command",
+        "if_not": (
+            "Command hooks fail OPEN, so a hook that does not deny is protecting "
+            "nothing. Check hooks/hooks.json and that python3 can import curamoir "
+            "from the plugin's src/ directory."
+        ),
+    },
+    "Stop": {
+        "script": "curamoir-hook-stop",
+        "payload": {"hook_event_name": "Stop", "last_assistant_message": "doctor probe"},
+        "writes": ("handoff", "journal.jsonl"),
+        "proves": "fires and records the turn",
+        "if_not": "Check scripts/curamoir-hook-stop is executable and python3 is on PATH.",
+    },
+    "PreCompact": {
+        "script": "curamoir-hook-precompact",
+        "payload": {"hook_event_name": "PreCompact", "trigger": "manual"},
+        "writes": ("handoff", "latest.md"),
+        "proves": "fires and writes a handoff",
+        "if_not": "Check scripts/curamoir-hook-precompact is executable.",
+    },
+    "SessionEnd": {
+        "script": "curamoir-hook-sessionend",
+        "payload": {"hook_event_name": "SessionEnd", "reason": "clear"},
+        "writes": ("handoff", "latest.md"),
+        "proves": "fires and finalises the handoff",
+        "if_not": "Check scripts/curamoir-hook-sessionend is executable.",
+    },
+    "SessionStart": {
+        "script": "curamoir-hook-sessionstart",
+        "payload": {"hook_event_name": "SessionStart", "source": "startup"},
+        "expect_or_empty": True,
+        "proves": "fires (injects when a handoff exists)",
+        "if_not": "Check scripts/curamoir-hook-sessionstart is executable.",
+    },
+}
 
-    Asserting the file is present proves nothing about whether the hook works —
-    which is exactly how the E0-R5 import-path bug survived until E1-R1.
+
+def _registered_hook_events():
+    """The events hooks.json actually registers."""
+    path = Path(__file__).resolve().parents[2] / "hooks" / "hooks.json"
+    try:
+        return list(json.loads(path.read_text(encoding="utf-8")).get("hooks", {}))
+    except (ValueError, OSError):
+        return []
+
+
+def _check_hooks(repo):
+    """Run EVERY registered hook rather than asserting hooks.json exists.
+
+    E1-R4 says "verify each hook fires (dry-run)". Checking the file proves
+    nothing about whether a hook works — which is exactly how the E0-R5
+    import-path bug survived, and how four of five events went unchecked once
+    Epic 8 registered them.
     """
-    wrapper = Path(__file__).resolve().parents[2] / "scripts" / "curamoir-hook-pretooluse"
-    if not wrapper.is_file():
-        return Finding(
-            "hook (PreToolUse)", "error", f"{wrapper} is missing",
-            fix="Reinstall the plugin; the denylist hook script is absent.",
-        )
+    events = _registered_hook_events()
+    if not events:
+        return [Finding(
+            "hooks", "error", "hooks/hooks.json is missing or unreadable",
+            fix="Reinstall the plugin.",
+        )]
 
-    payload = (
-        '{"hook_event_name":"PreToolUse","tool_name":"Bash",'
-        '"tool_input":{"command":"git reset --hard"},"cwd":"%s"}' % repo
-    )
+    findings = []
+    for event in events:
+        probe = _HOOK_PROBES.get(event)
+        if probe is None:
+            findings.append(Finding(
+                f"hook ({event})", "warning",
+                "registered but doctor has no probe for it",
+                fix=f"Add a probe for {event} to _HOOK_PROBES in doctor.py.",
+            ))
+            continue
+        findings.append(_run_hook_probe(repo, event, probe))
+    return findings
+
+
+def _run_hook_probe(repo, event, probe):
+    import os
+
+    wrapper = Path(__file__).resolve().parents[2] / "scripts" / probe["script"]
+    label = f"hook ({event})"
+    if not wrapper.is_file():
+        return Finding(label, "error", f"{wrapper} is missing",
+                       fix="Reinstall the plugin; the hook script is absent.")
+
+    payload = dict(probe["payload"], cwd=str(repo))
+    environment = {"PATH": os.environ.get("PATH", "")}
+    environment.update(probe.get("env", {}))
+
+    before = _probe_marker(repo, probe)
     try:
         result = subprocess.run(
-            [str(wrapper)], input=payload, capture_output=True, text=True, timeout=10,
-            env={"PATH": __import__("os").environ.get("PATH", ""), "CURAMOIR_JOB": "doctor"},
+            [str(wrapper)], input=json.dumps(payload),
+            capture_output=True, text=True, timeout=10, env=environment,
         )
     except (OSError, subprocess.SubprocessError) as error:
-        return Finding(
-            "hook (PreToolUse)", "error", f"hook could not be run ({error})",
-            fix="Check that python3 is on PATH and the plugin directory is readable.",
-        )
+        return Finding(label, "error", f"hook could not be run ({error})",
+                       fix="Check python3 is on PATH and the plugin directory is readable.")
 
-    if "deny" in result.stdout:
-        return Finding("hook (PreToolUse)", "ok", "fires and denies a destructive command")
-    return Finding(
-        "hook (PreToolUse)", "error",
-        f"hook ran but did not deny `git reset --hard` (stdout={result.stdout!r})",
-        fix=("Command hooks fail OPEN, so a hook that does not deny is protecting "
-             "nothing. Check hooks/hooks.json and that python3 can import curamoir "
-             "from the plugin's src/ directory."),
-    )
+    if result.returncode != 0:
+        return Finding(label, "error", f"hook exited {result.returncode}: {result.stderr[:200]}",
+                       fix=probe["if_not"])
+
+    if "expect" in probe:
+        if probe["expect"] in result.stdout:
+            return Finding(label, "ok", probe["proves"])
+        return Finding(label, "error",
+                       f"ran but did not produce {probe['expect']!r} (stdout={result.stdout[:120]!r})",
+                       fix=probe["if_not"])
+
+    if "writes" in probe:
+        if _probe_marker(repo, probe) != before or _probe_marker(repo, probe) is not None:
+            return Finding(label, "ok", probe["proves"])
+        return Finding(label, "error", "ran but wrote nothing", fix=probe["if_not"])
+
+    return Finding(label, "ok", probe["proves"])
+
+
+def _probe_marker(repo, probe):
+    """Mtime of the file a hook is expected to write, or None if absent."""
+    if "writes" not in probe:
+        return None
+    path = Path(repo).joinpath(".curamoir", *probe["writes"])
+    try:
+        return path.stat().st_mtime_ns
+    except OSError:
+        return None
 
 
 def _check_tools(tools):

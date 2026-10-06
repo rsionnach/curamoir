@@ -342,3 +342,83 @@ def test_the_branch_is_reported_on_a_repo_with_no_commits_yet(tmp_path):
     handoff = build_handoff(repo)
 
     assert handoff["branch"] == "main"
+
+
+# --- E8-R1: the intended next step (spec-compliance CRITICAL) --------------
+
+def test_the_handoff_always_states_an_intended_next_step(tmp_path):
+    """E8-R1 lists the intended next step among the six required contents.
+
+    It was previously unreachable: `_next_step` read a journal key no writer
+    ever wrote, so the section never rendered in any trigger path. A required
+    field that no code path can produce is worse than a missing one, because the
+    reader has no way to tell.
+    """
+    repo = make_repo(tmp_path)
+
+    rendered = render_handoff(build_handoff(repo))
+
+    assert "Intended next step" in rendered
+
+
+def test_an_explicit_next_step_is_used_when_given(tmp_path):
+    repo = make_repo(tmp_path)
+
+    write_handoff(repo, next_step="Finish the lock acquisition in the runner.")
+
+    text = (repo / ".curamoir" / "handoff" / "latest.md").read_text(encoding="utf-8")
+    assert "Finish the lock acquisition in the runner." in text
+
+
+def test_an_explicit_next_step_survives_into_the_following_handoff(tmp_path):
+    """Like the note, it is journalled, so the next automatic write does not
+    silently drop what the developer took the trouble to state."""
+    repo = make_repo(tmp_path)
+
+    write_handoff(repo, next_step="Wire the condenser behind config.")
+    write_handoff(repo)
+
+    text = (repo / ".curamoir" / "handoff" / "latest.md").read_text(encoding="utf-8")
+    assert "Wire the condenser behind config." in text
+
+
+def test_without_an_explicit_next_step_an_in_progress_bead_is_suggested(tmp_path):
+    """The deterministic fallback. A claimed bead is the best available guess at
+    what the developer was doing, and it beats an empty section."""
+    repo = make_repo(tmp_path)
+    beads = repo / ".beads"
+    beads.mkdir()
+    beads.joinpath("issues.jsonl").write_text(
+        json.dumps({"id": "x-7", "title": "Teach doctor about every hook",
+                    "status": "in_progress"}) + "\n", encoding="utf-8")
+
+    handoff = build_handoff(repo)
+
+    assert "x-7" in handoff["next_step"]
+
+
+def test_with_nothing_in_progress_the_next_step_says_so_rather_than_inventing_one(tmp_path):
+    repo = make_repo(tmp_path)
+
+    handoff = build_handoff(repo)
+
+    assert handoff["next_step"]
+    assert "nothing" in handoff["next_step"].lower() or "no " in handoff["next_step"].lower()
+
+
+def test_a_very_long_last_assistant_message_is_bounded(tmp_path):
+    """E8-R1 says the last decision is "one to three sentences". It was
+    previously the whole of last_assistant_message, bounded only by the 400-word
+    cap on the WHOLE FILE — so a long final turn would push the later sections
+    out of the handoff entirely."""
+    repo = make_repo(tmp_path)
+    sentences = " ".join(f"Sentence number {i} about the decision." for i in range(40))
+    (repo / ".curamoir" / "handoff" / "journal.jsonl").write_text(
+        json.dumps({"at": "2026-10-06T10:00:00+00:00", "note": sentences}) + "\n",
+        encoding="utf-8")
+
+    handoff = build_handoff(repo)
+
+    assert handoff["last_decision"].count(".") <= 4, handoff["last_decision"]
+    rendered = render_handoff(handoff)
+    assert "Intended next step" in rendered, "later sections pushed out by a long decision"

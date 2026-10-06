@@ -8,7 +8,7 @@ is a thin wrapper that invokes this and reports what it said.
 import argparse
 import sys
 
-from curamoir.brief import due_for_brief, write_brief
+from curamoir.brief import due_for_brief_from_config, write_brief
 from curamoir.doctor import diagnose, render_report
 from curamoir.handoff import write_handoff
 from curamoir.scaffold import AlreadyInitialised, detect_languages, detect_modules, init_repo
@@ -33,6 +33,8 @@ def main(argv=None):
     handoff = subcommands.add_parser("handoff", help="write a session handoff now")
     handoff.add_argument("--repo", default=".", help="repository root (default: cwd)")
     handoff.add_argument("--note", default=None, help="what you want your future self to know")
+    handoff.add_argument("--next", dest="next_step", default=None,
+                         help="the intended next step (E8-R1's most useful field)")
 
     brief = subcommands.add_parser("brief", help="generate the away-brief")
     brief.add_argument("--repo", default=".", help="repository root (default: cwd)")
@@ -46,7 +48,7 @@ def main(argv=None):
         print(render_status(collect_status(arguments.repo)))
         return 0
     if arguments.command == "brief":
-        if arguments.if_due and not due_for_brief(arguments.repo):
+        if arguments.if_due and not due_for_brief_from_config(arguments.repo):
             print("No brief needed: the last handoff is recent.")
             return 0
         path = write_brief(arguments.repo)
@@ -54,7 +56,8 @@ def main(argv=None):
         print(path.read_text(encoding="utf-8"))
         return 0
     if arguments.command == "handoff":
-        path = write_handoff(arguments.repo, note=arguments.note)
+        path = write_handoff(arguments.repo, note=arguments.note,
+                             next_step=arguments.next_step)
         print(f"Wrote {path}")
         print(path.read_text(encoding="utf-8"))
         return 0

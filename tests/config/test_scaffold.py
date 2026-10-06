@@ -210,3 +210,37 @@ def test_init_never_touches_anything_outside_the_curamoir_directory(tmp_path):
 
     for path, content in before.items():
         assert path.read_bytes() == content, f"init modified {path}"
+
+
+def test_the_test_suite_is_never_a_gradeable_module(tmp_path):
+    """DEC-2 item 3 says always exclude `tests/`. It was not excluded, so a
+    flat-layout repo detected `tests/unit` as a module and init wrote it into
+    modules.include — grading and review selection would then treat the test
+    suite as production code."""
+    repo = make_repo(tmp_path, {
+        "setup.py": "",
+        "myapp/__init__.py": "",
+        "myapp/core/__init__.py": "",
+        "tests/__init__.py": "",
+        "tests/unit/__init__.py": "",
+    })
+
+    modules = detect_modules(repo)
+
+    assert "myapp/core" in modules
+    assert not any(module.startswith("tests") for module in modules), modules
+
+
+def test_a_docs_heavy_repo_yields_no_prose_modules(tmp_path):
+    """DEC-2's named counter-example: opensrm, whose 12 top-level dirs are mostly
+    prose and assets. It had no test."""
+    repo = make_repo(tmp_path, {
+        "README.md": "",
+        "articles/one.md": "", "assets/logo.png": "", "diagrams/a.svg": "",
+        "docs/index.md": "", "plans/next.md": "", "examples/demo.md": "",
+        "scripts/build.sh": "",
+    })
+
+    modules = detect_modules(repo)
+
+    assert modules == [], modules

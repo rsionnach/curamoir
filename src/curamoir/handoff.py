@@ -27,12 +27,16 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from curamoir.redaction import write_artefact
+from curamoir.repo_config import config_value
 
 WORD_LIMIT = 400
 # Below this many journal notes, condensing is pure waste: a model call to
 # restate one sentence costs money and buys nothing.
 CONDENSE_THRESHOLD = 4
 CONDENSE_TIMEOUT_SECONDS = 20
+# E8-R1 asks for "one to three sentences". Four is the cap so a long final turn
+# cannot push the sections rendered after it out of the 400-word file budget.
+MAX_DECISION_SENTENCES = 3
 DEFAULT_KEEP_HISTORY = 10
 MAX_LISTED_CHANGES = 12
 MAX_LISTED_BEADS = 6
@@ -51,13 +55,14 @@ def build_handoff(repo, condense=None, condense_timeout=CONDENSE_TIMEOUT_SECONDS
     is least likely to succeed.
     """
     repo = Path(repo)
+    in_progress = _in_progress_beads(repo)
     return {
         "at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "branch": _branch(repo),
         "uncommitted": _uncommitted(repo),
-        "in_progress": _in_progress_beads(repo),
+        "in_progress": in_progress,
         "last_decision": _decide_last_decision(repo, condense, condense_timeout),
-        "next_step": _next_step(repo),
+        "next_step": _next_step(repo, in_progress),
         "note": None,
     }
 
@@ -68,13 +73,28 @@ def _decide_last_decision(repo, condense, timeout):
     deterministic = notes[-1] if notes else ""
 
     if condense is None or len(notes) < CONDENSE_THRESHOLD:
-        return deterministic
+        return _first_sentences(deterministic, MAX_DECISION_SENTENCES)
 
     try:
         condensed = _with_timeout(condense, notes, timeout)
     except Exception:
         return deterministic
-    return condensed.strip() if isinstance(condensed, str) and condensed.strip() else deterministic
+    if isinstance(condensed, str) and condensed.strip():
+        return _first_sentences(condensed.strip(), MAX_DECISION_SENTENCES)
+    return _first_sentences(deterministic, MAX_DECISION_SENTENCES)
+
+
+def _first_sentences(text, limit):
+    """The first `limit` sentences, so "one to three sentences" actually holds."""
+    if not text:
+        return text
+    import re
+
+    parts = re.split(r"(?<=[.!?])\s+", text.strip())
+    kept = " ".join(parts[:limit]).strip()
+    if len(parts) > limit and not kept.endswith(("…", "...")):
+        kept += " …"
+    return kept
 
 
 def _with_timeout(function, argument, seconds):
@@ -154,7 +174,8 @@ def render_handoff(handoff):
     return _cap_words(rendered, WORD_LIMIT)
 
 
-def write_handoff(repo, keep_history=DEFAULT_KEEP_HISTORY, note=None, condense=None):
+def write_handoff(repo, keep_history=None, note=None, condense=None,
+                  next_step=None):
     """Write `handoff/latest.md`, rolling the previous one into history.
 
     `note` is the developer's own words, from `/curamoir:handoff` (E8-R4). It is
@@ -165,8 +186,12 @@ def write_handoff(repo, keep_history=DEFAULT_KEEP_HISTORY, note=None, condense=N
     fail open, protects nothing by dying.
     """
     repo = Path(repo)
-    if note and note.strip():
-        record_turn(repo, note.strip())
+    if keep_history is None:
+        keep_history = config_value(
+            repo, "handoff", "keep_history", default=DEFAULT_KEEP_HISTORY
+        )
+    if (note and note.strip()) or (next_step and next_step.strip()):
+        record_turn(repo, note or "", next_step=next_step)
     directory = repo / ".curamoir" / "handoff"
     history = directory / "history"
     latest = directory / "latest.md"
@@ -200,19 +225,21 @@ def write_handoff(repo, keep_history=DEFAULT_KEEP_HISTORY, note=None, condense=N
     return write_artefact(latest, rendered)
 
 
-def record_turn(repo, note, at=None):
+def record_turn(repo, note, at=None, next_step=None):
     """Append one journal line. Called by the Stop hook, so it must be cheap.
 
     One short append per turn, no model call, no git call.
     """
     repo = Path(repo)
-    if not note or not note.strip():
+    if not (note and note.strip()) and not (next_step and next_step.strip()):
         return None
     journal = repo / ".curamoir" / "handoff" / "journal.jsonl"
     entry = {
         "at": at or datetime.now(timezone.utc).isoformat(timespec="seconds"),
-        "note": note.strip(),
+        "note": (note or "").strip(),
     }
+    if next_step and next_step.strip():
+        entry["next_step"] = next_step.strip()
     try:
         journal.parent.mkdir(parents=True, exist_ok=True)
         with journal.open("a", encoding="utf-8") as handle:
@@ -282,12 +309,34 @@ def _in_progress_beads(repo):
     return beads
 
 
-def _next_step(repo):
-    """Whatever the developer recorded as next, if anything did."""
+def _next_step(repo, in_progress):
+    """The intended next step — one of E8-R1's six required contents.
+
+    Resolution order, most authoritative first:
+      1. whatever the developer stated via `/curamoir:handoff --next`, journalled
+         so it survives the next automatic write;
+      2. the bead they had claimed, which is the best available evidence of what
+         they were doing;
+      3. an explicit statement that there is nothing claimed.
+
+    It always returns something. This field previously had a reader and no
+    writer, so the section never rendered at all — and a required field that no
+    code path can produce is worse than an absent one, because the reader cannot
+    tell the difference.
+    """
     for entry in reversed(_journal(repo)):
         if entry.get("next_step"):
             return entry["next_step"]
-    return ""
+
+    if in_progress:
+        first = in_progress[0]
+        more = f" (and {len(in_progress) - 1} other claimed bead(s))" if len(in_progress) > 1 else ""
+        return f"Resume {first['id']}: {first['title']}{more}."
+
+    return (
+        "Nothing was claimed, so there is no obvious thread to pick up. "
+        "`/curamoir:brief` will suggest a first task."
+    )
 
 
 def _journal(repo):
