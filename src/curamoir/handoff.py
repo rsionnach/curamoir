@@ -58,6 +58,7 @@ def build_handoff(repo, condense=None, condense_timeout=CONDENSE_TIMEOUT_SECONDS
         "in_progress": _in_progress_beads(repo),
         "last_decision": _decide_last_decision(repo, condense, condense_timeout),
         "next_step": _next_step(repo),
+        "note": None,
     }
 
 
@@ -109,9 +110,14 @@ def render_handoff(handoff):
     The cap is an acceptance criterion, and it is also the point: a handoff you
     skim is a handoff that worked.
     """
-    lines = [
-        "# cúramóir handoff",
-        "",
+    lines = ["# cúramóir handoff", ""]
+
+    # A deliberate note leads. The developer states the next step rather than the
+    # model inferring it, which makes it the most valuable line in the file.
+    if handoff.get("note"):
+        lines += ["> " + handoff["note"], ""]
+
+    lines += [
         f"- **when:** {handoff['at']}",
         f"- **branch:** {handoff['branch']}",
     ]
@@ -148,19 +154,27 @@ def render_handoff(handoff):
     return _cap_words(rendered, WORD_LIMIT)
 
 
-def write_handoff(repo, keep_history=DEFAULT_KEEP_HISTORY):
+def write_handoff(repo, keep_history=DEFAULT_KEEP_HISTORY, note=None, condense=None):
     """Write `handoff/latest.md`, rolling the previous one into history.
+
+    `note` is the developer's own words, from `/curamoir:handoff` (E8-R4). It is
+    journalled as well as rendered, so it survives the next automatic write
+    rather than being lost the moment a hook fires.
 
     Never raises. A hook that throws adds noise to every turn and, because hooks
     fail open, protects nothing by dying.
     """
     repo = Path(repo)
+    if note and note.strip():
+        record_turn(repo, note.strip())
     directory = repo / ".curamoir" / "handoff"
     history = directory / "history"
     latest = directory / "latest.md"
 
     try:
-        rendered = render_handoff(build_handoff(repo))
+        handoff = build_handoff(repo, condense=condense)
+        handoff["note"] = note.strip() if note and note.strip() else None
+        rendered = render_handoff(handoff)
     except Exception as error:
         rendered = (
             "# cúramóir handoff\n\n"
@@ -209,7 +223,19 @@ def record_turn(repo, note, at=None):
 
 
 def _branch(repo):
-    return _git(repo, "rev-parse", "--abbrev-ref", "HEAD") or UNAVAILABLE
+    """The current branch.
+
+    `rev-parse --abbrev-ref HEAD` fails on an unborn ref — a repo that has a
+    branch but no commits yet, which is the normal state right after
+    `git init` and `/curamoir:init`. `symbolic-ref --short HEAD` answers there,
+    so try it before giving up: reporting "unavailable" for a branch that is
+    plainly knowable is worse than saying nothing.
+    """
+    return (
+        _git(repo, "rev-parse", "--abbrev-ref", "HEAD")
+        or _git(repo, "symbolic-ref", "--short", "HEAD")
+        or UNAVAILABLE
+    )
 
 
 def _uncommitted(repo):

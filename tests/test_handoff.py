@@ -258,3 +258,87 @@ def test_no_condenser_is_attempted_for_a_short_journal(tmp_path):
     build_handoff(repo, condense=lambda notes: calls.append(notes) or "condensed")
 
     assert calls == [], "condenser called for a journal that did not need it"
+
+
+# --- E8-R4: the manual write ----------------------------------------------
+
+def test_a_manual_note_is_recorded_and_appears_in_the_handoff(tmp_path):
+    """E8-R4. A deliberate handoff beats an extracted one, because the developer
+    states the next step rather than the model inferring it — so the note must be
+    prominent, not buried."""
+    repo = make_repo(tmp_path)
+
+    write_handoff(repo, note="Stopped mid-refactor; the loader tests are red on purpose.")
+
+    text = (repo / ".curamoir" / "handoff" / "latest.md").read_text(encoding="utf-8")
+    assert "Stopped mid-refactor" in text
+    assert text.index("Stopped mid-refactor") < text.index("branch"), (
+        "a deliberate note must lead, not trail the automatic state"
+    )
+
+
+def test_a_manual_note_is_also_journalled_so_it_survives_the_next_write(tmp_path):
+    repo = make_repo(tmp_path)
+
+    write_handoff(repo, note="Chose the thread-based timeout.")
+    write_handoff(repo)
+
+    text = (repo / ".curamoir" / "handoff" / "latest.md").read_text(encoding="utf-8")
+    assert "thread-based timeout" in text
+
+
+def test_writing_without_a_note_still_works(tmp_path):
+    repo = make_repo(tmp_path)
+
+    path = write_handoff(repo)
+
+    assert path.is_file()
+
+
+# --- E8-R5: no secrets, no raw diffs --------------------------------------
+
+def test_a_secret_in_a_manual_note_is_redacted(tmp_path):
+    repo = make_repo(tmp_path)
+
+    write_handoff(repo, note="Used key sk-ant-api03-AAAAAAAAAAAAAAAAAAAAAAAA for the test.")
+
+    text = (repo / ".curamoir" / "handoff" / "latest.md").read_text(encoding="utf-8")
+    assert "sk-ant-" not in text
+    assert "REDACTED" in text
+
+
+def test_a_secret_in_a_changed_filename_is_redacted(tmp_path):
+    """Paths reach the handoff from git status, and a filename can carry a token."""
+    repo = make_repo(tmp_path)
+    (repo / "ghp_0123456789abcdefghijklmnopqrstuvwxyz.txt").write_text("x", encoding="utf-8")
+
+    write_handoff(repo)
+
+    text = (repo / ".curamoir" / "handoff" / "latest.md").read_text(encoding="utf-8")
+    assert "ghp_0123456789" not in text
+
+
+def test_no_file_contents_reach_the_handoff_however_large_the_change(tmp_path):
+    repo = make_repo(tmp_path)
+    (repo / "app.py").write_text("DISTINCTIVE_MARKER = 'leaked'\n" * 50, encoding="utf-8")
+
+    write_handoff(repo)
+
+    text = (repo / ".curamoir" / "handoff" / "latest.md").read_text(encoding="utf-8")
+    assert "DISTINCTIVE_MARKER" not in text
+    assert "leaked" not in text
+
+
+def test_the_branch_is_reported_on_a_repo_with_no_commits_yet(tmp_path):
+    """A fresh repo before its first commit has a branch, but `rev-parse HEAD`
+    fails on the unborn ref. Reporting "unavailable" there is misleading: the
+    branch is knowable, and this is a normal state for a repo someone has just
+    run /curamoir:init in."""
+    repo = tmp_path / "fresh"
+    repo.mkdir()
+    git(repo, "init", "--initial-branch=main")
+    (repo / ".curamoir" / "handoff").mkdir(parents=True)
+
+    handoff = build_handoff(repo)
+
+    assert handoff["branch"] == "main"

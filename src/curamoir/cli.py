@@ -9,6 +9,7 @@ import argparse
 import sys
 
 from curamoir.doctor import diagnose, render_report
+from curamoir.handoff import write_handoff
 from curamoir.scaffold import AlreadyInitialised, detect_languages, detect_modules, init_repo
 from curamoir.status import collect_status, render_status
 
@@ -28,11 +29,20 @@ def main(argv=None):
     doctor = subcommands.add_parser("doctor", help="validate the setup and say how to fix it")
     doctor.add_argument("--repo", default=".", help="repository root (default: cwd)")
 
+    handoff = subcommands.add_parser("handoff", help="write a session handoff now")
+    handoff.add_argument("--repo", default=".", help="repository root (default: cwd)")
+    handoff.add_argument("--note", default=None, help="what you want your future self to know")
+
     arguments = parser.parse_args(argv)
     if arguments.command == "init":
         return _init(arguments.repo)
     if arguments.command == "status":
         print(render_status(collect_status(arguments.repo)))
+        return 0
+    if arguments.command == "handoff":
+        path = write_handoff(arguments.repo, note=arguments.note)
+        print(f"Wrote {path}")
+        print(path.read_text(encoding="utf-8"))
         return 0
     if arguments.command == "doctor":
         findings = diagnose(arguments.repo)
