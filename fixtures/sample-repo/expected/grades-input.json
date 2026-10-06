@@ -1,0 +1,33 @@
+{
+  "_comment": "Fixed input for E7-R1's byte-identical-output test. Hand-written and never regenerated: if this file changes, that test stops meaning anything.",
+  "as_of": "2026-10-06T00:00:00+00:00",
+  "modules": {
+    "src/sample/core": {
+      "open_findings": [
+        {"severity": "P1", "lens": "correctness"},
+        {"severity": "P3", "lens": "clarity"}
+      ],
+      "open_violations": 3,
+      "sweep_fixes_in_window": 2,
+      "days_since_review": 14,
+      "tests_passing": true
+    },
+    "src/sample/web": {
+      "open_findings": [
+        {"severity": "P0", "lens": "correctness"},
+        {"severity": "P2", "lens": "edge_cases"}
+      ],
+      "open_violations": 2,
+      "sweep_fixes_in_window": 5,
+      "days_since_review": 61,
+      "tests_passing": true
+    },
+    "src/sample": {
+      "open_findings": [],
+      "open_violations": 0,
+      "sweep_fixes_in_window": 0,
+      "days_since_review": 3,
+      "tests_passing": true
+    }
+  }
+}

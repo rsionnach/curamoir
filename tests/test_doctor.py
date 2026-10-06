@@ -10,7 +10,7 @@ run (DEC-3). Both are reported as degraded, not as failures, or the developer
 learns to ignore the output.
 """
 
-from curamoir.doctor import Finding, diagnose, render_report
+from curamoir.doctor import diagnose, render_report
 
 
 def initialised(tmp_path):

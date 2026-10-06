@@ -1,0 +1,81 @@
+{
+  "_comment": "Every flaw in this fixture is deliberate and recorded here with the line it lives on and the acceptance criterion that needs it. Line numbers are generated from the files, not hand-counted. If tests/test_fixture_repo.py fails, the fixture has drifted: re-generate this file rather than editing the line numbers by hand.",
+  "test_command": "PYTHONPATH=src python3 -m pytest -q",
+  "violations": [
+    {
+      "principle_id": "structured-logging",
+      "path": "src/sample/core/billing.py",
+      "line": 15,
+      "evidence": "print(\"calculating line total\")",
+      "needed_by": "E2-R4 lint output, E3 sweep work list"
+    },
+    {
+      "principle_id": "structured-logging",
+      "path": "src/sample/web/handlers.py",
+      "line": 22,
+      "evidence": "print(f\"request failed: {exception}\")",
+      "needed_by": "E2-R4 lint output, E3 sweep work list"
+    },
+    {
+      "principle_id": "errors-carry-context",
+      "path": "src/sample/core/billing.py",
+      "line": 37,
+      "evidence": "raise RuntimeError(\"could not load rates\")",
+      "needed_by": "E3 sweep: 5 violations across 3 principles"
+    },
+    {
+      "principle_id": "errors-carry-context",
+      "path": "src/sample/web/handlers.py",
+      "line": 31,
+      "evidence": "raise ValueError(\"bad token\")",
+      "needed_by": "E3 sweep: 5 violations across 3 principles"
+    },
+    {
+      "principle_id": "no-file-variant-proliferation",
+      "path": "src/sample/web/handlers_v2.py",
+      "line": 1,
+      "evidence": "\"\"\"PLANTED: no-file-variant-proliferation.",
+      "needed_by": "E2-R3 regex matcher (DEC-3 escape hatch: no AST pattern matches a filename)"
+    }
+  ],
+  "bugs": [
+    {
+      "lens": "correctness",
+      "path": "src/sample/core/billing.py",
+      "line": 22,
+      "evidence": "return total * (1 - percent)",
+      "what": "percent is a percentage and must be divided by 100; apply_discount(100, 20) returns -1900.0 instead of 80.0",
+      "needed_by": "E5 acceptance: two planted correctness bugs, line ranges within +/-5"
+    },
+    {
+      "lens": "correctness",
+      "path": "src/sample/web/handlers.py",
+      "line": 16,
+      "evidence": "start = page * PAGE_SIZE",
+      "what": "off by one: page 1 must start at index 0, so the first page is silently skipped",
+      "needed_by": "E5 acceptance: two planted correctness bugs, line ranges within +/-5"
+    },
+    {
+      "lens": "edge_cases",
+      "path": "src/sample/core/billing.py",
+      "line": 28,
+      "evidence": "return sum(orders) / len(orders)",
+      "what": "an empty sequence raises ZeroDivisionError rather than returning 0 or raising a meaningful error",
+      "needed_by": "E5 acceptance: one planted edge-case gap"
+    }
+  ],
+  "quickstart": {
+    "path": "src/sample/core/billing.py",
+    "evidence": "TAX_RATE = 0.2",
+    "break_by": "Change TAX_RATE in src/sample/core/billing.py from 0.2 to 0.25. scripts/quickstart.sh asserts line_total(100, 2) == 240.0 and will fail. One line, reversible, and nothing else in the suite depends on the exact rate.",
+    "needed_by": "E12-R2: breaking the quickstart files an issue; fixing it closes it"
+  },
+  "beads": {
+    "path": ".beads/issues.jsonl",
+    "needed_by": "E8-R1 handoff must name an in-progress bead (smp-001); E9-R2 section 6 must choose a ready bead estimated at <=90 minutes (smp-002, smp-003, smp-005) and reject smp-004 at 240 minutes"
+  },
+  "grades_input": {
+    "path": "expected/grades-input.json",
+    "needed_by": "E7-R1: byte-identical output across runs and platforms"
+  }
+}

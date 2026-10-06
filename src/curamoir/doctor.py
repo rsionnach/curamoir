@@ -91,11 +91,11 @@ def render_report(findings):
 def _check_pyyaml(tools):
     available = tools.get("yaml")
     if available is None:
-        try:
-            import yaml  # noqa: F401
-            available = True
-        except ImportError:
-            available = False
+        # find_spec rather than an import: this is a probe, and an unused import
+        # reads as dead code to every linter that looks at it.
+        from importlib.util import find_spec
+
+        available = find_spec("yaml") is not None
     if available:
         return Finding("PyYAML", "ok", "importable")
     return Finding(
