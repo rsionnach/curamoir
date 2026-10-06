@@ -17,6 +17,10 @@
     "              most needed. Writes the full handoff. Never blocks compaction.",
     "  SessionEnd  finalises on exit. SessionEnd hooks SHARE a 1.5s budget, so this",
     "              is deterministic only and declares a 2s ceiling to stay inside it.",
+    "  SessionStart injects the previous handoff (and the brief when newer) as",
+    "              additionalContext. 5s timeout: it delays the first turn, and",
+    "              additionalContext has a hard 10,000-character ceiling beyond",
+    "              which Claude Code spills to a file and substitutes a preview.",
     "",
     "Guards promoted from rules (E4-R4b) will register separately with matcher",
     "'Edit|Write'."
@@ -63,6 +67,17 @@
             "type": "command",
             "command": "\"${CLAUDE_PLUGIN_ROOT}\"/scripts/curamoir-hook-sessionend",
             "timeout": 2
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}\"/scripts/curamoir-hook-sessionstart",
+            "timeout": 5
           }
         ]
       }

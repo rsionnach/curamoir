@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+# cúramóir SessionStart hook: inject the previous session's handoff.
+# Wrapper exists because an installed plugin is an unpacked directory, not a pip
+# install, so `curamoir` is not on the import path.
+set -u
+
+root="${CLAUDE_PLUGIN_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+
+for interpreter in python3 python; do
+  if command -v "$interpreter" >/dev/null 2>&1; then
+    PYTHONPATH="${root}/src${PYTHONPATH:+:${PYTHONPATH}}" \
+      exec "$interpreter" -m curamoir.hooks.sessionstart
+  fi
+done
+
+exit 0

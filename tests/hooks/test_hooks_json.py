@@ -105,3 +105,22 @@ def test_every_handoff_hook_command_target_exists_and_is_executable():
             target = root / relative
             assert target.is_file(), f"{event}: missing {relative}"
             assert os.access(target, os.X_OK), f"{event}: not executable {relative}"
+
+
+def test_sessionstart_is_registered_with_a_short_timeout():
+    """It delays the first turn of every session, so it must be quick."""
+    handlers = handlers_for("SessionStart")
+
+    assert handlers, "SessionStart hook not registered"
+    for handler in handlers:
+        assert handler["timeout"] <= 5, handler
+
+
+def test_the_sessionstart_command_target_exists_and_is_executable():
+    import os
+
+    root = HOOKS.parents[1]
+    for handler in handlers_for("SessionStart"):
+        relative = handler["command"].replace('"${CLAUDE_PLUGIN_ROOT}"/', "")
+        target = root / relative
+        assert target.is_file() and os.access(target, os.X_OK), relative
