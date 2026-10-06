@@ -3,7 +3,12 @@ name = "curamoir"
 version = "0.1.0"
 description = "Entropy management for agent-written codebases: holds the line while you're away."
 requires-python = ">=3.12"
-dependencies = []
+# PyYAML is the only runtime dependency, needed to read curamoir.yaml.
+# NOTE: a Claude Code plugin is an unpacked directory with no install step, so
+# this is NOT guaranteed present for an installed plugin. config.load_config_text
+# imports it lazily and fails with an actionable message; /curamoir:doctor (E1-R4)
+# reports it as a missing prerequisite. See the risk recorded on E1-R4.
+dependencies = ["pyyaml>=6"]
 
 [project.optional-dependencies]
 dev = ["pytest>=8"]

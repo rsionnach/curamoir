@@ -1,0 +1,128 @@
+# cúramóir configuration.
+#
+# Every value below is the default, shown so you can see what cúramóir will do
+# before it does it. Delete any line to keep the default; the schema is
+# validated on load and errors name the offending key.
+
+version: 1
+
+modules:
+  # How cúramóir decides what a "module" is. Modules are the unit of grading and
+  # of review selection, so this is the most consequential setting here.
+  #   auto            detect the importable package root (handles src/ layout)
+  #                   and treat its immediate subpackages as modules
+  #   top-level-dirs  one module per top-level directory
+  #   explicit        only what `include` lists
+  #
+  # `auto` is the default because top-level-dirs collapses a src-layout repo to
+  # a single module called "src", which leaves the review selector nothing to
+  # choose between and flattens per-module back-off.
+  strategy: auto
+  include: []
+  exclude:
+    - build/
+    - dist/
+    - "*.egg-info/"
+    - docs/
+    - tests/fixtures/
+
+models:
+  # Verify current model ids before relying on these. cheap runs the sweep,
+  # grading and the brief; deep runs r5 review escalations and rule drafting;
+  # summarise runs handoff extraction, where judgement is not required.
+  cheap: claude-sonnet-5
+  deep: claude-opus-5
+  summarise: claude-haiku-4-5
+
+budget:
+  monthly_ceiling_usd: 15
+  per_run_ceiling_usd: 2
+  # pause = refuse the run; warn = proceed but record a degraded check.
+  on_ceiling: pause
+  # Scheduled jobs are not latency-sensitive, and the Batch API runs at 50%.
+  # The largest cost lever available, at no cost in quality.
+  batch: true
+  # VERIFY PRICES. USD per million tokens, verified 2026-10-05. Published prices
+  # change, and a stale table silently misreports spend. Cost is derived from
+  # recorded tokens at read time, so correcting a price here fixes historical
+  # figures without re-running any job.
+  prices:
+    claude-opus-5:
+      input: 5.00
+      output: 25.00
+    claude-sonnet-5:
+      input: 2.00
+      output: 10.00
+    claude-haiku-4-5:
+      input: 1.00
+      output: 5.00
+
+cadence:
+  sweep: weekly
+  # Base interval. Per-module back-off doubles it for modules that keep coming
+  # back clean, capped at review.backoff.max_interval.
+  review: monthly
+  # on_return = generate when you have been away longer than the threshold.
+  brief: on_return
+  smoke: weekly
+
+review:
+  # correctness and edge_cases are the defaults. clarity is opt-in; excellence
+  # is opt-in AND gated on grade, so it cannot generate perpetual refactor
+  # proposals against unstable code.
+  lenses:
+    - correctness
+    - edge_cases
+  excellence_min_grade: B
+  modules_per_run: 2
+  # Chosen uniformly at random, to counter the selector's own blind spots: a
+  # selector driven only by grades never looks at a module whose grade is wrong.
+  random_extra: 1
+  backoff:
+    clean_rounds_to_double: 2
+    max_interval: quarterly
+
+sweep:
+  # You should never come back to a wall of PRs.
+  max_open_prs: 3
+  max_files_per_pr: 20
+
+promotion:
+  # A principle fixed this many times inside window_days becomes a candidate to
+  # be promoted into a mechanical rule.
+  fix_threshold: 3
+  window_days: 90
+
+filing:
+  # auto = file to beads when `bd` is present.
+  beads: auto
+  # Off by default. Mirroring findings as GitHub issues earns its keep on a
+  # popular repo where outside contributors want visibility; on a repo only you
+  # read, it is a second copy of the bead for an audience of one.
+  github: false
+  labels:
+    - curamoir
+    - curamoir:review
+  # Cap per run, so one noisy review cannot flood you. The overflow is
+  # summarised in a single issue rather than dropped.
+  max_per_run: 15
+
+guardrails:
+  # never = cúramóir will not write to your default branch under any
+  # circumstance. Enforced in code, not in a prompt.
+  default_branch_writes: never
+  branch_prefix: "curamoir/"
+  command_denylist: default
+  use_dcg_if_present: true
+
+rules:
+  # ast-grep patterns survive reformatting and can match a proposed edit before
+  # it reaches disk, which is what makes a guard possible. regex is the escape
+  # hatch for things no AST pattern can express, such as file naming.
+  matcher: ast-grep
+
+smoke:
+  # Run in a clean container on a cadence, so a broken quickstart is caught
+  # before an evaluator finds it.
+  command: "bash scripts/quickstart.sh"
+  container: "python:3.12-slim"
