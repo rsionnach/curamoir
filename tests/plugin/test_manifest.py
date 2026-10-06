@@ -145,14 +145,33 @@ def test_the_plugin_actually_loads_from_a_directory():
     assert "PreToolUse" in output, f"PreToolUse hook not loaded:\n{output}"
 
 
+ALWAYS_ON_TOKEN_BUDGET = 600
+
+
 @pytest.mark.skipif(shutil.which("claude") is None, reason="claude CLI not installed")
-def test_the_plugin_adds_no_always_on_context_cost():
-    """cúramóir runs on one subscription with a $15 ceiling, so a plugin that
-    taxed every session before doing any work would undercut its own premise."""
+def test_the_plugin_stays_within_its_always_on_token_budget():
+    """cúramóir runs on one subscription against a $15 ceiling, so a plugin that
+    taxes every session before doing any work undercuts its own premise.
+
+    Measured: each command costs ~40 tok always-on (its name and description, so
+    the model knows it exists) and ~470 on-invoke (the body, paid only when it
+    fires). Thirteen commands is therefore ~520 always-on, and the budget here is
+    600 — set deliberately close, so adding a fourteenth command or padding a
+    description fails this test rather than quietly taxing every session.
+    """
+    import re
+
     result = subprocess.run(
         ["claude", "--plugin-dir", str(ROOT), "plugin", "details", "curamoir"],
         capture_output=True, text=True,
     )
 
     assert result.returncode == 0, result.stderr
-    assert "~0 tok" in result.stdout, result.stdout
+    match = re.search(r"Always-on:\s*~?(\d+)\s*tok", result.stdout)
+    assert match, f"could not read always-on cost from:\n{result.stdout}"
+
+    always_on = int(match.group(1))
+    assert always_on <= ALWAYS_ON_TOKEN_BUDGET, (
+        f"always-on context cost is {always_on} tok, over the "
+        f"{ALWAYS_ON_TOKEN_BUDGET} tok budget"
+    )
