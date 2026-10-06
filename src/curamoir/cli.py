@@ -8,7 +8,9 @@ is a thin wrapper that invokes this and reports what it said.
 import argparse
 import sys
 
+from curamoir.doctor import diagnose, render_report
 from curamoir.scaffold import AlreadyInitialised, detect_languages, detect_modules, init_repo
+from curamoir.status import collect_status, render_status
 
 
 def main(argv=None):
@@ -20,9 +22,24 @@ def main(argv=None):
     init = subcommands.add_parser("init", help="scaffold .curamoir/ in a repository")
     init.add_argument("--repo", default=".", help="repository root (default: cwd)")
 
+    status = subcommands.add_parser("status", help="show lock, pause, spend, grades, PRs")
+    status.add_argument("--repo", default=".", help="repository root (default: cwd)")
+
+    doctor = subcommands.add_parser("doctor", help="validate the setup and say how to fix it")
+    doctor.add_argument("--repo", default=".", help="repository root (default: cwd)")
+
     arguments = parser.parse_args(argv)
     if arguments.command == "init":
         return _init(arguments.repo)
+    if arguments.command == "status":
+        print(render_status(collect_status(arguments.repo)))
+        return 0
+    if arguments.command == "doctor":
+        findings = diagnose(arguments.repo)
+        print(render_report(findings))
+        # Non-zero only on error: a warning is a degraded-but-usable setup, and
+        # failing CI over one would make the distinction meaningless.
+        return 1 if any(f.level == "error" for f in findings) else 0
     return 2
 
 

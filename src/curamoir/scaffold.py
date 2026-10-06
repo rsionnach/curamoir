@@ -58,12 +58,15 @@ def detect_modules(repo):
         ]
         modules.extend(str(child.relative_to(repo)) for child in subpackages)
 
-        # Loose .py files directly under the package still need a home.
+        # The package itself is a module when it holds loose .py files beside its
+        # subpackages, and ALSO when it has no subpackages at all — otherwise a
+        # single flat package yields zero modules and nothing is ever graded,
+        # which is worse than coarse granularity.
         loose = [
             child for child in package.iterdir()
             if child.is_file() and child.suffix == ".py" and child.name != "__init__.py"
         ]
-        if loose:
+        if loose or not subpackages:
             modules.append(str(package.relative_to(repo)))
 
     return modules

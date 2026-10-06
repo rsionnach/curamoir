@@ -87,14 +87,25 @@ def test_build_artefacts_and_docs_are_never_modules(tmp_path):
         assert not noise.startswith("docs")
 
 
-def test_a_repo_with_too_few_modules_says_so_rather_than_pretending(tmp_path):
-    """DEC-2: with fewer than three modules the selector degrades to round-robin,
-    and that must be visible rather than silently useless."""
+def test_a_single_flat_package_is_itself_a_module(tmp_path):
+    """A package with no subpackages must still be gradeable. Returning nothing
+    here would mean a small repo is never graded or reviewed at all — worse than
+    the coarse granularity DEC-2 rejected."""
     repo = make_repo(tmp_path, {"pyproject.toml": "", "src/tiny/__init__.py": ""})
 
     modules = detect_modules(repo)
 
-    assert len(modules) < 3
+    assert modules == ["src/tiny"]
+
+
+def test_a_repo_with_too_few_modules_still_yields_at_least_one(tmp_path):
+    """DEC-2: with fewer than three modules the selector degrades to round-robin.
+    Degraded, not empty."""
+    repo = make_repo(tmp_path, {"pyproject.toml": "", "src/tiny/__init__.py": ""})
+
+    modules = detect_modules(repo)
+
+    assert 1 <= len(modules) < 3
 
 
 # --- language detection ---------------------------------------------------
