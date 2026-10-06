@@ -67,3 +67,41 @@ def test_the_registered_command_points_at_an_executable_that_exists():
         target = root / relative
         assert target.is_file(), f"hook command target missing: {relative}"
         assert os.access(target, os.X_OK), f"hook command target not executable: {relative}"
+
+
+# --- the Epic 8 handoff hooks ---------------------------------------------
+
+def handlers_for(event):
+    config = load()
+    return [h for entry in config["hooks"].get(event, []) for h in entry["hooks"]]
+
+
+def test_all_three_handoff_events_are_registered():
+    """Three, not the two E8-R1 names: Stop fires every turn, so it cannot be
+    where the handoff is written. See the correction recorded on E8-R1."""
+    for event in ("Stop", "PreCompact", "SessionEnd"):
+        assert handlers_for(event), f"{event} hook not registered"
+
+
+def test_the_stop_hook_has_a_very_short_timeout_because_it_runs_every_turn():
+    for handler in handlers_for("Stop"):
+        assert handler["timeout"] <= 3, handler
+
+
+def test_the_sessionend_hook_stays_inside_the_shared_budget():
+    """SessionEnd hooks share 1.5s across all of them. A generous timeout here
+    would risk the handoff never being written."""
+    for handler in handlers_for("SessionEnd"):
+        assert handler["timeout"] <= 2, handler
+
+
+def test_every_handoff_hook_command_target_exists_and_is_executable():
+    import os
+
+    root = HOOKS.parents[1]
+    for event in ("Stop", "PreCompact", "SessionEnd"):
+        for handler in handlers_for(event):
+            relative = handler["command"].replace('"${CLAUDE_PLUGIN_ROOT}"/', "")
+            target = root / relative
+            assert target.is_file(), f"{event}: missing {relative}"
+            assert os.access(target, os.X_OK), f"{event}: not executable {relative}"

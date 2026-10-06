@@ -1,22 +1,25 @@
 {
   "_comment": [
-    "cúramóir hooks. Verified against the live hooks and manifest references",
-    "2026-10-06. Re-verify before editing: hook event names and the PreToolUse",
-    "response schema change between releases.",
+    "c\u00faram\u00f3ir hooks. Verified against the live hooks reference 2026-10-06.",
+    "Re-verify before editing: event names and response schemas change between releases.",
     "",
-    "The denylist hook (E0-R5) is scoped to Bash by `matcher`, so it is not",
-    "invoked for other tools, and carries a short explicit `timeout`. The default",
-    "is 600s and a timed-out command hook fails OPEN, so an unbounded timeout",
-    "would stall every Bash call for ten minutes while protecting nothing.",
+    "PreToolUse (E0-R5): the destructive-command denylist. Scoped to Bash by",
+    "`matcher`, with a short explicit timeout \u2014 the default is 600s and a timed-out",
+    "command hook fails OPEN, so an unbounded timeout would stall every Bash call",
+    "for ten minutes while protecting nothing.",
     "",
-    "The command goes through scripts/curamoir-hook-pretooluse rather than",
-    "`python3 -m curamoir.hooks.pretooluse`, because an installed plugin is an",
-    "unpacked directory and `curamoir` is not on the import path. The wrapper",
-    "sets it from ${CLAUDE_PLUGIN_ROOT}. The variable is quoted so a plugin path",
-    "containing a space survives.",
+    "The handoff hooks (Epic 8) use THREE events, not the two the spec names,",
+    "because Stop does not mean what the spec assumes:",
+    "  Stop        fires at the end of EVERY TURN. One cheap journal append, no",
+    "              model call, 3s timeout. Writing a full handoff here would mean",
+    "              dozens of writes and model calls per session.",
+    "  PreCompact  fires before context is discarded, which is when a handoff is",
+    "              most needed. Writes the full handoff. Never blocks compaction.",
+    "  SessionEnd  finalises on exit. SessionEnd hooks SHARE a 1.5s budget, so this",
+    "              is deterministic only and declares a 2s ceiling to stay inside it.",
     "",
-    "Guards promoted from rules (E4-R4b) register separately with matcher",
-    "'Edit|Write'. SessionStart / Stop / PreCompact handoff hooks are Epic 8's."
+    "Guards promoted from rules (E4-R4b) will register separately with matcher",
+    "'Edit|Write'."
   ],
   "hooks": {
     "PreToolUse": [
@@ -27,6 +30,39 @@
             "type": "command",
             "command": "\"${CLAUDE_PLUGIN_ROOT}\"/scripts/curamoir-hook-pretooluse",
             "timeout": 5
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}\"/scripts/curamoir-hook-stop",
+            "timeout": 3
+          }
+        ]
+      }
+    ],
+    "PreCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}\"/scripts/curamoir-hook-precompact",
+            "timeout": 30
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}\"/scripts/curamoir-hook-sessionend",
+            "timeout": 2
           }
         ]
       }

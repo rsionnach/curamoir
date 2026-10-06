@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+# cúramóir stop hook. Wrapper exists because an installed plugin is an unpacked
+# directory, not a pip install, so `curamoir` is not on the import path.
+# Must never fail noisily: hooks fail open, so a crash protects nothing.
+set -u
+
+root="${CLAUDE_PLUGIN_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+
+for interpreter in python3 python; do
+  if command -v "$interpreter" >/dev/null 2>&1; then
+    PYTHONPATH="${root}/src${PYTHONPATH:+:${PYTHONPATH}}" \
+      exec "$interpreter" -m curamoir.hooks.stop
+  fi
+done
+
+exit 0
