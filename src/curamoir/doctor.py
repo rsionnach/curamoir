@@ -17,7 +17,6 @@ ignore the output, which costs more than the check is worth.
 import json
 import shutil
 import subprocess
-import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -259,8 +258,32 @@ def _check_hooks(repo):
     return findings
 
 
+def _probe_repo(repo, probe):
+    """Where to run a probe.
+
+    Writing probes run against a SCRATCH repo, never the developer's. The hooks
+    they invoke are the real ones, and three of them write a handoff — so probing
+    in place replaced `handoff/latest.md`, appended fabricated journal notes
+    (which then became the next handoff's "Last decision"), and burned two of ten
+    history slots per run. Running doctor to find out why your handoff looked
+    wrong guaranteed it was wrong.
+
+    The probe only needs to observe that the hook writes SOMEWHERE, so a skeleton
+    is enough.
+    """
+    import tempfile
+
+    if not probe.get("writes"):
+        return repo, None
+    scratch = Path(tempfile.mkdtemp(prefix="curamoir-doctor-"))
+    (scratch / ".curamoir" / "handoff" / "history").mkdir(parents=True, exist_ok=True)
+    (scratch / ".curamoir" / "state").mkdir(parents=True, exist_ok=True)
+    return scratch, scratch
+
+
 def _run_hook_probe(repo, event, probe, script_path=None):
     import os
+    import shutil as _shutil
 
     wrapper = script_path or Path(__file__).resolve().parents[2] / "scripts" / probe["script"]
     label = f"hook ({event})"
@@ -268,11 +291,12 @@ def _run_hook_probe(repo, event, probe, script_path=None):
         return Finding(label, "error", f"{wrapper} is missing",
                        fix="Reinstall the plugin; the hook script is absent.")
 
-    payload = dict(probe["payload"], cwd=str(repo))
+    target, scratch = _probe_repo(repo, probe)
+    payload = dict(probe["payload"], cwd=str(target))
     environment = {"PATH": os.environ.get("PATH", "")}
     environment.update(probe.get("env", {}))
 
-    before = _probe_marker(repo, probe)
+    before = _probe_marker(target, probe)
     try:
         result = subprocess.run(
             [str(wrapper)], input=json.dumps(payload),
@@ -282,42 +306,58 @@ def _run_hook_probe(repo, event, probe, script_path=None):
         return Finding(label, "error", f"hook could not be run ({error})",
                        fix="Check python3 is on PATH and the plugin directory is readable.")
 
+    def done(finding):
+        if scratch is not None:
+            _shutil.rmtree(scratch, ignore_errors=True)
+        return finding
+
     if result.returncode != 0:
-        return Finding(label, "error", f"hook exited {result.returncode}: {result.stderr[:200]}",
-                       fix=probe["if_not"])
+        return done(Finding(
+            label, "error", f"hook exited {result.returncode}: {result.stderr[:200]}",
+            fix=probe["if_not"],
+        ))
 
     if "expect" in probe:
         if probe["expect"] in result.stdout:
-            return Finding(label, "ok", probe["proves"])
-        return Finding(label, "error",
-                       f"ran but did not produce {probe['expect']!r} (stdout={result.stdout[:120]!r})",
-                       fix=probe["if_not"])
+            return done(Finding(label, "ok", probe["proves"]))
+        return done(Finding(
+            label, "error",
+            f"ran but did not produce {probe['expect']!r} (stdout={result.stdout[:120]!r})",
+            fix=probe["if_not"],
+        ))
 
     if "writes" in probe:
-        after = _probe_marker(repo, probe)
+        after = _probe_marker(target, probe)
         # The file must exist AND have changed. An `or after is not None` here
         # made the comparison irrelevant: because hooks fail OPEN and exit 0, and
         # because the SessionEnd probe runs after PreCompact has already written
         # latest.md, a hook that did nothing still reported ok.
         if after is not None and after != before:
-            return Finding(label, "ok", probe["proves"])
-        return Finding(
+            return done(Finding(label, "ok", probe["proves"]))
+        return done(Finding(
             label, "error",
             f"ran (exit 0) but wrote nothing to {'/'.join(probe['writes'])}",
             fix=probe["if_not"],
-        )
+        ))
 
     if probe.get("injects"):
-        # Distinguish "injected something" from "ran". Reporting the same detail
-        # either way proves only that the script is executable.
+        handoff_exists = (repo / ".curamoir" / "handoff" / "latest.md").is_file()
         if result.stdout.strip():
-            return Finding(label, "ok", "fires and injects the previous handoff")
-        return Finding(
-            label, "ok",
-            "fires; injected nothing, which is correct when no handoff exists yet",
-        )
+            return done(Finding(label, "ok", "fires and injects the previous handoff"))
+        if handoff_exists:
+            # The one case that must fail: a handoff is present, so there WAS
+            # something to inject. The wrappers exit 0 when no interpreter is
+            # found, so an entirely dead hook used to report ok here.
+            return done(Finding(
+                label, "error",
+                "a handoff exists but the hook injected nothing",
+                fix=probe["if_not"],
+            ))
+        return done(Finding(
+            label, "ok", "fires; nothing to inject yet (no handoff written)",
+        ))
 
-    return Finding(label, "ok", probe["proves"])
+    return done(Finding(label, "ok", probe["proves"]))
 
 
 def _check_denylist_job_detection():
@@ -379,14 +419,21 @@ def _check_tools(tools):
          "AST-matched rules will be skipped; regex rules still run",
          "pip install ast-grep-cli  (or npm i -g @ast-grep/cli, or brew install ast-grep)"),
         ("python3", "error",
-         "cúramóir's deterministic helpers cannot run",
+         "no python3 (or python) on PATH, so every hook wrapper exits silently",
          "Install Python 3.12 or later and ensure python3 is on PATH."),
     )
     findings = []
     for name, level, detail, fix in specs:
         available = tools.get(name)
         if available is None:
-            available = shutil.which(name if name != "python3" else sys.executable) is not None
+            if name == "python3":
+                # What the WRAPPERS need: `command -v python3`, falling back to
+                # `python`. Resolving sys.executable instead made this check
+                # unfailable, because the running interpreter exists by
+                # definition — while the hooks it stands for could all be dead.
+                available = bool(shutil.which("python3") or shutil.which("python"))
+            else:
+                available = shutil.which(name) is not None
         findings.append(
             Finding(name, "ok", "available") if available
             else Finding(name, level, detail, fix=fix)

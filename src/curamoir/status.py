@@ -18,6 +18,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from curamoir.budget import PriceTable, UnknownModel
+from copy import deepcopy
+
 from curamoir.config import DEFAULTS, ConfigError, load_config_text
 from curamoir.ledger import Ledger
 
@@ -108,11 +110,13 @@ def render_status(status):
 def _read_config(base):
     path = base / "curamoir.yaml"
     if not path.is_file():
-        return DEFAULTS, f"{path.name} is missing; showing built-in defaults"
+        # deepcopy, not the module-level object: handing it out is one careless
+        # mutation away from poisoning every later load_config in the process.
+        return deepcopy(DEFAULTS), f"{path.name} is missing; showing built-in defaults"
     try:
         return load_config_text(path.read_text(encoding="utf-8")), None
     except ConfigError as invalid:
-        return DEFAULTS, str(invalid).replace("\n", " ")
+        return deepcopy(DEFAULTS), str(invalid).replace("\n", " ")
 
 
 def _read_lock(base):
@@ -217,4 +221,9 @@ def _parse(timestamp):
         when = datetime.fromisoformat(timestamp)
     except (TypeError, ValueError):
         return None
-    return when.replace(tzinfo=timezone.utc) if when.tzinfo is None else when
+    # Normalise to UTC. Attributing by the entry's own offset put a
+    # 2026-11-01T01:00+13:00 record (2026-10-31T12:00Z) into November, so a
+    # ledger merged from CI or another machine would lose and then double-count
+    # it across the month boundary.
+    when = when.replace(tzinfo=timezone.utc) if when.tzinfo is None else when
+    return when.astimezone(timezone.utc)

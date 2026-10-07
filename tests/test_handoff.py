@@ -184,80 +184,14 @@ def test_writing_never_raises_even_outside_a_git_repository(tmp_path):
 
 
 # --- E8-R2: graceful degradation ------------------------------------------
-
-def test_a_failing_condenser_still_produces_a_handoff_with_git_and_bead_state(tmp_path):
-    """E8-R2's acceptance criterion, exactly: "Simulated model failure still
-    produces a handoff with git and bead state"."""
-    repo = make_repo(tmp_path)
-    beads = repo / ".beads"
-    beads.mkdir()
-    beads.joinpath("issues.jsonl").write_text(
-        json.dumps({"id": "x-9", "title": "Half-done refactor", "status": "in_progress"}) + "\n",
-        encoding="utf-8")
-    journal = repo / ".curamoir" / "handoff" / "journal.jsonl"
-    journal.write_text(
-        json.dumps({"at": "2026-10-06T10:00:00+00:00", "note": "Picked the lock design."}) + "\n",
-        encoding="utf-8")
-
-    def exploding_condenser(_notes):
-        raise RuntimeError("model call failed")
-
-    handoff = build_handoff(repo, condense=exploding_condenser)
-    rendered = render_handoff(handoff)
-
-    assert "main" in rendered
-    assert "x-9" in rendered
-    assert "Picked the lock design." in rendered
+#
+# DEC-8 (b) deleted the condenser seam, so there is no model call left to fail.
+# The degradation requirement is now satisfied by CONSTRUCTION rather than by a
+# fallback branch: the handoff is built from git and bead state, which is the
+# only path. The non-blocking and never-raises halves stay tested below.
 
 
-def test_a_slow_condenser_does_not_hold_up_the_handoff(tmp_path):
-    """Non-blocking is the other half of E8-R2. A hook that waits on a hung model
-    call teaches the developer to kill the session, and then there is never a
-    handoff at all."""
-    import time as clock
 
-    repo = make_repo(tmp_path)
-    (repo / ".curamoir" / "handoff" / "journal.jsonl").write_text(
-        json.dumps({"at": "2026-10-06T10:00:00+00:00", "note": "A decision."}) + "\n",
-        encoding="utf-8")
-
-    def slow_condenser(_notes):
-        clock.sleep(10)
-        return "never arrives"
-
-    started = clock.monotonic()
-    handoff = build_handoff(repo, condense=slow_condenser, condense_timeout=0.2)
-    elapsed = clock.monotonic() - started
-
-    assert elapsed < 3.0, f"waited {elapsed:.2f}s on a hung condenser"
-    assert "A decision." in handoff["last_decision"]
-
-
-def test_a_working_condenser_is_used_when_it_succeeds(tmp_path):
-    repo = make_repo(tmp_path)
-    (repo / ".curamoir" / "handoff" / "journal.jsonl").write_text(
-        "\n".join(
-            json.dumps({"at": "2026-10-06T10:00:00+00:00", "note": f"Step {i}."})
-            for i in range(20)
-        ), encoding="utf-8")
-
-    handoff = build_handoff(repo, condense=lambda notes: f"Condensed {len(notes)} notes.")
-
-    assert handoff["last_decision"] == "Condensed 20 notes."
-
-
-def test_no_condenser_is_attempted_for_a_short_journal(tmp_path):
-    """A single note needs no condensing, and a model call to restate one
-    sentence is pure waste."""
-    repo = make_repo(tmp_path)
-    (repo / ".curamoir" / "handoff" / "journal.jsonl").write_text(
-        json.dumps({"at": "2026-10-06T10:00:00+00:00", "note": "The one decision."}) + "\n",
-        encoding="utf-8")
-    calls = []
-
-    build_handoff(repo, condense=lambda notes: calls.append(notes) or "condensed")
-
-    assert calls == [], "condenser called for a journal that did not need it"
 
 
 # --- E8-R4: the manual write ----------------------------------------------

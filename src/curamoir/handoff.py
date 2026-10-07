@@ -30,10 +30,6 @@ from curamoir.redaction import write_artefact
 from curamoir.repo_config import config_value
 
 WORD_LIMIT = 400
-# Below this many journal notes, condensing is pure waste: a model call to
-# restate one sentence costs money and buys nothing.
-CONDENSE_THRESHOLD = 4
-CONDENSE_TIMEOUT_SECONDS = 20
 # E8-R1 asks for "one to three sentences". Bounded by BOTH, because
 # `last_assistant_message` is raw prose — bullet lists, code blocks, a trailing
 # colon — and unpunctuated text is one "sentence" however long it runs. The word
@@ -46,16 +42,16 @@ MAX_LISTED_BEADS = 6
 UNAVAILABLE = "unavailable"
 
 
-def build_handoff(repo, condense=None, condense_timeout=CONDENSE_TIMEOUT_SECONDS):
+def build_handoff(repo):
     """Everything the handoff reports, as plain data.
 
-    `condense` is an optional callable that turns many journal notes into one to
-    three sentences. It is strictly an enhancement: it is only attempted when
-    there is enough journal to be worth condensing, it is bounded by
-    `condense_timeout`, and any failure or overrun falls back to the deterministic
-    last note. That ordering is E8-R2 — a handoff is most valuable on the
-    sessions that went wrong, which are exactly the sessions where a model call
-    is least likely to succeed.
+    No model call. DEC-8 (owner, 2026-10-07) settled that the last decision is
+    taken deterministically from the turn's final assistant message: the docs
+    direct hooks needing that text to prefer `last_assistant_message` over the
+    transcript, which lags the in-memory conversation, so the deterministic
+    source is better rather than a compromise — and a model call inside a hook
+    would add spend on every compaction and a failure mode on the one path that
+    must never block.
     """
     repo = Path(repo)
     in_progress = _in_progress_beads(repo)
@@ -64,27 +60,20 @@ def build_handoff(repo, condense=None, condense_timeout=CONDENSE_TIMEOUT_SECONDS
         "branch": _branch(repo),
         "uncommitted": _uncommitted(repo),
         "in_progress": in_progress,
-        "last_decision": _decide_last_decision(repo, condense, condense_timeout),
+        "last_decision": _last_decision(repo),
         "next_step": _next_step(repo, in_progress),
         "note": None,
     }
 
 
-def _decide_last_decision(repo, condense, timeout):
-    """The deterministic note, optionally condensed. Never raises, never hangs."""
+def _last_decision(repo):
+    """The most recent journal note, bounded.
+
+    Free: the Stop hook hands us `last_assistant_message` each turn, so this
+    needs no model call and no transcript parsing.
+    """
     notes = [entry["note"] for entry in _journal(repo) if entry.get("note")]
-    deterministic = notes[-1] if notes else ""
-
-    if condense is None or len(notes) < CONDENSE_THRESHOLD:
-        return _first_sentences(deterministic, MAX_DECISION_SENTENCES)
-
-    try:
-        condensed = _with_timeout(condense, notes, timeout)
-    except Exception:
-        return deterministic
-    if isinstance(condensed, str) and condensed.strip():
-        return _first_sentences(condensed.strip(), MAX_DECISION_SENTENCES)
-    return _first_sentences(deterministic, MAX_DECISION_SENTENCES)
+    return _first_sentences(notes[-1], MAX_DECISION_SENTENCES) if notes else ""
 
 
 def _first_sentences(text, limit, word_limit=MAX_DECISION_WORDS):
@@ -110,33 +99,6 @@ def _first_sentences(text, limit, word_limit=MAX_DECISION_WORDS):
     if truncated and not kept.endswith(("…", "...")):
         kept += " …"
     return kept
-
-
-def _with_timeout(function, argument, seconds):
-    """Run `function(argument)`, abandoning it after `seconds`.
-
-    A thread rather than a signal: hooks may run on any thread, and SIGALRM is
-    not available on Windows. The worker is left to finish into nothing — we
-    stop WAITING for it, which is what non-blocking means here.
-    """
-    import threading
-
-    outcome = {}
-
-    def worker():
-        try:
-            outcome["value"] = function(argument)
-        except BaseException as error:  # noqa: BLE001 - recorded, then discarded
-            outcome["error"] = error
-
-    thread = threading.Thread(target=worker, daemon=True)
-    thread.start()
-    thread.join(seconds)
-    if thread.is_alive():
-        raise TimeoutError(f"condenser exceeded {seconds}s")
-    if "error" in outcome:
-        raise outcome["error"]
-    return outcome.get("value")
 
 
 def render_handoff(handoff):
@@ -191,8 +153,7 @@ def render_handoff(handoff):
     return _cap_words(rendered, WORD_LIMIT)
 
 
-def write_handoff(repo, keep_history=None, note=None, condense=None,
-                  next_step=None):
+def write_handoff(repo, keep_history=None, note=None, next_step=None):
     """Write `handoff/latest.md`, rolling the previous one into history.
 
     `note` is the developer's own words, from `/curamoir:handoff` (E8-R4). It is
@@ -214,7 +175,7 @@ def write_handoff(repo, keep_history=None, note=None, condense=None,
     latest = directory / "latest.md"
 
     try:
-        handoff = build_handoff(repo, condense=condense)
+        handoff = build_handoff(repo)
         handoff["note"] = note.strip() if note and note.strip() else None
         rendered = render_handoff(handoff)
     except Exception as error:
@@ -284,24 +245,44 @@ def _branch(repo):
 
 def _uncommitted(repo):
     """Change summaries, never content. `--porcelain` gives status plus path."""
-    raw = _git(repo, "status", "--porcelain")
+    # NOT the stripping `_git`: porcelain's first column is a space for an
+    # unstaged change, and stripping the output shifts every such line left by
+    # one, which silently corrupted both the label and the path.
+    raw = _git_raw(repo, "status", "--porcelain")
     if raw is None:
         return UNAVAILABLE
-    changes = []
-    for line in raw.splitlines():
-        if not line.strip():
-            continue
-        code, _, path = line.partition(" ")
-        changes.append(f"{_describe(code)}: {path.strip() or line[3:].strip()}")
-    return changes
+    return [_describe_porcelain(line) for line in raw.splitlines() if line.strip()]
 
 
-def _describe(code):
-    code = code.strip()
-    return {
-        "M": "modified", "A": "added", "D": "deleted", "R": "renamed",
-        "C": "copied", "??": "untracked", "U": "conflicted",
-    }.get(code, code or "changed")
+_PORCELAIN = {
+    "M": "modified", "A": "added", "D": "deleted", "R": "renamed",
+    "C": "copied", "T": "type changed", "U": "conflicted", "?": "untracked",
+    "!": "ignored",
+}
+
+
+def _describe_porcelain(line):
+    """One porcelain v1 line as "<description>: <path>".
+
+    Parsed BY POSITION — two status characters, a space, then the path. Splitting
+    on the first space put the status character into the path for every UNSTAGED
+    change, because the index column is a space there. Modified-but-unstaged is
+    the overwhelmingly common state of the interrupted session a handoff exists
+    for, so that was the usual case rather than an edge one.
+    """
+    code, path = line[:2], line[3:].strip()
+    index, worktree = code[0], code[1] if len(code) > 1 else " "
+
+    if index == "?" or worktree == "?":
+        description = "untracked"
+    elif index == "U" or worktree == "U":
+        description = "conflicted"
+    else:
+        # Prefer the worktree column: it is what is on disk right now, and the
+        # index column is a space precisely when the change is unstaged.
+        character = worktree if worktree != " " else index
+        description = _PORCELAIN.get(character, "changed")
+    return f"{description}: {path or line.strip()}"
 
 
 def _in_progress_beads(repo):
@@ -394,6 +375,17 @@ def _cap_words(text, limit):
         used += count
     kept += ["", f"_Truncated at {limit} words. Full state: `/curamoir:status`._"]
     return "\n".join(kept)
+
+
+def _git_raw(repo, *args):
+    """git stdout with leading whitespace preserved, or None on failure."""
+    try:
+        result = subprocess.run(
+            ["git", *args], cwd=repo, capture_output=True, text=True, timeout=5
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return result.stdout.rstrip("\n") if result.returncode == 0 else None
 
 
 def _git(repo, *args):

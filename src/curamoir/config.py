@@ -46,8 +46,6 @@ DEFAULTS = {
     "models": {
         "cheap": "claude-sonnet-5",
         "deep": "claude-opus-5",
-        # Summarisation only: handoff last-decision extraction, brief assembly.
-        "summarise": "claude-haiku-4-5",
     },
     "budget": {
         "monthly_ceiling_usd": 15,
@@ -118,7 +116,7 @@ SCHEMA = {
         "include": STRING_LIST,
         "exclude": STRING_LIST,
     },
-    "models": {"cheap": STRING, "deep": STRING, "summarise": STRING},
+    "models": {"cheap": STRING, "deep": STRING},
     "budget": {
         "monthly_ceiling_usd": NUMBER,
         "per_run_ceiling_usd": NUMBER,
@@ -244,6 +242,29 @@ def _check_scalar(path, given, expected, problems):
     elif expected is MAPPING:
         if not isinstance(given, dict):
             problems.append(f"{path}: expected a {MAPPING}, got {_type_name(given)}")
+        elif path.endswith("prices"):
+            _check_price_table(path, given, problems)
+
+
+def _check_price_table(path, table, problems):
+    """Each price entry needs numeric `input` and `output`.
+
+    Validated here rather than discovered at read time: the table is documented
+    as editable, so a typo is an ordinary user action, and the error belongs with
+    the key the user mistyped rather than deep inside the budget guard.
+    """
+    for model, rate in table.items():
+        where = f"{path}.{model}"
+        if not isinstance(rate, dict):
+            problems.append(f"{where}: expected a {MAPPING} with numeric 'input' and 'output'")
+            continue
+        for side in ("input", "output"):
+            value = rate.get(side)
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                problems.append(
+                    f"{where}.{side}: expected a {NUMBER} (USD per million tokens), "
+                    f"got {_type_name(value)}"
+                )
 
 
 def _merge(base, override):

@@ -43,8 +43,34 @@ class Ledger:
         return entry
 
     def entries(self):
-        """Every entry, oldest first. Missing file reads as empty, not an error."""
+        """Every readable entry, oldest first. Missing file reads as empty.
+
+        An unparseable line is SKIPPED, not fatal. This file is appended to by
+        hooks and by the runner, so a crash mid-write will eventually truncate a
+        line — and a strict read turned that into "every job refused, and the one
+        command meant to explain why crashes".
+
+        Skipped lines are counted rather than discarded silently: undercounting
+        spend is the single failure the budget guard exists to prevent, so the
+        count is surfaced via `unreadable_lines()`.
+        """
+        self._unreadable = 0
         if not self._path.exists():
             return []
-        with self._path.open(encoding="utf-8") as handle:
-            return [json.loads(line) for line in handle if line.strip()]
+        entries = []
+        try:
+            with self._path.open(encoding="utf-8") as handle:
+                for line in handle:
+                    if not line.strip():
+                        continue
+                    try:
+                        entries.append(json.loads(line))
+                    except ValueError:
+                        self._unreadable += 1
+        except OSError:
+            return []
+        return entries
+
+    def unreadable_lines(self):
+        """How many lines the last `entries()` call could not parse."""
+        return getattr(self, "_unreadable", 0)

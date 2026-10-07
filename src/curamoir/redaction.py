@@ -57,7 +57,9 @@ _PATTERNS = (
             r"(?i)\b([A-Za-z0-9_.\-]*(?:password|passwd|secret|token|api[_\-]?key|"
             r"access[_\-]?key|private[_\-]?key|credential)[A-Za-z0-9_.\-]*)"
             r"(\s*[:=]\s*)"
-            r"[\"']?([^\s\"',]{8,})[\"']?"
+            # & and ; excluded so a query string is not swallowed whole:
+            # ?api_key=XXX&page=2 must keep &page=2.
+            r"[\"']?([^\s\"',&;]{8,})[\"']?"
         ),
         r"\1\2" + PLACEHOLDER,
     ),

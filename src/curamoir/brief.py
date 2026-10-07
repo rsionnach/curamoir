@@ -147,13 +147,22 @@ def _choose_first_task(repo):
     candidates = [
         bead for bead in _read_beads(repo)
         if bead.get("status") == "open"
-        and bead.get("estimate")
+        # Numeric, explicitly: a bead with "estimate": "30" raised TypeError out
+        # of the sort and crashed /curamoir:brief.
+        and isinstance(bead.get("estimate"), (int, float))
+        and not isinstance(bead.get("estimate"), bool)
         and bead["estimate"] <= MAX_FIRST_TASK_MINUTES
     ]
     if not candidates:
         return None
 
-    candidates.sort(key=lambda bead: (bead.get("priority", 9), bead["estimate"]))
+    def rank(bead):
+        priority = bead.get("priority", 9)
+        if isinstance(priority, bool) or not isinstance(priority, (int, float)):
+            priority = 9
+        return (priority, bead["estimate"])
+
+    candidates.sort(key=rank)
     best = candidates[0]
     return {
         "id": best.get("id", "?"),
@@ -239,12 +248,18 @@ def _lowest_graded(grades):
     if not grades or not grades.get("modules"):
         return None
     ranking = {"A": 0, "B": 1, "C": 2, "D": 3, "F": 4}
-    modules = sorted(
-        grades["modules"].items(),
-        key=lambda item: ranking.get(item[1].get("grade", "F"), 9),
-        reverse=True,
-    )
-    return modules[0][0] if modules else None
+
+    def rank(item):
+        data = item[1]
+        grade = data.get("grade") if isinstance(data, dict) else None
+        # An unrecognised or missing grade ranks BEST-known, not worst. Ranking
+        # it 9 with reverse=True reported a typo'd grade as the lowest-graded
+        # module, ahead of a genuine F — so the brief would send the developer
+        # to the wrong place.
+        return ranking.get(grade, -1)
+
+    modules = sorted(grades["modules"].items(), key=rank, reverse=True)
+    return modules[0][0] if modules and rank(modules[0]) >= 0 else None
 
 
 def _bullets(items, empty_message):

@@ -67,7 +67,11 @@ def detect_default_branch(repo):
     """
     remote_head = _git(repo, "symbolic-ref", "--quiet", "refs/remotes/origin/HEAD")
     if remote_head:
-        return remote_head.rsplit("/", 1)[-1]
+        # Strip the known prefix rather than splitting on the last slash, which
+        # turned refs/remotes/origin/release/main into "main" — so the
+        # default-branch comparison never fired for a slashed branch name.
+        prefix = "refs/remotes/origin/"
+        return remote_head[len(prefix):] if remote_head.startswith(prefix) else remote_head.rsplit("/", 1)[-1]
 
     # Explicit per-repo override only. `init.defaultBranch` is deliberately NOT
     # consulted: it says what NEWLY created repos get named and is usually

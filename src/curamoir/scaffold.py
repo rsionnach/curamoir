@@ -34,6 +34,10 @@ PYTHON_MARKERS = ("pyproject.toml", "setup.py", "setup.cfg", "Pipfile", "require
 TYPESCRIPT_MARKERS = ("tsconfig.json", "package.json")
 
 
+class TemplateDrift(Exception):
+    """The bundled config template no longer has the anchor init writes into."""
+
+
 class AlreadyInitialised(Exception):
     """`.curamoir/` exists. The new config was written alongside, not over."""
 
@@ -124,8 +128,17 @@ def _render_config(repo, templates):
     if not modules:
         return text
 
+    sentinel = "  include: []"
+    if sentinel not in text:
+        # Loudly, not silently: a reformatted template would otherwise ship
+        # include: [] and leave grading with nothing to grade.
+        raise TemplateDrift(
+            f"templates/curamoir.yaml no longer contains {sentinel!r}, so detected "
+            "modules cannot be written into it. Restore the line or update "
+            "scaffold._render_config."
+        )
     rendered = "\n".join(f"    - {module}" for module in modules)
-    return text.replace("  include: []", f"  include:\n{rendered}", 1)
+    return text.replace(sentinel, f"  include:\n{rendered}", 1)
 
 
 def _package_roots(repo):

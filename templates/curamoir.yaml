@@ -30,11 +30,9 @@ modules:
 
 models:
   # Verify current model ids before relying on these. cheap runs the sweep,
-  # grading and the brief; deep runs r5 review escalations and rule drafting;
-  # summarise runs handoff extraction, where judgement is not required.
+  # grading and the brief; deep runs r5 review escalations and rule drafting.
   cheap: claude-sonnet-5
   deep: claude-opus-5
-  summarise: claude-haiku-4-5
 
 budget:
   monthly_ceiling_usd: 15

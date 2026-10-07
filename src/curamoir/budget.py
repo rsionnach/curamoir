@@ -33,9 +33,18 @@ class PriceTable:
         self._prices = dict(prices)
 
     def cost(self, model, input_tokens, output_tokens):
+        """Cost in USD, or UnknownModel for an absent or malformed entry.
+
+        A mistyped key ("ouput") used to raise KeyError from inside the guard,
+        which the Gateway turned into GUARD_ERROR — every job refused, with a
+        message naming a dict key rather than the config file.
+        """
+        rate = self._prices.get(model)
+        if not isinstance(rate, dict):
+            raise UnknownModel(model)
         try:
-            rate = self._prices[model]
-        except KeyError:
+            rate = {"input": float(rate["input"]), "output": float(rate["output"])}
+        except (KeyError, TypeError, ValueError):
             raise UnknownModel(model) from None
         return (
             input_tokens * rate["input"] / PER_MILLION
@@ -120,4 +129,9 @@ def _parse(timestamp):
         when = datetime.fromisoformat(timestamp)
     except (TypeError, ValueError):
         return None
-    return when.replace(tzinfo=timezone.utc) if when.tzinfo is None else when
+    # Normalise to UTC. Attributing by the entry's own offset put a
+    # 2026-11-01T01:00+13:00 record (2026-10-31T12:00Z) into November, so a
+    # ledger merged from CI or another machine would lose and then double-count
+    # it across the month boundary.
+    when = when.replace(tzinfo=timezone.utc) if when.tzinfo is None else when
+    return when.astimezone(timezone.utc)
