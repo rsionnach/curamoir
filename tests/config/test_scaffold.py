@@ -270,3 +270,18 @@ def test_language_detection_still_sees_a_test_only_python_tree(tmp_path):
     repo = make_repo(tmp_path, {"tests/test_app.py": "def test_x(): pass\n"})
 
     assert "python" in detect_languages(repo)
+
+
+def test_template_drift_is_detected_even_when_no_modules_are_found(tmp_path):
+    """The drift check sat behind the no-modules early return, so a repo with
+    nothing detected never noticed — the fault would surface on some later repo
+    instead, far from its cause."""
+    from curamoir.scaffold import TemplateDrift, init_repo
+
+    templates = tmp_path / "templates"
+    templates.mkdir()
+    (templates / "curamoir.yaml").write_text("version: 1\nmodules:\n  include: [ ]\n", encoding="utf-8")
+    repo = make_repo(tmp_path / "repo", {"README.md": "no code here"})
+
+    with pytest.raises(TemplateDrift):
+        init_repo(repo, templates=templates)

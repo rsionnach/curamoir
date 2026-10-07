@@ -50,6 +50,20 @@ _PATTERNS = (
     (re.compile(r"\beyJ[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{4,}\.[A-Za-z0-9_\-]{4,}"), PLACEHOLDER),
     # Credentials embedded in a URL
     (re.compile(r"\b([a-z][a-z0-9+.\-]*://[^\s:/@]+):[^\s/@]+@"), r"\1:" + PLACEHOLDER + "@"),
+    # A secret-looking QUERY PARAMETER, handled before the generic rule and with
+    # its own value class. The generic rule must not have to reason about query
+    # syntax: narrowing ITS value class to stop a query string being swallowed
+    # truncated every secret containing & or ;, and left one whose leading part
+    # fell under the 8-character floor unredacted entirely.
+    (
+        re.compile(
+            r"(?i)([?&][A-Za-z0-9_.\-]*"
+            r"(?:password|passwd|secret|token|api[_\-]?key|access[_\-]?key|sig|signature|credential)"
+            r"[A-Za-z0-9_.\-]*=)"
+            r"(?!\[REDACTED\])[^\s&;\"']+"
+        ),
+        r"\1" + PLACEHOLDER,
+    ),
     # Generic: a secret-looking NAME assigned a long-enough value. The name is
     # kept so the reader knows what was removed.
     (
@@ -57,9 +71,11 @@ _PATTERNS = (
             r"(?i)\b([A-Za-z0-9_.\-]*(?:password|passwd|secret|token|api[_\-]?key|"
             r"access[_\-]?key|private[_\-]?key|credential)[A-Za-z0-9_.\-]*)"
             r"(\s*[:=]\s*)"
-            # & and ; excluded so a query string is not swallowed whole:
-            # ?api_key=XXX&page=2 must keep &page=2.
-            r"[\"']?([^\s\"',&;]{8,})[\"']?"
+            # The original class, restored. A narrower one truncated secrets
+            # containing & or ;. The negative lookahead keeps this rule from
+            # re-matching a value the query-parameter rule already replaced,
+            # which is what would otherwise eat the rest of the query string.
+            r"[\"']?(?!\[REDACTED\])([^\s\"',]{8,})[\"']?"
         ),
         r"\1\2" + PLACEHOLDER,
     ),

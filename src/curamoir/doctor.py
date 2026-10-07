@@ -60,6 +60,7 @@ def diagnose(repo, tools=None):
     findings.append(_check_pause(base))
     findings.extend(_check_hooks(repo))
     findings.append(_check_denylist_job_detection())
+    findings.append(_check_writable(base))
     findings.extend(_check_tools(tools))
 
     return sorted(findings, key=lambda f: LEVEL_ORDER[f.level])
@@ -282,7 +283,6 @@ def _probe_repo(repo, probe):
 
 
 def _run_hook_probe(repo, event, probe, script_path=None):
-    import os
     import shutil as _shutil
 
     wrapper = script_path or Path(__file__).resolve().parents[2] / "scripts" / probe["script"]
@@ -292,6 +292,19 @@ def _run_hook_probe(repo, event, probe, script_path=None):
                        fix="Reinstall the plugin; the hook script is absent.")
 
     target, scratch = _probe_repo(repo, probe)
+    try:
+        return _probe(repo, target, wrapper, label, probe)
+    finally:
+        # try/finally, not a done() wrapper: the subprocess-failure return was
+        # the one exit that could not go through it (done is defined after it),
+        # so a hook that merely timed out leaked a directory per doctor run.
+        if scratch is not None:
+            _shutil.rmtree(scratch, ignore_errors=True)
+
+
+def _probe(repo, target, wrapper, label, probe):
+    import os
+
     payload = dict(probe["payload"], cwd=str(target))
     environment = {"PATH": os.environ.get("PATH", "")}
     environment.update(probe.get("env", {}))
@@ -306,21 +319,16 @@ def _run_hook_probe(repo, event, probe, script_path=None):
         return Finding(label, "error", f"hook could not be run ({error})",
                        fix="Check python3 is on PATH and the plugin directory is readable.")
 
-    def done(finding):
-        if scratch is not None:
-            _shutil.rmtree(scratch, ignore_errors=True)
-        return finding
-
     if result.returncode != 0:
-        return done(Finding(
+        return (Finding(
             label, "error", f"hook exited {result.returncode}: {result.stderr[:200]}",
             fix=probe["if_not"],
         ))
 
     if "expect" in probe:
         if probe["expect"] in result.stdout:
-            return done(Finding(label, "ok", probe["proves"]))
-        return done(Finding(
+            return (Finding(label, "ok", probe["proves"]))
+        return (Finding(
             label, "error",
             f"ran but did not produce {probe['expect']!r} (stdout={result.stdout[:120]!r})",
             fix=probe["if_not"],
@@ -333,8 +341,8 @@ def _run_hook_probe(repo, event, probe, script_path=None):
         # because the SessionEnd probe runs after PreCompact has already written
         # latest.md, a hook that did nothing still reported ok.
         if after is not None and after != before:
-            return done(Finding(label, "ok", probe["proves"]))
-        return done(Finding(
+            return (Finding(label, "ok", probe["proves"]))
+        return (Finding(
             label, "error",
             f"ran (exit 0) but wrote nothing to {'/'.join(probe['writes'])}",
             fix=probe["if_not"],
@@ -343,21 +351,45 @@ def _run_hook_probe(repo, event, probe, script_path=None):
     if probe.get("injects"):
         handoff_exists = (repo / ".curamoir" / "handoff" / "latest.md").is_file()
         if result.stdout.strip():
-            return done(Finding(label, "ok", "fires and injects the previous handoff"))
+            return (Finding(label, "ok", "fires and injects the previous handoff"))
         if handoff_exists:
             # The one case that must fail: a handoff is present, so there WAS
             # something to inject. The wrappers exit 0 when no interpreter is
             # found, so an entirely dead hook used to report ok here.
-            return done(Finding(
+            return (Finding(
                 label, "error",
                 "a handoff exists but the hook injected nothing",
                 fix=probe["if_not"],
             ))
-        return done(Finding(
+        return (Finding(
             label, "ok", "fires; nothing to inject yet (no handoff written)",
         ))
 
-    return done(Finding(label, "ok", probe["proves"]))
+    return (Finding(label, "ok", probe["proves"]))
+
+
+def _check_writable(base):
+    """Whether cúramóir can actually write where it needs to.
+
+    Checked separately because the hook probes now run in a scratch repo so they
+    cannot destroy the handoff they diagnose — which also means they no longer
+    prove the REAL `.curamoir/handoff/` is writable. Without this, doctor would
+    report every hook ok on a repo with a read-only `.curamoir/`.
+    """
+    import os
+
+    unwritable = [
+        str(path.relative_to(base.parent))
+        for path in (base, base / "handoff", base / "state", base / "briefs")
+        if path.is_dir() and not os.access(path, os.W_OK)
+    ]
+    if unwritable:
+        return Finding(
+            "writable state", "error",
+            "not writable: " + ", ".join(unwritable),
+            fix="Fix the permissions; cúramóir cannot write handoffs, briefs or the ledger.",
+        )
+    return Finding("writable state", "ok", "handoff, state and briefs are writable")
 
 
 def _check_denylist_job_detection():

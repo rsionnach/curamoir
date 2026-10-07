@@ -137,3 +137,84 @@ def test_an_unparseable_command_still_gets_inspected():
 def test_nothing_is_denied_outside_a_job():
     for command in MUST_DENY[:5]:
         assert not decide(command, in_job=False).deny
+
+
+# --- prefix words and nested payloads must not be a bypass -----------------
+#
+# The tokenising rewrite dispatched on tokens[0], so ANY prefix word defeated
+# the whole denylist — `sudo rm -rf /` passed a guard that the previous regex
+# caught. The regex searched the whole segment; argv[0] dispatch made the prefix
+# the bypass. Ten forms regressed at once, so this table is the regression gate.
+
+PREFIXED_MUST_DENY = [
+    "sudo rm -rf /",
+    "doas rm -rf /tmp/x",
+    "time rm -rf /tmp/x",
+    "nice -n 5 rm -rf /tmp/x",
+    "ionice -c3 rm -rf /tmp/x",
+    "timeout 5 git reset --hard",
+    "timeout --signal=KILL 5 rm -rf /tmp/x",
+    "env FOO=1 git push -f",
+    "FOO=1 BAR=2 rm -rf /tmp/x",
+    "command rm -rf /tmp/x",
+    "exec rm -rf /tmp/x",
+    "nohup rm -rf /tmp/x &",
+    "xargs rm -rf",
+    "stdbuf -o0 rm -rf /tmp/x",
+    "sudo -u root git push --force",
+    "/usr/bin/sudo rm -rf /",
+]
+
+NESTED_MUST_DENY = [
+    "echo $(rm -rf /tmp/x)",
+    "echo `rm -rf /tmp/x`",
+    "VAR=$(git reset --hard) echo done",
+    "bash -c 'rm -rf /tmp/x'",
+    "sh -c \"git push -f\"",
+    "zsh -c 'git clean -fd'",
+    "find . -name '*.pyc' -exec rm -rf {} ;",
+    "find . -type d -exec rm -rf {} +",
+    "echo hi & rm -rf /tmp/x",
+    "echo one & echo two & git push -f",
+]
+
+
+@pytest.mark.parametrize("command", PREFIXED_MUST_DENY)
+def test_a_prefix_word_is_not_a_bypass(command):
+    assert decide(command, in_job=True).deny, f"PREFIX BYPASS: {command}"
+
+
+@pytest.mark.parametrize("command", NESTED_MUST_DENY)
+def test_a_nested_payload_is_not_a_bypass(command):
+    assert decide(command, in_job=True).deny, f"NESTED BYPASS: {command}"
+
+
+# These contain the same words but destroy nothing. A guardrail that blocks them
+# is one the developer switches off.
+PREFIXED_MUST_ALLOW = [
+    "echo 'rm -rf is dangerous'",
+    "echo \"never run rm -rf\"",
+    "grep -rf patterns.txt src/",
+    "grep -r 'rm -rf' docs/",
+    "sudo apt-get install git",
+    "git log --grep='rm -rf'",
+    "printf 'rm -rf %s\\n' /tmp",
+    "rm -- -rf",
+    "rm -- -r -f",
+    "sudo rm file.txt",
+    "time pytest -q",
+    "echo $(git status)",
+    "bash -c 'git status'",
+]
+
+
+@pytest.mark.parametrize("command", PREFIXED_MUST_ALLOW)
+def test_mentions_and_safe_prefixed_commands_are_allowed(command):
+    assert not decide(command, in_job=True).deny, f"WRONGLY DENIED: {command}"
+
+
+def test_recursion_into_payloads_terminates():
+    """A deeply nested payload must not hang or blow the stack."""
+    command = "bash -c " + " ".join(["'bash -c"] * 20) + " 'git status'" + "'" * 20
+
+    decide(command, in_job=True)  # must simply return

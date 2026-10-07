@@ -5,8 +5,7 @@ Purpose, from the spec: eliminate the first forty minutes of every return.
 The deterministic path is the PRIMARY path, not a fallback. A handoff earns its
 keep precisely on the sessions that ended badly — the crash, the context
 exhaustion, the abandoned evening — so it is built from git state and bead state,
-both local and both always available. A model call only ever condenses what is
-already written down.
+both local and both always available.
 
 Hook wiring (see hooks/hooks.json, and the correction recorded on E8-R1):
 
@@ -270,7 +269,9 @@ def _describe_porcelain(line):
     the overwhelmingly common state of the interrupted session a handoff exists
     for, so that was the usual case rather than an edge one.
     """
-    code, path = line[:2], line[3:].strip()
+    # rstrip only: the position slice has already removed the separator, and
+    # stripping both ends discards a leading space that is part of the filename.
+    code, path = line[:2], line[3:].rstrip()
     index, worktree = code[0], code[1] if len(code) > 1 else " "
 
     if index == "?" or worktree == "?":

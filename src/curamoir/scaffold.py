@@ -124,11 +124,10 @@ def _render_config(repo, templates):
     "commented defaults" and a YAML round-trip would discard every comment.
     """
     text = (templates / "curamoir.yaml").read_text(encoding="utf-8")
-    modules = detect_modules(repo)
-    if not modules:
-        return text
-
     sentinel = "  include: []"
+    # Checked BEFORE the no-modules early return: a repo with nothing detected
+    # would otherwise never notice that the template had drifted, so the drift
+    # would only surface on some later repo.
     if sentinel not in text:
         # Loudly, not silently: a reformatted template would otherwise ship
         # include: [] and leave grading with nothing to grade.
@@ -137,6 +136,11 @@ def _render_config(repo, templates):
             "modules cannot be written into it. Restore the line or update "
             "scaffold._render_config."
         )
+
+    modules = detect_modules(repo)
+    if not modules:
+        return text
+
     rendered = "\n".join(f"    - {module}" for module in modules)
     return text.replace(sentinel, f"  include:\n{rendered}", 1)
 

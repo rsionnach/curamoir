@@ -11,7 +11,9 @@ import sys
 from curamoir.brief import due_for_brief_from_config, write_brief
 from curamoir.doctor import diagnose, render_report
 from curamoir.handoff import write_handoff
-from curamoir.scaffold import AlreadyInitialised, detect_languages, detect_modules, init_repo
+from curamoir.scaffold import (
+    AlreadyInitialised, TemplateDrift, detect_languages, detect_modules, init_repo,
+)
 from curamoir.status import collect_status, render_status
 
 
@@ -78,6 +80,11 @@ def _init(repo):
         base = init_repo(repo)
     except AlreadyInitialised as existing:
         print(f"cúramóir is already initialised here.\n{existing}")
+        return 1
+    except TemplateDrift as drift:
+        # A message, not a traceback: this is a packaging fault in cúramóir
+        # itself, and the developer can do nothing with a stack trace.
+        print(f"cúramóir's bundled config template is damaged.\n{drift}")
         return 1
 
     print(f"Scaffolded {base}")

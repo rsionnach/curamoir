@@ -16,6 +16,13 @@ So: tokenise, skip git's global options, expand clustered short flags, normalise
 synonyms (`-R` is `-r`, `-f` is `--force`), then decide on the subcommand and the
 resulting flag set.
 
+**The program is SEARCHED FOR, not assumed to be argv[0].** A first attempt at
+this dispatched on `tokens[0]`, which made any prefix word a bypass — it allowed
+`sudo rm -rf /`, which the regex it replaced had caught. Scanning every position
+also avoids enumerating wrapper programs (sudo, env, time, nice, timeout, xargs,
+nohup, stdbuf, …), a list we would be permanently behind. Nested payloads are
+followed too: `$(...)`, backticks, and a shell's `-c` script.
+
 Scope is the spec's: "during any cúramóir job". The developer's own destructive
 commands in their own session are their business.
 
@@ -39,8 +46,24 @@ class Decision:
     alternative: str = ""
 
 
-# Shell separators a command may hide behind.
-_SEGMENT = re.compile(r"&&|\|\||\||;|\n")
+# Shell separators a command may hide behind. `&` is included: a single
+# ampersand backgrounds the left side and starts a new command, so
+# `echo hi & rm -rf /tmp/x` is two commands, not one.
+_SEGMENT = re.compile(r"&&|\|\||\||;|&|\n")
+
+# Programs whose misuse this list exists to stop.
+_DANGEROUS = ("rm", "git")
+
+# Shells whose `-c` argument is a script to be judged in its own right.
+_SHELLS = {"bash", "sh", "zsh", "dash", "ksh", "ash", "fish"}
+
+# `$(...)` and `` `...` `` bodies: a destructive command inside a substitution is
+# still executed, and tokenising the outer string leaves it invisible.
+_SUBSTITUTION = re.compile(r"\$\(([^()]*)\)|`([^`]*)`")
+
+# How deep to follow nested payloads before giving up. Bounded so a pathological
+# input cannot hang the hook that runs on every Bash call.
+_MAX_DEPTH = 6
 
 # git options that appear BEFORE the subcommand. Skipping these is what stops
 # `git -C /repo reset --hard` walking past the guard.
@@ -77,11 +100,21 @@ def _parse_flags(tokens):
 
     Clustered short flags are expanded (`-xdf` → x, d, f) and `-R` is folded to
     `r`, because `-R` is a documented synonym for `-r` in `rm`.
+
+    `--` ends option parsing, as POSIX requires: everything after it is a
+    positional, however much it looks like a flag. Treating it as just another
+    flag made `rm -- -rf` — deleting a file literally named `-rf`, neither
+    recursive nor forced — look like `rm -rf`.
     """
     positionals, flags = [], set()
+    end_of_options = False
     for token in tokens:
+        if end_of_options:
+            positionals.append(token)
+            continue
         if token == "--":
             flags.add("--")
+            end_of_options = True
             continue
         if token.startswith("--"):
             name = token.split("=", 1)[0]
@@ -117,11 +150,47 @@ def _is_forced(flags):
     return "f" in flags or "--force" in flags
 
 
+def _program_name(token):
+    """The bare program name a token refers to, ignoring path and quoting."""
+    return token.strip("\"'").rsplit("/", 1)[-1]
+
+
+def _dangerous_positions(tokens):
+    """Indices where a dangerous program appears.
+
+    Every position, not just index 0. Dispatching on argv[0] made any prefix
+    word a bypass — `sudo rm -rf /`, `xargs rm -rf`, `nice -n 5 rm -rf`,
+    `timeout 5 git reset --hard` — because the program sits further along. The
+    regex this replaced searched the whole segment and caught all of them, so
+    argv[0] dispatch was a regression, not a refinement.
+
+    Scanning every position also removes the need to enumerate wrapper programs,
+    which is an open-ended list we would be permanently behind.
+    """
+    return [
+        index for index, token in enumerate(tokens)
+        if _program_name(token) in _DANGEROUS
+    ]
+
+
+def _shell_payloads(tokens):
+    """Scripts passed to a shell with `-c`, to be judged in their own right.
+
+    Only for an actual shell: `echo 'rm -rf is dangerous'` is a quoted
+    multi-word token too, and must stay allowed.
+    """
+    payloads = []
+    for index, token in enumerate(tokens[:-1]):
+        if _program_name(token) in _SHELLS and tokens[index + 1] == "-c" and index + 2 < len(tokens):
+            payloads.append(tokens[index + 2])
+    return payloads
+
+
 def _judge(tokens):
-    """A Decision for one tokenised segment, or None if nothing applies."""
+    """A Decision for a token list starting at a dangerous program."""
     if not tokens:
         return None
-    program = tokens[0].rsplit("/", 1)[-1]
+    program = _program_name(tokens[0])
 
     if program == "rm":
         _, flags = _parse_flags(tokens[1:])
@@ -207,6 +276,34 @@ def _judge(tokens):
     return None
 
 
+def _inspect(command, depth):
+    """A raw Decision for `command`, following nested payloads. None if clean."""
+    if depth > _MAX_DEPTH or not command:
+        return None
+
+    for segment in _segments(command):
+        # Command substitutions execute too, and tokenising the outer string
+        # leaves their contents invisible.
+        for match in _SUBSTITUTION.finditer(segment):
+            inner = match.group(1) or match.group(2) or ""
+            nested = _inspect(inner, depth + 1)
+            if nested is not None:
+                return nested
+
+        tokens = _tokenise(segment)
+
+        for payload in _shell_payloads(tokens):
+            nested = _inspect(payload, depth + 1)
+            if nested is not None:
+                return nested
+
+        for index in _dangerous_positions(tokens):
+            decision = _judge(tokens[index:])
+            if decision is not None:
+                return decision
+    return None
+
+
 def decide(command, in_job):
     """Whether to block `command`.
 
@@ -216,15 +313,14 @@ def decide(command, in_job):
     if not in_job:
         return Decision(deny=False)
 
-    for segment in _segments(command):
-        decision = _judge(_tokenise(segment))
-        if decision is not None:
-            return Decision(
-                deny=True,
-                reason=f"blocked by cúramóir: {decision.reason}. Use `{decision.alternative}` instead.",
-                alternative=decision.alternative,
-            )
-    return Decision(deny=False)
+    decision = _inspect(command, depth=0)
+    if decision is None:
+        return Decision(deny=False)
+    return Decision(
+        deny=True,
+        reason=f"blocked by cúramóir: {decision.reason}. Use `{decision.alternative}` instead.",
+        alternative=decision.alternative,
+    )
 
 
 def in_curamoir_job(env, repo=None):

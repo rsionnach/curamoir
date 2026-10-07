@@ -86,6 +86,8 @@ def render_status(status):
             f"  spend:     ${spend['month_to_date_usd']:.2f} of "
             f"${spend['ceiling_usd']:.2f} this month (${headroom:.2f} left)"
         )
+        if spend.get("detail"):
+            lines.append(f"             ⚠ {spend['detail']}")
 
     handoff = status["handoff"]
     if handoff["age_days"] is None:
@@ -159,9 +161,15 @@ def _read_spend(base, config, now):
             "unavailable": True, "month_to_date_usd": None, "ceiling_usd": ceiling,
             "detail": f"ledger names unpriced model {unknown.args[0]!r}",
         }
+    unreadable = ledger.unreadable_lines()
     return {
         "unavailable": False, "month_to_date_usd": round(total, 2),
-        "ceiling_usd": ceiling, "detail": None,
+        "ceiling_usd": ceiling,
+        "unreadable_lines": unreadable,
+        "detail": (
+            f"{unreadable} unreadable ledger line(s): this total is a lower bound"
+            if unreadable else None
+        ),
     }
 
 

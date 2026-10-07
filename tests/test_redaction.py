@@ -119,3 +119,34 @@ def test_write_artefact_is_the_redacting_write_path(tmp_path):
     written = target.read_text(encoding="utf-8")
     assert "ghp_" not in written
     assert "REDACTED" in written
+
+
+def test_a_password_containing_an_ampersand_is_still_redacted():
+    """Excluding & and ; from the value class to stop URL over-redaction meant a
+    secret containing either was truncated — and one whose leading part fell
+    under the 8-character floor was not redacted at all. `&` is a common
+    password character, so this was more likely than the case it fixed, and the
+    brief it leaks into may be published as a public issue (E9-R3)."""
+    assert "s3cr3t" not in redact('password = "s3cr3t&p4ssw0rd!"')
+    assert "secretpart" not in redact("PASSWORD=abcdefgh&secretpart")
+    assert "bbbbbbbbbbbb" not in redact("api_token=aaaaaaaa;bbbbbbbbbbbb")
+
+
+def test_a_query_string_is_not_swallowed_past_the_secret():
+    """The case the broken fix was reaching for: redact the key's value without
+    eating the rest of the query string."""
+    result = redact("url=https://api.example.com/v1?api_key=abcdefghij&page=2&sort=asc")
+
+    assert "abcdefghij" not in result
+    assert "page=2" in result
+    assert "sort=asc" in result
+
+
+def test_query_and_generic_redaction_are_both_idempotent():
+    for text in [
+        "url=https://x/v1?api_key=abcdefghij&page=2",
+        'password = "s3cr3t&p4ssw0rd!"',
+        "api_token=aaaaaaaa;bbbbbbbbbbbb",
+    ]:
+        once = redact(text)
+        assert redact(once) == once, text

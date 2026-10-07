@@ -265,6 +265,15 @@ def _check_price_table(path, table, problems):
                     f"{where}.{side}: expected a {NUMBER} (USD per million tokens), "
                     f"got {_type_name(value)}"
                 )
+            elif value < 0:
+                # A mistyped -5 would make a run look like it refunded money,
+                # pulling month-to-date below the real total — the same
+                # undercount the ceiling exists to prevent, and silent because
+                # nothing raises.
+                problems.append(
+                    f"{where}.{side}: must not be negative (got {value}); a negative "
+                    "price understates spend and would silently raise the ceiling"
+                )
 
 
 def _merge(base, override):

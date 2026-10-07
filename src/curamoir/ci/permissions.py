@@ -82,7 +82,11 @@ def _parse_scopes(text, start, block_indent=0):
     for line in text[start:].splitlines():
         if not line.strip() or line.strip().startswith("#"):
             continue
-        indent = len(line) - len(line.lstrip())
+        # expandtabs on BOTH sides. Measuring the block with expandtabs(8) and
+        # the scope lines without it gave a tab-indented block an indent of 16
+        # against scope lines measuring 3, so parsing stopped on the first one
+        # and a tab-indented job block was never checked at all.
+        indent = len(line.expandtabs(8)) - len(line.expandtabs(8).lstrip())
         if indent <= block_indent:
             break  # dedented to or past the block's own level: it has ended
         pair = re.match(r"\s+([A-Za-z0-9\-_]+):\s*(\S+)", line)

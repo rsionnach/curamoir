@@ -81,6 +81,7 @@ class Budget:
         ledger = Ledger(context.repo / ".curamoir" / "state" / "ledger.jsonl")
         try:
             spent = self._month_to_date(ledger)
+            unreadable = ledger.unreadable_lines()
         except UnknownModel as unknown:
             # Do NOT treat an unpriced model as $0. Undercounting is the one
             # failure this guard exists to prevent, so say the cap is unenforced
@@ -91,6 +92,20 @@ class Budget:
                     f"ledger names model {unknown.args[0]!r}, which the price table "
                     "does not cover; month-to-date spend could not be computed and "
                     "the ceiling was NOT enforced. Add the model to the price table."
+                ),
+            )
+
+        if unreadable:
+            # Allow, but say the figure is incomplete. A skipped line could have
+            # recorded any amount, so the ceiling is being enforced against a
+            # number we know is too low — which is the undercount this guard
+            # exists to prevent, and must not pass silently.
+            return Degraded(
+                reason=Reason.BUDGET,
+                message=(
+                    f"{unreadable} unreadable ledger line(s); month-to-date spend "
+                    f"of ${spent:.2f} is a LOWER BOUND and the ceiling was "
+                    "enforced against it. Inspect .curamoir/state/ledger.jsonl."
                 ),
             )
 

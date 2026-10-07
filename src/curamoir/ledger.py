@@ -59,7 +59,12 @@ class Ledger:
             return []
         entries = []
         try:
-            with self._path.open(encoding="utf-8") as handle:
+            # errors="replace": a crash mid-write of a multi-byte character
+            # leaves invalid UTF-8, and UnicodeDecodeError is a ValueError raised
+            # by the ITERATION, outside the per-line guard — so a torn "cúramóir"
+            # in a message field reproduced the original symptom exactly: every
+            # job refused, /curamoir:status crashing.
+            with self._path.open(encoding="utf-8", errors="replace") as handle:
                 for line in handle:
                     if not line.strip():
                         continue
@@ -67,7 +72,7 @@ class Ledger:
                         entries.append(json.loads(line))
                     except ValueError:
                         self._unreadable += 1
-        except OSError:
+        except (OSError, ValueError):
             return []
         return entries
 
