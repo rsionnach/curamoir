@@ -60,6 +60,7 @@ def diagnose(repo, tools=None):
     findings.extend(_check_modules(repo))
     findings.append(_check_pause(base))
     findings.extend(_check_hooks(repo))
+    findings.append(_check_denylist_job_detection())
     findings.extend(_check_tools(tools))
 
     return sorted(findings, key=lambda f: LEVEL_ORDER[f.level])
@@ -204,8 +205,8 @@ _HOOK_PROBES = {
     "SessionStart": {
         "script": "curamoir-hook-sessionstart",
         "payload": {"hook_event_name": "SessionStart", "source": "startup"},
-        "expect_or_empty": True,
-        "proves": "fires (injects when a handoff exists)",
+        "injects": True,
+        "proves": "fires",
         "if_not": "Check scripts/curamoir-hook-sessionstart is executable.",
     },
 }
@@ -218,6 +219,13 @@ def _registered_hook_events():
         return list(json.loads(path.read_text(encoding="utf-8")).get("hooks", {}))
     except (ValueError, OSError):
         return []
+
+
+# Probe order matters: the PreCompact and SessionEnd probes WRITE a handoff, so
+# probing SessionStart after them would always report "injects" even on a repo
+# that has never had one — doctor would be describing state it had just created.
+# Read-only probes first.
+_PROBE_ORDER = ("PreToolUse", "SessionStart", "Stop", "PreCompact", "SessionEnd")
 
 
 def _check_hooks(repo):
@@ -236,7 +244,9 @@ def _check_hooks(repo):
         )]
 
     findings = []
-    for event in events:
+    ordered = [e for e in _PROBE_ORDER if e in events]
+    ordered += [e for e in events if e not in _PROBE_ORDER]
+    for event in ordered:
         probe = _HOOK_PROBES.get(event)
         if probe is None:
             findings.append(Finding(
@@ -249,10 +259,10 @@ def _check_hooks(repo):
     return findings
 
 
-def _run_hook_probe(repo, event, probe):
+def _run_hook_probe(repo, event, probe, script_path=None):
     import os
 
-    wrapper = Path(__file__).resolve().parents[2] / "scripts" / probe["script"]
+    wrapper = script_path or Path(__file__).resolve().parents[2] / "scripts" / probe["script"]
     label = f"hook ({event})"
     if not wrapper.is_file():
         return Finding(label, "error", f"{wrapper} is missing",
@@ -284,11 +294,66 @@ def _run_hook_probe(repo, event, probe):
                        fix=probe["if_not"])
 
     if "writes" in probe:
-        if _probe_marker(repo, probe) != before or _probe_marker(repo, probe) is not None:
+        after = _probe_marker(repo, probe)
+        # The file must exist AND have changed. An `or after is not None` here
+        # made the comparison irrelevant: because hooks fail OPEN and exit 0, and
+        # because the SessionEnd probe runs after PreCompact has already written
+        # latest.md, a hook that did nothing still reported ok.
+        if after is not None and after != before:
             return Finding(label, "ok", probe["proves"])
-        return Finding(label, "error", "ran but wrote nothing", fix=probe["if_not"])
+        return Finding(
+            label, "error",
+            f"ran (exit 0) but wrote nothing to {'/'.join(probe['writes'])}",
+            fix=probe["if_not"],
+        )
+
+    if probe.get("injects"):
+        # Distinguish "injected something" from "ran". Reporting the same detail
+        # either way proves only that the script is executable.
+        if result.stdout.strip():
+            return Finding(label, "ok", "fires and injects the previous handoff")
+        return Finding(
+            label, "ok",
+            "fires; injected nothing, which is correct when no handoff exists yet",
+        )
 
     return Finding(label, "ok", probe["proves"])
+
+
+def _check_denylist_job_detection():
+    """Disclose the denylist's current silent-failure mode.
+
+    The denylist enforces only inside a cúramóir job. DEC-5 established two
+    detection signals: the CURAMOIR_JOB environment variable, with the supervisor
+    lock as a fallback precisely because CLAUDE_CODE_SUBPROCESS_ENV_SCRUB can
+    strip env vars from hook processes.
+
+    The fallback does not work yet, because nothing acquires or writes the lock
+    (E0-R2's unmet half, tracked as E10-LOCK). So if the env var is stripped, the
+    denylist stops enforcing and says nothing.
+
+    This check exists because a guardrail with an undisclosed silent-failure mode
+    is worse than an absent one: the absent one does not invite reliance. Remove
+    it when E10-LOCK lands and the fallback becomes real.
+    """
+    from curamoir.guards.lock import LOCK_PATH
+
+    return Finding(
+        check="denylist job detection",
+        level="warning",
+        detail=(
+            "the destructive-command denylist enforces only inside a cúramóir "
+            "job, detected from the CURAMOIR_JOB env var with the supervisor lock "
+            "as fallback. Nothing writes the lock yet, so if the env var is "
+            "stripped (CLAUDE_CODE_SUBPROCESS_ENV_SCRUB) the denylist stops "
+            "enforcing silently"
+        ),
+        fix=(
+            "Until E10-LOCK lands: do not rely on the denylist as a safety "
+            "boundary, and keep CLAUDE_CODE_SUBPROCESS_ENV_SCRUB unset so the "
+            f"primary signal survives. The fallback reads .curamoir/{'/'.join(LOCK_PATH)}."
+        ),
+    )
 
 
 def _probe_marker(repo, probe):

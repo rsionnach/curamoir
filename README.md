@@ -87,10 +87,14 @@ before any feature:
 - **An open-PR cap.** You will never come back to a wall of PRs.
 - **Redaction** on everything it writes.
 
-Two honest limits. Guards are a ratchet against drift, not a security boundary:
-a Claude Code hook that times out fails *open*, so a guard that hangs stops
-protecting. And redaction is pattern-based — it catches shapes it knows, and
-reduces exposure rather than guaranteeing absence.
+Three honest limits. Guards are a ratchet against drift, not a security
+boundary: a Claude Code hook that times out fails *open*, so a guard that hangs
+stops protecting. Redaction is pattern-based — it catches shapes it knows, and
+reduces exposure rather than guaranteeing absence. And the command denylist
+currently has a silent-failure mode: it enforces only inside a cúramóir job,
+detected from an environment variable with the supervisor lock as a fallback,
+and nothing writes that lock yet — so a scrubbed environment disables it
+quietly. `/curamoir:doctor` reports this until it is fixed.
 
 ## Cost
 

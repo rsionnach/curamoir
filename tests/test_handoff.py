@@ -422,3 +422,34 @@ def test_a_very_long_last_assistant_message_is_bounded(tmp_path):
     assert handoff["last_decision"].count(".") <= 4, handoff["last_decision"]
     rendered = render_handoff(handoff)
     assert "Intended next step" in rendered, "later sections pushed out by a long decision"
+
+
+def test_an_unpunctuated_last_message_is_still_bounded(tmp_path):
+    """`_first_sentences` split on sentence-ending punctuation, so prose with no
+    terminal punctuation — bullet lists, code blocks, a trailing colon, which is
+    what `last_assistant_message` usually is — counted as ONE sentence and passed
+    through at full length. The whole-file cap then dropped the sections after it.
+    """
+    repo = make_repo(tmp_path)
+    unpunctuated = " ".join(f"word{i}" for i in range(600))
+    (repo / ".curamoir" / "handoff" / "journal.jsonl").write_text(
+        json.dumps({"at": "2026-10-06T10:00:00+00:00", "note": unpunctuated}) + "\n",
+        encoding="utf-8")
+
+    handoff = build_handoff(repo)
+
+    assert len(handoff["last_decision"].split()) < 80, len(handoff["last_decision"].split())
+
+
+def test_the_next_step_survives_an_over_long_last_decision(tmp_path):
+    """The intended next step is the most actionable field in the handoff, so it
+    must not be the one truncation discards."""
+    repo = make_repo(tmp_path)
+    (repo / ".curamoir" / "handoff" / "journal.jsonl").write_text(
+        json.dumps({"at": "2026-10-06T10:00:00+00:00",
+                    "note": " ".join(f"word{i}" for i in range(2000))}) + "\n",
+        encoding="utf-8")
+
+    rendered = render_handoff(build_handoff(repo))
+
+    assert "Intended next step" in rendered

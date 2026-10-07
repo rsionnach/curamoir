@@ -164,3 +164,81 @@ def test_every_hook_check_actually_runs_the_hook(tmp_path):
     assert len(hooks) >= 5, [f.check for f in hooks]
     for finding in hooks:
         assert finding.level == "ok", f"{finding.check}: {finding.detail}"
+
+
+def test_a_hook_that_writes_nothing_fails_its_probe(tmp_path):
+    """The `writes` probe read `after != before OR after is not None`, so the
+    second disjunct made the comparison irrelevant: if the file merely EXISTED
+    the probe passed. Hooks fail open and exit 0, so a hook that died internally
+    still reported `ok` — and the SessionEnd probe runs after PreCompact has
+    written latest.md, so it could never fail for the reason it exists to catch.
+    """
+    from curamoir.doctor import _run_hook_probe
+
+    repo = initialised(tmp_path)
+    handoff = repo / ".curamoir" / "handoff" / "latest.md"
+    handoff.parent.mkdir(parents=True, exist_ok=True)
+    handoff.write_text("# pre-existing\n", encoding="utf-8")
+
+    stub = tmp_path / "does-nothing"
+    stub.write_text("#!/usr/bin/env bash\ncat >/dev/null\nexit 0\n", encoding="utf-8")
+    stub.chmod(0o755)
+
+    finding = _run_hook_probe(repo, "SessionEnd", {
+        "script": "does-nothing", "payload": {"hook_event_name": "SessionEnd"},
+        "writes": ("handoff", "latest.md"), "proves": "x", "if_not": "y",
+    }, script_path=stub)
+
+    assert finding.level == "error", finding
+    assert "missing" not in finding.detail.lower(), (
+        "failed because the script was absent, not because nothing was written — "
+        "this test would pass against the bug it is meant to catch"
+    )
+    assert "wrote nothing" in finding.detail.lower(), finding.detail
+
+
+def test_the_sessionstart_probe_distinguishes_injecting_from_merely_running(tmp_path):
+    """`expect_or_empty` was declared and never consumed, so the probe fell
+    through to an unconditional `ok` — it proved the script was executable and
+    nothing more.
+
+    Tested at probe level because doctor's own PreCompact probe writes a handoff,
+    so through `diagnose` both states look alike. That coupling is itself why
+    SessionStart is now probed before the probes that write.
+    """
+    from curamoir.doctor import _HOOK_PROBES, _run_hook_probe
+
+    probe = _HOOK_PROBES["SessionStart"]
+
+    bare = initialised(tmp_path)
+    without = _run_hook_probe(bare, "SessionStart", probe)
+
+    handoff = bare / ".curamoir" / "handoff" / "latest.md"
+    handoff.parent.mkdir(parents=True, exist_ok=True)
+    handoff.write_text("# handoff\n\nbranch: main\n", encoding="utf-8")
+    with_handoff = _run_hook_probe(bare, "SessionStart", probe)
+
+    assert without.level == "ok" and with_handoff.level == "ok"
+    assert without.detail != with_handoff.detail, (
+        "the probe reports the same thing whether or not anything was injected"
+    )
+    assert "inject" in with_handoff.detail.lower()
+
+
+def test_doctor_discloses_that_the_denylist_cannot_detect_a_job_yet(tmp_path):
+    """The denylist enforces only inside a cúramóir job, detected by the
+    CURAMOIR_JOB env var with the supervisor lock as fallback (DEC-5, because
+    CLAUDE_CODE_SUBPROCESS_ENV_SCRUB can strip env). But nothing writes a lock
+    yet (E10-LOCK), so under a scrubbed environment the denylist silently stops
+    enforcing.
+
+    A guardrail with an undisclosed silent-failure mode is worse than an absent
+    one, so doctor must say so until E10-LOCK lands.
+    """
+    findings = diagnose(initialised(tmp_path), tools={"python3": True, "yaml": True})
+
+    disclosure = [f for f in findings if "denylist" in f.check.lower()]
+    assert disclosure, [f.check for f in findings]
+    assert disclosure[0].level == "warning"
+    assert "scrub" in disclosure[0].detail.lower() or "env" in disclosure[0].detail.lower()
+    assert disclosure[0].fix

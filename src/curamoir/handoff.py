@@ -34,9 +34,12 @@ WORD_LIMIT = 400
 # restate one sentence costs money and buys nothing.
 CONDENSE_THRESHOLD = 4
 CONDENSE_TIMEOUT_SECONDS = 20
-# E8-R1 asks for "one to three sentences". Four is the cap so a long final turn
-# cannot push the sections rendered after it out of the 400-word file budget.
+# E8-R1 asks for "one to three sentences". Bounded by BOTH, because
+# `last_assistant_message` is raw prose — bullet lists, code blocks, a trailing
+# colon — and unpunctuated text is one "sentence" however long it runs. The word
+# cap is what actually stops a long final turn consuming the file budget.
 MAX_DECISION_SENTENCES = 3
+MAX_DECISION_WORDS = 60
 DEFAULT_KEEP_HISTORY = 10
 MAX_LISTED_CHANGES = 12
 MAX_LISTED_BEADS = 6
@@ -84,15 +87,27 @@ def _decide_last_decision(repo, condense, timeout):
     return _first_sentences(deterministic, MAX_DECISION_SENTENCES)
 
 
-def _first_sentences(text, limit):
-    """The first `limit` sentences, so "one to three sentences" actually holds."""
+def _first_sentences(text, limit, word_limit=MAX_DECISION_WORDS):
+    """The first `limit` sentences, and at most `word_limit` words.
+
+    Both bounds are needed. Splitting on terminal punctuation alone leaves
+    unpunctuated prose as a single unbounded "sentence", which is the common
+    shape of `last_assistant_message`.
+    """
     if not text:
         return text
     import re
 
     parts = re.split(r"(?<=[.!?])\s+", text.strip())
     kept = " ".join(parts[:limit]).strip()
-    if len(parts) > limit and not kept.endswith(("…", "...")):
+    truncated = len(parts) > limit
+
+    words = kept.split()
+    if len(words) > word_limit:
+        kept = " ".join(words[:word_limit])
+        truncated = True
+
+    if truncated and not kept.endswith(("…", "...")):
         kept += " …"
     return kept
 
@@ -165,10 +180,12 @@ def render_handoff(handoff):
     else:
         lines.append("- **in progress:** nothing claimed")
 
-    if handoff["last_decision"]:
-        lines += ["", "## Last decision", "", handoff["last_decision"]]
+    # Intended next step first, deliberately. It is the most actionable field in
+    # the file, so it must not be the one truncation discards.
     if handoff["next_step"]:
         lines += ["", "## Intended next step", "", handoff["next_step"]]
+    if handoff["last_decision"]:
+        lines += ["", "## Last decision", "", handoff["last_decision"]]
 
     rendered = "\n".join(lines)
     return _cap_words(rendered, WORD_LIMIT)

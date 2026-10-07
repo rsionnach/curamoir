@@ -244,3 +244,29 @@ def test_a_docs_heavy_repo_yields_no_prose_modules(tmp_path):
     modules = detect_modules(repo)
 
     assert modules == [], modules
+
+
+def test_a_legitimate_domain_module_named_fixtures_is_not_dropped(tmp_path):
+    """`fixtures` and `test` were added to NEVER_MODULES and matched as exact path
+    parts anywhere, so a real domain module called `fixtures` (sports, test-data
+    services) vanished silently. Excluding the test SUITE is not the same as
+    banning a noun."""
+    repo = make_repo(tmp_path, {
+        "pyproject.toml": "",
+        "src/app/__init__.py": "",
+        "src/app/fixtures/__init__.py": "",
+        "src/app/billing/__init__.py": "",
+    })
+
+    modules = detect_modules(repo)
+
+    assert "src/app/fixtures" in modules, modules
+    assert "src/app/billing" in modules
+
+
+def test_language_detection_still_sees_a_test_only_python_tree(tmp_path):
+    """Excluding `tests/` from GRADING must not make the repo look like it has no
+    Python at all — doctor would then report 'languages: none detected'."""
+    repo = make_repo(tmp_path, {"tests/test_app.py": "def test_x(): pass\n"})
+
+    assert "python" in detect_languages(repo)
