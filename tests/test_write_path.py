@@ -17,6 +17,7 @@ or `/curamoir:handoff` followed by exit, land in the same second routinely.
 """
 
 import os
+import pathlib
 import resource
 import signal
 
@@ -25,6 +26,10 @@ import pytest
 from curamoir.handoff import write_handoff
 from curamoir.redaction import write_artefact
 from curamoir.scaffold import init_repo
+
+#: The import path a child process needs, since it does not inherit PYTHONPATH
+#: from pytest's own invocation reliably.
+SRC = pathlib.Path(__file__).resolve().parents[1] / "src"
 
 
 def initialised(tmp_path):
@@ -162,3 +167,45 @@ def test_a_damaged_install_is_reported_in_one_sentence(tmp_path, capsys):
 
     assert code == 1
     assert "Traceback" not in capsys.readouterr().out
+
+
+def test_two_concurrent_writers_do_not_destroy_each_others_write(tmp_path):
+    """Atomicity per writer is not enough if they share the temp file.
+
+    With a single `<name>.tmp` both processes wrote it, the first renamed it,
+    and the second's `os.replace` raised FileNotFoundError on a path that had
+    been moved out from under it — which `write_handoff` catches and reports as
+    no handoff. Two sessions ending together therefore lost one silently.
+    """
+    import subprocess
+    import sys
+    import textwrap
+
+    target = tmp_path / "latest.md"
+    program = textwrap.dedent(f"""
+        import pathlib, sys
+        sys.path.insert(0, {str(SRC)!r})
+        from curamoir.redaction import write_artefact
+        tag = sys.argv[1]
+        target = pathlib.Path({str(target)!r})
+        for _ in range(60):
+            write_artefact(target, "# " + tag + "\\n" + (tag + " line\\n") * int(sys.argv[2]))
+    """)
+    script = tmp_path / "writer.py"
+    script.write_text(program, encoding="utf-8")
+
+    runs = [
+        subprocess.Popen([sys.executable, str(script), "SESSION-A", "500"],
+                         stderr=subprocess.PIPE, text=True),
+        subprocess.Popen([sys.executable, str(script), "SESSION-B", "40"],
+                         stderr=subprocess.PIPE, text=True),
+    ]
+    errors = [process.communicate()[1] for process in runs]
+
+    assert all(process.returncode == 0 for process in runs), errors
+    body = target.read_text(encoding="utf-8")
+    tags = {line.split()[0] for line in body.splitlines()
+            if line.strip() and not line.startswith("#")}
+    assert len(tags) == 1, f"two writers' content in one file: {tags}"
+    assert body.splitlines()[0].split()[1] in tags, "header and body disagree"
+    assert not list(tmp_path.glob("*.tmp")), "a temp file was left behind"

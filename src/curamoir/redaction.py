@@ -123,7 +123,13 @@ def write_artefact(path, text, encoding="utf-8"):
     # Beside the target, not in /tmp: `os.replace` is only atomic within one
     # filesystem, and a repo on an external volume would otherwise degrade to a
     # copy — the very non-atomic write this exists to avoid.
-    scratch = target.with_name(target.name + ".tmp")
+    #
+    # The name carries the pid, so two writers never share one temp file. With a
+    # single `<name>.tmp` they raced: both wrote it, the first renamed it, and
+    # the second's `os.replace` raised FileNotFoundError on a path that had just
+    # been moved out from under it. `write_handoff` catches that and reports no
+    # handoff, so two sessions ending together silently lost one.
+    scratch = target.with_name(f"{target.name}.{os.getpid()}.tmp")
     try:
         with scratch.open("w", encoding=encoding) as handle:
             handle.write(redact(text))
