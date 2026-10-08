@@ -32,12 +32,26 @@ Stdlib only, and no config read: this runs on every Bash call during a job.
 
 import re
 
-from curamoir.hooks._shell import SHELLS, program_name, segments, tokenise
+from curamoir.hooks._shell import (
+    SHELLS,
+    lex,
+    program_name,
+    redirection_targets,
+    segments,
+    strip_redirections,
+)
 from curamoir.hooks.verdict import Category, Decision, Rule
 
 
 # Programs whose misuse this list exists to stop.
-_DANGEROUS = ("rm", "git")
+_DANGEROUS = ("rm", "git", "find")
+
+#: cúramóir's own state. A job may read it; rewriting or moving it destroys the
+#: ledger, the journal and the handoff — and silences the four hooks that would
+#: have recorded the loss, because `_entry.run` goes quiet when `.curamoir` is
+#: not a directory. Judged as a path rule rather than per program, because
+#: `mv`, `cp`, `tee` and a `>` redirection all reach it and all are allowlisted.
+_OWN_STATE = ".curamoir"
 
 
 # `$(...)` and `` `...` `` bodies: a destructive command inside a substitution is
@@ -119,6 +133,48 @@ def _is_forced(flags):
     return "f" in flags
 
 
+def _looks_like_a_path(token):
+    """Whether a positional names a path rather than a branch.
+
+    Deliberately generous: a branch name containing a slash is common
+    (`curamoir/sweep`), so a slash alone cannot decide it. What distinguishes a
+    discard is naming the tree — `.`, a glob, a path that exists — and when the
+    answer is uncertain the safe reading is "this is a path", because the cost
+    of being wrong is a retry on one side and the working tree on the other.
+    """
+    if token in (".", "..", "*") or token.startswith("./"):
+        return True
+    if any(character in token for character in "*?["):
+        return True
+    return "." in token.rsplit("/", 1)[-1]
+
+
+#: Suffixes of files that hold code. A truncating `>` over one of these is a
+#: destroy-without-backup in the same family as `git checkout -- <path>`.
+#: Deliberately code only: a job legitimately writes `> report.json` and
+#: `> out.log`, and refusing those is the false-refusal pressure that gets a
+#: guard switched off. Writing code through shell redirection is not something a
+#: job does — it edits through the Edit tool, which keeps the previous content.
+_SOURCE_SUFFIXES = (
+    ".py", ".pyi", ".js", ".jsx", ".ts", ".tsx", ".go", ".rs", ".rb", ".java",
+    ".kt", ".c", ".h", ".cc", ".cpp", ".hpp", ".cs", ".php", ".swift", ".sh",
+    ".bash", ".zsh", ".sql", ".scala", ".ex", ".exs",
+)
+
+
+def _is_source_file(target):
+    return target.endswith(_SOURCE_SUFFIXES)
+
+
+def _targets_own_state(tokens):
+    """Whether any argument points inside cúramóir's own state directory."""
+    for token in tokens[1:]:
+        parts = token.strip("\"'").split("/")
+        if _OWN_STATE in parts:
+            return True
+    return False
+
+
 def _dangerous_positions(tokens):
     """Indices where a dangerous program appears — EVERY position, not just 0.
 
@@ -166,6 +222,24 @@ def _judge(tokens):
             )
         return None
 
+    if program == "find":
+        # `find` is allowlisted as a read-only search, but it carries its own
+        # deletion and execution primitives, and reaches them without naming
+        # `rm` anywhere the position scan would see it.
+        for flag in tokens[1:]:
+            if flag == "-delete":
+                return Rule(
+                    "find -delete removes every matching path with no confirmation",
+                    "find the paths first, then delete the ones you mean by name",
+                )
+            if flag in ("-exec", "-execdir", "-ok", "-okdir"):
+                return Rule(
+                    f"find {flag} runs a command the guard cannot verify against "
+                    "every match",
+                    "find the paths first, then act on them by name",
+                )
+        return None
+
     if program != "git":
         return None
 
@@ -198,15 +272,26 @@ def _judge(tokens):
             )
         return None
 
-    if subcommand in ("checkout", "switch") and (
-        "--" in flags or _is_forced(flags) or "--discard-changes" in flags
-    ):
-        # `-f` discards the whole working tree, exactly as `git reset --hard`
-        # does — the rule immediately above.
-        return Rule(
-                        f"git {subcommand} with -f/-- overwrites the working tree with no backup",
-            "git stash push <path>",
+    if subcommand in ("checkout", "switch"):
+        # `--` is a cosmetic separator: `git checkout .` and `git checkout
+        # src/foo.py` overwrite the working tree exactly as `git checkout -- .`
+        # does, and the modern spelling `git restore .` is already caught below.
+        # So judge what is targeted. A single positional that names a branch is
+        # an ordinary branch change and stays allowed; a path, or more than one
+        # positional, is a discard.
+        discards = (
+            "--" in flags
+            or _is_forced(flags)
+            or "--discard-changes" in flags
+            or len(positionals) > 1
+            or any(_looks_like_a_path(p) for p in positionals)
         )
+        if discards:
+            return Rule(
+                f"git {subcommand} over a path overwrites the working tree with no backup",
+                "git stash push <path>",
+            )
+        return None
 
     if subcommand == "restore":
         # Decide on whether the WORKING TREE is targeted, not on a spelling.
@@ -288,36 +373,69 @@ def _judge(tokens):
     return None
 
 
-def _inspect(command, depth):
-    """The Rule `command` violates, following nested payloads. None if clean."""
-    if depth > _MAX_DEPTH or not command:
+def _inspect(tokens, depth):
+    """The Rule `tokens` violate, following nested payloads. None if clean."""
+    if depth > _MAX_DEPTH or not tokens:
         return None
 
-    for segment in segments(command):
-        # Command substitutions execute too, and tokenising the outer string
-        # leaves their contents invisible.
-        for match in _SUBSTITUTION.finditer(segment):
-            inner = match.group(1) or match.group(2) or ""
-            nested = _inspect(inner, depth + 1)
+    for segment in segments(tokens):
+        # Judged before the operators are stripped, because the write target is
+        # the effect: `cat /dev/null > src/foo.py` truncates a source file while
+        # every program in it is allowlisted.
+        for target in redirection_targets(segment):
+            if _OWN_STATE in target.split("/"):
+                return _own_state_rule("redirecting output over")
+            if _is_source_file(target):
+                return Rule(
+                    f"redirecting output over {target} truncates a source file, "
+                    "discarding whatever it held with no backup",
+                    "edit the file with the Edit tool, which keeps the old content",
+                )
+        bare = strip_redirections(segment)
+        if not bare:
+            continue
+
+        if _targets_own_state(bare):
+            return _own_state_rule(f"{program_name(bare[0])!r} over")
+
+        # Command substitutions execute too, and a rule that reads token
+        # program names cannot see inside one. Searched over the rejoined
+        # segment because a substitution is not confined to a single token:
+        # `echo `rm -rf /tmp/x`` lexes as "`rm", "-rf", "/tmp/x`".
+        for match in _SUBSTITUTION.finditer(" ".join(segment)):
+            inner = lex(match.group(1) or match.group(2) or "")
+            nested = None if inner is None else _inspect(inner, depth + 1)
             if nested is not None:
                 return nested
 
-        tokens = tokenise(segment)
-
-        for payload in _shell_payloads(tokens):
-            nested = _inspect(payload, depth + 1)
+        for payload in _shell_payloads(bare):
+            inner = lex(payload)
+            nested = None if inner is None else _inspect(inner, depth + 1)
             if nested is not None:
                 return nested
 
-        for index in _dangerous_positions(tokens):
-            decision = _judge(tokens[index:])
+        for index in _dangerous_positions(bare):
+            decision = _judge(bare[index:])
             if decision is not None:
                 return decision
     return None
 
 
+def _own_state_rule(what):
+    return Rule(
+        f"{what} .curamoir/ destroys cúramóir's own ledger, journal and handoff "
+        "— and silences the hooks that would have recorded the loss",
+        "leave .curamoir/ to cúramóir; a job writes through /curamoir: commands",
+    )
+
+
 def judge_destructive(command, in_job):
     """Whether `command` matches a destructive rule.
+
+    Takes a token list from `policy`, so that the two passes can never disagree
+    about where one command ends and the next begins. A raw string is accepted
+    too and lexed here, which is how the rule tests and any direct caller use
+    it; an unlexable string is unverifiable, and refusing is the safe reading.
 
     `in_job` is the caller's answer to "are we inside a cúramóir job?" —
     computed by `in_curamoir_job`, passed in so this stays pure and testable.
@@ -325,7 +443,22 @@ def judge_destructive(command, in_job):
     if not in_job:
         return Decision(deny=False)
 
-    rule = _inspect(command, depth=0)
+    if isinstance(command, str):
+        tokens = lex(command)
+        if tokens is None:
+            return Decision(
+                deny=True,
+                reason=(
+                    "blocked by cúramóir: this command could not be parsed "
+                    "(unbalanced quoting), so the guard cannot verify it."
+                ),
+                alternative="rewrite the command with balanced quoting",
+                category=Category.UNPARSEABLE,
+            )
+    else:
+        tokens = command
+
+    rule = _inspect(tokens, depth=0)
     if rule is None:
         return Decision(deny=False)
     return Decision(

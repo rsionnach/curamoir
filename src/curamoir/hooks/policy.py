@@ -26,7 +26,14 @@ Stdlib only, and no config read: this runs on every Bash call during a job.
 
 import re
 
-from curamoir.hooks._shell import SHELLS, segments, tokenise
+from curamoir.hooks._shell import (
+    HEREDOCS,
+    MAX_COMMAND_CHARS,
+    SHELLS,
+    lex,
+    segments,
+    strip_redirections,
+)
 from curamoir.hooks.destructive import judge_destructive
 from curamoir.hooks.verdict import Category, Decision
 
@@ -35,7 +42,11 @@ from curamoir.hooks.verdict import Category, Decision
 _UNVERIFIABLE = (
     (re.compile(r"\$\("), "command substitution `$(...)`"),
     (re.compile(r"`"), "command substitution with backticks"),
-    (re.compile(r"<\(|>\("), "process substitution `<(...)`"),
+    # A token that OPENS a parenthesis group: a process substitution lexes as
+    # `<` then `(rm`, and a subshell group as `(rm`. Anchored at the start of
+    # the token so that `--format=%(refname:short)`, one shell word the sweep
+    # runs, is not caught by it.
+    (re.compile(r"^\("), "a subshell or process substitution `(...)`"),
     (re.compile(r"\$\{?[A-Za-z_]"), "a shell variable, whose value is not knowable here"),
 )
 
@@ -114,47 +125,72 @@ ALLOWED = {
 _PYTHON = {"python", "python3", "python2"}
 _ALLOWED_PYTHON_MODULES = {"pytest", "pyflakes", "ruff", "mypy", "black", "curamoir.cli"}
 
-_HEREDOC = re.compile(r"<<-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1")
 
+def _strip_heredoc_bodies(tokens):
+    """(tokens with heredoc bodies removed, whether one was left unterminated).
 
-def _strip_heredocs(command):
-    """Remove heredoc bodies, which are data rather than commands.
+    A heredoc body is data, not commands. Without removing it, writing a file
+    that merely MENTIONS `rm -rf` — this project's own `docs/security.md` does —
+    is refused, and a guard that blocks writing its own documentation is one the
+    developer switches off.
 
-    Without this, writing a file that merely MENTIONS `rm -rf` — this project's
-    own `docs/security.md` does — is refused, and a guard that blocks writing
-    its own documentation is one the developer switches off.
+    The operator and its terminator word stay, because they are the command's
+    own tokens and the shell branch needs to see them: `bash <<EOF` is inline
+    code however the body reads.
+
+    An unterminated heredoc returns True, and the caller must refuse. Dropping
+    the remainder instead — which is what the previous regex did, over the raw
+    string, to the end of the command — is how `echo "see <<EOF"` followed by
+    `rm -rf /` came to be allowed.
     """
-    lines = command.splitlines()
-    kept, index = [], 0
-    while index < len(lines):
-        line = lines[index]
-        kept.append(line)
-        match = _HEREDOC.search(line)
+    kept, index, unterminated = [], 0, False
+    while index < len(tokens):
+        token = tokens[index]
+        kept.append(token)
         index += 1
-        if match:
-            terminator = match.group(2)
-            while index < len(lines) and lines[index].strip() != terminator:
+        if token not in HEREDOCS or token == "<<<":
+            continue
+        if index >= len(tokens):
+            unterminated = True
+            break
+        terminator = tokens[index]
+        kept.append(terminator)
+        index += 1
+        closed = False
+        while index < len(tokens):
+            if tokens[index] == terminator:
                 index += 1
-            index += 1  # skip the terminator itself
-    return "\n".join(kept)
+                closed = True
+                break
+            index += 1
+        if not closed:
+            unterminated = True
+    return kept, unterminated
 
 
-def _unbalanced(segment):
-    """Whether `segment` could not be tokenised, so nothing in it is verifiable."""
-    import shlex
+def _unverifiable(tokens):
+    """The construction in `tokens` whose effect cannot be read, if any.
 
-    try:
-        shlex.split(segment)
-    except ValueError:
-        return True
-    return False
-
-
-def _unverifiable(segment):
-    for pattern, description in _UNVERIFIABLE:
-        if pattern.search(segment):
-            return description
+    Checked per token rather than over the raw string, so that a `$` inside a
+    quoted message is the literal character it is and not a variable reference.
+    """
+    for token in tokens:
+        for pattern, description in _UNVERIFIABLE:
+            if pattern.search(token):
+                return description
     return None
+
+
+#: Arguments that hand a shell code to run instead of naming a script to run.
+_INLINE_INPUT = frozenset({"<<", "<<-", "<<<", "-s", "/dev/stdin", "-"})
+
+
+def _inline_code(program):
+    return (
+        Category.UNVERIFIABLE,
+        f"{program!r} with -c runs code composed at call time, which the "
+        "guard cannot verify. Put the script in a file and run that instead",
+    )
 
 
 def _refusal_for(tokens):
@@ -182,15 +218,29 @@ def _refusal_for(tokens):
         # The line is reviewed-artefact versus generated-at-call-time. cúramóir
         # already allows `pytest`, `make` and `npm`, each of which executes
         # arbitrary repo-controlled code, so a committed script is no worse.
-        # Inline `-c` is different: it is composed at call time and is not an
+        # Inline code is different: it is composed at call time and is not an
         # artefact anyone reviewed.
-        flags = [a for a in arguments if a.startswith("-")]
-        if any("c" in flag.lstrip("-") for flag in flags):
+        #
+        # `-c` is only the best-known route to it. A heredoc, a here-string,
+        # `-s` and `/dev/stdin` all feed a shell code that no one reviewed, and
+        # each of those reads as "a positional", so testing for a positional
+        # read `bash <<EOF` as a committed script.
+        if _INLINE_INPUT.intersection(arguments):
             return (
                 Category.UNVERIFIABLE,
-                f"{program!r} with -c runs code composed at call time, which the "
-                "guard cannot verify. Put the script in a file and run that instead",
+                f"{program!r} is being fed code to run inline rather than a "
+                "committed script, which the guard cannot verify. Put the "
+                "script in a file and run that instead",
             )
+        # Match `-c` exactly for a long flag, and character by character for a
+        # clustered short one. `"c" in flag` matched any flag whose NAME
+        # contains a c, so `bash --rcfile /dev/null script.sh` was refused.
+        for flag in (a for a in arguments if a.startswith("-")):
+            if flag.startswith("--"):
+                if flag == "--command":
+                    return _inline_code(program)
+            elif "c" in flag[1:]:
+                return _inline_code(program)
         positionals = [a for a in arguments if not a.startswith("-")]
         if positionals:
             return None
@@ -255,13 +305,61 @@ def judge_command(command, in_job):
     if not in_job:
         return Decision(deny=False)
 
-    stripped = _strip_heredocs(command or "")
+    command = command or ""
 
-    for segment in segments(stripped):
-        if not segment.strip():
-            continue
+    # Before any parsing, because this bound exists to stop the parse. Lexing is
+    # superlinear in length, a PreToolUse hook has 5s, and a command hook that
+    # times out FAILS OPEN — so without the cap a padded command is a reliable
+    # way to switch the guard off rather than merely a slow one.
+    if len(command) > MAX_COMMAND_CHARS:
+        return Decision(
+            deny=True,
+            reason=(
+                f"blocked by cúramóir: this command is {len(command)} characters, "
+                f"beyond the {MAX_COMMAND_CHARS} the guard will parse. It is "
+                "refused unverified rather than left to time out, because a "
+                "hook that times out permits the action."
+            ),
+            alternative="put a command this long in a committed script and run that",
+            category=Category.UNVERIFIABLE,
+        )
 
+    tokens = lex(command)
+    if tokens is None:
+        return Decision(
+            deny=True,
+            reason=(
+                "blocked by cúramóir: this command could not be parsed "
+                "(unbalanced quoting), so the guard cannot verify what it "
+                "would run."
+            ),
+            alternative="rewrite the command with balanced quoting",
+            category=Category.UNPARSEABLE,
+        )
+
+    tokens, unterminated = _strip_heredoc_bodies(tokens)
+    if unterminated:
+        return Decision(
+            deny=True,
+            reason=(
+                "blocked by cúramóir: this command opens a heredoc that is never "
+                "terminated, so the guard cannot tell where the data ends and "
+                "the next command begins."
+            ),
+            alternative="terminate the heredoc, or put the text in a file",
+            category=Category.UNVERIFIABLE,
+        )
+
+    for segment in segments(tokens):
+        # Asked BEFORE the redirections are stripped. A process substitution
+        # lexes as a `<` operator followed by `(rm`, so stripping first would
+        # drop both and leave `cat -rf /tmp/x` looking allowlisted.
         reason = _unverifiable(segment)
+        if reason is None:
+            segment = strip_redirections(segment)
+            if not segment:
+                continue
+
         if reason is not None:
             return Decision(
                 deny=True,
@@ -276,20 +374,7 @@ def judge_command(command, in_job):
                 category=Category.UNVERIFIABLE,
             )
 
-        tokens = tokenise(segment)
-        if tokens == segment.split() and _unbalanced(segment):
-            return Decision(
-                deny=True,
-                reason=(
-                    "blocked by cúramóir: this command could not be parsed "
-                    "(unbalanced quoting), so the guard cannot verify what it "
-                    "would run."
-                ),
-                alternative="rewrite the command with balanced quoting",
-                category=Category.UNPARSEABLE,
-            )
-
-        refusal = _refusal_for(tokens)
+        refusal = _refusal_for(segment)
         if refusal is not None:
             category, reason = refusal
             return Decision(
@@ -305,5 +390,7 @@ def judge_command(command, in_job):
                 category=category,
             )
 
-    # Second pass: an allowlisted program can still be used destructively.
-    return judge_destructive(stripped, in_job=True)
+    # Second pass: an allowlisted program can still be used destructively, and
+    # judged on tokens so that the two passes can never disagree about where one
+    # command ends and the next begins.
+    return judge_destructive(tokens, in_job=True)
