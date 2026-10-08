@@ -285,3 +285,22 @@ def test_template_drift_is_detected_even_when_no_modules_are_found(tmp_path):
 
     with pytest.raises(TemplateDrift):
         init_repo(repo, templates=templates)
+
+
+def test_dotfile_and_egg_info_directories_are_never_modules(tmp_path):
+    """_is_noise's two remaining rules had no test: dropping either left the
+    suite green, and scaffold.py calls module detection "the part that matters"
+    because wrong granularity makes E7 grading and E5-R3 selection meaningless."""
+    repo = make_repo(tmp_path, {
+        "pyproject.toml": "",
+        "src/app/__init__.py": "",
+        "src/app/real/__init__.py": "",
+        "src/app/.hidden/__init__.py": "",
+        "src/app/app.egg-info/__init__.py": "",
+    })
+
+    modules = detect_modules(repo)
+
+    assert "src/app/real" in modules
+    assert not any(".hidden" in m for m in modules), modules
+    assert not any("egg-info" in m for m in modules), modules

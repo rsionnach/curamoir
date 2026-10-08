@@ -214,3 +214,34 @@ def test_the_budget_from_config_actually_bounds_the_injection(tmp_path):
     context = context_of(run({"hook_event_name": "SessionStart", "source": "startup"}, repo))
 
     assert len(context) <= 200 * 4 + 400, f"{len(context)} characters"
+
+
+def test_a_misconfigured_budget_falls_back_rather_than_zeroing_the_injection(tmp_path):
+    """token_budget_for's type and positivity guard had no test: a config value
+    of 0 would silently inject nothing, and "lots" would crash the slice. E8-R3
+    ships this injection, so a quiet zero loses the whole feature."""
+    from curamoir.hooks.sessionstart import DEFAULT_TOKEN_BUDGET, token_budget_for
+
+    repo = prepared(tmp_path, handoff="# handoff\n\nstate\n")
+    for value in ("0", '"lots"', "-100", "null"):
+        (repo / ".curamoir" / "curamoir.yaml").write_text(
+            f"version: 1\nhandoff:\n  session_start_token_budget: {value}\n", encoding="utf-8")
+        assert token_budget_for(repo) == DEFAULT_TOKEN_BUDGET, value
+
+
+def test_the_assembled_context_never_exceeds_the_budget(tmp_path):
+    """_assemble's final clamp had no test. Per-part shares are computed from a
+    budget less reserved room, but the header, footer and notice are added back
+    afterwards, so the clamp is what actually enforces the limit."""
+    from curamoir.hooks.sessionstart import build_context
+
+    repo = prepared(tmp_path, handoff="# handoff\n\n" + ("x" * 50_000))
+
+    # A tiny budget is the case where the clamp is load-bearing: the per-part
+    # share is computed from the budget LESS reserved room for the header,
+    # footer and notice, which are then added back. When those alone exceed the
+    # budget the share floors at zero and only the final clamp enforces the
+    # limit. Budgets of 60+ never reach that, so they could not kill the mutant.
+    for budget in (5, 10, 20, 60, 400):
+        context = build_context(repo, token_budget=budget)
+        assert len(context) <= budget * 4, f"budget {budget}: got {len(context)} chars"

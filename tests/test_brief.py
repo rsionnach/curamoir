@@ -25,6 +25,7 @@ SECTION_TITLES = [
 
 
 def prepared(tmp_path, handoff_age_days=None, beads=None):
+    tmp_path.mkdir(parents=True, exist_ok=True)
     repo = tmp_path / "repo"
     (repo / ".curamoir" / "handoff").mkdir(parents=True)
     (repo / ".curamoir" / "briefs").mkdir(parents=True)
@@ -289,3 +290,39 @@ def test_the_brief_threshold_and_cadence_come_from_config(tmp_path):
         "version: 1\ncadence:\n  brief: weekly\n", encoding="utf-8")
 
     assert due_for_brief_from_config(repo) is True
+
+
+# --- provenance: behaviours whose fixes live only in a code comment --------
+
+def test_an_unrecognised_grade_does_not_masquerade_as_the_lowest(tmp_path):
+    """brief.py's comment records the bug in full: ranking an unknown grade 9
+    with reverse=True reported a typo'd grade as the lowest-graded module, ahead
+    of a genuine F, so the brief sent the developer to the wrong place. The
+    comment was the only thing stopping it coming back."""
+    repo = prepared(tmp_path, handoff_age_days=7, beads=[])
+    (repo / ".curamoir" / "state" / "grades.json").write_text(json.dumps(
+        {"modules": {"src/real": {"grade": "F"}, "src/typo": {"grade": "Bee"}}}),
+        encoding="utf-8")
+
+    brief = build_brief(repo)
+
+    assert brief["lowest_graded"] == "src/real"
+    assert "src/real" in render_brief(brief)
+
+
+def test_all_unknown_grades_name_no_module_rather_than_a_random_one(tmp_path):
+    repo = prepared(tmp_path, handoff_age_days=7, beads=[])
+    (repo / ".curamoir" / "state" / "grades.json").write_text(json.dumps(
+        {"modules": {"src/a": {"grade": "?"}, "src/b": {}}}), encoding="utf-8")
+
+    assert build_brief(repo)["lowest_graded"] is None
+
+
+def test_the_absence_threshold_boundary_is_inclusive(tmp_path):
+    """E9-R1's default is 5 days. No test used absence == threshold, so the
+    suite could not tell `>=` from `>` — "5 days away" from "6 days away"."""
+    at_threshold = prepared(tmp_path / "at", handoff_age_days=5)
+    under = prepared(tmp_path / "under", handoff_age_days=4)
+
+    assert due_for_brief(at_threshold, threshold_days=5) is True
+    assert due_for_brief(under, threshold_days=5) is False

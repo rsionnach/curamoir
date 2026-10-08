@@ -10,6 +10,8 @@ run (DEC-3). Both are reported as degraded, not as failures, or the developer
 learns to ignore the output.
 """
 
+import pytest
+
 from curamoir.doctor import diagnose, render_report
 
 
@@ -308,3 +310,59 @@ def test_doctor_leaves_the_real_handoff_byte_identical(tmp_path):
     assert (handoff.read_bytes(), handoff.stat().st_mtime_ns,
             journal.read_bytes(), journal.stat().st_mtime_ns) == before
     assert list((repo / ".curamoir" / "handoff" / "history").glob("*.md")) == []
+
+
+def test_fewer_than_three_modules_is_reported_as_a_warning(tmp_path):
+    """The warning explains E5-R3's round-robin fallback — the thing the shared
+    fixture exists to avoid — but no test checked the LEVEL, only the text, so
+    disabling the branch entirely stayed green."""
+    repo = initialised(tmp_path)  # one module: src/app
+
+    findings = diagnose(repo, tools={"python3": True, "yaml": True})
+    modules = [f for f in findings if f.check == "modules"]
+
+    assert modules and modules[0].level == "warning", modules
+    assert "round-robin" in modules[0].fix.lower()
+
+
+def test_a_registered_event_with_no_probe_is_a_warning_not_ok(tmp_path):
+    """The probe table was made data-driven so a new event could not go
+    unchecked — but the warning for an unprobed event was itself untested, so a
+    sixth event would have reported healthy."""
+    from curamoir import doctor
+
+    repo = initialised(tmp_path)
+    original = doctor._registered_hook_events
+
+    try:
+        doctor._registered_hook_events = lambda: ["PreToolUse", "FutureEvent"]
+        findings = doctor._check_hooks(repo)
+    finally:
+        doctor._registered_hook_events = original
+
+    future = [f for f in findings if "FutureEvent" in f.check]
+    assert future and future[0].level == "warning", findings
+    assert "no probe" in future[0].detail.lower()
+
+
+def test_an_unwritable_state_directory_is_reported(tmp_path):
+    """_check_writable exists BECAUSE the hook probes moved to a scratch tree and
+    therefore stopped proving the real .curamoir/ is writable. Nothing chmodded
+    anything, so flipping its condition to False stayed green."""
+    import os
+
+    if os.geteuid() == 0:
+        pytest.skip("root ignores mode bits")
+
+    repo = initialised(tmp_path)
+    handoff = repo / ".curamoir" / "handoff"
+    handoff.mkdir(parents=True, exist_ok=True)
+    os.chmod(handoff, 0o500)
+    try:
+        findings = diagnose(repo, tools={"python3": True, "yaml": True})
+    finally:
+        os.chmod(handoff, 0o700)
+
+    writable = [f for f in findings if f.check == "writable state"]
+    assert writable and writable[0].level == "error", writable
+    assert "handoff" in writable[0].detail
