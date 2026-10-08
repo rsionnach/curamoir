@@ -190,19 +190,46 @@ def write_handoff(repo, keep_history=None, note=None, next_step=None):
     try:
         history.mkdir(parents=True, exist_ok=True)
         if latest.is_file():
-            stamp = datetime.fromtimestamp(
-                latest.stat().st_mtime, tz=timezone.utc
-            ).strftime("%Y-%m-%dT%H-%M-%S")
-            (history / f"{stamp}.md").write_text(
-                latest.read_text(encoding="utf-8"), encoding="utf-8"
-            )
+            _archive(latest, history)
         _prune(history, keep_history)
     except OSError:
         # Rolling is a nicety; losing it must not cost us the handoff itself.
         pass
 
     # Through the redacting write path (E0-R7), so E8-R5 is structural.
-    return write_artefact(latest, rendered)
+    try:
+        return write_artefact(latest, rendered)
+    except OSError:
+        # The docstring's "never raises" has to cover the write too, not only
+        # the build: a read-only handoff directory — which doctor has a whole
+        # check for — reached /curamoir:handoff as a traceback, and reached the
+        # hooks as a silent exit 0. None says "no handoff was written", which
+        # the CLI reports in one sentence.
+        return None
+
+
+def _archive(latest, history):
+    """Copy `latest` into `history` under a name no other copy can take.
+
+    The name came from `latest`'s mtime at SECOND resolution, written with
+    `write_text`. PreCompact followed by SessionEnd lands in the same second
+    routinely, and the second copy then overwrote the first — so the oldest
+    handoff was gone from `latest.md` AND from the archive that exists to keep
+    it, in a store the spec calls append-only. Microseconds make a collision
+    unlikely; `O_EXCL` makes losing one impossible.
+    """
+    written = datetime.fromtimestamp(latest.stat().st_mtime, tz=timezone.utc)
+    stamp = written.strftime("%Y-%m-%dT%H-%M-%S")
+    body = latest.read_text(encoding="utf-8")
+    for suffix in ("", *(f"-{n}" for n in range(1, 1000))):
+        candidate = history / f"{stamp}{suffix}.md"
+        try:
+            with open(candidate, "x", encoding="utf-8") as handle:
+                handle.write(body)
+            return candidate
+        except FileExistsError:
+            continue
+    return None
 
 
 def record_turn(repo, note, at=None, next_step=None):

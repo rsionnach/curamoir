@@ -19,6 +19,7 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 
+from curamoir.grades import graded_modules
 from curamoir.redaction import write_artefact
 from curamoir.repo_config import config_value
 
@@ -102,12 +103,13 @@ def render_brief(brief):
     lines += _bullets(brief["findings"], "No review findings — " + NOT_YET + ".")
 
     lines += ["", "## Grades", ""]
-    if not brief["grades"] or not brief["grades"].get("modules"):
+    graded = graded_modules(brief["grades"])
+    if not graded:
         lines.append(f"Grades {NOT_YET}.")
     else:
         lines.append("| module | grade |")
         lines.append("|---|---|")
-        for module, data in sorted(brief["grades"]["modules"].items()):
+        for module, data in sorted(graded.items()):
             lines.append(f"| {module} | {data.get('grade', '?')} |")
 
     lines += ["", "## Blocked on you", ""]
@@ -249,20 +251,20 @@ def _read_blocked(base):
 
 
 def _lowest_graded(grades):
-    if not grades or not grades.get("modules"):
+    graded = graded_modules(grades)
+    if not graded:
         return None
     ranking = {"A": 0, "B": 1, "C": 2, "D": 3, "F": 4}
 
     def rank(item):
-        data = item[1]
-        grade = data.get("grade") if isinstance(data, dict) else None
+        grade = item[1].get("grade")
         # An unrecognised or missing grade ranks BEST-known, not worst. Ranking
         # it 9 with reverse=True reported a typo'd grade as the lowest-graded
         # module, ahead of a genuine F — so the brief would send the developer
         # to the wrong place.
         return ranking.get(grade, -1)
 
-    modules = sorted(grades["modules"].items(), key=rank, reverse=True)
+    modules = sorted(graded.items(), key=rank, reverse=True)
     return modules[0][0] if modules and rank(modules[0]) >= 0 else None
 
 

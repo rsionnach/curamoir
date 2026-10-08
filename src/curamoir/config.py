@@ -29,6 +29,7 @@ import math
 from copy import deepcopy
 
 NUMBER = "number"
+COUNT = "whole number of 0 or more"
 STRING = "string"
 BOOLEAN = "boolean"
 STRING_LIST = "list of strings"
@@ -126,7 +127,12 @@ SCHEMA = {
         "prices": MAPPING,
     },
     "cadence": {
-        "sweep": STRING, "review": STRING, "brief": STRING, "smoke": STRING,
+        "sweep": STRING, "review": STRING,
+        # A fixed vocabulary, like modules.strategy and budget.on_ceiling: a
+        # typo here silently disabled the documented `weekly` mode while doctor
+        # went on reporting "config: valid".
+        "brief": ("on_return", "weekly"),
+        "smoke": STRING,
     },
     "review": {
         "lenses": STRING_LIST,
@@ -154,7 +160,7 @@ SCHEMA = {
     },
     "handoff": {
         "session_start_token_budget": NUMBER,
-        "keep_history": NUMBER,
+        "keep_history": COUNT,
         "brief_threshold_days": NUMBER,
     },
     "rules": {"matcher": ("ast-grep", "regex")},
@@ -227,7 +233,18 @@ def _validate(value, schema, prefix, problems):
 
 
 def _check_scalar(path, given, expected, problems):
-    if expected is NUMBER:
+    if expected is COUNT:
+        # A count indexes and slices, so a float is not merely untidy: it
+        # reached `files[: len(files) - keep]` as a TypeError that the hooks
+        # swallow, so handoffs stopped silently. A negative one pruned the
+        # entire archive, including the entry just written.
+        if isinstance(given, bool) or not isinstance(given, int):
+            problems.append(
+                f"{path}: expected a {COUNT}, got {_type_name(given)}"
+            )
+        elif given < 0:
+            problems.append(f"{path}: must not be negative (got {given})")
+    elif expected is NUMBER:
         # bool is an int in Python; a boolean where a number belongs is a mistake.
         if isinstance(given, bool) or not isinstance(given, (int, float)):
             problems.append(f"{path}: expected a {NUMBER}, got {_type_name(given)}")

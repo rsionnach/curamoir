@@ -7,6 +7,7 @@ is a thin wrapper that invokes this and reports what it said.
 
 import argparse
 import sys
+from pathlib import Path
 
 from curamoir.brief import due_for_brief_from_config, write_brief
 from curamoir.doctor import diagnose, render_report
@@ -44,12 +45,28 @@ def main(argv=None):
                        help="only generate when the absence threshold has passed")
 
     arguments = parser.parse_args(argv)
+    try:
+        return _run(arguments)
+    except OSError as failure:
+        # A slash command relays this straight to the developer, and a stack
+        # trace is the one thing it must not show them. `init` already turned
+        # two faults into sentences (AlreadyInitialised, TemplateDrift); this
+        # covers the rest — a `.curamoir` that is a file, a read-only checkout,
+        # a full disk.
+        print(f"cúramóir could not complete that: {failure}")
+        return 1
+
+
+def _run(arguments):
     if arguments.command == "init":
         return _init(arguments.repo)
     if arguments.command == "status":
         print(render_status(collect_status(arguments.repo)))
         return 0
     if arguments.command == "brief":
+        uninitialised = _uninitialised(arguments.repo)
+        if uninitialised is not None:
+            return uninitialised
         if arguments.if_due and not due_for_brief_from_config(arguments.repo):
             print("No brief needed: the last handoff is recent.")
             return 0
@@ -58,8 +75,17 @@ def main(argv=None):
         print(path.read_text(encoding="utf-8"))
         return 0
     if arguments.command == "handoff":
+        uninitialised = _uninitialised(arguments.repo)
+        if uninitialised is not None:
+            return uninitialised
         path = write_handoff(arguments.repo, note=arguments.note,
                              next_step=arguments.next_step)
+        if path is None:
+            print(
+                "cúramóir could not write the handoff. Check that "
+                ".curamoir/handoff is writable, then run /curamoir:doctor."
+            )
+            return 1
         print(f"Wrote {path}")
         print(path.read_text(encoding="utf-8"))
         return 0
@@ -70,6 +96,22 @@ def main(argv=None):
         # failing CI over one would make the distinction meaningless.
         return 1 if any(f.level == "error" for f in findings) else 0
     return 2
+
+
+def _uninitialised(repo):
+    """1 and a message if cúramóir is not set up here, else None.
+
+    `status` already required this and the HOOKS check for it (`_entry.run`
+    returns early when `.curamoir` is not a directory), but `brief` and
+    `handoff` wrote through `mkdir(parents=True)`. Running either before `init`
+    therefore created a `.curamoir/` holding only that one artefact, after which
+    `init` refused permanently and the repo never got curamoir.yaml,
+    principles.md or state/ at all.
+    """
+    if (Path(repo) / ".curamoir").is_dir():
+        return None
+    print("cúramóir is not initialised here. Run /curamoir:init first.")
+    return 1
 
 
 def _init(repo):

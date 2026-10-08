@@ -17,6 +17,7 @@ its value is replaced — because a brief reading "[REDACTED]" with no indicatio
 of what was removed is not actionable.
 """
 
+import os
 import re
 from pathlib import Path
 
@@ -101,8 +102,30 @@ def write_artefact(path, text, encoding="utf-8"):
     The single write path E0-R7 calls for. Briefs (E9-R3), handoffs (E8-R1),
     issue bodies and PR bodies (E6-R2, E3-R3) all go through here, so redaction
     is structural rather than something each epic has to remember.
+
+    Written atomically: into a temporary file beside the target, then renamed
+    over it. `write_text` truncates first and writes second, so a write that
+    fails part way — a full disk, a quota — left a FRAGMENT where a complete
+    artefact had been, with the previous one already gone. SessionStart would
+    then inject the fragment next session as state from the previous session.
+    `os.replace` is atomic within a directory, so a reader sees the old complete
+    artefact or the new one and never a partial one.
     """
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(redact(text), encoding=encoding)
+    # Beside the target, not in /tmp: `os.replace` is only atomic within one
+    # filesystem, and a repo on an external volume would otherwise degrade to a
+    # copy — the very non-atomic write this exists to avoid.
+    scratch = target.with_name(target.name + ".tmp")
+    try:
+        with scratch.open("w", encoding=encoding) as handle:
+            handle.write(redact(text))
+            handle.flush()
+            # The rename is atomic, but without the fsync the CONTENT may still
+            # be in flight: a crash can leave a present, empty, renamed file.
+            os.fsync(handle.fileno())
+        os.replace(scratch, target)
+    except OSError:
+        scratch.unlink(missing_ok=True)
+        raise
     return target

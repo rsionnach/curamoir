@@ -20,6 +20,7 @@ from pathlib import Path
 
 from curamoir.budget import PriceTable, UnknownModel, month_to_date
 from curamoir.config import DEFAULTS, ConfigError, load_config_text
+from curamoir.grades import graded_modules
 from curamoir.ledger import Ledger
 
 NOT_AVAILABLE = "not yet available"
@@ -207,10 +208,11 @@ def _read_json(path):
 
 
 def _summarise_grades(grades):
-    if not grades or not grades.get("modules"):
+    graded = graded_modules(grades)
+    if not graded:
         return NOT_AVAILABLE + " (no grades computed yet — Epic 7)"
     return ", ".join(
-        f"{module} {data.get('grade', '?')}" for module, data in sorted(grades["modules"].items())
+        f"{module} {data.get('grade', '?')}" for module, data in sorted(graded.items())
     )
 
 
