@@ -28,6 +28,7 @@ Stdlib only, and no config read: this runs on every Bash call during a job.
 import re
 import shlex
 
+from curamoir.hooks.categories import Category
 from curamoir.hooks.denylist import Decision, _segments, decide
 
 # Construction whose effect this guard cannot determine by reading it. Refused
@@ -39,9 +40,16 @@ _UNVERIFIABLE = (
     (re.compile(r"\$\{?[A-Za-z_]"), "a shell variable, whose value is not knowable here"),
 )
 
+# `NAME=value` before the program is a shell ASSIGNMENT PREFIX, not a command.
+# Refusing it meant this repo's own test command — PLANTED.json's
+# `PYTHONPATH=src python3 -m pytest -q`, which E3-R4 requires the sweep to run —
+# was blocked. A variable REFERENCE (`$R`) is still unverifiable; an assignment
+# is not.
+_ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+
 # Programs that can run anything, so allowlisting them would allowlist everything.
+_SHELLS = {"bash", "sh", "zsh", "dash", "ksh", "ash", "fish", "csh", "tcsh"}
 _INTERPRETERS = {
-    "bash", "sh", "zsh", "dash", "ksh", "ash", "fish", "csh", "tcsh",
     "eval", "exec", "source", ".", "env", "python", "python3", "python2",
     "perl", "ruby", "node", "deno", "bun", "php", "awk", "xargs", "parallel",
     "sudo", "doas", "su", "ssh", "nohup", "setsid", "script",
@@ -144,32 +152,79 @@ def _unverifiable(segment):
 
 
 def _allowed(tokens):
-    """None if this segment's program is allowed, else why it is not."""
+    """None if allowed, else (Category, reason).
+
+    The category is returned, never inferred from the message. Deriving it from a
+    substring of the prose would be the same mistake the provenance review found
+    in the tests: a check that reads text instead of structure.
+
+    UNVERIFIABLE is reserved for cases where the guard genuinely cannot determine
+    the effect — inline code, a bare interpreter. A program we recognise and
+    decline is NOT_ALLOWLISTED, because we read it perfectly well and said no.
+    """
+    # Drop leading assignment prefixes so the real program is judged.
+    while tokens and _ASSIGNMENT.match(tokens[0]):
+        tokens = tokens[1:]
     if not tokens:
         return None
 
     program = tokens[0].strip("\"'").rsplit("/", 1)[-1]
     arguments = tokens[1:]
 
-    if program in _PYTHON:
-        # `-m <allowed module>` only. Inline `-c` code is unverifiable.
-        if len(arguments) >= 2 and arguments[0] == "-m" and arguments[1] in _ALLOWED_PYTHON_MODULES:
+    if program in _SHELLS:
+        # A committed SCRIPT may run; inline code may not.
+        #
+        # The line is reviewed-artefact versus generated-at-call-time. cúramóir
+        # already allows `pytest`, `make` and `npm`, every one of which executes
+        # arbitrary repo-controlled code — so refusing `bash scripts/quickstart.sh`
+        # (the default `smoke.command`) while allowing `pytest` was incoherent.
+        # Inline `-c` is genuinely different: it is composed at call time and is
+        # not an artefact anyone reviewed.
+        flags = [a for a in arguments if a.startswith("-")]
+        if any("c" in flag.lstrip("-") for flag in flags):
+            return (
+                Category.UNVERIFIABLE,
+                f"{program!r} with -c runs code composed at call time, which the "
+                "guard cannot verify. Put the script in a file and run that instead",
+            )
+        positionals = [a for a in arguments if not a.startswith("-")]
+        if positionals:
             return None
         return (
-            f"{program!r} runs code the guard cannot verify, so it is allowed "
-            f"only as `{program} -m <module>` for: "
-            + ", ".join(sorted(_ALLOWED_PYTHON_MODULES))
+            Category.NOT_ALLOWLISTED,
+            f"{program!r} with no script runs an interactive shell",
+        )
+
+    if program in _PYTHON:
+        if len(arguments) >= 2 and arguments[0] == "-m":
+            if arguments[1] in _ALLOWED_PYTHON_MODULES:
+                return None
+            # The module is plainly readable; we simply decline it.
+            return (
+                Category.NOT_ALLOWLISTED,
+                f"{program} -m {arguments[1]!r} is not on cúramóir's allowlist; "
+                "allowed modules: " + ", ".join(sorted(_ALLOWED_PYTHON_MODULES)),
+            )
+        return (
+            Category.UNVERIFIABLE,
+            f"{program!r} without `-m <module>` can run inline code the guard "
+            "cannot verify",
         )
 
     if program in _INTERPRETERS:
+        # Recognised and declined: these can run anything, so allowlisting them
+        # would allowlist everything.
         return (
-            f"{program!r} runs code the guard cannot verify — whatever follows "
-            "it is opaque to inspection — so cúramóir's allowlist does not "
-            "include it"
+            Category.NOT_ALLOWLISTED,
+            f"{program!r} can run arbitrary programs, so allowlisting it would "
+            "allowlist everything",
         )
 
     if program not in ALLOWED:
-        return f"{program!r} is not on cúramóir's allowlist for jobs"
+        return (
+            Category.NOT_ALLOWLISTED,
+            f"{program!r} is not on cúramóir's allowlist for jobs",
+        )
 
     subcommands = ALLOWED[program]
     if subcommands is None:
@@ -180,7 +235,10 @@ def _allowed(tokens):
             continue
         if argument in subcommands:
             return None
-        return f"{program} {argument!r} is not on cúramóir's allowlist for jobs"
+        return (
+            Category.NOT_ALLOWLISTED,
+            f"{program} {argument!r} is not on cúramóir's allowlist for jobs",
+        )
     # No subcommand at all (`git`, `gh`) prints usage: harmless.
     return None
 
@@ -211,6 +269,7 @@ def judge_command(command, in_job):
                     "directly."
                 ),
                 alternative="run the inner command directly",
+                category=Category.UNVERIFIABLE,
             )
 
         try:
@@ -224,10 +283,12 @@ def judge_command(command, in_job):
                     "would run."
                 ),
                 alternative="rewrite the command with balanced quoting",
+                category=Category.UNPARSEABLE,
             )
 
-        reason = _allowed(tokens)
-        if reason is not None:
+        verdict = _allowed(tokens)
+        if verdict is not None:
+            category, reason = verdict
             return Decision(
                 deny=True,
                 reason=(
@@ -238,6 +299,7 @@ def judge_command(command, in_job):
                     "allowlist in curamoir.yaml and say why in the bead."
                 ),
                 alternative="add it to the allowlist in curamoir.yaml",
+                category=category,
             )
 
     # Second pass: an allowlisted program can still be used destructively.

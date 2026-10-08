@@ -259,7 +259,7 @@ def _check_hooks(repo):
     return findings
 
 
-def _probe_repo(repo, probe):
+def _probe_repo(repo, probe, probe_target=None):
     """Where to run a probe.
 
     Writing probes run against a SCRATCH repo, never the developer's. The hooks
@@ -276,13 +276,19 @@ def _probe_repo(repo, probe):
 
     if not probe.get("writes"):
         return repo, None
+    if probe_target is not None:
+        # Injected by tests so the "file present and unchanged" state is
+        # reachable. _probe_repo otherwise owns a fresh scratch tree, which made
+        # that state impossible to construct — and it is the one the bug let
+        # through, so the fix had no test.
+        return Path(probe_target), None
     scratch = Path(tempfile.mkdtemp(prefix="curamoir-doctor-"))
     (scratch / ".curamoir" / "handoff" / "history").mkdir(parents=True, exist_ok=True)
     (scratch / ".curamoir" / "state").mkdir(parents=True, exist_ok=True)
     return scratch, scratch
 
 
-def _run_hook_probe(repo, event, probe, script_path=None):
+def _run_hook_probe(repo, event, probe, script_path=None, probe_target=None):
     import shutil as _shutil
 
     wrapper = script_path or Path(__file__).resolve().parents[2] / "scripts" / probe["script"]
@@ -291,7 +297,7 @@ def _run_hook_probe(repo, event, probe, script_path=None):
         return Finding(label, "error", f"{wrapper} is missing",
                        fix="Reinstall the plugin; the hook script is absent.")
 
-    target, scratch = _probe_repo(repo, probe)
+    target, scratch = _probe_repo(repo, probe, probe_target=probe_target)
     try:
         return _probe(repo, target, wrapper, label, probe)
     finally:

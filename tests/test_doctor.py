@@ -242,3 +242,69 @@ def test_doctor_discloses_that_the_denylist_cannot_detect_a_job_yet(tmp_path):
     assert disclosure[0].level == "warning"
     assert "scrub" in disclosure[0].detail.lower() or "env" in disclosure[0].detail.lower()
     assert disclosure[0].fix
+
+
+def test_the_writes_probe_distinguishes_wrote_from_did_not_write(tmp_path):
+    """The predicate's `after != before` half had NO test.
+
+    The previous test pre-created latest.md inside `repo`, but `_probe_repo`
+    redirects every writes-probe to a fresh scratch tree — so in the probe's real
+    target both before and after were None, and the fixed form and the buggy
+    `after != before or after is not None` form evaluated identically. Restoring
+    the exact original bug left the full 506-test suite green.
+
+    Three states, against a target the test controls."""
+    from curamoir.doctor import _run_hook_probe
+
+    repo = initialised(tmp_path)
+    writer = tmp_path / "writes"
+    writer.write_text(
+        "#!/usr/bin/env bash\n"
+        'cwd=$(python3 -c "import json,sys;print(json.load(sys.stdin)[\'cwd\'])")\n'
+        'mkdir -p "$cwd/.curamoir/handoff" && date +%s%N > "$cwd/.curamoir/handoff/latest.md"\n',
+        encoding="utf-8")
+    writer.chmod(0o755)
+    silent = tmp_path / "silent"
+    silent.write_text("#!/usr/bin/env bash\ncat >/dev/null\nexit 0\n", encoding="utf-8")
+    silent.chmod(0o755)
+
+    probe = {"script": "x", "payload": {"hook_event_name": "SessionEnd"},
+             "writes": ("handoff", "latest.md"), "proves": "wrote", "if_not": "fix"}
+
+    # (a) nothing there, hook writes -> ok
+    assert _run_hook_probe(repo, "SessionEnd", probe, script_path=writer).level == "ok"
+
+    # (b) file PRESENT and UNCHANGED, hook writes nothing -> error. This is the
+    # state the old test could not construct, and the one the bug let through.
+    target = tmp_path / "preexisting"
+    (target / ".curamoir" / "handoff").mkdir(parents=True)
+    (target / ".curamoir" / "handoff" / "latest.md").write_text("already here\n", encoding="utf-8")
+    finding = _run_hook_probe(repo, "SessionEnd", probe, script_path=silent, probe_target=target)
+    assert finding.level == "error", finding
+    assert "wrote nothing" in finding.detail.lower()
+
+    # (c) file present, hook rewrites it -> ok
+    assert _run_hook_probe(
+        repo, "SessionEnd", probe, script_path=writer, probe_target=target
+    ).level == "ok"
+
+
+def test_doctor_leaves_the_real_handoff_byte_identical(tmp_path):
+    """_probe_repo's central safety property had no test: deleting the scratch
+    redirect entirely left the suite green, while the docstring records doctor
+    having overwritten latest.md, fabricated journal notes that became the next
+    handoff's "Last decision", and burned two of ten history slots per run."""
+    repo = initialised(tmp_path)
+    handoff = repo / ".curamoir" / "handoff" / "latest.md"
+    handoff.parent.mkdir(parents=True, exist_ok=True)
+    handoff.write_text("# MINE\n\ndo not touch\n", encoding="utf-8")
+    journal = repo / ".curamoir" / "handoff" / "journal.jsonl"
+    journal.write_text('{"at":"t","note":"mine"}\n', encoding="utf-8")
+    before = (handoff.read_bytes(), handoff.stat().st_mtime_ns,
+              journal.read_bytes(), journal.stat().st_mtime_ns)
+
+    diagnose(repo, tools={"python3": True, "yaml": True})
+
+    assert (handoff.read_bytes(), handoff.stat().st_mtime_ns,
+            journal.read_bytes(), journal.stat().st_mtime_ns) == before
+    assert list((repo / ".curamoir" / "handoff" / "history").glob("*.md")) == []

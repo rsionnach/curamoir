@@ -72,7 +72,12 @@ def render_status(status):
     lines.append(f"  state:     {'PAUSED (.curamoir/PAUSE present)' if status['paused'] else 'running'}")
 
     lock = status["lock"]
-    if lock["held"]:
+    if lock["held"] and lock.get("detail"):
+        # Held but unreadable: the detail is the only thing that explains it.
+        # Rendering the holder fields instead produced "held by None, pid None on
+        # None", which tells the developer nothing about why.
+        lines.append(f"  lock:      {lock['detail']}")
+    elif lock["held"]:
         lines.append(f"  lock:      held by {lock['job']!r}, pid {lock['pid']} on {lock['host']}")
     else:
         lines.append(f"  lock:      {lock['detail'] or 'free'}")

@@ -41,9 +41,19 @@ from dataclasses import dataclass
 
 @dataclass(frozen=True)
 class Decision:
+    """A verdict on one command.
+
+    `category` is the structured half. Asserting only on `deny` and a truthy
+    `reason` could not tell "refused because the guard cannot see inside it"
+    from "refused because it is not on the list" — the distinction DEC-9 calls
+    its whole point — so deleting a rule left the command denied by a different
+    rule and the suite stayed green.
+    """
+
     deny: bool
     reason: str = ""
     alternative: str = ""
+    category: object = None
 
 
 # Shell separators a command may hide behind. `&` is included: a single
@@ -389,10 +399,13 @@ def decide(command, in_job):
     decision = _inspect(command, depth=0)
     if decision is None:
         return Decision(deny=False)
+    from curamoir.hooks.categories import Category
+
     return Decision(
         deny=True,
         reason=f"blocked by cúramóir: {decision.reason}. Use `{decision.alternative}` instead.",
         alternative=decision.alternative,
+        category=Category.DESTRUCTIVE,
     )
 
 

