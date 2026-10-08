@@ -59,8 +59,8 @@ MUST_ALLOW = [
 # Not recognised. Each is refused, and each would have been a bypass under a
 # denylist-only model.
 MUST_REFUSE = [
-    # The three holes round 3 found in v3, now refused as unverifiable rather
-    # than parsed. These are the reason for the decision.
+    # Refused as UNVERIFIABLE rather than parsed. These shapes are why DEC-9
+    # inverted the policy: no parser sees inside them reliably.
     "bash -lc 'rm -rf /'",
     "sh -ec 'rm -rf /'",
     "bash -c 'rm -rf /tmp/x'",
@@ -137,7 +137,7 @@ def test_an_unverifiable_refusal_says_so_rather_than_claiming_the_command_is_des
 
 
 def test_a_heredoc_body_is_not_judged_as_commands():
-    """Round 3: the denylist blocked `cat > docs/security.md <<'EOF'` because it
+    """Without this the rules block `cat > docs/security.md <<'EOF'` because it
     treated each body line as a command. A guard that blocks writing its own
     security documentation is one the developer switches off."""
     command = (
@@ -187,7 +187,7 @@ def test_the_non_destructive_forms_of_those_subcommands_still_work():
         assert not judge_command(command, in_job=True).deny, command
 
 
-# --- provenance finding 3: real committed command strings ------------------
+# --- command strings this repo actually ships -----------------------------
 #
 # Derived from artefacts in this repo, not from imagination. MUST_ALLOW above is
 # the author's guess at what a job needs; these are strings the repo actually
@@ -242,13 +242,13 @@ def test_a_committed_script_may_run_but_inline_code_may_not():
     assert judge_command("bash -lc 'rm -rf /'", in_job=True).deny
 
 
-# --- provenance finding 4: assert the reason CATEGORY, not truthiness ------
+# --- the reason CATEGORY, not truthiness ----------------------------------
 
 def test_refusals_carry_a_structured_category_not_only_prose():
     """Asserting `.deny` plus a truthy `.reason` cannot tell "refused because we
     could not see inside it" from "refused because it is not on the list" — the
     distinction DEC-9 calls its whole point. Deleting the shell-variable pattern
-    left `$R` denied by a different rule, so the suite stayed green."""
+    left `$R` denied by a different rule."""
     from curamoir.hooks import Category
 
     cases = [

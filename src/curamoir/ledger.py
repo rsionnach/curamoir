@@ -63,8 +63,8 @@ class Ledger:
 
         An unparseable line is SKIPPED, not fatal. This file is appended to by
         hooks and by the runner, so a crash mid-write will eventually truncate a
-        line — and a strict read turned that into "every job refused, and the one
-        command meant to explain why crashes".
+        line, and a strict read would turn that into "every job refused, and the
+        one command meant to explain why crashes".
 
         Skipped lines are counted rather than discarded silently: undercounting
         spend is the single failure the budget guard exists to prevent, so the
@@ -77,9 +77,7 @@ class Ledger:
         try:
             # errors="replace": a crash mid-write of a multi-byte character
             # leaves invalid UTF-8, and UnicodeDecodeError is a ValueError raised
-            # by the ITERATION, outside the per-line guard — so a torn "cúramóir"
-            # in a message field reproduced the original symptom exactly: every
-            # job refused, /curamoir:status crashing.
+            # by the ITERATION, outside the per-line guard below.
             with self._path.open(encoding="utf-8", errors="replace") as handle:
                 for line in handle:
                     if not line.strip():
@@ -89,9 +87,8 @@ class Ledger:
                     except ValueError:
                         self._unreadable += 1
         except (OSError, ValueError):
-            # UNKNOWN, not zero. Returning [] with the count still 0 let the
-            # caller read "could not open the ledger" as "no spend recorded",
-            # so round 2's fix turned a loud crash into a silent $0 ceiling.
+            # UNKNOWN, not zero. With the count left at 0 a caller reads
+            # "could not open the ledger" as "no spend recorded".
             self._unreadable = None
             return []
         return entries

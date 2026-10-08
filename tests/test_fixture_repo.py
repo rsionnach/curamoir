@@ -217,7 +217,7 @@ def test_the_fixture_declares_a_test_command_that_passes(manifest):
     assert result.returncode == 0, result.stdout + result.stderr
 
 
-# --- provenance: every planted violation must name a DEFINED principle ----
+# --- every planted violation must name a DEFINED principle ----------------
 
 def test_every_planted_principle_id_resolves_to_a_defined_principle(manifest):
     """Until the fixture defined these, the ids resolved to nothing: the

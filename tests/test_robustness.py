@@ -218,7 +218,7 @@ jobs:
     assert any("id-token" in p for p in problems), problems
 
 
-# --- round 3: the budget guard's own failure paths -------------------------
+# --- the budget guard's own failure paths ---------------------------------
 
 def test_an_unreadable_ledger_does_not_pass_as_zero_spend(tmp_path):
     """Round 2's fix turned a loud crash into a silent zero: OSError returned []

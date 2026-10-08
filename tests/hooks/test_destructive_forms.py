@@ -245,7 +245,7 @@ def test_recursion_into_payloads_terminates():
     judge_destructive(command, in_job=True)  # must simply return
 
 
-# --- round 3: rule-table gaps (each one line, independent of the parser) ---
+# --- rule-table gaps, each independent of the parser ----------------------
 #
 # EXTRAPOLATED — no external source. See the provenance note at the top of this
 # file. Each entry states its equivalence argument; none is in the spec.

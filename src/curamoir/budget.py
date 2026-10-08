@@ -55,11 +55,11 @@ class PriceTable:
         self._prices = dict(prices)
 
     def cost(self, model, input_tokens, output_tokens):
-        """Cost in USD, or UnknownModel for an absent or malformed entry.
+        """Cost in USD. Raises UnknownModel for an absent or malformed entry.
 
-        A mistyped key ("ouput") used to raise KeyError from inside the guard,
-        which the Gateway turned into GUARD_ERROR — every job refused, with a
-        message naming a dict key rather than the config file.
+        Malformed, not just absent: a config typo (`ouput`) must surface as
+        UnknownModel naming the model, rather than as a KeyError the Gateway
+        turns into GUARD_ERROR with a dict key for a message.
         """
         rate = self._prices.get(model)
         if not isinstance(rate, dict):
@@ -130,10 +130,9 @@ class Budget:
                 ),
             )
 
-        # Compare FIRST. A lower bound that already exceeds the ceiling is PROOF
-        # of a breach, not uncertainty about one — returning Degraded before this
-        # comparison meant one corrupt byte turned on_ceiling: pause into
-        # on_ceiling: ignore, while the message claimed the ceiling was enforced.
+        # Compare FIRST, before the unreadable-line degradation below. A lower
+        # bound that already exceeds the ceiling is PROOF of a breach, not
+        # uncertainty about one, so on_ceiling must still be honoured.
         projected = spent + self._per_run
         if projected > self._ceiling:
             suffix = (

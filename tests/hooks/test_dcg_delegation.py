@@ -7,7 +7,7 @@ The spec (docs/curamoir-spec.md:202) says: "If `dcg` is installed and
 `judge_destructive()` directly and every case in test_command_policy.py calls
 `judge_command()` directly — so the one source that could independently
 adjudicate "what is a destructive git command", rather than this author's
-opinion of it, was never asked. Fixture provenance review's finding 8.
+opinion of it, was never asked. E0-R5 names it; nothing else exercises it.
 
 These tests stub a `dcg` on PATH and assert the delegation actually happens and
 its verdict is honoured.

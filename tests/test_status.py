@@ -158,7 +158,7 @@ def test_status_completes_well_inside_two_seconds(tmp_path):
     assert elapsed < 2.0, f"took {elapsed:.3f}s, over the two-second requirement"
 
 
-# --- provenance: five of seven behaviours here had no test ----------------
+# --- the invariants the code comments name, each with a fixture -----------
 #
 # Every pre-existing test exercised the happy path, so the invariants the code
 # comments describe were never entered. Each fixture below is the shape the

@@ -253,7 +253,7 @@ def test_the_writes_probe_distinguishes_wrote_from_did_not_write(tmp_path):
     redirects every writes-probe to a fresh scratch tree — so in the probe's real
     target both before and after were None, and the fixed form and the buggy
     `after != before or after is not None` form evaluated identically. Restoring
-    the exact original bug left the full 506-test suite green.
+    the exact original bug leaves the rest of the suite green.
 
     Three states, against a target the test controls."""
     from curamoir.doctor import _probe_hook

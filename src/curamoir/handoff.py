@@ -266,11 +266,10 @@ _PORCELAIN = {
 def _describe_porcelain(line):
     """One porcelain v1 line as "<description>: <path>".
 
-    Parsed BY POSITION — two status characters, a space, then the path. Splitting
-    on the first space put the status character into the path for every UNSTAGED
-    change, because the index column is a space there. Modified-but-unstaged is
-    the overwhelmingly common state of the interrupted session a handoff exists
-    for, so that was the usual case rather than an edge one.
+    Parsed BY POSITION — two status characters, a space, then the path — never by
+    splitting on whitespace: for an UNSTAGED change the index column is a space,
+    and modified-but-unstaged is the overwhelmingly common state of the
+    interrupted session a handoff exists for.
     """
     # rstrip only: the position slice has already removed the separator, and
     # stripping both ends discards a leading space that is part of the filename.
@@ -321,10 +320,9 @@ def _next_step(repo, in_progress):
          they were doing;
       3. an explicit statement that there is nothing claimed.
 
-    It always returns something. This field previously had a reader and no
-    writer, so the section never rendered at all — and a required field that no
-    code path can produce is worse than an absent one, because the reader cannot
-    tell the difference.
+    It always returns something: E8-R1 lists this field as required, and a
+    required field no code path can produce is indistinguishable, to the reader,
+    from an absent one.
     """
     for entry in reversed(_journal(repo)):
         if entry.get("next_step"):

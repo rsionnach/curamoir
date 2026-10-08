@@ -68,9 +68,10 @@ def _parse_flags(tokens):
     `r`, because `-R` is a documented synonym for `-r` in `rm`.
 
     `--` ends option parsing, as POSIX requires: everything after it is a
-    positional, however much it looks like a flag. Treating it as just another
-    flag made `rm -- -rf` — deleting a file literally named `-rf`, neither
-    recursive nor forced — look like `rm -rf`.
+    positional, however much it looks like a flag — `rm -- -rf` deletes a file
+    NAMED `-rf` and is neither recursive nor forced. It is ALSO recorded in the
+    flag set, because `git checkout --` is itself a destructive spelling the
+    rules below need to see.
     """
     positionals, flags = [], set()
     end_of_options = False
@@ -113,8 +114,8 @@ def _git_subcommand(tokens):
 
 
 def _is_forced(flags):
-    # `--force` is folded to "f" by _LONG_SYNONYMS before this sees it, so
-    # checking the long spelling too would be a safety net that does not exist.
+    # `--force` is normalised to "f" by _LONG_SYNONYMS before this is reached,
+    # so the long spelling must NOT also be checked here: it never arrives.
     return "f" in flags
 
 
@@ -201,8 +202,7 @@ def _judge(tokens):
         "--" in flags or _is_forced(flags) or "--discard-changes" in flags
     ):
         # `-f` discards the whole working tree, exactly as `git reset --hard`
-        # does — the rule immediately above. Firing only on the literal `--`
-        # separator caught the rarer spelling and let the common one through.
+        # does — the rule immediately above.
         return Rule(
                         f"git {subcommand} with -f/-- overwrites the working tree with no backup",
             "git stash push <path>",
@@ -211,8 +211,7 @@ def _judge(tokens):
     if subcommand == "restore":
         # Decide on whether the WORKING TREE is targeted, not on a spelling.
         # `-S` is git's documented short form of `--staged`, and
-        # `--staged --worktree` restores both — so checking for the long flag
-        # alone was wrong in both directions at once.
+        # `--staged --worktree` restores both.
         staged_only = (
             ("--staged" in flags or "S" in flags)
             and "--worktree" not in flags

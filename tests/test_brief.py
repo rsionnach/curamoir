@@ -292,7 +292,7 @@ def test_the_brief_threshold_and_cadence_come_from_config(tmp_path):
     assert due_for_brief_from_config(repo) is True
 
 
-# --- provenance: behaviours whose fixes live only in a code comment --------
+# --- boundary behaviours whose only other record is a code comment --------
 
 def test_an_unrecognised_grade_does_not_masquerade_as_the_lowest(tmp_path):
     """brief.py's comment records the bug in full: ranking an unknown grade 9
