@@ -79,12 +79,24 @@ def main(argv=None, stdin=None, stdout=None):
         return 0
 
 
+# Exit statuses that mean the shell could not execute `dcg` at all, rather than
+# that `dcg` reached a verdict. Treating these as a refusal made a mis-installed
+# dcg deny `git status`, `git add -A` and `pytest -q` alike, with the message
+# "blocked by dcg" — a guard that blocks all work, which gets switched off.
+_COULD_NOT_RUN = (126, 127)
+
+
 def _delegate_to_dcg(command):
     """`dcg`'s verdict, or None to fall back to our own list.
 
     E0-R5: "If `dcg` is installed and `use_dcg_if_present` is true, delegate to
     it instead of duplicating the list." The switch reaching this hook is
     CURAMOIR_USE_DCG, not the config key directly — see the module docstring.
+
+    Delegation never WEAKENS the guard: a `dcg` that allows returns None, so
+    cúramóir's own tables still judge the command. `dcg` exists so we do not
+    maintain a second copy of the list, not so a permissive one can unlock
+    commands cúramóir refuses on its own account.
     """
     if os.environ.get("CURAMOIR_USE_DCG", "1") != "1":
         return None
@@ -96,7 +108,8 @@ def _delegate_to_dcg(command):
         )
     except (OSError, subprocess.SubprocessError):
         return None
-    if result.returncode == 0:
+    if result.returncode == 0 or result.returncode in _COULD_NOT_RUN:
+        # Allowed, or could not run. Either way, fall back to our own tables.
         return None
     from curamoir.hooks.denylist import Decision
 

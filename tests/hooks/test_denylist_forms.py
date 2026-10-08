@@ -15,7 +15,32 @@ import pytest
 
 from curamoir.hooks.denylist import decide
 
-# Every one of these destroys work with no recovery path. All must be denied.
+# PROVENANCE — read before adding to these tables.
+#
+# The cases below have three different sources, and a reader cannot tell which
+# is which from a single undifferentiated wall. Keeping them labelled matters
+# because the three carry different authority:
+#
+#   SPEC          docs/curamoir-spec.md:202 (E0-R5) enumerates exactly seven
+#                 families: git reset --hard, git checkout -- <file>,
+#                 git push --force, git clean -f, git branch -D,
+#                 git stash drop|clear, rm -rf. These are requirements.
+#   TOOL DOCS     the flag spellings are traceable to the tools themselves —
+#                 `git restore -h` gives "-S, --staged" and "-W, --worktree",
+#                 and `man 1 rm` gives "-R ... -r Equivalent to -R". These are
+#                 facts about the tools, checkable by anyone.
+#   EXTRAPOLATED  RULE_GAPS_MUST_DENY below has NO external source. It is this
+#                 author's round-3 reasoning from "equivalent destruction", and
+#                 it was added after three failed rewrites — so it is partly a
+#                 transcript of bugs already made rather than a specification.
+#                 The argument for each is stated, but nothing outside the code
+#                 justifies them.
+#
+# The external oracle E0-R5 names — `dcg` — is exercised separately in
+# tests/hooks/test_dcg_delegation.py. Every case in THIS file calls decide()
+# directly and so bypasses it.
+
+# SPEC + TOOL DOCS. Each destroys work with no recovery path.
 MUST_DENY = [
     # git reset --hard, in its spellings and behind git global options
     "git reset --hard",
@@ -221,6 +246,9 @@ def test_recursion_into_payloads_terminates():
 
 
 # --- round 3: rule-table gaps (each one line, independent of the parser) ---
+#
+# EXTRAPOLATED — no external source. See the provenance note at the top of this
+# file. Each entry states its equivalence argument; none is in the spec.
 
 RULE_GAPS_MUST_DENY = [
     # Discards the working tree exactly as `git reset --hard` does, and that is

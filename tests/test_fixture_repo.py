@@ -136,12 +136,48 @@ def test_breaking_the_quickstart_is_a_single_documented_edit(manifest):
 
 def test_a_fixed_grades_input_is_shipped_for_the_determinism_test():
     """E7's criterion: "given a fixed grades input fixture, the script produces
-    byte-identical output across runs and platforms"."""
-    grades_input = FIXTURE / "expected" / "grades-input.json"
+    byte-identical output across runs and platforms".
 
+    It lives under `input/`, not `expected/`. Filed as "expected" it invited the
+    next reader — reasonably — to treat it as an expected OUTPUT and "correct" it
+    to match whatever `curamoir-grade` emits, which would make E7-R1's
+    determinism test self-confirming.
+
+    The assertion was `assert payload["modules"]`, bare truthiness that passes
+    for `{"modules": {"x": {}}}`. It now checks the five factors E7-R1 names.
+    """
+    grades_input = FIXTURE / "input" / "grades-input.json"
     assert grades_input.is_file()
+    assert not (FIXTURE / "expected").exists(), "an input fixture is back under expected/"
+
     payload = json.loads(grades_input.read_text(encoding="utf-8"))
-    assert payload["modules"], "grades input names no modules"
+    modules = payload["modules"]
+    assert modules, "grades input names no modules"
+
+    # docs/curamoir-spec.md E7-R1: "open findings weighted by severity, open lint
+    # violations, sweep-fix density over the window, days since last review, and
+    # (if available) test pass state for the module".
+    required = ("open_findings", "open_violations", "sweep_fixes_in_window",
+                "days_since_review", "tests_passing")
+    for name, factors in modules.items():
+        for factor in required:
+            assert factor in factors, f"{name}: missing E7-R1 factor {factor!r}"
+        for finding in factors["open_findings"]:
+            assert finding["severity"] in ("P0", "P1", "P2", "P3"), finding
+
+
+def test_the_grades_input_names_the_modules_detection_actually_finds():
+    """A grades fixture naming modules that do not exist would let E7-R1 be
+    written against a shape the detector never produces."""
+    from curamoir.scaffold import detect_modules
+
+    payload = json.loads((FIXTURE / "input" / "grades-input.json").read_text(encoding="utf-8"))
+    detected = set(detect_modules(FIXTURE))
+
+    assert set(payload["modules"]) == detected, (
+        f"grades input names {sorted(payload['modules'])}, "
+        f"detection finds {sorted(detected)}"
+    )
 
 
 # --- beads (E8, E9) -------------------------------------------------------
@@ -179,3 +215,52 @@ def test_the_fixture_declares_a_test_command_that_passes(manifest):
         command, cwd=FIXTURE, shell=True, capture_output=True, text=True, timeout=120,
     )
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+# --- provenance: every planted violation must name a DEFINED principle ----
+
+def test_every_planted_principle_id_resolves_to_a_defined_principle(manifest):
+    """Until the fixture defined these, the ids resolved to nothing: the
+    manifest asserted a reading of three rules that were named in the spec's
+    example list but never defined anywhere.
+
+    The consequence was directional. When E2-R2 authors the real starter set,
+    the pressure would run the wrong way — the rule written to match the
+    fixture rather than the fixture checked against the rule — and E3's
+    acceptance criterion would then be self-confirming."""
+    principles = (FIXTURE / ".curamoir" / "principles.md").read_text(encoding="utf-8")
+    defined = {
+        line.split("`")[1]
+        for line in principles.splitlines()
+        if line.strip().startswith("- **id:**") and "`" in line
+    }
+
+    assert defined, "the fixture defines no principles at all"
+    for violation in manifest["violations"]:
+        assert violation["principle_id"] in defined, (
+            f"{violation['principle_id']!r} is tagged on a planted violation but "
+            f"is not defined. Defined: {sorted(defined)}"
+        )
+
+
+def test_each_defined_principle_carries_every_field_E2_R1_requires(manifest):
+    """E2-R1 fixes the structure: id, title, rule, why, good, bad, tier,
+    promoted_on. A fixture principle missing a field would let E2-R1's parser
+    be written against an incomplete shape."""
+    text = (FIXTURE / ".curamoir" / "principles.md").read_text(encoding="utf-8")
+    sections = text.split("\n## ")[1:]
+
+    assert len(sections) == 3, f"expected three principles, found {len(sections)}"
+    for section in sections:
+        name = section.splitlines()[0]
+        for field in ("id", "title", "rule", "why", "good", "bad", "tier", "promoted_on"):
+            assert f"**{field}:**" in section, f"{name}: missing {field!r}"
+
+
+def test_each_principle_cites_where_its_concept_came_from(manifest):
+    """So a later reader can tell a spec-derived concept from an invented one."""
+    text = (FIXTURE / ".curamoir" / "principles.md").read_text(encoding="utf-8")
+
+    for section in text.split("\n## ")[1:]:
+        assert "**source:**" in section, section.splitlines()[0]
+        assert "curamoir-spec.md" in section, section.splitlines()[0]

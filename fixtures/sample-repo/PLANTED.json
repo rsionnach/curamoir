@@ -75,7 +75,7 @@
     "needed_by": "E8-R1 handoff must name an in-progress bead (smp-001); E9-R2 section 6 must choose a ready bead estimated at <=90 minutes (smp-002, smp-003, smp-005) and reject smp-004 at 240 minutes"
   },
   "grades_input": {
-    "path": "expected/grades-input.json",
+    "path": "input/grades-input.json",
     "needed_by": "E7-R1: byte-identical output across runs and platforms"
   }
 }
