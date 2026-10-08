@@ -97,3 +97,21 @@ def test_malformed_input_does_not_crash_the_hook():
     )
 
     assert result.returncode == 0, result.stderr
+
+
+def test_the_hook_applies_the_allowlist_not_only_the_denylist():
+    """DEC-9. The three holes three denylist rewrites could not close must be
+    refused through the real hook, not merely in the policy unit tests."""
+    for command in ("bash -lc 'rm -rf /'", "echo $(rm -rf $(pwd))", "cat <(rm -rf /tmp/x)"):
+        result, decision = run_hook(command, env={"CURAMOIR_JOB": "sweep"})
+        assert result.returncode == 0, result.stderr
+        assert decision is not None, f"NOT REFUSED THROUGH THE HOOK: {command}"
+        assert decision["permissionDecision"] == "deny"
+
+
+def test_the_hook_still_lets_a_job_do_its_work():
+    for command in ("git status --porcelain", "git add -A", "pytest -q",
+                    "bd list --json", "gh pr create --title x --body y"):
+        result, decision = run_hook(command, env={"CURAMOIR_JOB": "sweep"})
+        assert result.returncode == 0, result.stderr
+        assert decision is None, f"WRONGLY REFUSED THROUGH THE HOOK: {command}"

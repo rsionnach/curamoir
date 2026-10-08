@@ -11,6 +11,11 @@ Two properties matter more than the logic:
 - **It is fast.** It runs on every Bash call during a job. No imports beyond the
   standard library, no network, no model.
 
+Judges commands with the two-pass policy of DEC-9 (see policy.py): an allowlist
+of what cúramóir's jobs legitimately do, then the denylist as a second pass over
+the same string. Three denylist-only rewrites each shipped a hole, because a
+denylist must understand every way a command can be written.
+
 Delegates to `dcg` when that is installed and not switched off, rather than
 keeping a second copy of the denylist (E0-R5).
 
@@ -30,7 +35,8 @@ import subprocess
 import sys
 from pathlib import Path
 
-from curamoir.hooks.denylist import decide, in_curamoir_job
+from curamoir.hooks.denylist import in_curamoir_job
+from curamoir.hooks.policy import judge_command
 
 
 def main(argv=None, stdin=None, stdout=None):
@@ -53,7 +59,7 @@ def main(argv=None, stdin=None, stdout=None):
             return 0
 
         delegated = _delegate_to_dcg(command)
-        decision = delegated if delegated is not None else decide(command, in_job=True)
+        decision = delegated if delegated is not None else judge_command(command, in_job=True)
 
         if decision.deny:
             json.dump(
