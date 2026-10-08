@@ -11,6 +11,7 @@ G4 is "make the cost of doing this visible and capped". This module is the
 
 from datetime import datetime, timezone
 
+from curamoir.guards.context import unusable_repo
 from curamoir.guards.reasons import Reason
 from curamoir.guards.result import Degraded, Refusal
 from curamoir.ledger import Ledger, parse_ledger_timestamp
@@ -119,11 +120,12 @@ class Budget:
         self._now = now or (lambda: datetime.now(timezone.utc))
 
     def __call__(self, context):
-        if context.repo is None:
+        unusable = unusable_repo(context)
+        if unusable is not None:
             return Degraded(
                 reason=Reason.BUDGET,
                 message=(
-                    "the repo root is unknown, so the spend ceiling did NOT run. "
+                    f"{unusable}, so the spend ceiling did NOT run. "
                     "Resolve the repository root before attempting the job."
                 ),
             )

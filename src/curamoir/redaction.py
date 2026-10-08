@@ -103,6 +103,25 @@ def redact(text):
     return text
 
 
+def _sweep_stale_temporaries(target):
+    """Remove `<target>.<pid>.tmp` files no live process is writing.
+
+    A process killed between opening the temp and renaming it cannot clean up
+    after itself, and `.curamoir/` is committed — so without this, every killed
+    hook leaves one stray in the repository forever.
+    """
+    for stale in target.parent.glob(f"{target.name}.*.tmp"):
+        middle = stale.name[len(target.name) + 1:-len(".tmp")]
+        if not middle.isdigit() or int(middle) == os.getpid():
+            continue
+        try:
+            os.kill(int(middle), 0)
+        except ProcessLookupError:
+            stale.unlink(missing_ok=True)   # its writer is gone
+        except OSError:
+            continue                        # alive, or not ours to judge
+
+
 def write_artefact(path, text, encoding="utf-8"):
     """Write one of cúramóir's generated artefacts, redacted.
 
@@ -118,8 +137,14 @@ def write_artefact(path, text, encoding="utf-8"):
     `os.replace` is atomic within a directory, so a reader sees the old complete
     artefact or the new one and never a partial one.
     """
+    # Redacted BEFORE the file is opened. The regex pass is the slow part — a
+    # 10 MB artefact takes 5.6s — and running it inside the `with` held the
+    # temp file open for all of it, so a hook killed at its timeout left a
+    # stray behind. `except OSError` cannot clean up after SIGKILL.
+    redacted = redact(text)
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
+    _sweep_stale_temporaries(target)
     # Beside the target, not in /tmp: `os.replace` is only atomic within one
     # filesystem, and a repo on an external volume would otherwise degrade to a
     # copy — the very non-atomic write this exists to avoid.
@@ -132,7 +157,7 @@ def write_artefact(path, text, encoding="utf-8"):
     scratch = target.with_name(f"{target.name}.{os.getpid()}.tmp")
     try:
         with scratch.open("w", encoding=encoding) as handle:
-            handle.write(redact(text))
+            handle.write(redacted)
             handle.flush()
             # The rename is atomic, but without the fsync the CONTENT may still
             # be in flight: a crash can leave a present, empty, renamed file.

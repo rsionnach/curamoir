@@ -7,6 +7,7 @@ This is the first check in `curamoir run <job>` (E10-R1), before the lock is
 acquired, so a paused repo never takes a lock it will not use.
 """
 
+from curamoir.guards.context import unusable_repo
 from curamoir.guards.reasons import Reason
 from curamoir.guards.result import Degraded, Refusal
 
@@ -27,11 +28,12 @@ class KillSwitch:
         self._repo_labels = repo_labels
 
     def __call__(self, context):
-        if context.repo is None:
+        unusable = unusable_repo(context)
+        if unusable is not None:
             return Degraded(
                 reason=Reason.PAUSED,
                 message=(
-                    "the repo root is unknown, so the PAUSE check did NOT run. "
+                    f"{unusable}, so the PAUSE check did NOT run. "
                     "Resolve the repository root before attempting the job."
                 ),
             )

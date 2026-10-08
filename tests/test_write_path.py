@@ -209,3 +209,30 @@ def test_two_concurrent_writers_do_not_destroy_each_others_write(tmp_path):
     assert len(tags) == 1, f"two writers' content in one file: {tags}"
     assert body.splitlines()[0].split()[1] in tags, "header and body disagree"
     assert not list(tmp_path.glob("*.tmp")), "a temp file was left behind"
+
+
+def test_a_temp_file_from_a_dead_writer_is_swept_up(tmp_path):
+    """A process killed between opening the temp and renaming it cannot clean up
+    after itself, and `.curamoir/` is committed — so without a sweep every
+    killed hook leaves one stray in the repository forever."""
+    target = tmp_path / "latest.md"
+    write_artefact(target, "# first\n")
+    # pid 1 exists; a pid that cannot exist stands in for a dead writer.
+    dead = tmp_path / f"{target.name}.999999.tmp"
+    dead.write_text("half-written\n", encoding="utf-8")
+
+    write_artefact(target, "# second\n")
+
+    assert not dead.exists(), "a stray temp from a dead writer was left behind"
+    assert target.read_text(encoding="utf-8") == "# second\n"
+
+
+def test_a_temp_file_belonging_to_a_live_writer_is_left_alone(tmp_path):
+    """Sweeping another live process's temp would corrupt its write."""
+    target = tmp_path / "latest.md"
+    live = tmp_path / f"{target.name}.1.tmp"   # pid 1 is always running
+    live.write_text("in flight\n", encoding="utf-8")
+
+    write_artefact(target, "# mine\n")
+
+    assert live.exists(), "swept a temp belonging to a running process"

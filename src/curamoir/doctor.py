@@ -69,7 +69,8 @@ def diagnose(repo, tools=None):
     findings.extend(_check_hooks(repo))
     findings.append(_check_job_detection())
     findings.append(_check_writable(base))
-    findings.extend(_check_tools(tools))
+    findings.append(_check_gitignore(base))
+    findings.extend(_check_tools(tools, repo=repo))
 
     return sorted(findings, key=lambda f: LEVEL_ORDER[f.level])
 
@@ -405,6 +406,38 @@ def _check_writable(base):
     return Finding("writable state", "ok", "handoff, state and briefs are writable")
 
 
+def _check_gitignore(base):
+    """Whether machine-local state is kept out of git.
+
+    `init` writes this file, but `init_repo` refuses an existing `.curamoir/` —
+    so no repo initialised before the file existed will ever get one, and the
+    journal holds verbatim session text. doctor is the only thing that sees
+    those repos again.
+    """
+    ignore = base / ".gitignore"
+    if not ignore.is_file():
+        return Finding(
+            "gitignore", "warning",
+            ".curamoir/.gitignore is missing, so the journal (verbatim session "
+            "text) and the lock (a pid) would be committed",
+            fix=(
+                "Create .curamoir/.gitignore with: handoff/journal.jsonl, "
+                "state/lock, curamoir.yaml.new, *.tmp"
+            ),
+        )
+    missing = [
+        pattern for pattern in ("handoff/journal.jsonl", "state/lock")
+        if pattern not in ignore.read_text(encoding="utf-8", errors="replace")
+    ]
+    if missing:
+        return Finding(
+            "gitignore", "warning",
+            ".curamoir/.gitignore does not cover " + ", ".join(missing),
+            fix="Add those patterns to .curamoir/.gitignore.",
+        )
+    return Finding("gitignore", "ok", "machine-local state is not committed")
+
+
 def _can_create_a_file_in(directory):
     """Whether a file can actually be created in `directory`.
 
@@ -412,14 +445,18 @@ def _can_create_a_file_in(directory):
     root and on ACL-governed or read-only-mounted volumes. doctor's own
     principle is that only behaviour proves behaviour, so this writes.
     """
-    probe = directory / ".curamoir-write-probe"
+    # A UNIQUE name via mkstemp, not a fixed one. With a fixed name a leftover
+    # probe — from a doctor killed between create and unlink, or arriving
+    # through `git pull`, since `.curamoir/` is committed — made
+    # FileExistsError (an OSError) read as "cannot write", permanently, with a
+    # fix the developer cannot act on because the permissions are fine.
     try:
-        with open(probe, "x"):
-            pass
-        probe.unlink()
-        return True
+        handle, probe = tempfile.mkstemp(dir=directory, prefix=".curamoir-write-probe")
     except OSError:
         return False
+    os.close(handle)
+    os.unlink(probe)
+    return True
 
 
 def _check_job_detection():
@@ -473,8 +510,16 @@ MINIMUM_PYTHON = (3, 12)
 _BD_PROBE_SECONDS = 5
 
 
-def _probe_bd(level, fix):
-    """`bd`'s health, by asking it something cheap and real."""
+def _probe_bd(level, fix, repo=None):
+    """`bd`'s health, by asking it something cheap and real.
+
+    Only when the repo HAS a beads database. `filing.beads: auto` explicitly
+    supports a repo that does not use beads, and in one `bd ready` exits
+    non-zero with "no beads database found" — which this reported as a fault,
+    with Dolt advice that cannot help. That is the failure this module's own
+    docstring warns against: "reporting either as a failure teaches the
+    developer to ignore the output".
+    """
     path = shutil.which("bd")
     if path is None:
         return Finding(
@@ -482,10 +527,15 @@ def _probe_bd(level, fix):
             "beads filing unavailable; findings will be GitHub-only with a ledger note",
             fix=fix,
         )
+    if repo is not None and not (Path(repo) / ".beads").exists():
+        return Finding("bd", "ok", "available (this repo has no beads database)")
     try:
         result = subprocess.run(
             [path, "ready", "--json"], capture_output=True, text=True,
             timeout=_BD_PROBE_SECONDS, stdin=subprocess.DEVNULL,
+            # cwd=repo, or `/curamoir:doctor --repo /other` probes bd against
+            # whatever directory the doctor process happens to be in.
+            cwd=str(repo) if repo is not None else None,
         )
     except (OSError, subprocess.SubprocessError):
         return Finding("bd", level, "present but did not respond", fix=fix)
@@ -531,7 +581,7 @@ def _probe_python(resolved, level, detail, fix):
     return Finding("python3", "ok", f"available ({reported})")
 
 
-def _check_tools(tools):
+def _check_tools(tools, repo=None):
     specs = (
         ("bd", "warning",
          "beads filing unavailable; findings will be GitHub-only with a ledger note",
@@ -554,7 +604,7 @@ def _check_tools(tools):
             # and its documented failure mode is "installed, but the Dolt
             # server is not reachable" — in which case the handoff and the
             # brief read a stale export while doctor calls the setup fine.
-            findings.append(_probe_bd(level, fix))
+            findings.append(_probe_bd(level, fix, repo=repo))
             continue
         if available is None and name == "python3":
             resolved = shutil.which("python3") or shutil.which("python")

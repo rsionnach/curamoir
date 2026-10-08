@@ -15,6 +15,7 @@ import os
 import socket
 from datetime import datetime, timezone
 
+from curamoir.guards.context import unusable_repo
 from curamoir.guards.reasons import Reason
 from curamoir.guards.result import Degraded, Refusal
 
@@ -38,11 +39,12 @@ class SupervisorLock:
         return socket.gethostname()
 
     def __call__(self, context):
-        if context.repo is None:
+        unusable = unusable_repo(context)
+        if unusable is not None:
             return Degraded(
                 reason=Reason.LOCKED,
                 message=(
-                    "the repo root is unknown, so the supervisor-lock check did NOT run. "
+                    f"{unusable}, so the supervisor-lock check did NOT run. "
                     "Resolve the repository root before attempting the job."
                 ),
             )

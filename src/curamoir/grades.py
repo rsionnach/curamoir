@@ -24,5 +24,16 @@ def graded_modules(grades):
         return {}
     return {
         name: entry for name, entry in modules.items()
-        if isinstance(name, str) and isinstance(entry, dict)
+        if isinstance(name, str) and isinstance(entry, dict) and _scalar_grade(entry)
     }
+
+
+def _scalar_grade(entry):
+    """Whether `entry`'s grade is something a ranking can look up.
+
+    `_lowest_graded` does `ranking.get(grade, -1)`, and `dict.get` RAISES on an
+    unhashable key — so `{"grade": ["B"]}` crashed the brief while status, which
+    only formats, survived. A grade that is not a string is not a grade.
+    """
+    grade = entry.get("grade")
+    return grade is None or isinstance(grade, str)

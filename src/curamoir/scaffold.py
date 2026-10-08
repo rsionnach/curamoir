@@ -97,6 +97,8 @@ GITIGNORE = """\
 handoff/journal.jsonl
 state/lock
 curamoir.yaml.new
+# A writer killed mid-write leaves one of these; it is never content.
+*.tmp
 """
 
 

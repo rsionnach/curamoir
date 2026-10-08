@@ -35,7 +35,6 @@ ALLOWED = [
     "git push --force-with-lease",
     "git branch -d merged-branch",
     "git clean -n",
-    "git checkout feature/x",
     "rm build/artifact.txt",
     "pytest -q",
 ]

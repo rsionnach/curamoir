@@ -24,3 +24,41 @@ class JobContext:
 
     job: str
     repo: Optional[Path]
+
+
+def unusable_repo(context):
+    """Why `context.repo` cannot be inspected, or None if it can.
+
+    One predicate, so that the four repo-reading guards cannot disagree about
+    what counts as a repository. Each used to test `repo is None` and nothing
+    else, which answered one value of a question with several wrong answers:
+
+    - a path that no longer exists, or that is a regular file, is what an
+      unattended scheduled job meets when a repo is moved or deleted between
+      being scheduled and being run;
+    - `Path("")` resolves to the CURRENT WORKING DIRECTORY, which is what
+      `Path(os.environ.get("REPO_ROOT", ""))` yields from an unset variable. The
+      kill switch then reported "not paused" after looking for
+      `./.curamoir/PAUSE` wherever the process happened to be.
+
+    Each of those produced a clean, unrecorded pass — the outcome `Degraded`
+    exists to prevent.
+
+    The `Path("")` case is NOT caught here, and cannot be: pathlib normalises
+    it to `.` before any guard sees it, so by this point an unset variable is
+    indistinguishable from a deliberate `--repo .`. I tried requiring
+    `.curamoir/` to catch it and withdrew the change — it is not an honest
+    precondition for all four guards, because `DefaultBranchGuard` reads git and
+    the kill switch's label path reads a remote, so it refused seven legitimate
+    cases to catch one illegitimate one.
+
+    The place to catch an empty root is where the root is RESOLVED, which is the
+    runner (E10) — and `JobContext`'s own docstring already states the rule: a
+    caller that cannot resolve the repo must fail closed itself. Recorded on
+    bead cm-7ck so the runner's own validation is not left to be rediscovered.
+    """
+    if context.repo is None:
+        return "the repo root is unknown"
+    if not Path(context.repo).is_dir():
+        return f"{context.repo} is not a directory"
+    return None

@@ -48,6 +48,13 @@ DEFAULT_KEEP_HISTORY = 10
 MAX_LISTED_CHANGES = 12
 MAX_LISTED_BEADS = 6
 UNAVAILABLE = "unavailable"
+#: `_next_step`'s fallback when there is nothing to resume. Named, because
+#: `is_informative` has to be able to tell it from a real next step, and
+#: comparing against a prose literal spelled out in two places would drift.
+NO_THREAD_TO_PICK_UP = (
+    "Nothing was claimed, so there is no obvious thread to pick up. "
+    "`/curamoir:brief` will suggest a first task."
+)
 
 
 def build_handoff(repo, deadline_seconds=None):
@@ -63,25 +70,30 @@ def build_handoff(repo, deadline_seconds=None):
     """
     repo = Path(repo)
     deadline = _Deadline(deadline_seconds)
-    in_progress = _in_progress_beads(repo)
+    # Read ONCE and shared. `_last_decision` and `_next_step` each used to parse
+    # the whole journal, which only ever grows: at 161 MB that was two passes
+    # inside a 1.5s budget. The deadline reaches the file readers too, because
+    # bounding only the git calls bounds only half the work.
+    journal = _journal(repo, deadline=deadline)
+    in_progress = _in_progress_beads(repo, deadline=deadline)
     return {
         "at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "branch": _branch(repo, deadline=deadline),
         "uncommitted": _uncommitted(repo, deadline=deadline),
         "in_progress": in_progress,
-        "last_decision": _last_decision(repo),
-        "next_step": _next_step(repo, in_progress),
+        "last_decision": _last_decision(journal),
+        "next_step": _next_step(journal, in_progress),
         "note": None,
     }
 
 
-def _last_decision(repo):
+def _last_decision(journal):
     """The most recent journal note, bounded.
 
     Free: the Stop hook hands us `last_assistant_message` each turn, so this
     needs no model call and no transcript parsing.
     """
-    notes = [entry["note"] for entry in _journal(repo) if entry.get("note")]
+    notes = [entry["note"] for entry in journal if entry.get("note")]
     return _first_sentences(notes[-1], MAX_DECISION_SENTENCES) if notes else ""
 
 
@@ -160,12 +172,23 @@ def render_handoff(handoff):
     # Intended next step first, deliberately. It is the most actionable field in
     # the file, so it must not be the one truncation discards.
     if handoff["next_step"]:
-        lines += ["", "## Intended next step", "", handoff["next_step"]]
+        # Bounded like the note. `_bounded` lets 2,000 characters into the
+        # journal and `_next_step` returns them verbatim, so an unbounded next
+        # step hit `_cap_words`' per-line skip: the short heading survived and
+        # its body did not, leaving a handoff that claimed to state a next step
+        # and stated nothing — while "Last decision" rendered in full below it.
+        lines += ["", "## Intended next step", "",
+                  _first_sentences(handoff["next_step"], MAX_NOTE_SENTENCES,
+                                   word_limit=MAX_NOTE_WORDS)]
     if handoff["last_decision"]:
         lines += ["", "## Last decision", "", handoff["last_decision"]]
 
-    rendered = "\n".join(lines)
-    return _cap_words(rendered, WORD_LIMIT)
+    rendered = _cap_words("\n".join(lines), WORD_LIMIT)
+    if not is_informative(handoff):
+        # Appended after capping: the marker is what `_file_is_informative`
+        # reads next session, so truncation must not be able to drop it.
+        rendered += "\n\n" + _CONTENT_FREE_MARKER
+    return rendered
 
 
 def write_handoff(repo, keep_history=None, note=None, next_step=None,
@@ -203,7 +226,7 @@ def write_handoff(repo, keep_history=None, note=None, next_step=None,
 
     try:
         history.mkdir(parents=True, exist_ok=True)
-        if latest.is_file() and _is_informative(latest):
+        if latest.is_file() and _file_is_informative(latest):
             _archive(latest, history)
         _prune(history, keep_history)
     except OSError:
@@ -222,24 +245,48 @@ def write_handoff(repo, keep_history=None, note=None, next_step=None,
         return None
 
 
-def _is_informative(latest):
-    """Whether `latest` says anything worth keeping a copy of.
+def is_informative(handoff):
+    """Whether this handoff says anything worth keeping a copy of.
 
-    With git unavailable — off PATH, a hung git, a non-git directory — every
-    handoff renders the same content-free shape: branch unavailable,
-    uncommitted unavailable, nothing claimed. Archiving those pruned the last
-    REAL handoff out of history within ten writes, which is a handful of
-    sessions. A handoff with no note and no git state is still written to
-    latest.md, because it is the current state; it just does not displace
-    something better.
+    Judged on the DATA, because judging the rendered prose does not work: the
+    first version of this tested the markdown for `## Intended next step`, and
+    `_next_step` always returns something, so the gate returned True for the
+    very handoff it was written to reject and the eviction it was meant to stop
+    went on happening. (`"> "` was a false positive on its own too — a renamed
+    file renders as `old.py -> new.py`.)
+
+    A handoff is informative if the developer wrote a note, or git told us
+    anything, or a bead is claimed, or the next step is a real one rather than
+    the "nothing was claimed" fallback.
     """
+    if handoff.get("note"):
+        return True
+    if handoff.get("in_progress"):
+        return True
+    if handoff.get("branch") not in (None, "", UNAVAILABLE):
+        return True
+    if handoff.get("uncommitted") not in (None, UNAVAILABLE):
+        return True
+    if handoff.get("last_decision"):
+        return True
+    return handoff.get("next_step") not in (None, "", NO_THREAD_TO_PICK_UP)
+
+
+#: The marker line that records `is_informative`'s verdict IN the file, so that
+#: archiving a handoff written by an earlier session does not require parsing
+#: its prose back into data. Rendered as an HTML comment: invisible when the
+#: markdown is read, and unambiguous when it is matched.
+_CONTENT_FREE_MARKER = "<!-- curamoir: content-free -->"
+
+
+def _file_is_informative(latest):
+    """Whether the handoff ALREADY on disk is worth archiving."""
     try:
-        body = latest.read_text(encoding="utf-8", errors="replace")
+        return _CONTENT_FREE_MARKER not in latest.read_text(
+            encoding="utf-8", errors="replace"
+        )
     except OSError:
         return False
-    if "> " in body or "## Intended next step" in body or "## Last decision" in body:
-        return True
-    return UNAVAILABLE not in body
 
 
 def _archive(latest, history):
@@ -379,14 +426,14 @@ def _describe_porcelain(line):
     return f"{description}: {path or line.strip()}"
 
 
-def _in_progress_beads(repo):
+def _in_progress_beads(repo, deadline=None):
     """In-progress beads, read from the JSONL export rather than by calling bd.
 
     Calling `bd` from a per-turn hook would be slow and could contend with the
     Dolt server the developer's own session is using.
     """
     path = repo / ".beads" / "issues.jsonl"
-    if not path.is_file():
+    if not path.is_file() or (deadline and deadline.remaining() <= 0):
         return []
     beads = []
     try:
@@ -401,7 +448,7 @@ def _in_progress_beads(repo):
     return beads
 
 
-def _next_step(repo, in_progress):
+def _next_step(journal, in_progress):
     """The intended next step — one of E8-R1's six required contents.
 
     Resolution order, most authoritative first:
@@ -415,7 +462,7 @@ def _next_step(repo, in_progress):
     required field no code path can produce is indistinguishable, to the reader,
     from an absent one.
     """
-    for entry in reversed(_journal(repo)):
+    for entry in reversed(journal):
         if entry.get("next_step"):
             return entry["next_step"]
 
@@ -424,15 +471,12 @@ def _next_step(repo, in_progress):
         more = f" (and {len(in_progress) - 1} other claimed bead(s))" if len(in_progress) > 1 else ""
         return f"Resume {first['id']}: {first['title']}{more}."
 
-    return (
-        "Nothing was claimed, so there is no obvious thread to pick up. "
-        "`/curamoir:brief` will suggest a first task."
-    )
+    return NO_THREAD_TO_PICK_UP
 
 
-def _journal(repo):
+def _journal(repo, deadline=None):
     path = repo / ".curamoir" / "handoff" / "journal.jsonl"
-    if not path.is_file():
+    if not path.is_file() or (deadline and deadline.remaining() <= 0):
         return []
     entries = []
     try:
@@ -480,8 +524,29 @@ def _cap_words(text, limit):
             continue
         kept.append(line)
         used += count
+    kept = _without_empty_headings(kept)
     kept += ["", f"_Truncated at {limit} words. Full state: `/curamoir:status`._"]
     return "\n".join(kept)
+
+
+def _without_empty_headings(lines):
+    """`lines` with any heading whose body was skipped removed.
+
+    Skipping an over-long line rather than stopping at it keeps the short
+    structural fields, which is the point — but it can leave a `## Intended
+    next step` with nothing under it. A heading that promises the most
+    actionable field in the file and delivers nothing is worse than no heading.
+    """
+    kept = []
+    for index, line in enumerate(lines):
+        if line.startswith("##"):
+            body = [later for later in lines[index + 1:] if later.strip()]
+            if not body or body[0].startswith("##"):
+                continue
+        kept.append(line)
+    while kept and not kept[-1].strip():
+        kept.pop()
+    return kept
 
 
 class _Deadline:

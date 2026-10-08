@@ -12,11 +12,19 @@ and a write.
 import sys
 
 from curamoir.handoff import write_handoff
+
+#: Inside the 1.5s SessionEnd hooks share, with room to write the file.
+SESSION_END_BUDGET_SECONDS = 1.2
 from curamoir.hooks._entry import run
 
 
 def _handle(_payload, repo):
-    write_handoff(repo)
+    # SessionEnd hooks SHARE a 1.5s budget, and hooks.json allows this one 2s.
+    # `build_handoff`'s git calls are 5s each by default, so without a deadline
+    # the hook was killed before writing anything — losing the handoff on
+    # exactly the session most worth having one for. Measured at 12.1s with a
+    # slow git; the deadline is what makes the declared budget real.
+    write_handoff(repo, deadline_seconds=SESSION_END_BUDGET_SECONDS)
 
 
 def main():

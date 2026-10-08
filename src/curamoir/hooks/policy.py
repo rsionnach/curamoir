@@ -33,6 +33,7 @@ from curamoir.hooks._shell import (
     lex,
     segments,
     strip_redirections,
+    unquoted,
 )
 from curamoir.hooks.destructive import judge_destructive
 from curamoir.hooks.verdict import Category, Decision
@@ -171,8 +172,11 @@ def _strip_heredoc_bodies(tokens):
 def _unverifiable(tokens):
     """The construction in `tokens` whose effect cannot be read, if any.
 
-    Checked per token rather than over the raw string, so that a `$` inside a
-    quoted message is the literal character it is and not a variable reference.
+    `tokens` must come from `unquoted`, not from `lex`: posix lexing strips the
+    quotes, so a single-quoted `$HOME` or `'(WIP|TODO)'` — literal text to the
+    shell — is indistinguishable from the real thing and was refused. The
+    docstring here used to claim that per-token checking solved that; it did
+    not, because the quoting was already gone by then.
     """
     for token in tokens:
         for pattern, description in _UNVERIFIABLE:
@@ -181,8 +185,49 @@ def _unverifiable(tokens):
     return None
 
 
-#: Arguments that hand a shell code to run instead of naming a script to run.
+#: Arguments that hand a program its own text to run, rather than naming a file
+#: that someone reviewed.
 _INLINE_INPUT = frozenset({"<<", "<<-", "<<<", "-s", "/dev/stdin", "-"})
+
+#: Options whose VALUE is program text rather than data. A shell is not the only
+#: program that will run what it is handed on stdin: `make -f -` reads a
+#: makefile whose recipes are shell, `docker build -f -` a Dockerfile whose RUN
+#: lines are shell, `pip install -r /dev/stdin` a requirements file. Testing
+#: `_INLINE_INPUT` only inside the SHELLS branch left every one of those open —
+#: the same hole as `bash <<EOF`, through a different door.
+#:
+#: This is NOT the "`make` runs repo-controlled code, which is an accepted
+#: trade" case: that trade is about a committed Makefile. Text composed at call
+#: time is the line this module draws.
+_PROGRAM_TEXT_OPTIONS = frozenset({
+    "-f", "--file", "--makefile", "-r", "--requirement", "-c", "--config",
+})
+
+
+def _inline_program_text(program, arguments):
+    """A refusal if `arguments` hand `program` text to run, else None."""
+    for index, argument in enumerate(arguments):
+        if argument not in _PROGRAM_TEXT_OPTIONS:
+            continue
+        following = arguments[index + 1] if index + 1 < len(arguments) else None
+        if following in _INLINE_INPUT:
+            return (
+                Category.UNVERIFIABLE,
+                f"{program!r} is being handed its {argument} from stdin, so the "
+                "guard cannot read what it would run. Put it in a committed "
+                "file and name that file instead",
+            )
+    # A heredoc anywhere alongside a program-text option is the same thing
+    # spelled differently: `make -f - <<EOF` and `make -f /dev/stdin` both run
+    # the body. The heredoc operator survives `_strip_heredoc_bodies` precisely
+    # so it can be seen here.
+    if HEREDOCS.intersection(arguments) and _PROGRAM_TEXT_OPTIONS.intersection(arguments):
+        return (
+            Category.UNVERIFIABLE,
+            f"{program!r} is being handed program text in a heredoc, which the "
+            "guard cannot verify. Put it in a committed file and run that",
+        )
+    return None
 
 
 def _inline_code(program):
@@ -211,6 +256,10 @@ def _refusal_for(tokens):
 
     program = tokens[0].strip("\"'").rsplit("/", 1)[-1]
     arguments = tokens[1:]
+
+    fed_inline = _inline_program_text(program, arguments)
+    if fed_inline is not None:
+        return fed_inline
 
     if program in SHELLS:
         # A committed SCRIPT may run; inline code may not.
@@ -350,29 +399,36 @@ def judge_command(command, in_job):
             category=Category.UNVERIFIABLE,
         )
 
-    for segment in segments(tokens):
-        # Asked BEFORE the redirections are stripped. A process substitution
-        # lexes as a `<` operator followed by `(rm`, so stripping first would
-        # drop both and leave `cat -rf /tmp/x` looking allowlisted.
-        reason = _unverifiable(segment)
-        if reason is None:
-            segment = strip_redirections(segment)
-            if not segment:
-                continue
+    # Asked once, over the whole command, and over the UNQUOTED tokens so that
+    # shell syntax inside single quotes is the literal text it is. Not inside
+    # the segment loop: the question is "does any token contain a construction
+    # the guard cannot read", which does not depend on where commands divide —
+    # and keeping two differently-lexed token lists in step across heredoc
+    # stripping and segmentation would be a seam with nothing holding it.
+    #
+    # Before redirections are stripped, too: a process substitution lexes as a
+    # `<` operator followed by `(rm`, so stripping first would drop both and
+    # leave `cat -rf /tmp/x` looking allowlisted.
+    bare = unquoted(command)
+    reason = _unverifiable(bare if bare is not None else tokens)
+    if reason is not None:
+        return Decision(
+            deny=True,
+            reason=(
+                f"blocked by cúramóir: this command contains {reason}, so the "
+                "guard cannot verify what it would run. Refused for that "
+                "reason rather than because it is known to be destructive. "
+                "Rewrite it without substitution, or run the inner command "
+                "directly."
+            ),
+            alternative="run the inner command directly",
+            category=Category.UNVERIFIABLE,
+        )
 
-        if reason is not None:
-            return Decision(
-                deny=True,
-                reason=(
-                    f"blocked by cúramóir: this command contains {reason}, so the "
-                    "guard cannot verify what it would run. Refused for that "
-                    "reason rather than because it is known to be destructive. "
-                    "Rewrite it without substitution, or run the inner command "
-                    "directly."
-                ),
-                alternative="run the inner command directly",
-                category=Category.UNVERIFIABLE,
-            )
+    for segment in segments(tokens):
+        segment = strip_redirections(segment)
+        if not segment:
+            continue
 
         refusal = _refusal_for(segment)
         if refusal is not None:

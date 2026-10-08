@@ -64,6 +64,13 @@ def build_context(repo, token_budget=DEFAULT_TOKEN_BUDGET):
     if not parts:
         return None
 
+    # NOT floored here, deliberately, though `token_budget_for` floors what the
+    # config can supply. A tiny budget here produces a short, ugly fragment —
+    # and the final clamp in `_assemble` is the only thing enforcing the limit
+    # at that size, which `test_the_assembled_context_never_exceeds_the_budget`
+    # pins by passing budgets of 5, 10 and 20. Flooring here would make that
+    # clamp unreachable and the test unable to kill its mutant, trading a real
+    # guarantee for a defence against a caller that does not exist.
     budget = min(token_budget * CHARS_PER_TOKEN, HARD_CHARACTER_LIMIT)
     return _assemble(parts, budget)
 

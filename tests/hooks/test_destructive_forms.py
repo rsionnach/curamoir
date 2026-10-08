@@ -113,8 +113,7 @@ MUST_ALLOW = [
     "git clean -n",
     "git clean --dry-run",
     "git clean -nd",
-    "git checkout feature/x",
-    "git checkout -b feature/y",
+    "git checkout -b feature/y",   # creating a branch loses nothing
     "git restore --staged src/app.py",
     "git reset",
     "git reset --soft HEAD~1",
@@ -279,7 +278,6 @@ RULE_GAPS_MUST_ALLOW = [
     # no working-tree content, so the two spellings must agree.
     "git restore -S src/app.py",
     "git restore --staged src/app.py",
-    "git checkout main",
     "git switch main",
     "git push origin main",
     "git gc",

@@ -82,23 +82,81 @@ def test_write_handoff_returns_inside_the_session_end_budget(tmp_path, monkeypat
     assert elapsed < 3.0, f"took {elapsed:.1f}s against a 1.5s declared budget"
 
 
-def test_a_content_free_handoff_does_not_evict_the_last_informative_one(tmp_path):
-    """With git off PATH every write produces `branch: unavailable`,
-    `uncommitted: unavailable`, `in progress: nothing claimed`. Ten of those —
-    a handful of sessions — pruned the last real handoff out of the archive."""
-    repo = git_repo(tmp_path)
-    write_handoff(repo, note="THE HANDOFF THAT MATTERS")
+def test_a_content_free_handoff_does_not_evict_the_last_informative_one(
+    tmp_path, monkeypatch
+):
+    """With git unavailable every write renders the same empty shape, and
+    archiving those pruned the last real handoff out of history within ten
+    writes — a handful of sessions.
 
+    The first version of this test passed for two wrong reasons, and the fix it
+    guarded could be stubbed out entirely with the suite still green:
+
+    1. its fixture never actually removed git from PATH, despite the docstring
+       saying so, so every handoff was informative;
+    2. it seeded the marker through `--note`, which `record_turn` journals — so
+       `_last_decision` replayed the phrase into every LATER handoff, and the
+       assertion found it whether or not the original survived.
+
+    Both are fixed here: git is genuinely gone, and the informative handoff is
+    seeded by writing the file, so the phrase exists in exactly one place.
+    """
+    repo = initialised(tmp_path)
+    marker = "THE HANDOFF THAT MATTERS"
+    latest = repo / ".curamoir" / "handoff" / "latest.md"
+    latest.parent.mkdir(parents=True, exist_ok=True)
+    latest.write_text(f"# cúramóir handoff\n\n> {marker}\n", encoding="utf-8")
+
+    monkeypatch.setenv("PATH", "")
     for _ in range(12):
         write_handoff(repo, keep_history=10)
 
     history = repo / ".curamoir" / "handoff" / "history"
-    bodies = "\n".join(p.read_text(encoding="utf-8") for p in history.iterdir())
-    latest = (repo / ".curamoir" / "handoff" / "latest.md").read_text(encoding="utf-8")
+    archived = "\n".join(p.read_text(encoding="utf-8") for p in history.iterdir())
 
-    assert "THE HANDOFF THAT MATTERS" in bodies + latest, (
+    assert marker in archived, (
         "the only informative handoff was pruned away by content-free ones"
     )
+
+
+def test_the_content_free_gate_is_not_satisfied_by_every_handoff(tmp_path, monkeypatch):
+    """The gate's first version tested the rendered markdown for `## Intended
+    next step`, which `_next_step` always emits — so it returned True for the
+    exact handoff it existed to reject. Asserted on the predicate directly, so
+    that the gate cannot quietly become a tautology again."""
+    from curamoir.handoff import build_handoff, is_informative
+
+    repo = initialised(tmp_path)
+    monkeypatch.setenv("PATH", "")
+
+    assert not is_informative(build_handoff(repo)), (
+        "a handoff with no note, no git state and no claimed bead is not informative"
+    )
+
+
+def test_a_handoff_with_any_real_content_is_informative(tmp_path):
+    """The gate must not reject a handoff worth keeping."""
+    from curamoir.handoff import build_handoff, is_informative
+
+    repo = git_repo(tmp_path)
+
+    assert is_informative(build_handoff(repo))
+    assert is_informative(dict(build_handoff(repo), note="a deliberate note"))
+
+
+def test_a_long_next_step_renders_its_body_not_a_bare_heading(tmp_path):
+    """`_cap_words`' skip keeps the short structural fields — and could leave
+    `## Intended next step` with nothing under it, which promises the most
+    actionable field in the file and delivers nothing."""
+    repo = git_repo(tmp_path)
+
+    write_handoff(repo, note="short note", next_step="word " * 600)
+
+    rendered = (repo / ".curamoir" / "handoff" / "latest.md").read_text(encoding="utf-8")
+    if "## Intended next step" in rendered:
+        after = rendered.split("## Intended next step", 1)[1].lstrip("\n")
+        body = [line for line in after.splitlines() if line.strip()]
+        assert body and not body[0].startswith("##"), "the heading has no body"
 
 
 def test_a_handoff_written_in_the_future_is_not_reported_as_negative_age(tmp_path):

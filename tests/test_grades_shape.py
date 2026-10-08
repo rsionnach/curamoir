@@ -60,3 +60,14 @@ def test_a_well_formed_grades_file_is_still_summarised(tmp_path):
     repo = initialised(tmp_path, {"modules": {"src/a": {"grade": "B"}}})
 
     assert "src/a B" in render_status(collect_status(repo))
+
+
+@pytest.mark.parametrize("grade", [["B"], {"letter": "B"}, 3])
+def test_a_grade_that_is_not_a_string_does_not_crash_the_brief(tmp_path, grade):
+    """`_lowest_graded` does `ranking.get(grade, -1)`, and `dict.get` RAISES on
+    an unhashable key — so a list or dict grade crashed the brief while status,
+    which only formats, survived. A grade that is not a string is not a grade."""
+    repo = initialised(tmp_path, {"modules": {"src/a": {"grade": grade}}})
+
+    assert write_brief(repo) is not None
+    assert "grades:" in render_status(collect_status(repo))

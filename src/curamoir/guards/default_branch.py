@@ -10,6 +10,7 @@ the one guardrail everything else rests on silently does nothing.
 
 import subprocess
 
+from curamoir.guards.context import unusable_repo
 from curamoir.guards.reasons import Reason
 from curamoir.guards.result import Degraded, Refusal
 
@@ -30,11 +31,12 @@ class DefaultBranchGuard:
         self._detect_default = detect_default or detect_default_branch
 
     def __call__(self, context):
-        if context.repo is None:
+        unusable = unusable_repo(context)
+        if unusable is not None:
             return Degraded(
                 reason=Reason.DEFAULT_BRANCH,
                 message=(
-                    "the repo root is unknown, so the default-branch check did NOT run. "
+                    f"{unusable}, so the default-branch check did NOT run. "
                     "Resolve the repository root before attempting the job."
                 ),
             )

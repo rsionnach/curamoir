@@ -15,6 +15,7 @@ So: lex ONCE, with a lexer that knows about quoting, and let the passes judge
 tokens. Separators, redirections and heredocs are tokens here, not substrings.
 """
 
+import re
 import shlex
 
 #: Characters the lexer emits as their own tokens rather than folding into
@@ -30,8 +31,15 @@ import shlex
 #:   covered by `program_name`, which strips the leading paren off `(rm`.
 PUNCTUATION = ";<>|&\n"
 
-#: Tokens that end one command and begin another.
-SEPARATORS = frozenset({";", "&", "&&", "|", "||", "\n", "|&"})
+#: Characters that, alone or in any combination, end one command and begin
+#: another. A SET rather than a list of operators, because `punctuation_chars`
+#: emits a RUN of adjacent punctuation as one token: a blank line between two
+#: commands lexes as `"\n\n"`, and `cmd;\n` as `";\n"`. Neither was in the old
+#: list of individual operators, so `segments()` did not split there and the
+#: allowlist — the primary defence — judged only the first program of the
+#: command. Every redirection operator contains `<` or `>`, so testing against
+#: this set leaves redirections alone.
+SEPARATOR_CHARACTERS = frozenset(";&|\n")
 
 #: Redirection operators. The shell consumes the following token as a filename,
 #: so it is not a program name and must not be judged as one — `pytest 2>&1`
@@ -72,11 +80,43 @@ def lex(command):
         return None
 
 
+def is_separator(token):
+    """Whether `token` is entirely made of command separators."""
+    return bool(token) and set(token) <= SEPARATOR_CHARACTERS
+
+
+def unquoted(command):
+    """`command`'s tokens with single-quoted spans removed, aligned 1:1 with `lex`.
+
+    Posix lexing strips the quotes, so by the time a token reaches a pattern
+    there is no way to tell `'(WIP|TODO)'` — literal text to the shell — from a
+    subshell, or a single-quoted `$HOME` from a variable reference. Both were
+    refused, and a guard that refuses `grep -nE '(WIP|TODO)'` and
+    `git commit -m 'fix $HOME handling'` is one the developer turns off.
+
+    Single-quoted spans are dropped because the shell treats them as literal.
+    Double-quoted spans are KEPT, because the shell still expands `$` and
+    backticks inside them — so refusing there is correct, not a false positive.
+    """
+    lexer = shlex.shlex(command or "", posix=False, punctuation_chars=PUNCTUATION)
+    lexer.whitespace_split = True
+    lexer.whitespace = lexer.whitespace.replace("\n", "")
+    try:
+        raw = list(lexer)
+    except ValueError:
+        return None
+    return [_SINGLE_QUOTED.sub("", token) for token in raw]
+
+
+#: A single-quoted span, which the shell takes literally.
+_SINGLE_QUOTED = re.compile(r"'[^']*'")
+
+
 def segments(tokens):
     """`tokens` split into one token list per command, separators dropped."""
     found, current = [], []
     for token in tokens:
-        if token in SEPARATORS:
+        if is_separator(token):
             if current:
                 found.append(current)
             current = []

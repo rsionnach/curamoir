@@ -12,13 +12,18 @@ trade.
 import sys
 
 from curamoir.handoff import record_turn, write_handoff
+
+#: Well inside PreCompact's 30s, and generous: losing this one costs the most.
+PRE_COMPACT_BUDGET_SECONDS = 15
 from curamoir.hooks._entry import run
 
 
 def _handle(payload, repo):
     trigger = payload.get("trigger") or "unknown"
     record_turn(repo, f"Context compacted ({trigger} trigger).")
-    write_handoff(repo)
+    # hooks.json allows PreCompact 30s: this is the write that matters most, so
+    # it gets room. Still bounded, because a hung git must not spend the lot.
+    write_handoff(repo, deadline_seconds=PRE_COMPACT_BUDGET_SECONDS)
 
 
 def main():

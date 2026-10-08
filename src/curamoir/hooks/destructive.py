@@ -31,6 +31,7 @@ Stdlib only, and no config read: this runs on every Bash call during a job.
 """
 
 import re
+from fnmatch import fnmatch
 
 from curamoir.hooks._shell import (
     SHELLS,
@@ -61,6 +62,10 @@ _SUBSTITUTION = re.compile(r"\$\(([^()]*)\)|`([^`]*)`")
 # How deep to follow nested payloads before giving up. Bounded so a pathological
 # input cannot hang the hook that runs on every Bash call.
 _MAX_DEPTH = 6
+
+#: Most dangerous-program mentions the guard will inspect individually. Far
+#: above anything a real command does; see the Rule above for the arithmetic.
+MAX_DANGEROUS_POSITIONS = 50
 
 # git options that appear BEFORE the subcommand. Skipping these is what stops
 # `git -C /repo reset --hard` walking past the guard.
@@ -166,11 +171,39 @@ def _is_source_file(target):
     return target.endswith(_SOURCE_SUFFIXES)
 
 
+#: Allowlisted programs that OVERWRITE a file named in their arguments, and
+#: which argument that is. The redirection rule caught `cat /dev/null > x.py`
+#: and missed `echo '' | tee x.py`, `cp -f /dev/null x.py` and `mv /dev/null
+#: x.py` — the same effect through three allowlisted programs. By this module's
+#: own invariant they belong with the redirection case, not apart from it.
+_WRITE_TARGETS = {"tee": "all", "cp": "last", "mv": "last"}
+
+
+def _write_targets(tokens):
+    """The paths `tokens` would overwrite by virtue of the program they run."""
+    which = _WRITE_TARGETS.get(program_name(tokens[0]))
+    if which is None:
+        return []
+    positionals = [t for t in tokens[1:] if not t.startswith("-")]
+    if not positionals:
+        return []
+    return positionals if which == "all" else positionals[-1:]
+
+
 def _targets_own_state(tokens):
-    """Whether any argument points inside cúramóir's own state directory."""
-    for token in tokens[1:]:
-        parts = token.strip("\"'").split("/")
-        if _OWN_STATE in parts:
+    """Whether any argument points inside cúramóir's own state directory.
+
+    Matched with `fnmatch`, not equality, because the shell expands the pattern
+    before the command runs: `mv -f .curamoi? /tmp` moves exactly what
+    `mv -f .curamoir /tmp` moves, and one character defeated a literal
+    comparison.
+    """
+    return any(_targets_own_state_path(token) for token in tokens[1:])
+
+
+def _targets_own_state_path(token):
+    for part in token.strip("\"'").split("/"):
+        if part == _OWN_STATE or fnmatch(_OWN_STATE, part):
             return True
     return False
 
@@ -277,22 +310,29 @@ def _judge(tokens):
         return None
 
     if subcommand in ("checkout", "switch"):
-        # `--` is a cosmetic separator: `git checkout .` and `git checkout
-        # src/foo.py` overwrite the working tree exactly as `git checkout -- .`
-        # does, and the modern spelling `git restore .` is already caught below.
-        # So judge what is targeted. A single positional that names a branch is
-        # an ordinary branch change and stays allowed; a path, or more than one
-        # positional, is a discard.
-        discards = (
-            "--" in flags
-            or _is_forced(flags)
-            or "--discard-changes" in flags
-            or len(positionals) > 1
-            or any(_looks_like_a_path(p) for p in positionals)
-        )
-        if discards:
+        # `git checkout <anything>` denies, because path-versus-ref is not
+        # decidable by reading the command. The previous heuristic guessed, and
+        # guessed the unsafe way for an uncertain token: an extension-less name
+        # — `src`, `tests`, `Makefile`, `Dockerfile` — answered "branch", so
+        # `git checkout src` silently overwrote a whole subtree. Dotted names
+        # went wrong in the other direction, refusing the tag `v1.2.3`.
+        #
+        # So stop guessing. `git switch` is the purpose-built branch tool, it is
+        # allowlisted, and the refusal names it — which costs a retry on the
+        # branch case and saves the working tree on the path case.
+        # `-b`/`-B`/`--orphan`/`--track` CREATE a branch; the positional is a
+        # new branch name and there is no tree to lose.
+        creating = flags & {"b", "B", "--orphan", "--track", "-t", "t"}
+        if subcommand == "checkout" and positionals and not creating:
             return Rule(
-                f"git {subcommand} over a path overwrites the working tree with no backup",
+                "git checkout over a path overwrites the working tree with no "
+                "backup, and a path cannot be told from a branch by reading it",
+                "git switch <branch> to change branch, git stash push <path> to "
+                "set work aside",
+            )
+        if "--" in flags or _is_forced(flags) or "--discard-changes" in flags:
+            return Rule(
+                f"git {subcommand} with -f/-- overwrites the working tree with no backup",
                 "git stash push <path>",
             )
         return None
@@ -402,6 +442,14 @@ def _inspect(tokens, depth):
         if _targets_own_state(bare):
             return _own_state_rule(f"{program_name(bare[0])!r} over")
 
+        for target in _write_targets(bare):
+            if _is_source_file(target):
+                return Rule(
+                    f"{program_name(bare[0])} would overwrite {target}, a source "
+                    "file, discarding whatever it held with no backup",
+                    "edit the file with the Edit tool, which keeps the old content",
+                )
+
         # Command substitutions execute too, and a rule that reads token
         # program names cannot see inside one. Searched over the rejoined
         # segment because a substitution is not confined to a single token:
@@ -418,7 +466,21 @@ def _inspect(tokens, depth):
             if nested is not None:
                 return nested
 
-        for index in _dangerous_positions(bare):
+        positions = _dangerous_positions(bare)
+        if len(positions) > MAX_DANGEROUS_POSITIONS:
+            # Bounding the LENGTH did not bound the work: `_judge` slices and
+            # then walks the remaining tokens, so N dangerous tokens cost
+            # O(N²). `echo rm rm rm …` is 15,924 characters — inside
+            # MAX_COMMAND_CHARS — and took 6.4s against a 5s hook budget that
+            # fails open. Refusing unverified is the same trade the length
+            # bound makes, and nothing real comes close to this many.
+            return Rule(
+                f"this command names {len(positions)} potentially destructive "
+                "programs, too many for the guard to check inside its time "
+                "budget — and a hook that times out permits the action",
+                "run one command at a time, or put the sequence in a committed script",
+            )
+        for index in positions:
             decision = _judge(bare[index:])
             if decision is not None:
                 return decision
