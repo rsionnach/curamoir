@@ -218,3 +218,55 @@ def test_recursion_into_payloads_terminates():
     command = "bash -c " + " ".join(["'bash -c"] * 20) + " 'git status'" + "'" * 20
 
     decide(command, in_job=True)  # must simply return
+
+
+# --- round 3: rule-table gaps (each one line, independent of the parser) ---
+
+RULE_GAPS_MUST_DENY = [
+    # Discards the working tree exactly as `git reset --hard` does, and that is
+    # the rule two lines above it in the same table.
+    "git checkout -f",
+    "git checkout --force .",
+    "git switch --discard-changes main",
+    # Deletes a remote branch outright: strictly worse than the force-push the
+    # push rule exists to stop.
+    "git push --delete origin main",
+    "git push origin :main",
+    # The commands that make `git reset --hard` actually unrecoverable. The
+    # module's own refusal text calls that command irrecoverable, which is only
+    # true once the reflog is gone — and this is the documented recipe for it.
+    "git reflog expire --expire=now --all",
+    "git gc --prune=now",
+    "git update-ref -d refs/heads/main",
+    "git worktree remove --force wt",
+    "git submodule deinit -f .",
+    "git filter-branch --force --all",
+    # restore targeting the worktree, however it is spelled
+    "git restore --staged --worktree .",
+    "git restore -SW .",
+]
+
+RULE_GAPS_MUST_ALLOW = [
+    # -S is git's documented short form of --staged; staged-only restore touches
+    # no working-tree content, so the two spellings must agree.
+    "git restore -S src/app.py",
+    "git restore --staged src/app.py",
+    "git checkout main",
+    "git switch main",
+    "git push origin main",
+    "git gc",
+    "git gc --auto",
+    "git worktree list",
+    "git submodule update --init",
+    "git reflog",
+]
+
+
+@pytest.mark.parametrize("command", RULE_GAPS_MUST_DENY)
+def test_equivalent_destruction_is_also_denied(command):
+    assert decide(command, in_job=True).deny, f"NOT DENIED: {command}"
+
+
+@pytest.mark.parametrize("command", RULE_GAPS_MUST_ALLOW)
+def test_the_safe_halves_of_those_rules_are_allowed(command):
+    assert not decide(command, in_job=True).deny, f"WRONGLY DENIED: {command}"

@@ -147,7 +147,9 @@ def _git_subcommand(tokens):
 
 
 def _is_forced(flags):
-    return "f" in flags or "--force" in flags
+    # `--force` is folded to "f" by _LONG_SYNONYMS before this sees it, so
+    # checking the long spelling too would be a safety net that does not exist.
+    return "f" in flags
 
 
 def _program_name(token):
@@ -226,7 +228,16 @@ def _judge(tokens):
 
     if subcommand == "push":
         leased = "--force-with-lease" in flags or "--force-if-includes" in flags
+        # A `+` source forces; an EMPTY source deletes the remote branch.
         plus_refspec = any(argument.startswith("+") for argument in positionals)
+        delete_refspec = any(argument.startswith(":") for argument in positionals)
+        # `--delete` is folded to "d" by _LONG_SYNONYMS, so check that spelling.
+        if "d" in flags or delete_refspec:
+            return Decision(
+                True,
+                "git push --delete (or an empty refspec) deletes a remote branch outright",
+                "delete the branch locally and let the PR close it",
+            )
         if (_is_forced(flags) and not leased) or plus_refspec:
             return Decision(
                 True,
@@ -235,19 +246,34 @@ def _judge(tokens):
             )
         return None
 
-    if subcommand == "checkout" and "--" in flags:
+    if subcommand in ("checkout", "switch") and (
+        "--" in flags or _is_forced(flags) or "--discard-changes" in flags
+    ):
+        # `-f` discards the whole working tree, exactly as `git reset --hard`
+        # does — the rule immediately above. Firing only on the literal `--`
+        # separator caught the rarer spelling and let the common one through.
         return Decision(
             True,
-            "git checkout -- <path> overwrites the file from a commit with no backup",
+            f"git {subcommand} with -f/-- overwrites the working tree with no backup",
             "git stash push <path>",
         )
 
-    if subcommand == "restore" and "--staged" not in flags:
-        return Decision(
-            True,
-            "git restore overwrites the working tree from a commit with no backup",
-            "git stash push <path>",
+    if subcommand == "restore":
+        # Decide on whether the WORKING TREE is targeted, not on a spelling.
+        # `-S` is git's documented short form of `--staged`, and
+        # `--staged --worktree` restores both — so checking for the long flag
+        # alone was wrong in both directions at once.
+        staged_only = (
+            ("--staged" in flags or "S" in flags)
+            and "--worktree" not in flags
+            and "W" not in flags
         )
+        if not staged_only:
+            return Decision(
+                True,
+                "git restore overwrites the working tree from a commit with no backup",
+                "git stash push <path>",
+            )
 
     if subcommand == "clean" and _is_forced(flags):
         return Decision(
@@ -265,6 +291,53 @@ def _judge(tokens):
                 "git branch -d",
             )
         return None
+
+    # The commands that make `git reset --hard` actually unrecoverable. This
+    # module's own refusal text calls that command irrecoverable, which is only
+    # true while the reflog survives — and expiring the reflog then pruning is
+    # the documented recipe for destroying it, so it is the natural next thing
+    # an agent tries after being refused.
+    if subcommand == "reflog" and positionals and positionals[0] == "expire":
+        return Decision(
+            True,
+            "git reflog expire destroys the recovery log that makes other git operations undoable",
+            "git reflog",
+        )
+
+    if subcommand == "gc" and any(flag.startswith("--prune") for flag in flags):
+        return Decision(
+            True,
+            "git gc --prune discards unreachable objects, finalising earlier destruction",
+            "git gc --auto",
+        )
+
+    if subcommand == "update-ref" and "d" in flags:
+        return Decision(
+            True,
+            "git update-ref -d deletes a ref outright, with no reflog entry for the deletion",
+            "git branch -d",
+        )
+
+    if subcommand == "worktree" and positionals and positionals[0] == "remove" and _is_forced(flags):
+        return Decision(
+            True,
+            "git worktree remove --force discards a worktree including uncommitted work",
+            "git worktree remove (without --force)",
+        )
+
+    if subcommand == "submodule" and positionals and positionals[0] == "deinit" and _is_forced(flags):
+        return Decision(
+            True,
+            "git submodule deinit -f discards a submodule's local modifications",
+            "git submodule deinit (without -f)",
+        )
+
+    if subcommand == "filter-branch":
+        return Decision(
+            True,
+            "git filter-branch rewrites history across the whole repository",
+            "git filter-repo on a clone, reviewed before pushing",
+        )
 
     if subcommand == "stash" and positionals and positionals[0] in ("drop", "clear"):
         return Decision(

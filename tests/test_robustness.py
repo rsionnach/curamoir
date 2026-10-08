@@ -216,3 +216,79 @@ jobs:
 
     assert problems
     assert any("id-token" in p for p in problems), problems
+
+
+# --- round 3: the budget guard's own failure paths -------------------------
+
+def test_an_unreadable_ledger_does_not_pass_as_zero_spend(tmp_path):
+    """Round 2's fix turned a loud crash into a silent zero: OSError returned []
+    with the unreadable count still 0, so the caller could not tell "no spend"
+    from "could not read", and the ceiling was enforced against $0.00."""
+    repo = initialised(tmp_path)
+    ledger_path = repo / ".curamoir" / "state" / "ledger.jsonl"
+    ledger_path.unlink(missing_ok=True)
+    ledger_path.mkdir()  # a directory where a file belongs: OSError on read
+
+    from curamoir.guards import Degraded
+
+    outcome = Budget(prices=PRICES, monthly_ceiling_usd=10.0)(
+        JobContext(job="sweep", repo=repo)
+    )
+
+    assert isinstance(outcome, Degraded), f"silent allow with spend assumed $0: {outcome}"
+    assert "could not" in outcome.message.lower() or "unreadable" in outcome.message.lower()
+
+
+def test_a_lower_bound_already_over_the_ceiling_refuses(tmp_path):
+    """A corrupt line made the guard return Degraded BEFORE comparing projected
+    spend to the ceiling, so one bad byte turned on_ceiling: pause into
+    on_ceiling: ignore — and the message claimed the ceiling "was enforced".
+
+    A lower bound that already exceeds the ceiling is PROOF of a breach, not
+    uncertainty about one."""
+    repo = initialised(tmp_path)
+    (repo / ".curamoir" / "state" / "ledger.jsonl").write_text(
+        json.dumps({"kind": "job", "job": "sweep", "model": "claude-sonnet-5",
+                    "input_tokens": 20_000_000, "output_tokens": 20_000_000,
+                    "at": "2026-10-08T10:00:00+00:00"}) + "\n{broken\n",
+        encoding="utf-8")
+
+    from curamoir.guards import Refusal
+
+    outcome = Budget(prices=PRICES, monthly_ceiling_usd=10.0, on_ceiling="pause")(
+        JobContext(job="sweep", repo=repo)
+    )
+
+    assert isinstance(outcome, Refusal), f"unbounded spend bypass: {outcome}"
+    assert outcome.reason.value == "budget"
+
+
+def test_a_lower_bound_under_the_ceiling_degrades_and_says_it_is_unconfirmed(tmp_path):
+    repo = initialised(tmp_path)
+    (repo / ".curamoir" / "state" / "ledger.jsonl").write_text(
+        json.dumps({"kind": "job", "job": "sweep", "model": "claude-sonnet-5",
+                    "input_tokens": 1000, "output_tokens": 100,
+                    "at": "2026-10-08T10:00:00+00:00"}) + "\n{broken\n",
+        encoding="utf-8")
+
+    from curamoir.guards import Degraded
+
+    outcome = Budget(prices=PRICES, monthly_ceiling_usd=15.0)(
+        JobContext(job="sweep", repo=repo)
+    )
+
+    assert isinstance(outcome, Degraded)
+    assert "could not be confirmed" in outcome.message.lower()
+    assert "was enforced" not in outcome.message.lower(), "the message still overclaims"
+
+
+def test_infinite_and_nan_prices_are_rejected():
+    """YAML parses .inf, .nan and 1e400 to exactly these. They passed validation,
+    then made every job refuse with a message reading "would reach $inf" — and
+    nan compares false against everything, so the comparison silently inverted."""
+    from curamoir.config import ConfigError, load_config
+
+    for value in (float("inf"), float("nan"), float("-inf")):
+        with pytest.raises(ConfigError) as caught:
+            load_config({"budget": {"prices": {"m": {"input": value, "output": 1.0}}}})
+        assert "budget.prices.m.input" in str(caught.value), value

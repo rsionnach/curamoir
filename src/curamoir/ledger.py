@@ -73,9 +73,22 @@ class Ledger:
                     except ValueError:
                         self._unreadable += 1
         except (OSError, ValueError):
+            # UNKNOWN, not zero. Returning [] with the count still 0 let the
+            # caller read "could not open the ledger" as "no spend recorded",
+            # so round 2's fix turned a loud crash into a silent $0 ceiling.
+            self._unreadable = None
             return []
         return entries
 
     def unreadable_lines(self):
-        """How many lines the last `entries()` call could not parse."""
-        return getattr(self, "_unreadable", 0)
+        """Lines the last `entries()` call could not parse.
+
+        `None` means the ledger itself could not be read, which is different
+        from zero: a caller that cannot tell those apart will enforce a spend
+        ceiling against a total it never obtained.
+
+        Meaningful only after `entries()`. Returns `None` if that has not been
+        called, so a caller that asks first gets "unknown" rather than a
+        confident zero.
+        """
+        return getattr(self, "_unreadable", None)

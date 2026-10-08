@@ -95,32 +95,54 @@ class Budget:
                 ),
             )
 
+        if unreadable is None:
+            # The ledger could not be read at all, so there is no lower bound —
+            # not even zero. Enforcing a ceiling against a total we never
+            # obtained is the undercount this guard exists to prevent.
+            return Degraded(
+                reason=Reason.BUDGET,
+                message=(
+                    "the ledger could not be read, so month-to-date spend is "
+                    "unknown and the monthly ceiling could not be enforced at all. "
+                    "Inspect .curamoir/state/ledger.jsonl."
+                ),
+            )
+
+        # Compare FIRST. A lower bound that already exceeds the ceiling is PROOF
+        # of a breach, not uncertainty about one — returning Degraded before this
+        # comparison meant one corrupt byte turned on_ceiling: pause into
+        # on_ceiling: ignore, while the message claimed the ceiling was enforced.
+        projected = spent + self._per_run
+        if projected > self._ceiling:
+            suffix = (
+                f" (and {unreadable} unreadable ledger line(s), so the real total "
+                "is higher still)" if unreadable else ""
+            )
+            message = (
+                f"month-to-date spend ${spent:.2f} plus an estimated "
+                f"${self._per_run:.2f} for this run would reach ${projected:.2f}, "
+                f"breaching the ${self._ceiling:.2f} monthly ceiling{suffix}."
+            )
+            if self._on_ceiling == "warn":
+                return Degraded(reason=Reason.BUDGET,
+                                message=message + " Configured to warn, so proceeding.")
+            return Refusal(reason=Reason.BUDGET, message=message)
+
         if unreadable:
-            # Allow, but say the figure is incomplete. A skipped line could have
-            # recorded any amount, so the ceiling is being enforced against a
-            # number we know is too low — which is the undercount this guard
-            # exists to prevent, and must not pass silently.
+            # Under the ceiling on what we could read, but a skipped line could
+            # have recorded any amount, so say the ceiling is UNCONFIRMED rather
+            # than claiming it was enforced.
             return Degraded(
                 reason=Reason.BUDGET,
                 message=(
                     f"{unreadable} unreadable ledger line(s); month-to-date spend "
-                    f"of ${spent:.2f} is a LOWER BOUND and the ceiling was "
-                    "enforced against it. Inspect .curamoir/state/ledger.jsonl."
+                    f"of ${spent:.2f} is a lower bound, so the ${self._ceiling:.2f} "
+                    "ceiling could not be confirmed. Inspect "
+                    ".curamoir/state/ledger.jsonl."
                 ),
             )
 
-        projected = spent + self._per_run
-        if projected <= self._ceiling:
-            return None
-
-        message = (
-            f"month-to-date spend ${spent:.2f} plus an estimated ${self._per_run:.2f} "
-            f"for this run would reach ${projected:.2f}, breaching the "
-            f"${self._ceiling:.2f} monthly ceiling."
-        )
-        if self._on_ceiling == "warn":
-            return Degraded(reason=Reason.BUDGET, message=message + " Configured to warn, so proceeding.")
-        return Refusal(reason=Reason.BUDGET, message=message)
+        return None
 
     def _month_to_date(self, ledger):
         now = self._now()

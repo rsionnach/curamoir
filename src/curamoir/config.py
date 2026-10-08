@@ -25,6 +25,7 @@ at module scope: a plugin is an unpacked directory with no install step, so
 third-party imports cannot be assumed present. Everything else here is stdlib.
 """
 
+import math
 from copy import deepcopy
 
 NUMBER = "number"
@@ -264,6 +265,14 @@ def _check_price_table(path, table, problems):
                 problems.append(
                     f"{where}.{side}: expected a {NUMBER} (USD per million tokens), "
                     f"got {_type_name(value)}"
+                )
+            elif not math.isfinite(value):
+                # YAML parses .inf, .nan and 1e400 to exactly these. They passed
+                # validation, then made every job refuse with "would reach $inf";
+                # and nan compares false against everything, silently inverting
+                # the ceiling comparison.
+                problems.append(
+                    f"{where}.{side}: must be a finite {NUMBER} (got {value})"
                 )
             elif value < 0:
                 # A mistyped -5 would make a run look like it refunded money,
