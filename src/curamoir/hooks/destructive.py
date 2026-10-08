@@ -215,9 +215,13 @@ def _judge(tokens):
                                 "rm -r --no-preserve-root can delete the filesystem root",
                 "delete named paths without --no-preserve-root",
             )
-        if recursive and _is_forced(flags):
+        if recursive:
+            # `-f` is not what makes this unrecoverable. On a non-tty — which is
+            # what an agent's shell is — plain `rm -r` prompts for nothing
+            # either, so the two spellings have the same effect and the rule
+            # judges the effect.
             return Rule(
-                                "rm -rf deletes recursively with no confirmation and no recovery",
+                "rm -r deletes recursively with no confirmation and no recovery",
                 "move the path aside, or delete named files without -r",
             )
         return None

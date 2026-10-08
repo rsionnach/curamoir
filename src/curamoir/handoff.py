@@ -25,7 +25,7 @@ import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 
-from curamoir.redaction import write_artefact
+from curamoir.redaction import redact, write_artefact
 from curamoir.repo_config import config_value
 
 #: Bounds the WHOLE handoff file, not the last-decision field below it.
@@ -236,6 +236,14 @@ def record_turn(repo, note, at=None, next_step=None):
     """Append one journal line. Called by the Stop hook, so it must be cheap.
 
     One short append per turn, no model call, no git call.
+
+    Redacted and bounded here rather than at render time. This is the one
+    artefact that does not go through `write_artefact`, because it is an append
+    and not a rewrite — so E0-R7's redaction has to be applied explicitly, or a
+    token the agent mentioned in passing is scrubbed from latest.md and written
+    in full one directory away. The bound is for the same reason the renderer
+    has one: the Stop hook passes the whole assistant message, every turn, and
+    one real call wrote a 99,046-character line into a file nothing prunes.
     """
     repo = Path(repo)
     if not (note and note.strip()) and not (next_step and next_step.strip()):
@@ -243,10 +251,10 @@ def record_turn(repo, note, at=None, next_step=None):
     journal = repo / ".curamoir" / "handoff" / "journal.jsonl"
     entry = {
         "at": at or datetime.now(timezone.utc).isoformat(timespec="seconds"),
-        "note": (note or "").strip(),
+        "note": _bounded(note),
     }
     if next_step and next_step.strip():
-        entry["next_step"] = next_step.strip()
+        entry["next_step"] = _bounded(next_step)
     try:
         journal.parent.mkdir(parents=True, exist_ok=True)
         with journal.open("a", encoding="utf-8") as handle:
@@ -254,6 +262,20 @@ def record_turn(repo, note, at=None, next_step=None):
     except OSError:
         return None
     return journal
+
+
+#: Longest note stored per turn. The renderer never reads past
+#: MAX_DECISION_WORDS, so anything beyond this is weight the file carries for
+#: the life of the repo without a reader.
+MAX_JOURNAL_NOTE_CHARS = 2_000
+
+
+def _bounded(text):
+    """`text` redacted, trimmed, and cut to a length a reader will use."""
+    trimmed = redact((text or "").strip())
+    if len(trimmed) <= MAX_JOURNAL_NOTE_CHARS:
+        return trimmed
+    return trimmed[:MAX_JOURNAL_NOTE_CHARS] + "… [truncated]"
 
 
 def _branch(repo):
@@ -372,11 +394,21 @@ def _journal(repo):
         return []
     entries = []
     try:
-        for line in path.read_text(encoding="utf-8").splitlines():
-            if line.strip():
-                entries.append(json.loads(line))
-    except (ValueError, OSError):
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
         return []
+    for line in lines:
+        if not line.strip():
+            continue
+        try:
+            entry = json.loads(line)
+        except ValueError:
+            # Skip the torn line, keep the rest. Returning [] on any
+            # ValueError meant one crash mid-append cost every entry —
+            # including the next step, which E8-R1 calls required.
+            continue
+        if isinstance(entry, dict):
+            entries.append(entry)
     return entries
 
 

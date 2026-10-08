@@ -8,6 +8,7 @@ E11-R1 extends the line with token and cost attribution; this module owns only
 the guarantee that there is always exactly one.
 """
 
+import sys
 import uuid
 from datetime import datetime, timezone
 
@@ -63,6 +64,21 @@ class JobRun:
         self._extra.update(fields)
 
     def _write(self):
+        try:
+            self._write_line()
+        except OSError as failure:
+            # The ledger is the audit trail, not the job. If it cannot be
+            # written — a read-only checkout, a full disk — the operator still
+            # needs the exception the job actually died of, so this one is
+            # reported and swallowed rather than raised from __exit__ where it
+            # would replace the real one.
+            print(
+                f"cúramóir could not write the ledger line for {self._job!r}: "
+                f"{failure}",
+                file=sys.stderr,
+            )
+
+    def _write_line(self):
         ended = self._now()
         self._ledger.record(
             kind="job",

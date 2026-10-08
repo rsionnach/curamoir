@@ -68,12 +68,27 @@ def build_context(repo, token_budget=DEFAULT_TOKEN_BUDGET):
     return _assemble(parts, budget)
 
 
+#: Below this there is no useful injection to make. A budget of 1 passed the
+#: `> 0` test, drove the per-section room negative, truncated every block to
+#: empty and then sliced the header mid-word — four characters of mojibake with
+#: no pointer to the files it was supposed to summarise. A value too small to
+#: hold the header, the footer and one line is a misconfiguration, so it falls
+#: back to the default rather than being honoured literally.
+MINIMUM_TOKEN_BUDGET = 100
+
+
 def token_budget_for(repo):
     """The configured SessionStart injection budget (E8-R3's "configurable")."""
     budget = config_value(
         repo, "handoff", "session_start_token_budget", default=DEFAULT_TOKEN_BUDGET
     )
-    return budget if isinstance(budget, (int, float)) and budget > 0 else DEFAULT_TOKEN_BUDGET
+    # `isinstance(True, int)` is True, so bool has to be excluded by name or a
+    # `session_start_token_budget: true` becomes a budget of one token.
+    if isinstance(budget, bool) or not isinstance(budget, (int, float)):
+        return DEFAULT_TOKEN_BUDGET
+    if budget < MINIMUM_TOKEN_BUDGET:
+        return DEFAULT_TOKEN_BUDGET
+    return budget
 
 
 def should_inject(payload):
@@ -115,7 +130,13 @@ def _assemble(parts, budget):
 
 def _read(path):
     try:
-        return path.read_text(encoding="utf-8")
+        # errors="replace": a write torn mid-codepoint — a full disk, or
+        # SessionEnd killed at its shared 1.5s budget — raises
+        # UnicodeDecodeError, which is a ValueError and not an OSError. It
+        # propagated to `main`'s blanket except, so SessionStart injected
+        # nothing and said nothing. A handoff with one mangled character is
+        # still worth injecting.
+        return path.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return ""
 

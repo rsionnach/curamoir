@@ -8,6 +8,9 @@ LIMITS, stated plainly and repeated in docs/security.md (E13-R2b):
 
 - Pattern-based redaction catches shapes it knows. An unrecognised secret
   format passes through untouched.
+- The generic name=value rule requires a value of at least 8 characters, so a
+  short secret (`hunter2`) passes through. Shorter values are mostly ordinary
+  config, and redacting them would make an artefact unreadable.
 - It reduces exposure; it does not guarantee absence. A brief is committed and
   may become a public issue (E9-R3), so the real protection is not putting
   secrets in a repo cúramóir can read.
@@ -38,10 +41,14 @@ _PATTERNS = (
     (re.compile(r"\bAIza[0-9A-Za-z_\-]{35}\b"), PLACEHOLDER),
     # Slack
     (re.compile(r"\bxox[abprs]-[A-Za-z0-9\-]{10,}"), PLACEHOLDER),
-    # PEM private keys: the whole block, not just the header
+    # PEM private keys: the whole block, not just the header. The END marker is
+    # optional because a key most realistically reaches an artefact TRUNCATED —
+    # as a diff hunk or a file excerpt showing the first lines of a key file —
+    # and requiring the terminator let exactly that case through whole.
     (
         re.compile(
-            r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----",
+            r"-----BEGIN [A-Z ]*PRIVATE KEY-----"
+            r"(?:.*?-----END [A-Z ]*PRIVATE KEY-----|.*\Z)",
             re.DOTALL,
         ),
         PLACEHOLDER,

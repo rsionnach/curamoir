@@ -91,6 +91,15 @@ class SupervisorLock:
         age = self._age_seconds(started)
         if age is None:
             return f"unparseable start time {started!r}"
+        if age < 0:
+            # A negative age is never greater than the timeout, so a lock
+            # stamped in the future never aged out: a CI machine or VM whose
+            # clock runs ahead blocked the repo indefinitely, and the message
+            # gave no hint that clearing it was safe.
+            return (
+                f"start time {started!r} is in the future, so the clock that "
+                "wrote this lock disagrees with this one"
+            )
         if age > self._timeout_seconds:
             return f"age {int(age)}s exceeds timeout {self._timeout_seconds}s"
         return None

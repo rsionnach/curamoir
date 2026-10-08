@@ -79,11 +79,21 @@ def main(argv=None, stdin=None, stdout=None):
         return 0
 
 
-# Exit statuses that mean the shell could not execute `dcg` at all, rather than
-# that `dcg` reached a verdict. Treating these as a refusal made a mis-installed
-# dcg deny `git status`, `git add -A` and `pytest -q` alike, with the message
-# "blocked by dcg" — a guard that blocks all work, which gets switched off.
-_COULD_NOT_RUN = (126, 127)
+# Exit statuses that mean `dcg` never reached a verdict on the command, rather
+# than that it refused one.
+#
+# 126 and 127 are the shell's "could not execute". 2 and 64 (sysexits' EX_USAGE)
+# are a tool that RAN and rejected its own arguments — a `dcg` a version out of
+# step with the subcommand we pass, or an unrelated binary of that name on PATH.
+# Read as a refusal, that denied `git status`, `git add -A` and `pytest -q`
+# alike with the message "blocked by dcg": a guard that blocks all work, which
+# gets switched off.
+#
+# Being liberal here is the safe direction, and that asymmetry is the reason to
+# prefer it. Falling back never weakens the guard — cúramóir's own tables still
+# judge the command, so a missed `dcg` verdict costs only dcg's extra coverage.
+# A wrong refusal costs every command in the job.
+_COULD_NOT_RUN = (2, 64, 126, 127)
 
 
 def _delegate_to_dcg(command):
@@ -104,16 +114,25 @@ def _delegate_to_dcg(command):
         return None
     try:
         result = subprocess.run(
-            ["dcg", "check", command], capture_output=True, text=True, timeout=3
+            ["dcg", "check", command],
+            capture_output=True,
+            text=True,
+            timeout=3,
+            # A `dcg` that reads stdin would otherwise block the hook until the
+            # timeout, and a command hook that times out fails OPEN.
+            stdin=subprocess.DEVNULL,
         )
     except (OSError, subprocess.SubprocessError):
         return None
-    if result.returncode == 0 or result.returncode in _COULD_NOT_RUN:
-        # Allowed, or could not run. Either way, fall back to our own tables.
+    verdict = (result.stdout or result.stderr or "").strip()
+    if result.returncode == 0 or result.returncode in _COULD_NOT_RUN or not verdict:
+        # Allowed, or no verdict reached, or a refusal with nothing to quote —
+        # and E0-R5 requires every refusal to name what to do instead, so a
+        # silent one cannot be relayed. Fall back to our own tables.
         return None
     return Decision(
         deny=True,
-        reason=(result.stdout or result.stderr or "blocked by dcg").strip(),
+        reason=verdict,
         alternative="see dcg output",
         category=Category.DESTRUCTIVE,
     )

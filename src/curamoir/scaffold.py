@@ -86,6 +86,20 @@ def detect_modules(repo):
     return modules
 
 
+#: `.curamoir/` is meant to be committed — the config, the principles and the
+#: rules are the repo's shared memory. Three things in it are not: the journal
+#: holds verbatim session text, the lock holds a pid and a hostname, and the
+#: pending config is a diff artefact. Writing this at init rather than
+#: documenting it means the journal cannot be committed by accident on the first
+#: session, which is the only session where nobody has thought about it yet.
+GITIGNORE = """\
+# Machine-local cúramóir state. Everything else here is meant to be committed.
+handoff/journal.jsonl
+state/lock
+curamoir.yaml.new
+"""
+
+
 def init_repo(repo, templates=None):
     """Create `.curamoir/`, writing a config that reflects what was detected.
 
@@ -111,6 +125,7 @@ def init_repo(repo, templates=None):
 
     (base / "curamoir.yaml").write_text(config_text, encoding="utf-8")
     _copy_template(templates / "principles.md", base / "principles.md")
+    (base / ".gitignore").write_text(GITIGNORE, encoding="utf-8")
     # PAUSE and state/lock are deliberately NOT created: a scaffolded PAUSE would
     # ship the repo paused, and a scaffolded lock would block the first job.
     return base

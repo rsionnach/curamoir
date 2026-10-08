@@ -25,6 +25,12 @@ ALLOWED_PERMISSIONS = {
 _RANK = {"none": 0, "read": 1, "write": 2}
 
 
+#: Yielded as a scope's value when a line inside a permissions block does not
+#: parse as `scope: value`. Reported rather than skipped: a line this parser
+#: cannot read is exactly where an unwanted scope would hide.
+UNREADABLE = object()
+
+
 def check_workflow_permissions(workflow_text):
     """Problems with EVERY permissions block in a workflow. Empty list passes.
 
@@ -58,6 +64,12 @@ def check_workflow_permissions(workflow_text):
             )
             continue
         for scope, value in _parse_scopes(workflow_text, block.end(), indent):
+            if value is UNREADABLE:
+                problems.append(
+                    f"the line {scope!r} in {where} permissions could not be read "
+                    "as `scope: value`; cúramóir cannot confirm what it grants."
+                )
+                continue
             if scope not in ALLOWED_PERMISSIONS:
                 problems.append(
                     f"permission {scope!r} in {where} is outside the allowed set "
@@ -89,6 +101,14 @@ def _parse_scopes(text, start, block_indent=0):
         indent = len(line.expandtabs(8)) - len(line.expandtabs(8).lstrip())
         if indent <= block_indent:
             break  # dedented to or past the block's own level: it has ended
-        pair = re.match(r"\s+([A-Za-z0-9\-_]+):\s*(\S+)", line)
+        # The key may be quoted: `"id-token": write` is valid YAML and GitHub
+        # honours it, so requiring an unquoted key let two characters defeat
+        # the one assertion guarding against OIDC cloud credentials.
+        pair = re.match(r"""\s+["']?([A-Za-z0-9\-_]+)["']?:\s*(\S+)""", line)
         if pair:
             yield pair.group(1), pair.group(2).strip().strip("\"'")
+        elif line.strip() and not line.lstrip().startswith("#"):
+            # A line inside a permissions block that this parser cannot read is
+            # reported rather than skipped: skipping in silence is how an
+            # evasion stays invisible.
+            yield line.strip(), UNREADABLE

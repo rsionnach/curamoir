@@ -42,6 +42,20 @@ class DefaultBranchGuard:
         current = _git(context.repo, "rev-parse", "--abbrev-ref", "HEAD")
         default = self._detect_default(context.repo)
 
+        if not current:
+            # `_git` returns "" for any non-zero exit: a repo with no commits,
+            # a corrupt .git, a cwd that is not a work tree. An unknown current
+            # branch is not a safe branch, and with an empty configured prefix
+            # `"".startswith("")` was True — so the protection was conditional
+            # on detection succeeding, which the docstring says it is not.
+            return Degraded(
+                reason=Reason.DEFAULT_BRANCH,
+                message=(
+                    "the current branch could not be determined, so the "
+                    "default-branch check did NOT run"
+                ),
+            )
+
         if default is not None and current == default:
             return Refusal(
                 reason=Reason.DEFAULT_BRANCH,
