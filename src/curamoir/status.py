@@ -177,7 +177,10 @@ def _read_handoff_age(base, now):
         # the truth and the worst thing to tell someone returning.
         return {"age_days": None, "path": str(path)}
     written = datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc)
-    return {"age_days": (now() - written).days, "path": str(path)}
+    # Clamped at 0, as `brief._absence_days` already was. Clock skew, a
+    # restored backup or a synced mount gives a file an mtime in the future,
+    # and "-3 day(s) old" tells the reader nothing they can act on.
+    return {"age_days": max(0, (now() - written).days), "path": str(path)}
 
 
 def _read_open_prs(open_pr_branches, config):

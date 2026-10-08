@@ -379,10 +379,22 @@ def _check_writable(base):
     prove the REAL `.curamoir/handoff/` is writable. Without this, doctor would
     report every hook ok on a repo with a read-only `.curamoir/`.
     """
+    required = (base, base / "handoff", base / "state", base / "briefs")
+    # A directory that does not EXIST was skipped by the old `is_dir()` filter
+    # and so contributed nothing, which let an empty `.curamoir/` report
+    # "handoff, state and briefs are writable". Reachable whenever something
+    # created `.curamoir/` before `init` did.
+    missing = [str(path.relative_to(base.parent)) for path in required if not path.is_dir()]
+    if missing:
+        return Finding(
+            "writable state", "error",
+            "missing: " + ", ".join(missing),
+            fix="Run /curamoir:init to complete the scaffold.",
+        )
     unwritable = [
         str(path.relative_to(base.parent))
-        for path in (base, base / "handoff", base / "state", base / "briefs")
-        if path.is_dir() and not os.access(path, os.W_OK)
+        for path in required
+        if not _can_create_a_file_in(path)
     ]
     if unwritable:
         return Finding(
@@ -391,6 +403,23 @@ def _check_writable(base):
             fix="Fix the permissions; cúramóir cannot write handoffs, briefs or the ledger.",
         )
     return Finding("writable state", "ok", "handoff, state and briefs are writable")
+
+
+def _can_create_a_file_in(directory):
+    """Whether a file can actually be created in `directory`.
+
+    `os.access(path, W_OK)` answers from the permission bits, which lie for
+    root and on ACL-governed or read-only-mounted volumes. doctor's own
+    principle is that only behaviour proves behaviour, so this writes.
+    """
+    probe = directory / ".curamoir-write-probe"
+    try:
+        with open(probe, "x"):
+            pass
+        probe.unlink()
+        return True
+    except OSError:
+        return False
 
 
 def _check_job_detection():
@@ -438,6 +467,70 @@ def _probe_marker(repo, probe):
         return None
 
 
+#: pyproject's `requires-python`, as a tuple to compare against.
+MINIMUM_PYTHON = (3, 12)
+#: Short: doctor is interactive, and `bd` reaching a down server fails fast.
+_BD_PROBE_SECONDS = 5
+
+
+def _probe_bd(level, fix):
+    """`bd`'s health, by asking it something cheap and real."""
+    path = shutil.which("bd")
+    if path is None:
+        return Finding(
+            "bd", level,
+            "beads filing unavailable; findings will be GitHub-only with a ledger note",
+            fix=fix,
+        )
+    try:
+        result = subprocess.run(
+            [path, "ready", "--json"], capture_output=True, text=True,
+            timeout=_BD_PROBE_SECONDS, stdin=subprocess.DEVNULL,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return Finding("bd", level, "present but did not respond", fix=fix)
+    if result.returncode != 0:
+        complaint = (result.stderr or result.stdout or "").strip().splitlines()
+        return Finding(
+            "bd", level,
+            "present but not working: " + (complaint[0] if complaint else "non-zero exit"),
+            fix="Check that the Dolt server is running: `bd dolt status`.",
+        )
+    return Finding("bd", "ok", "available")
+
+
+def _probe_python(resolved, level, detail, fix):
+    """The version the WRAPPERS would use, not the one running this code.
+
+    The fix text has always said "Install Python 3.12 or later" while the check
+    only asked whether `python3` resolves — and on a Mac with Command Line
+    Tools it resolves to 3.9, which is what the hook wrappers would use.
+    """
+    if resolved is None:
+        return Finding("python3", level, detail, fix=fix)
+    try:
+        result = subprocess.run(
+            [resolved, "-c", "import sys; print('%d.%d' % sys.version_info[:2])"],
+            capture_output=True, text=True, timeout=5, stdin=subprocess.DEVNULL,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return Finding("python3", "warning", "present but would not report its version",
+                       fix=fix)
+    reported = (result.stdout or "").strip()
+    try:
+        version = tuple(int(part) for part in reported.split("."))
+    except ValueError:
+        return Finding("python3", "warning",
+                       f"present but reported an unreadable version ({reported!r})", fix=fix)
+    if version < MINIMUM_PYTHON:
+        return Finding(
+            "python3", "error",
+            f"python3 on PATH is {reported}, below the 3.12 cúramóir requires",
+            fix="Install Python 3.12 or later and ensure it is first on PATH.",
+        )
+    return Finding("python3", "ok", f"available ({reported})")
+
+
 def _check_tools(tools):
     specs = (
         ("bd", "warning",
@@ -456,6 +549,17 @@ def _check_tools(tools):
     findings = []
     for name, level, detail, fix in specs:
         available = tools.get(name)
+        if available is None and name == "bd":
+            # `bd` is the one prerequisite that was checked by mere presence,
+            # and its documented failure mode is "installed, but the Dolt
+            # server is not reachable" — in which case the handoff and the
+            # brief read a stale export while doctor calls the setup fine.
+            findings.append(_probe_bd(level, fix))
+            continue
+        if available is None and name == "python3":
+            resolved = shutil.which("python3") or shutil.which("python")
+            findings.append(_probe_python(resolved, level, detail, fix))
+            continue
         if available is None:
             if name == "python3":
                 # What the WRAPPERS need: `command -v python3`, falling back to

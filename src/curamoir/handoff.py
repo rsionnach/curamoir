@@ -22,6 +22,7 @@ Hook wiring (see hooks/hooks.json, and the correction recorded on E8-R1):
 
 import json
 import subprocess
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -36,6 +37,11 @@ WORD_LIMIT = 400
 # cap is what actually stops a long final turn consuming the file budget.
 MAX_DECISION_SENTENCES = 3
 MAX_DECISION_WORDS = 60
+#: The developer's own note gets more room than a journal-derived decision —
+#: they chose to write it — but still a bound, because WORD_LIMIT applies to
+#: the whole file and the structural fields must survive it.
+MAX_NOTE_SENTENCES = 6
+MAX_NOTE_WORDS = 120
 #: Room reserved for `_cap_words`' own "truncated" line.
 _TRUNCATION_NOTICE_WORDS = 15
 DEFAULT_KEEP_HISTORY = 10
@@ -44,7 +50,7 @@ MAX_LISTED_BEADS = 6
 UNAVAILABLE = "unavailable"
 
 
-def build_handoff(repo):
+def build_handoff(repo, deadline_seconds=None):
     """Everything the handoff reports, as plain data.
 
     No model call. DEC-8 (owner, 2026-10-07) settled that the last decision is
@@ -56,11 +62,12 @@ def build_handoff(repo):
     must never block.
     """
     repo = Path(repo)
+    deadline = _Deadline(deadline_seconds)
     in_progress = _in_progress_beads(repo)
     return {
         "at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-        "branch": _branch(repo),
-        "uncommitted": _uncommitted(repo),
+        "branch": _branch(repo, deadline=deadline),
+        "uncommitted": _uncommitted(repo, deadline=deadline),
         "in_progress": in_progress,
         "last_decision": _last_decision(repo),
         "next_step": _next_step(repo, in_progress),
@@ -114,7 +121,13 @@ def render_handoff(handoff):
     # A deliberate note leads. The developer states the next step rather than the
     # model inferring it, which makes it the most valuable line in the file.
     if handoff.get("note"):
-        lines += ["> " + handoff["note"], ""]
+        # Bounded like `last_decision`, which was already capped at 60 words
+        # while the developer's own note was capped at nothing. `_cap_words`
+        # DROPS a line that does not fit, so one long note past about 385 words
+        # took the branch, the changes and the explicit next step with it,
+        # leaving a title and a truncation notice.
+        lines += ["> " + _first_sentences(handoff["note"], MAX_NOTE_SENTENCES,
+                                          word_limit=MAX_NOTE_WORDS), ""]
 
     lines += [
         f"- **when:** {handoff['at']}",
@@ -155,7 +168,8 @@ def render_handoff(handoff):
     return _cap_words(rendered, WORD_LIMIT)
 
 
-def write_handoff(repo, keep_history=None, note=None, next_step=None):
+def write_handoff(repo, keep_history=None, note=None, next_step=None,
+                  deadline_seconds=None):
     """Write `handoff/latest.md`, rolling the previous one into history.
 
     `note` is the developer's own words, from `/curamoir:handoff` (E8-R4). It is
@@ -177,7 +191,7 @@ def write_handoff(repo, keep_history=None, note=None, next_step=None):
     latest = directory / "latest.md"
 
     try:
-        handoff = build_handoff(repo)
+        handoff = build_handoff(repo, deadline_seconds=deadline_seconds)
         handoff["note"] = note.strip() if note and note.strip() else None
         rendered = render_handoff(handoff)
     except Exception as error:
@@ -189,7 +203,7 @@ def write_handoff(repo, keep_history=None, note=None, next_step=None):
 
     try:
         history.mkdir(parents=True, exist_ok=True)
-        if latest.is_file():
+        if latest.is_file() and _is_informative(latest):
             _archive(latest, history)
         _prune(history, keep_history)
     except OSError:
@@ -208,6 +222,26 @@ def write_handoff(repo, keep_history=None, note=None, next_step=None):
         return None
 
 
+def _is_informative(latest):
+    """Whether `latest` says anything worth keeping a copy of.
+
+    With git unavailable — off PATH, a hung git, a non-git directory — every
+    handoff renders the same content-free shape: branch unavailable,
+    uncommitted unavailable, nothing claimed. Archiving those pruned the last
+    REAL handoff out of history within ten writes, which is a handful of
+    sessions. A handoff with no note and no git state is still written to
+    latest.md, because it is the current state; it just does not displace
+    something better.
+    """
+    try:
+        body = latest.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+    if "> " in body or "## Intended next step" in body or "## Last decision" in body:
+        return True
+    return UNAVAILABLE not in body
+
+
 def _archive(latest, history):
     """Copy `latest` into `history` under a name no other copy can take.
 
@@ -221,7 +255,9 @@ def _archive(latest, history):
     written = datetime.fromtimestamp(latest.stat().st_mtime, tz=timezone.utc)
     stamp = written.strftime("%Y-%m-%dT%H-%M-%S")
     body = latest.read_text(encoding="utf-8")
-    for suffix in ("", *(f"-{n}" for n in range(1, 1000))):
+    # Zero-padded, so that lexical order stays chronological order: `_prune`
+    # sorts by filename, and `-10` sorts before `-2`.
+    for suffix in ("", *(f"-{n:03d}" for n in range(1, 1000))):
         candidate = history / f"{stamp}{suffix}.md"
         try:
             with open(candidate, "x", encoding="utf-8") as handle:
@@ -278,7 +314,7 @@ def _bounded(text):
     return trimmed[:MAX_JOURNAL_NOTE_CHARS] + "… [truncated]"
 
 
-def _branch(repo):
+def _branch(repo, deadline=None):
     """The current branch.
 
     `rev-parse --abbrev-ref HEAD` fails on an unborn ref — a repo that has a
@@ -287,19 +323,25 @@ def _branch(repo):
     so try it before giving up: reporting "unavailable" for a branch that is
     plainly knowable is worse than saying nothing.
     """
+    named = _git_stripped(repo, "rev-parse", "--abbrev-ref", "HEAD", deadline=deadline)
+    if named == "HEAD":
+        # Detached: mid-rebase or mid-bisect, which is exactly the interrupted
+        # session a handoff exists for — and "HEAD" reads as a branch name.
+        sha = _git_stripped(repo, "rev-parse", "--short", "HEAD", deadline=deadline)
+        return f"detached at {sha}" if sha else "detached HEAD"
     return (
-        _git_stripped(repo, "rev-parse", "--abbrev-ref", "HEAD")
-        or _git_stripped(repo, "symbolic-ref", "--short", "HEAD")
+        named
+        or _git_stripped(repo, "symbolic-ref", "--short", "HEAD", deadline=deadline)
         or UNAVAILABLE
     )
 
 
-def _uncommitted(repo):
+def _uncommitted(repo, deadline=None):
     """Change summaries, never content. `--porcelain` gives status plus path."""
     # _git_raw, NOT _git_stripped: porcelain's first column is a space for an
     # unstaged change, and stripping the output shifts every such line left by
     # one, corrupting both the label and the path.
-    raw = _git_raw(repo, "status", "--porcelain")
+    raw = _git_raw(repo, "status", "--porcelain", deadline=deadline)
     if raw is None:
         return UNAVAILABLE
     return [_describe_porcelain(line) for line in raw.splitlines() if line.strip()]
@@ -431,29 +473,66 @@ def _cap_words(text, limit):
     for line in text.splitlines():
         count = len(line.split())
         if used + count > limit - _TRUNCATION_NOTICE_WORDS:
-            break
+            # Skip this line and keep going, rather than stopping here. A
+            # `break` meant one over-long line discarded every SHORTER line
+            # after it — and the structural fields are all short, so a long
+            # note cost the branch, the changes and the next step.
+            continue
         kept.append(line)
         used += count
     kept += ["", f"_Truncated at {limit} words. Full state: `/curamoir:status`._"]
     return "\n".join(kept)
 
 
-def _git_raw(repo, *args):
-    """git stdout with leading whitespace preserved, or None on failure."""
+class _Deadline:
+    """How much time is left for the git calls a handoff makes.
+
+    Per-call timeouts do not add up to a bound: `_branch` makes two calls when
+    the first fails, `_uncommitted` makes another, and at 5s each that is up to
+    15s against the 2s hooks.json gives SessionEnd — which itself SHARES a
+    1.5s budget with every other SessionEnd hook. A slow-but-not-down git (a
+    cold network mount, a hung credential helper) therefore lost the handoff on
+    exactly the session most worth having one for. One deadline for the whole
+    build bounds it; a call with no time left is simply not made, and its field
+    reports unavailable like any other git failure.
+    """
+
+    def __init__(self, seconds):
+        self._until = None if seconds is None else time.monotonic() + seconds
+
+    def remaining(self):
+        if self._until is None:
+            return _GIT_TIMEOUT
+        return min(_GIT_TIMEOUT, self._until - time.monotonic())
+
+
+#: Per-call ceiling when no deadline is given, e.g. from the CLI where the
+#: developer is waiting and would rather have the answer than a fast nothing.
+_GIT_TIMEOUT = 5
+
+
+def _run_git(repo, args, deadline):
+    left = (deadline or _Deadline(None)).remaining()
+    if left <= 0:
+        return None
     try:
-        result = subprocess.run(
-            ["git", *args], cwd=repo, capture_output=True, text=True, timeout=5
+        return subprocess.run(
+            ["git", *args], cwd=repo, capture_output=True, text=True, timeout=left
         )
     except (OSError, subprocess.SubprocessError):
+        return None
+
+
+def _git_raw(repo, *args, deadline=None):
+    """git stdout with leading whitespace preserved, or None on failure."""
+    result = _run_git(repo, args, deadline)
+    if result is None:
         return None
     return result.stdout.rstrip("\n") if result.returncode == 0 else None
 
 
-def _git_stripped(repo, *args):
-    try:
-        result = subprocess.run(
-            ["git", *args], cwd=repo, capture_output=True, text=True, timeout=5
-        )
-    except (OSError, subprocess.SubprocessError):
+def _git_stripped(repo, *args, deadline=None):
+    result = _run_git(repo, args, deadline)
+    if result is None:
         return None
     return result.stdout.strip() if result.returncode == 0 else None
