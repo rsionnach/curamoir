@@ -231,6 +231,19 @@ def _check_scalar(path, given, expected, problems):
         # bool is an int in Python; a boolean where a number belongs is a mistake.
         if isinstance(given, bool) or not isinstance(given, (int, float)):
             problems.append(f"{path}: expected a {NUMBER}, got {_type_name(given)}")
+        elif not math.isfinite(given):
+            # YAML parses .inf, .nan and 1e400 to exactly these, and nan
+            # compares false against everything: a nan ceiling turns
+            # `on_ceiling: pause` into `on_ceiling: ignore` with no error.
+            # Checked for every number in the schema, not just prices, because
+            # finiteness is a property of the type rather than of one key.
+            problems.append(f"{path}: must be a finite {NUMBER} (got {given})")
+        elif given < 0 and path.endswith("_usd"):
+            # A negative ceiling refuses every job, which errs safe but reads as
+            # a broken install; say which key is wrong instead.
+            problems.append(
+                f"{path}: must not be negative (got {given})"
+            )
     elif expected is STRING:
         if not isinstance(given, str):
             problems.append(f"{path}: expected a {STRING}, got {_type_name(given)}")

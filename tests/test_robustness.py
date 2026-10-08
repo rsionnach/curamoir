@@ -11,7 +11,7 @@ import subprocess
 import pytest
 
 from curamoir.budget import Budget, PriceTable, UnknownModel
-from curamoir.guards import Gateway, JobContext
+from curamoir.guards import Degraded, Gateway, JobContext
 from curamoir.ledger import Ledger
 from curamoir.status import collect_status
 
@@ -292,3 +292,114 @@ def test_infinite_and_nan_prices_are_rejected():
         with pytest.raises(ConfigError) as caught:
             load_config({"budget": {"prices": {"m": {"input": value, "output": 1.0}}}})
         assert "budget.prices.m.input" in str(caught.value), value
+
+
+# --- a ledger line that is valid JSON but not an entry ---------------------
+
+@pytest.mark.parametrize("line", [
+    pytest.param("42", id="bare_scalar"),
+    pytest.param("null", id="json_null"),
+    pytest.param('["sweep", 1]', id="json_list"),
+    pytest.param('"a string"', id="json_string"),
+])
+def test_a_json_valid_non_entry_line_does_not_refuse_every_job(tmp_path, line):
+    """`json.loads` succeeding does not make the result an entry.
+
+    The truncated-line case above is caught because it raises ValueError. These
+    parse cleanly, so they reached `entry.get(...)` and raised AttributeError —
+    not UnknownModel, so it escaped the Degraded path and the gateway turned it
+    into GUARD_ERROR. In a file the spec says is append-only and never pruned,
+    that refuses every future job until someone hand-edits an audit trail.
+    """
+    repo = initialised(tmp_path)
+    (repo / ".curamoir" / "state" / "ledger.jsonl").write_text(line + "\n", encoding="utf-8")
+
+    gateway = Gateway(guards=[Budget(prices=PRICES, monthly_ceiling_usd=15.0)])
+    outcome = gateway.perform(JobContext(job="sweep", repo=repo), lambda: "ran")
+
+    assert outcome == "ran", f"a {line!r} line refused the job: {outcome}"
+
+
+def test_a_non_entry_line_is_counted_as_unreadable_not_discarded(tmp_path):
+    """Skipping it silently would undercount spend, which is the one failure
+    the budget guard exists to prevent."""
+    ledger = Ledger(tmp_path / "ledger.jsonl")
+    ledger._path.write_text("42\nnull\n", encoding="utf-8")
+
+    assert ledger.entries() == []
+    assert ledger.unreadable_lines() == 2
+
+
+def test_token_counts_that_are_not_numbers_degrade_rather_than_crash(tmp_path):
+    """A writer emitting "1000" instead of 1000 is a plausible hook bug, and
+    multiplying a str by a float raises TypeError deep inside the price table."""
+    repo = initialised(tmp_path)
+    (repo / ".curamoir" / "state" / "ledger.jsonl").write_text(
+        json.dumps({"kind": "job", "job": "sweep", "model": "claude-sonnet-5",
+                    "input_tokens": "1000", "output_tokens": "100",
+                    "at": "2026-10-08T10:00:00+00:00"}) + "\n",
+        encoding="utf-8")
+
+    outcome = Budget(prices=PRICES, monthly_ceiling_usd=15.0)(
+        JobContext(job="sweep", repo=repo)
+    )
+
+    assert isinstance(outcome, Degraded), outcome
+    assert "could not be confirmed" in outcome.message.lower()
+
+
+# --- an append that lands on a line with no terminator ---------------------
+
+def test_recording_after_a_truncated_line_does_not_eat_the_new_entry(tmp_path):
+    """A crash mid-write leaves a line with no trailing newline. Appending
+    concatenated onto it, so the crash cost TWO records rather than one — and
+    `unreadable_lines()` still said 1, under-reporting its own loss."""
+    ledger = Ledger(tmp_path / "ledger.jsonl")
+    ledger.record(job="first", reason=None, message="ok")
+    with ledger._path.open("a", encoding="utf-8") as handle:
+        handle.write('{"kind": "job", "job": "swe')  # crash mid-append
+
+    ledger.record(job="second", reason=None, message="ok")
+
+    jobs = [entry.get("job") for entry in ledger.entries()]
+    assert jobs == ["first", "second"], f"the new record was swallowed: {jobs}"
+    assert ledger.unreadable_lines() == 1
+
+
+# --- spend that cannot be attributed to a month ----------------------------
+
+def test_an_entry_with_an_unusable_timestamp_is_not_counted_as_zero(tmp_path):
+    """Undercounting is the failure this guard exists to prevent. An entry
+    carrying tokens but no parseable `at` is unattributable spend, not $0, and
+    with the unreadable tally at 0 nothing downstream hedges the number."""
+    ledger = Ledger(tmp_path / "ledger.jsonl")
+    ledger._path.write_text(
+        json.dumps({"kind": "job", "job": "sweep", "model": "claude-sonnet-5",
+                    "input_tokens": 1_000_000, "output_tokens": 1_000_000,
+                    "at": "08/10/2026"}) + "\n",
+        encoding="utf-8")
+
+    from curamoir.budget import month_to_date
+    from datetime import datetime, timezone
+
+    total = month_to_date(ledger, PRICES, datetime(2026, 10, 8, tzinfo=timezone.utc))
+
+    assert total == 0.0, "an unparseable date cannot be attributed to this month"
+    assert ledger.unreadable_lines() == 1, (
+        "$12 of real spend contributed $0 with no signal that anything was missed"
+    )
+
+
+# --- a ceiling that is not a usable number ---------------------------------
+
+def test_non_finite_and_negative_ceilings_are_rejected():
+    """`projected > nan` is always False, so `.nan` turns on_ceiling: pause into
+    on_ceiling: ignore with no error. The identical hazard is already rejected
+    for budget.prices.*, where the comment explains why."""
+    from curamoir.config import ConfigError, load_config
+
+    for key in ("monthly_ceiling_usd", "per_run_ceiling_usd"):
+        for value in (float("nan"), float("inf"), float("-inf"), -5.0):
+            with pytest.raises(ConfigError) as caught:
+                load_config({"budget": {key: value}})
+            assert f"budget.{key}" in str(caught.value), (key, value)

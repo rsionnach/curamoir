@@ -12,7 +12,7 @@ def test_side_effect_runs_when_no_guard_objects():
     performed = []
     gateway = Gateway(guards=[])
 
-    gateway.perform(JobContext(job="sweep"), lambda: performed.append("wrote to the repo"))
+    gateway.perform(JobContext(job="sweep", repo=None), lambda: performed.append("wrote to the repo"))
 
     assert performed == ["wrote to the repo"]
 
@@ -26,7 +26,7 @@ def test_refusing_guard_prevents_the_side_effect_from_running():
     performed = []
     gateway = Gateway(guards=[refuse_with(Reason.PAUSED, ".curamoir/PAUSE is present")])
 
-    gateway.perform(JobContext(job="sweep"), lambda: performed.append("wrote to the repo"))
+    gateway.perform(JobContext(job="sweep", repo=None), lambda: performed.append("wrote to the repo"))
 
     assert performed == []
 
@@ -34,7 +34,7 @@ def test_refusing_guard_prevents_the_side_effect_from_running():
 def test_refusal_reaches_the_caller_with_its_reason_and_message():
     gateway = Gateway(guards=[refuse_with(Reason.PR_CAP, "3 open curamoir/ PRs already")])
 
-    outcome = gateway.perform(JobContext(job="sweep"), lambda: "should not happen")
+    outcome = gateway.perform(JobContext(job="sweep", repo=None), lambda: "should not happen")
 
     assert outcome.reason is Reason.PR_CAP
     assert outcome.message == "3 open curamoir/ PRs already"
@@ -54,7 +54,7 @@ def test_first_refusing_guard_wins_and_later_guards_are_not_consulted():
         record("budget", Refusal(Reason.BUDGET, "over ceiling")),
     ])
 
-    outcome = gateway.perform(JobContext(job="sweep"), lambda: None)
+    outcome = gateway.perform(JobContext(job="sweep", repo=None), lambda: None)
 
     assert consulted == ["pause"]
     assert outcome.reason is Reason.PAUSED
@@ -75,7 +75,7 @@ def test_guard_that_raises_refuses_the_side_effect_rather_than_letting_it_throug
 
     gateway = Gateway(guards=[broken_guard])
 
-    outcome = gateway.perform(JobContext(job="sweep"), lambda: performed.append("wrote"))
+    outcome = gateway.perform(JobContext(job="sweep", repo=None), lambda: performed.append("wrote"))
 
     assert performed == []
     assert outcome.reason is Reason.GUARD_ERROR

@@ -55,8 +55,39 @@ class Ledger:
         }
         self._path.parent.mkdir(parents=True, exist_ok=True)
         with self._path.open("a", encoding="utf-8") as handle:
+            # A crash mid-write leaves a line with no terminator. Appending
+            # straight onto it would concatenate, so one crash would cost two
+            # records: the truncated one AND this one, which is whatever just
+            # happened. Terminate it first and the crash costs exactly its own
+            # line, which `unreadable_lines()` then reports accurately.
+            if handle.tell() and not self._ends_with_newline():
+                handle.write("\n")
             handle.write(json.dumps(entry, sort_keys=True) + "\n")
         return entry
+
+    def _ends_with_newline(self):
+        """True for an empty or missing file: there is no partial line to close."""
+        try:
+            with self._path.open("rb") as handle:
+                handle.seek(0, 2)
+                if handle.tell() == 0:
+                    return True
+                handle.seek(-1, 2)
+                return handle.read(1) == b"\n"
+        except OSError:
+            return True
+
+    def note_unaccounted(self, count=1):
+        """Record spend a consumer read but could not attribute to a month.
+
+        `unreadable_lines()` answers one question — how much of this file did
+        not make it into the total — and an entry carrying token counts with an
+        unparseable `at` fails that test just as surely as a truncated line,
+        even though it parsed. Folding it into the same counter means the
+        existing lower-bound wording covers it without a second vocabulary.
+        """
+        if self._unreadable is not None:
+            self._unreadable += count
 
     def entries(self):
         """Every readable entry, oldest first. Missing file reads as empty.
@@ -83,9 +114,19 @@ class Ledger:
                     if not line.strip():
                         continue
                     try:
-                        entries.append(json.loads(line))
+                        entry = json.loads(line)
                     except ValueError:
                         self._unreadable += 1
+                        continue
+                    # Parsing is not validating. `42`, `null` and `["a", 1]` are
+                    # all valid JSON, and reached consumers that call
+                    # `entry.get(...)` as an AttributeError — which is not
+                    # UnknownModel, so it escaped the degraded path and refused
+                    # every future job from a file that is never pruned.
+                    if not isinstance(entry, dict):
+                        self._unreadable += 1
+                        continue
+                    entries.append(entry)
         except (OSError, ValueError):
             # UNKNOWN, not zero. With the count left at 0 a caller reads
             # "could not open the ledger" as "no spend recorded".

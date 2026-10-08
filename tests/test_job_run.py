@@ -92,7 +92,7 @@ def test_guard_events_and_the_job_line_are_separable(tmp_path):
     gateway = Gateway(guards=[lambda _c: Refusal(Reason.PAUSED, "paused")], ledger=ledger)
 
     with JobRun(ledger, job="sweep") as run:
-        outcome = gateway.perform(JobContext(job="sweep"), lambda: None)
+        outcome = gateway.perform(JobContext(job="sweep", repo=tmp_path), lambda: None)
         run.refused(outcome)
 
     entries = ledger.entries()

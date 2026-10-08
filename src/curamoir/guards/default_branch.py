@@ -11,7 +11,7 @@ the one guardrail everything else rests on silently does nothing.
 import subprocess
 
 from curamoir.guards.reasons import Reason
-from curamoir.guards.result import Refusal
+from curamoir.guards.result import Degraded, Refusal
 
 DEFAULT_PREFIX = "curamoir/"
 COMMON_DEFAULTS = ("main", "master", "trunk", "develop")
@@ -31,7 +31,13 @@ class DefaultBranchGuard:
 
     def __call__(self, context):
         if context.repo is None:
-            return None
+            return Degraded(
+                reason=Reason.DEFAULT_BRANCH,
+                message=(
+                    "the repo root is unknown, so the default-branch check did NOT run. "
+                    "Resolve the repository root before attempting the job."
+                ),
+            )
 
         current = _git(context.repo, "rev-parse", "--abbrev-ref", "HEAD")
         default = self._detect_default(context.repo)

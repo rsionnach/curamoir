@@ -30,14 +30,36 @@ def month_to_date(ledger, prices, now):
         if entry.get("input_tokens") is None and entry.get("output_tokens") is None:
             continue
         when = parse_ledger_timestamp(entry.get("at"))
-        if when is None or (when.year, when.month) != (now.year, now.month):
+        if when is None:
+            # Tokens with no usable date is unattributable spend, not $0. Left
+            # uncounted it would read as "nothing spent" with the unreadable
+            # tally at zero, so nothing downstream would hedge the total.
+            ledger.note_unaccounted()
             continue
-        total += prices.cost(
-            entry.get("model"),
-            entry.get("input_tokens") or 0,
-            entry.get("output_tokens") or 0,
-        )
+        if (when.year, when.month) != (now.year, now.month):
+            continue
+        tokens = _token_counts(entry)
+        if tokens is None:
+            ledger.note_unaccounted()
+            continue
+        total += prices.cost(entry.get("model"), *tokens)
     return total
+
+
+def _token_counts(entry):
+    """`(input, output)` as numbers, or None if either is not one.
+
+    A writer emitting "1000" for 1000 is a plausible hook bug, and a str reaches
+    the price table as a TypeError from multiplication rather than as anything
+    the degraded path recognises.
+    """
+    counts = []
+    for key in ("input_tokens", "output_tokens"):
+        value = entry.get(key) or 0
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return None
+        counts.append(value)
+    return tuple(counts)
 
 
 class UnknownModel(Exception):
@@ -98,7 +120,13 @@ class Budget:
 
     def __call__(self, context):
         if context.repo is None:
-            return None
+            return Degraded(
+                reason=Reason.BUDGET,
+                message=(
+                    "the repo root is unknown, so the spend ceiling did NOT run. "
+                    "Resolve the repository root before attempting the job."
+                ),
+            )
 
         ledger = Ledger(context.repo / ".curamoir" / "state" / "ledger.jsonl")
         try:

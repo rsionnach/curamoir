@@ -15,7 +15,7 @@ def test_refusal_is_recorded_with_its_job_and_reason(tmp_path):
         ledger=ledger,
     )
 
-    gateway.perform(JobContext(job="sweep"), lambda: None)
+    gateway.perform(JobContext(job="sweep", repo=tmp_path), lambda: None)
 
     entries = ledger.entries()
     assert len(entries) == 1
@@ -38,7 +38,7 @@ def test_guard_failure_is_recorded_so_lost_enforcement_is_never_silent(tmp_path)
     ledger = Ledger(tmp_path / "ledger.jsonl")
     gateway = Gateway(guards=[broken_guard], ledger=ledger)
 
-    gateway.perform(JobContext(job="review"), lambda: None)
+    gateway.perform(JobContext(job="review", repo=tmp_path), lambda: None)
 
     entry = ledger.entries()[0]
     assert entry["reason"] == "guard_error"

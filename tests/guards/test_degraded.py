@@ -20,7 +20,7 @@ def test_a_degraded_guard_does_not_block_the_side_effect(tmp_path):
         ledger=Ledger(tmp_path / "ledger.jsonl"),
     )
 
-    gateway.perform(JobContext(job="sweep"), lambda: performed.append("wrote"))
+    gateway.perform(JobContext(job="sweep", repo=tmp_path), lambda: performed.append("wrote"))
 
     assert performed == ["wrote"]
 
@@ -32,7 +32,7 @@ def test_a_degraded_check_is_recorded_so_it_is_not_silent(tmp_path):
         ledger=ledger,
     )
 
-    gateway.perform(JobContext(job="sweep"), lambda: None)
+    gateway.perform(JobContext(job="sweep", repo=tmp_path), lambda: None)
 
     entry = ledger.entries()[0]
     assert entry["kind"] == "guard"
@@ -52,7 +52,7 @@ def test_later_guards_still_run_after_a_degraded_one(tmp_path):
         ledger=Ledger(tmp_path / "ledger.jsonl"),
     )
 
-    gateway.perform(JobContext(job="sweep"), lambda: None)
+    gateway.perform(JobContext(job="sweep", repo=tmp_path), lambda: None)
 
     assert consulted == ["budget"]
 

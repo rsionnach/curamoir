@@ -27,16 +27,23 @@ class KillSwitch:
         self._repo_labels = repo_labels
 
     def __call__(self, context):
-        if context.repo is not None:
-            pause_file = context.repo / ".curamoir" / PAUSE_FILE
-            if pause_file.exists():
-                return Refusal(
-                    reason=Reason.PAUSED,
-                    message=(
-                        f"paused: {pause_file.relative_to(context.repo)} is present. "
-                        "Delete it to resume scheduled runs."
-                    ),
-                )
+        if context.repo is None:
+            return Degraded(
+                reason=Reason.PAUSED,
+                message=(
+                    "the repo root is unknown, so the PAUSE check did NOT run. "
+                    "Resolve the repository root before attempting the job."
+                ),
+            )
+        pause_file = context.repo / ".curamoir" / PAUSE_FILE
+        if pause_file.exists():
+            return Refusal(
+                reason=Reason.PAUSED,
+                message=(
+                    f"paused: {pause_file.relative_to(context.repo)} is present. "
+                    "Delete it to resume scheduled runs."
+                ),
+            )
 
         if self._repo_labels is not None:
             try:

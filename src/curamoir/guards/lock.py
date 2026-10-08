@@ -16,7 +16,7 @@ import socket
 from datetime import datetime, timezone
 
 from curamoir.guards.reasons import Reason
-from curamoir.guards.result import Refusal
+from curamoir.guards.result import Degraded, Refusal
 
 LOCK_PATH = ("state", "lock")
 DEFAULT_TIMEOUT_SECONDS = 6 * 60 * 60
@@ -39,7 +39,13 @@ class SupervisorLock:
 
     def __call__(self, context):
         if context.repo is None:
-            return None
+            return Degraded(
+                reason=Reason.LOCKED,
+                message=(
+                    "the repo root is unknown, so the supervisor-lock check did NOT run. "
+                    "Resolve the repository root before attempting the job."
+                ),
+            )
         path = context.repo.joinpath(".curamoir", *LOCK_PATH)
         if not path.exists():
             return None
