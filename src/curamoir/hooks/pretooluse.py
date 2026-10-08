@@ -12,9 +12,8 @@ Two properties matter more than the logic:
   standard library, no network, no model.
 
 Judges commands with the two-pass policy of DEC-9 (see policy.py): an allowlist
-of what cúramóir's jobs legitimately do, then the denylist as a second pass over
-the same string. Three denylist-only rewrites each shipped a hole, because a
-denylist must understand every way a command can be written.
+of what cúramóir's jobs legitimately do, then the destructive rules as a second
+pass over the same string.
 
 Delegates to `dcg` when that is installed and not switched off, rather than
 keeping a second copy of the denylist (E0-R5).
@@ -35,8 +34,9 @@ import subprocess
 import sys
 from pathlib import Path
 
-from curamoir.hooks.denylist import in_curamoir_job
+from curamoir.hooks._entry import in_curamoir_job
 from curamoir.hooks.policy import judge_command
+from curamoir.hooks.verdict import Category, Decision
 
 
 def main(argv=None, stdin=None, stdout=None):
@@ -111,12 +111,11 @@ def _delegate_to_dcg(command):
     if result.returncode == 0 or result.returncode in _COULD_NOT_RUN:
         # Allowed, or could not run. Either way, fall back to our own tables.
         return None
-    from curamoir.hooks.denylist import Decision
-
     return Decision(
         deny=True,
         reason=(result.stdout or result.stderr or "blocked by dcg").strip(),
         alternative="see dcg output",
+        category=Category.DESTRUCTIVE,
     )
 
 

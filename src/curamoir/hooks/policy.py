@@ -1,8 +1,7 @@
 """DEC-9: the command policy for a cúramóir job — allowlist first, denylist second.
 
-Three denylist rewrites each closed holes and opened others, because a denylist
-must understand every way a command can be written while an allowlist only has
-to recognise the few things cúramóir's own jobs legitimately do.
+A denylist must understand every way a command can be written; an allowlist only
+has to recognise the few things cúramóir's own jobs legitimately do.
 
 The asymmetry is the whole argument:
 
@@ -26,10 +25,10 @@ Stdlib only, and no config read: this runs on every Bash call during a job.
 """
 
 import re
-import shlex
 
-from curamoir.hooks.categories import Category
-from curamoir.hooks.denylist import Decision, _segments, decide
+from curamoir.hooks._shell import SHELLS, segments, tokenise
+from curamoir.hooks.destructive import judge_destructive
+from curamoir.hooks.verdict import Category, Decision
 
 # Construction whose effect this guard cannot determine by reading it. Refused
 # rather than parsed — the distinction matters, and the message says which.
@@ -40,15 +39,12 @@ _UNVERIFIABLE = (
     (re.compile(r"\$\{?[A-Za-z_]"), "a shell variable, whose value is not knowable here"),
 )
 
-# `NAME=value` before the program is a shell ASSIGNMENT PREFIX, not a command.
-# Refusing it meant this repo's own test command — PLANTED.json's
-# `PYTHONPATH=src python3 -m pytest -q`, which E3-R4 requires the sweep to run —
-# was blocked. A variable REFERENCE (`$R`) is still unverifiable; an assignment
-# is not.
+# `NAME=value` before the program is a shell ASSIGNMENT PREFIX, not a command:
+# the sweep's own test command is `PYTHONPATH=src python3 -m pytest -q` (E3-R4).
+# A variable REFERENCE (`$R`) is still unverifiable; an assignment is not.
 _ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 
 # Programs that can run anything, so allowlisting them would allowlist everything.
-_SHELLS = {"bash", "sh", "zsh", "dash", "ksh", "ash", "fish", "csh", "tcsh"}
 _INTERPRETERS = {
     "eval", "exec", "source", ".", "env", "python", "python3", "python2",
     "perl", "ruby", "node", "deno", "bun", "php", "awk", "xargs", "parallel",
@@ -124,10 +120,9 @@ _HEREDOC = re.compile(r"<<-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1")
 def _strip_heredocs(command):
     """Remove heredoc bodies, which are data rather than commands.
 
-    The denylist judged each body line as its own command, so writing this
-    project's `docs/security.md` — which names `rm -rf` and `git reset --hard` —
-    was refused. A guard that blocks writing its own documentation is one the
-    developer switches off.
+    Without this, writing a file that merely MENTIONS `rm -rf` — this project's
+    own `docs/security.md` does — is refused, and a guard that blocks writing
+    its own documentation is one the developer switches off.
     """
     lines = command.splitlines()
     kept, index = [], 0
@@ -144,6 +139,17 @@ def _strip_heredocs(command):
     return "\n".join(kept)
 
 
+def _unbalanced(segment):
+    """Whether `segment` could not be tokenised, so nothing in it is verifiable."""
+    import shlex
+
+    try:
+        shlex.split(segment)
+    except ValueError:
+        return True
+    return False
+
+
 def _unverifiable(segment):
     for pattern, description in _UNVERIFIABLE:
         if pattern.search(segment):
@@ -151,12 +157,11 @@ def _unverifiable(segment):
     return None
 
 
-def _allowed(tokens):
-    """None if allowed, else (Category, reason).
+def _refusal_for(tokens):
+    """(Category, reason) if this command must be refused, else None.
 
-    The category is returned, never inferred from the message. Deriving it from a
-    substring of the prose would be the same mistake the provenance review found
-    in the tests: a check that reads text instead of structure.
+    The category is returned, never inferred from the message: prose is not a
+    safe way to tell outcomes apart.
 
     UNVERIFIABLE is reserved for cases where the guard genuinely cannot determine
     the effect — inline code, a bare interpreter. A program we recognise and
@@ -171,15 +176,14 @@ def _allowed(tokens):
     program = tokens[0].strip("\"'").rsplit("/", 1)[-1]
     arguments = tokens[1:]
 
-    if program in _SHELLS:
+    if program in SHELLS:
         # A committed SCRIPT may run; inline code may not.
         #
         # The line is reviewed-artefact versus generated-at-call-time. cúramóir
-        # already allows `pytest`, `make` and `npm`, every one of which executes
-        # arbitrary repo-controlled code — so refusing `bash scripts/quickstart.sh`
-        # (the default `smoke.command`) while allowing `pytest` was incoherent.
-        # Inline `-c` is genuinely different: it is composed at call time and is
-        # not an artefact anyone reviewed.
+        # already allows `pytest`, `make` and `npm`, each of which executes
+        # arbitrary repo-controlled code, so a committed script is no worse.
+        # Inline `-c` is different: it is composed at call time and is not an
+        # artefact anyone reviewed.
         flags = [a for a in arguments if a.startswith("-")]
         if any("c" in flag.lstrip("-") for flag in flags):
             return (
@@ -253,7 +257,7 @@ def judge_command(command, in_job):
 
     stripped = _strip_heredocs(command or "")
 
-    for segment in _segments(stripped):
+    for segment in segments(stripped):
         if not segment.strip():
             continue
 
@@ -272,9 +276,8 @@ def judge_command(command, in_job):
                 category=Category.UNVERIFIABLE,
             )
 
-        try:
-            tokens = shlex.split(segment)
-        except ValueError:
+        tokens = tokenise(segment)
+        if tokens == segment.split() and _unbalanced(segment):
             return Decision(
                 deny=True,
                 reason=(
@@ -286,9 +289,9 @@ def judge_command(command, in_job):
                 category=Category.UNPARSEABLE,
             )
 
-        verdict = _allowed(tokens)
-        if verdict is not None:
-            category, reason = verdict
+        refusal = _refusal_for(tokens)
+        if refusal is not None:
+            category, reason = refusal
             return Decision(
                 deny=True,
                 reason=(
@@ -303,4 +306,4 @@ def judge_command(command, in_job):
             )
 
     # Second pass: an allowlisted program can still be used destructively.
-    return decide(stripped, in_job=True)
+    return judge_destructive(stripped, in_job=True)

@@ -14,12 +14,11 @@ or inventing a zero. This command ships in M0, before grades (E7), the runner
 """
 
 import json
+from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
 
-from curamoir.budget import PriceTable, UnknownModel
-from copy import deepcopy
-
+from curamoir.budget import PriceTable, UnknownModel, month_to_date
 from curamoir.config import DEFAULTS, ConfigError, load_config_text
 from curamoir.ledger import Ledger
 
@@ -146,26 +145,18 @@ def _read_lock(base):
 
 
 def _read_spend(base, config, now):
+    """Month-to-date spend against the ceiling, or why it is unavailable."""
     ceiling = config["budget"]["monthly_ceiling_usd"]
-    prices = PriceTable(config["budget"]["prices"])
     ledger = Ledger(base / "state" / "ledger.jsonl")
-    today = now()
-    total = 0.0
     try:
-        for entry in ledger.entries():
-            if entry.get("input_tokens") is None and entry.get("output_tokens") is None:
-                continue
-            when = _parse(entry.get("at"))
-            if when is None or (when.year, when.month) != (today.year, today.month):
-                continue
-            total += prices.cost(
-                entry.get("model"), entry.get("input_tokens") or 0, entry.get("output_tokens") or 0
-            )
+        total = month_to_date(ledger, PriceTable(config["budget"]["prices"]), now())
     except UnknownModel as unknown:
         return {
             "unavailable": True, "month_to_date_usd": None, "ceiling_usd": ceiling,
+            "unreadable_lines": ledger.unreadable_lines(),
             "detail": f"ledger names unpriced model {unknown.args[0]!r}",
         }
+
     unreadable = ledger.unreadable_lines()
     return {
         "unavailable": False, "month_to_date_usd": round(total, 2),
@@ -229,14 +220,3 @@ def _summarise_cadence(cadence):
     return ", ".join(f"{job}: {when}" for job, when in sorted(cadence.items()))
 
 
-def _parse(timestamp):
-    try:
-        when = datetime.fromisoformat(timestamp)
-    except (TypeError, ValueError):
-        return None
-    # Normalise to UTC. Attributing by the entry's own offset put a
-    # 2026-11-01T01:00+13:00 record (2026-10-31T12:00Z) into November, so a
-    # ledger merged from CI or another machine would lose and then double-count
-    # it across the month boundary.
-    when = when.replace(tzinfo=timezone.utc) if when.tzinfo is None else when
-    return when.astimezone(timezone.utc)

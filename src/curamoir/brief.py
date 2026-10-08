@@ -71,7 +71,7 @@ def build_brief(repo, now=None):
         "at": (now() if now else datetime.now(timezone.utc)).isoformat(timespec="seconds"),
         "absence_days": _absence_days(repo, now),
         "jobs": _read_jobs(base),
-        "spend": _read_spend(base),
+        "spend": _read_period_spend(base),
         "changed": _read_changed(base),
         "findings": _read_findings(base),
         "grades": grades,
@@ -214,9 +214,13 @@ def _read_jobs(base):
         return None
 
 
-def _read_spend(base):
-    """Deliberately None until E11-R1 attributes cost. Reporting $0.00 before
-    anything is tracked would understate rather than inform."""
+def _read_period_spend(base):
+    """Spend over the absence, or None until E11-R1 attributes cost.
+
+    Deliberately NOT `status._read_spend`, which is month-to-date against the
+    ceiling: a brief reports what this absence cost. Reporting $0.00 before
+    anything is tracked would understate rather than inform.
+    """
     return None
 
 

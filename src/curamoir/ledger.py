@@ -15,6 +15,22 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 
+def parse_ledger_timestamp(timestamp):
+    """A ledger `at` value as an aware UTC datetime, or None if unusable.
+
+    Normalised to UTC so month attribution never depends on the writer's offset:
+    `2026-11-01T01:00+13:00` is 2026-10-31T12:00Z and belongs to October. A
+    ledger merged from CI would otherwise lose and double-count entries across
+    the month boundary.
+    """
+    try:
+        when = datetime.fromisoformat(timestamp)
+    except (TypeError, ValueError):
+        return None
+    when = when.replace(tzinfo=timezone.utc) if when.tzinfo is None else when
+    return when.astimezone(timezone.utc)
+
+
 class Ledger:
     """A handle on one `.curamoir/state/ledger.jsonl`."""
 

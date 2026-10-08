@@ -249,7 +249,7 @@ def test_refusals_carry_a_structured_category_not_only_prose():
     could not see inside it" from "refused because it is not on the list" — the
     distinction DEC-9 calls its whole point. Deleting the shell-variable pattern
     left `$R` denied by a different rule, so the suite stayed green."""
-    from curamoir.hooks.policy import Category
+    from curamoir.hooks import Category
 
     cases = [
         ("bash -lc 'rm -rf /'", Category.UNVERIFIABLE),

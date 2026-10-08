@@ -9,6 +9,9 @@ import json
 import sys
 from pathlib import Path
 
+#: Where the supervisor lock lives, relative to `.curamoir/`.
+_LOCK = ("state", "lock")
+
 
 def read_payload(stream=None):
     """The hook payload, or None if it cannot be parsed."""
@@ -38,3 +41,20 @@ def run(handler):
     except Exception:
         return 0
     return 0
+
+def in_curamoir_job(env, repo=None):
+    """Whether we are running inside a cúramóir job.
+
+    Two signals, per DEC-5. The env var is primary: hook processes inherit the
+    parent environment, so the runner (E10-R1) exports CURAMOIR_JOB. The
+    supervisor lock is the fallback, because CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1
+    strips extra variables and we would otherwise stop enforcing silently.
+
+    NOTE: nothing writes the lock yet (E10-LOCK), so the fallback is currently
+    inert and /curamoir:doctor reports that as a warning.
+    """
+    if env.get("CURAMOIR_JOB"):
+        return True
+    if repo is not None:
+        return repo.joinpath(".curamoir", *_LOCK).exists()
+    return False

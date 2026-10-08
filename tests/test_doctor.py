@@ -175,7 +175,7 @@ def test_a_hook_that_writes_nothing_fails_its_probe(tmp_path):
     still reported `ok` — and the SessionEnd probe runs after PreCompact has
     written latest.md, so it could never fail for the reason it exists to catch.
     """
-    from curamoir.doctor import _run_hook_probe
+    from curamoir.doctor import _probe_hook
 
     repo = initialised(tmp_path)
     handoff = repo / ".curamoir" / "handoff" / "latest.md"
@@ -186,7 +186,7 @@ def test_a_hook_that_writes_nothing_fails_its_probe(tmp_path):
     stub.write_text("#!/usr/bin/env bash\ncat >/dev/null\nexit 0\n", encoding="utf-8")
     stub.chmod(0o755)
 
-    finding = _run_hook_probe(repo, "SessionEnd", {
+    finding = _probe_hook(repo, "SessionEnd", {
         "script": "does-nothing", "payload": {"hook_event_name": "SessionEnd"},
         "writes": ("handoff", "latest.md"), "proves": "x", "if_not": "y",
     }, script_path=stub)
@@ -208,17 +208,17 @@ def test_the_sessionstart_probe_distinguishes_injecting_from_merely_running(tmp_
     so through `diagnose` both states look alike. That coupling is itself why
     SessionStart is now probed before the probes that write.
     """
-    from curamoir.doctor import _HOOK_PROBES, _run_hook_probe
+    from curamoir.doctor import _HOOK_PROBES, _probe_hook
 
     probe = _HOOK_PROBES["SessionStart"]
 
     bare = initialised(tmp_path)
-    without = _run_hook_probe(bare, "SessionStart", probe)
+    without = _probe_hook(bare, "SessionStart", probe)
 
     handoff = bare / ".curamoir" / "handoff" / "latest.md"
     handoff.parent.mkdir(parents=True, exist_ok=True)
     handoff.write_text("# handoff\n\nbranch: main\n", encoding="utf-8")
-    with_handoff = _run_hook_probe(bare, "SessionStart", probe)
+    with_handoff = _probe_hook(bare, "SessionStart", probe)
 
     assert without.level == "ok" and with_handoff.level == "ok"
     assert without.detail != with_handoff.detail, (
@@ -239,7 +239,7 @@ def test_doctor_discloses_that_the_denylist_cannot_detect_a_job_yet(tmp_path):
     """
     findings = diagnose(initialised(tmp_path), tools={"python3": True, "yaml": True})
 
-    disclosure = [f for f in findings if "denylist" in f.check.lower()]
+    disclosure = [f for f in findings if "job detection" in f.check.lower()]
     assert disclosure, [f.check for f in findings]
     assert disclosure[0].level == "warning"
     assert "scrub" in disclosure[0].detail.lower() or "env" in disclosure[0].detail.lower()
@@ -256,7 +256,7 @@ def test_the_writes_probe_distinguishes_wrote_from_did_not_write(tmp_path):
     the exact original bug left the full 506-test suite green.
 
     Three states, against a target the test controls."""
-    from curamoir.doctor import _run_hook_probe
+    from curamoir.doctor import _probe_hook
 
     repo = initialised(tmp_path)
     writer = tmp_path / "writes"
@@ -274,19 +274,19 @@ def test_the_writes_probe_distinguishes_wrote_from_did_not_write(tmp_path):
              "writes": ("handoff", "latest.md"), "proves": "wrote", "if_not": "fix"}
 
     # (a) nothing there, hook writes -> ok
-    assert _run_hook_probe(repo, "SessionEnd", probe, script_path=writer).level == "ok"
+    assert _probe_hook(repo, "SessionEnd", probe, script_path=writer).level == "ok"
 
     # (b) file PRESENT and UNCHANGED, hook writes nothing -> error. This is the
     # state the old test could not construct, and the one the bug let through.
     target = tmp_path / "preexisting"
     (target / ".curamoir" / "handoff").mkdir(parents=True)
     (target / ".curamoir" / "handoff" / "latest.md").write_text("already here\n", encoding="utf-8")
-    finding = _run_hook_probe(repo, "SessionEnd", probe, script_path=silent, probe_target=target)
+    finding = _probe_hook(repo, "SessionEnd", probe, script_path=silent, probe_target=target)
     assert finding.level == "error", finding
     assert "wrote nothing" in finding.detail.lower()
 
     # (c) file present, hook rewrites it -> ok
-    assert _run_hook_probe(
+    assert _probe_hook(
         repo, "SessionEnd", probe, script_path=writer, probe_target=target
     ).level == "ok"
 

@@ -12,15 +12,23 @@ Three levels, and the distinction matters:
 with a ledger note. `ast-grep` absent is a warning: AST rules skip while regex
 rules still run (DEC-3). Reporting either as a failure teaches the developer to
 ignore the output, which costs more than the check is worth.
+
+One warning is currently unconditional: the denylist's job-detection fallback is
+not implemented (E10-LOCK), and an undisclosed silent-failure mode is worse than
+a declared one. So a healthy repo reports WARNINGS rather than OK until that
+lands — see `_check_job_detection`.
 """
 
 import json
+import os
 import shutil
 import subprocess
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from curamoir.config import ConfigError, load_config_text
+from curamoir.guards.lock import LOCK_PATH
 from curamoir.scaffold import detect_languages, detect_modules
 
 LEVEL_ORDER = {"error": 0, "warning": 1, "ok": 2}
@@ -59,7 +67,7 @@ def diagnose(repo, tools=None):
     findings.extend(_check_modules(repo))
     findings.append(_check_pause(base))
     findings.extend(_check_hooks(repo))
-    findings.append(_check_denylist_job_detection())
+    findings.append(_check_job_detection())
     findings.append(_check_writable(base))
     findings.extend(_check_tools(tools))
 
@@ -163,8 +171,7 @@ def _check_pause(base):
 
 # One probe per hook event: the payload to send, and what proves it worked.
 # Driven off hooks.json rather than hardcoded, so registering a sixth event
-# cannot leave doctor silently ignoring it — which is how four of five events
-# went unchecked after Epic 8 landed.
+# cannot leave doctor silently ignoring it.
 _HOOK_PROBES = {
     "PreToolUse": {
         "script": "curamoir-hook-pretooluse",
@@ -231,10 +238,8 @@ _PROBE_ORDER = ("PreToolUse", "SessionStart", "Stop", "PreCompact", "SessionEnd"
 def _check_hooks(repo):
     """Run EVERY registered hook rather than asserting hooks.json exists.
 
-    E1-R4 says "verify each hook fires (dry-run)". Checking the file proves
-    nothing about whether a hook works — which is exactly how the E0-R5
-    import-path bug survived, and how four of five events went unchecked once
-    Epic 8 registered them.
+    E1-R4 says "verify each hook fires (dry-run)". The file existing proves
+    nothing about whether a hook actually runs under the installed layout.
     """
     events = _registered_hook_events()
     if not events:
@@ -255,25 +260,23 @@ def _check_hooks(repo):
                 fix=f"Add a probe for {event} to _HOOK_PROBES in doctor.py.",
             ))
             continue
-        findings.append(_run_hook_probe(repo, event, probe))
+        findings.append(_probe_hook(repo, event, probe))
     return findings
 
 
-def _probe_repo(repo, probe, probe_target=None):
+def _probe_target(repo, probe, probe_target=None):
     """Where to run a probe.
 
     Writing probes run against a SCRATCH repo, never the developer's. The hooks
     they invoke are the real ones, and three of them write a handoff — so probing
-    in place replaced `handoff/latest.md`, appended fabricated journal notes
-    (which then became the next handoff's "Last decision"), and burned two of ten
-    history slots per run. Running doctor to find out why your handoff looked
-    wrong guaranteed it was wrong.
+    in place would replace `handoff/latest.md`, append fabricated journal notes
+    (which become the next handoff's "Last decision"), and burn two of ten
+    history slots per run. Running doctor to find out why your handoff looks
+    wrong would guarantee it was wrong.
 
     The probe only needs to observe that the hook writes SOMEWHERE, so a skeleton
     is enough.
     """
-    import tempfile
-
     if not probe.get("writes"):
         return repo, None
     if probe_target is not None:
@@ -288,29 +291,24 @@ def _probe_repo(repo, probe, probe_target=None):
     return scratch, scratch
 
 
-def _run_hook_probe(repo, event, probe, script_path=None, probe_target=None):
-    import shutil as _shutil
-
+def _probe_hook(repo, event, probe, script_path=None, probe_target=None):
     wrapper = script_path or Path(__file__).resolve().parents[2] / "scripts" / probe["script"]
     label = f"hook ({event})"
     if not wrapper.is_file():
         return Finding(label, "error", f"{wrapper} is missing",
                        fix="Reinstall the plugin; the hook script is absent.")
 
-    target, scratch = _probe_repo(repo, probe, probe_target=probe_target)
+    target, scratch = _probe_target(repo, probe, probe_target=probe_target)
     try:
-        return _probe(repo, target, wrapper, label, probe)
+        return _evaluate_probe(repo, target, wrapper, label, probe)
     finally:
-        # try/finally, not a done() wrapper: the subprocess-failure return was
-        # the one exit that could not go through it (done is defined after it),
-        # so a hook that merely timed out leaked a directory per doctor run.
+        # Every exit from _evaluate_probe must remove the scratch tree,
+        # including the early returns for a subprocess that could not run.
         if scratch is not None:
-            _shutil.rmtree(scratch, ignore_errors=True)
+            shutil.rmtree(scratch, ignore_errors=True)
 
 
-def _probe(repo, target, wrapper, label, probe):
-    import os
-
+def _evaluate_probe(repo, target, wrapper, label, probe):
     payload = dict(probe["payload"], cwd=str(target))
     environment = {"PATH": os.environ.get("PATH", "")}
     environment.update(probe.get("env", {}))
@@ -342,10 +340,9 @@ def _probe(repo, target, wrapper, label, probe):
 
     if "writes" in probe:
         after = _probe_marker(target, probe)
-        # The file must exist AND have changed. An `or after is not None` here
-        # made the comparison irrelevant: because hooks fail OPEN and exit 0, and
-        # because the SessionEnd probe runs after PreCompact has already written
-        # latest.md, a hook that did nothing still reported ok.
+        # The file must exist AND have changed. Existence alone proves nothing:
+        # hooks fail OPEN and exit 0, and the SessionEnd probe runs after
+        # PreCompact has already written latest.md.
         if after is not None and after != before:
             return (Finding(label, "ok", probe["proves"]))
         return (Finding(
@@ -382,8 +379,6 @@ def _check_writable(base):
     prove the REAL `.curamoir/handoff/` is writable. Without this, doctor would
     report every hook ok on a repo with a read-only `.curamoir/`.
     """
-    import os
-
     unwritable = [
         str(path.relative_to(base.parent))
         for path in (base, base / "handoff", base / "state", base / "briefs")
@@ -398,7 +393,7 @@ def _check_writable(base):
     return Finding("writable state", "ok", "handoff, state and briefs are writable")
 
 
-def _check_denylist_job_detection():
+def _check_job_detection():
     """Disclose the denylist's current silent-failure mode.
 
     The denylist enforces only inside a cúramóir job. DEC-5 established two
@@ -414,10 +409,8 @@ def _check_denylist_job_detection():
     is worse than an absent one: the absent one does not invite reliance. Remove
     it when E10-LOCK lands and the fallback becomes real.
     """
-    from curamoir.guards.lock import LOCK_PATH
-
     return Finding(
-        check="denylist job detection",
+        check="job detection",
         level="warning",
         detail=(
             "the destructive-command denylist enforces only inside a cúramóir "

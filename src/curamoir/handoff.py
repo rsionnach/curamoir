@@ -28,6 +28,7 @@ from pathlib import Path
 from curamoir.redaction import write_artefact
 from curamoir.repo_config import config_value
 
+#: Bounds the WHOLE handoff file, not the last-decision field below it.
 WORD_LIMIT = 400
 # E8-R1 asks for "one to three sentences". Bounded by BOTH, because
 # `last_assistant_message` is raw prose — bullet lists, code blocks, a trailing
@@ -35,6 +36,8 @@ WORD_LIMIT = 400
 # cap is what actually stops a long final turn consuming the file budget.
 MAX_DECISION_SENTENCES = 3
 MAX_DECISION_WORDS = 60
+#: Room reserved for `_cap_words`' own "truncated" line.
+_TRUNCATION_NOTICE_WORDS = 15
 DEFAULT_KEEP_HISTORY = 10
 MAX_LISTED_CHANGES = 12
 MAX_LISTED_BEADS = 6
@@ -236,17 +239,17 @@ def _branch(repo):
     plainly knowable is worse than saying nothing.
     """
     return (
-        _git(repo, "rev-parse", "--abbrev-ref", "HEAD")
-        or _git(repo, "symbolic-ref", "--short", "HEAD")
+        _git_stripped(repo, "rev-parse", "--abbrev-ref", "HEAD")
+        or _git_stripped(repo, "symbolic-ref", "--short", "HEAD")
         or UNAVAILABLE
     )
 
 
 def _uncommitted(repo):
     """Change summaries, never content. `--porcelain` gives status plus path."""
-    # NOT the stripping `_git`: porcelain's first column is a space for an
+    # _git_raw, NOT _git_stripped: porcelain's first column is a space for an
     # unstaged change, and stripping the output shifts every such line left by
-    # one, which silently corrupted both the label and the path.
+    # one, corrupting both the label and the path.
     raw = _git_raw(repo, "status", "--porcelain")
     if raw is None:
         return UNAVAILABLE
@@ -370,7 +373,7 @@ def _cap_words(text, limit):
     kept, used = [], 0
     for line in text.splitlines():
         count = len(line.split())
-        if used + count > limit - 15:
+        if used + count > limit - _TRUNCATION_NOTICE_WORDS:
             break
         kept.append(line)
         used += count
@@ -389,7 +392,7 @@ def _git_raw(repo, *args):
     return result.stdout.rstrip("\n") if result.returncode == 0 else None
 
 
-def _git(repo, *args):
+def _git_stripped(repo, *args):
     try:
         result = subprocess.run(
             ["git", *args], cwd=repo, capture_output=True, text=True, timeout=5

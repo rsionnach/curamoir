@@ -4,7 +4,7 @@ The spec (docs/curamoir-spec.md:202) says: "If `dcg` is installed and
 `use_dcg_if_present` is true, delegate to it instead of duplicating the list."
 
 `_delegate_to_dcg` exists, but every case in test_denylist_forms.py calls
-`decide()` directly and every case in test_command_policy.py calls
+`judge_destructive()` directly and every case in test_command_policy.py calls
 `judge_command()` directly — so the one source that could independently
 adjudicate "what is a destructive git command", rather than this author's
 opinion of it, was never asked. Fixture provenance review's finding 8.

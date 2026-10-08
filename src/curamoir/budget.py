@@ -13,9 +13,31 @@ from datetime import datetime, timezone
 
 from curamoir.guards.reasons import Reason
 from curamoir.guards.result import Degraded, Refusal
-from curamoir.ledger import Ledger
+from curamoir.ledger import Ledger, parse_ledger_timestamp
 
 PER_MILLION = 1_000_000
+
+
+def month_to_date(ledger, prices, now):
+    """Total USD for ledger entries dated in `now`'s calendar month (UTC).
+
+    Shared by the E0-R4 budget guard and E1-R3's /curamoir:status so the two can
+    never disagree about what a month's spend is. Raises UnknownModel for an
+    entry naming a model the price table does not cover.
+    """
+    total = 0.0
+    for entry in ledger.entries():
+        if entry.get("input_tokens") is None and entry.get("output_tokens") is None:
+            continue
+        when = parse_ledger_timestamp(entry.get("at"))
+        if when is None or (when.year, when.month) != (now.year, now.month):
+            continue
+        total += prices.cost(
+            entry.get("model"),
+            entry.get("input_tokens") or 0,
+            entry.get("output_tokens") or 0,
+        )
+    return total
 
 
 class UnknownModel(Exception):
@@ -80,7 +102,7 @@ class Budget:
 
         ledger = Ledger(context.repo / ".curamoir" / "state" / "ledger.jsonl")
         try:
-            spent = self._month_to_date(ledger)
+            spent = month_to_date(ledger, self._prices, self._now())
             unreadable = ledger.unreadable_lines()
         except UnknownModel as unknown:
             # Do NOT treat an unpriced model as $0. Undercounting is the one
@@ -144,31 +166,5 @@ class Budget:
 
         return None
 
-    def _month_to_date(self, ledger):
-        now = self._now()
-        total = 0.0
-        for entry in ledger.entries():
-            if entry.get("input_tokens") is None and entry.get("output_tokens") is None:
-                continue
-            when = _parse(entry.get("at"))
-            if when is None or (when.year, when.month) != (now.year, now.month):
-                continue
-            total += self._prices.cost(
-                entry.get("model"),
-                entry.get("input_tokens") or 0,
-                entry.get("output_tokens") or 0,
-            )
-        return total
 
 
-def _parse(timestamp):
-    try:
-        when = datetime.fromisoformat(timestamp)
-    except (TypeError, ValueError):
-        return None
-    # Normalise to UTC. Attributing by the entry's own offset put a
-    # 2026-11-01T01:00+13:00 record (2026-10-31T12:00Z) into November, so a
-    # ledger merged from CI or another machine would lose and then double-count
-    # it across the month boundary.
-    when = when.replace(tzinfo=timezone.utc) if when.tzinfo is None else when
-    return when.astimezone(timezone.utc)

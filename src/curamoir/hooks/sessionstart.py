@@ -38,6 +38,8 @@ DEFAULT_TOKEN_BUDGET = 1500
 # Hard ceiling imposed by Claude Code. Staying well under it is deliberate.
 HARD_CHARACTER_LIMIT = 9000
 LONG_GAP_SECONDS = 3600
+#: The blank lines and "--- label ---" rules `_assemble` joins its parts with.
+_JOIN_SLACK = 16
 
 ALWAYS_INJECT = {"startup", "clear", "compact"}
 
@@ -86,15 +88,13 @@ def should_inject(payload):
 
 def _assemble(parts, budget):
     header = "cúramóir state from the previous session:"
-    footer_for = lambda paths: "Full text: " + ", ".join(paths) + "."
-
     paths = [path for _, path, _ in parts]
-    footer = footer_for(paths)
+    footer = "Full text: " + ", ".join(paths) + "."
     # Reserve room for the footer and the truncation notice, so the pointer to the
     # full files survives truncation. A truncated injection that loses the pointer
     # is silent data loss.
     notice = "(Truncated to fit the session-start budget.)"
-    room = budget - len(header) - len(footer) - len(notice) - 16
+    room = budget - len(header) - len(footer) - len(notice) - _JOIN_SLACK
 
     body, truncated = [], False
     for label, _, text in parts:

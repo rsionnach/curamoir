@@ -13,7 +13,7 @@ reopen it.
 
 import pytest
 
-from curamoir.hooks.denylist import decide
+from curamoir.hooks.destructive import judge_destructive
 
 # PROVENANCE — read before adding to these tables.
 #
@@ -37,7 +37,7 @@ from curamoir.hooks.denylist import decide
 #                 justifies them.
 #
 # The external oracle E0-R5 names — `dcg` — is exercised separately in
-# tests/hooks/test_dcg_delegation.py. Every case in THIS file calls decide()
+# tests/hooks/test_dcg_delegation.py. Every case in THIS file calls judge_destructive()
 # directly and so bypasses it.
 
 # SPEC + TOOL DOCS. Each destroys work with no recovery path.
@@ -131,24 +131,24 @@ MUST_ALLOW = [
 
 @pytest.mark.parametrize("command", MUST_DENY)
 def test_destructive_forms_are_denied(command):
-    decision = decide(command, in_job=True)
+    decision = judge_destructive(command, in_job=True)
     assert decision.deny, f"NOT DENIED: {command}"
     assert decision.alternative, f"denied with no alternative: {command}"
 
 
 @pytest.mark.parametrize("command", MUST_ALLOW)
 def test_safe_forms_are_allowed(command):
-    assert not decide(command, in_job=True).deny, f"WRONGLY DENIED: {command}"
+    assert not judge_destructive(command, in_job=True).deny, f"WRONGLY DENIED: {command}"
 
 
 def test_the_recommended_alternative_is_never_itself_denied():
     """The rule must not block the thing its own message tells you to use.
     `--force-with-lease --force-if-includes` was denied while being recommended."""
     for command in MUST_DENY:
-        decision = decide(command, in_job=True)
+        decision = judge_destructive(command, in_job=True)
         suggestion = decision.alternative
         if suggestion.startswith("git ") or suggestion.startswith("rm "):
-            assert not decide(suggestion, in_job=True).deny, (
+            assert not judge_destructive(suggestion, in_job=True).deny, (
                 f"{command!r} suggests {suggestion!r}, which is itself denied"
             )
 
@@ -156,12 +156,12 @@ def test_the_recommended_alternative_is_never_itself_denied():
 def test_an_unparseable_command_still_gets_inspected():
     """Unbalanced quotes must not become a bypass: shlex raises on them, and
     falling back to no inspection would make a quote the way round the guard."""
-    assert decide('git push -f "unclosed', in_job=True).deny
+    assert judge_destructive('git push -f "unclosed', in_job=True).deny
 
 
 def test_nothing_is_denied_outside_a_job():
     for command in MUST_DENY[:5]:
-        assert not decide(command, in_job=False).deny
+        assert not judge_destructive(command, in_job=False).deny
 
 
 # --- prefix words and nested payloads must not be a bypass -----------------
@@ -206,12 +206,12 @@ NESTED_MUST_DENY = [
 
 @pytest.mark.parametrize("command", PREFIXED_MUST_DENY)
 def test_a_prefix_word_is_not_a_bypass(command):
-    assert decide(command, in_job=True).deny, f"PREFIX BYPASS: {command}"
+    assert judge_destructive(command, in_job=True).deny, f"PREFIX BYPASS: {command}"
 
 
 @pytest.mark.parametrize("command", NESTED_MUST_DENY)
 def test_a_nested_payload_is_not_a_bypass(command):
-    assert decide(command, in_job=True).deny, f"NESTED BYPASS: {command}"
+    assert judge_destructive(command, in_job=True).deny, f"NESTED BYPASS: {command}"
 
 
 # These contain the same words but destroy nothing. A guardrail that blocks them
@@ -235,14 +235,14 @@ PREFIXED_MUST_ALLOW = [
 
 @pytest.mark.parametrize("command", PREFIXED_MUST_ALLOW)
 def test_mentions_and_safe_prefixed_commands_are_allowed(command):
-    assert not decide(command, in_job=True).deny, f"WRONGLY DENIED: {command}"
+    assert not judge_destructive(command, in_job=True).deny, f"WRONGLY DENIED: {command}"
 
 
 def test_recursion_into_payloads_terminates():
     """A deeply nested payload must not hang or blow the stack."""
     command = "bash -c " + " ".join(["'bash -c"] * 20) + " 'git status'" + "'" * 20
 
-    decide(command, in_job=True)  # must simply return
+    judge_destructive(command, in_job=True)  # must simply return
 
 
 # --- round 3: rule-table gaps (each one line, independent of the parser) ---
@@ -292,9 +292,9 @@ RULE_GAPS_MUST_ALLOW = [
 
 @pytest.mark.parametrize("command", RULE_GAPS_MUST_DENY)
 def test_equivalent_destruction_is_also_denied(command):
-    assert decide(command, in_job=True).deny, f"NOT DENIED: {command}"
+    assert judge_destructive(command, in_job=True).deny, f"NOT DENIED: {command}"
 
 
 @pytest.mark.parametrize("command", RULE_GAPS_MUST_ALLOW)
 def test_the_safe_halves_of_those_rules_are_allowed(command):
-    assert not decide(command, in_job=True).deny, f"WRONGLY DENIED: {command}"
+    assert not judge_destructive(command, in_job=True).deny, f"WRONGLY DENIED: {command}"
