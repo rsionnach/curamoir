@@ -37,10 +37,12 @@ def test_an_unserialisable_field_does_not_replace_the_real_exception(tmp_path):
 
     ledger = Ledger(tmp_path / "ledger.jsonl")
 
-    with pytest.raises(RuntimeError, match="the real failure"):
-        with JobRun(job="sweep", ledger=ledger, ) as run:
-            run.failed("broke", artefact=Path("/tmp/x"))
-            raise RuntimeError("the real failure the operator needs to see")
+    with (
+        pytest.raises(RuntimeError, match="the real failure"),
+        JobRun(job="sweep", ledger=ledger) as run,
+    ):
+        run.failed("broke", artefact=Path("/tmp/x"))
+        raise RuntimeError("the real failure the operator needs to see")
 
 
 def test_an_unserialisable_field_is_recorded_as_its_repr_not_dropped(tmp_path):

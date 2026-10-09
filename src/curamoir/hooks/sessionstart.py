@@ -28,7 +28,7 @@ import json
 import sys
 from pathlib import Path
 
-from curamoir.hooks._entry import repo_from, read_payload
+from curamoir.hooks._entry import read_payload, repo_from
 from curamoir.repo_config import config_value
 
 # ~4 characters per token: the standard rough approximation. Tokenising properly
@@ -127,7 +127,7 @@ def _assemble(parts, budget):
             truncated = True
         body.append(block)
 
-    sections = [header, ""] + body
+    sections = [header, "", *body]
     if truncated:
         sections += ["", notice]
     sections += ["", footer]

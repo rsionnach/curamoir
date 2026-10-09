@@ -4,7 +4,8 @@ Briefs, handoffs, issues and PR bodies pass through `redact` before being
 written. Making this the only write path for those artefacts is deliberate: a
 later epic cannot forget to call something it has to go through.
 
-LIMITS, stated plainly and repeated in docs/security.md (E13-R2b):
+LIMITS, stated plainly here and to be repeated in docs/security.md
+(E13-R2b, not yet landed):
 
 - Pattern-based redaction catches shapes it knows. An unrecognised secret
   format passes through untouched.

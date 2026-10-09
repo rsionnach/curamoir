@@ -9,7 +9,10 @@ to choose between and flattening per-module back-off.
 import pytest
 
 from curamoir.scaffold import (
-    AlreadyInitialised, detect_languages, detect_modules, init_repo,
+    AlreadyInitialised,
+    detect_languages,
+    detect_modules,
+    init_repo,
 )
 
 

@@ -21,8 +21,10 @@ Hook wiring (see hooks/hooks.json, and the correction recorded on E8-R1):
 """
 
 import json
+import re
 import subprocess
 import time
+from contextlib import suppress
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -106,8 +108,6 @@ def _first_sentences(text, limit, word_limit=MAX_DECISION_WORDS):
     """
     if not text:
         return text
-    import re
-
     parts = re.split(r"(?<=[.!?])\s+", text.strip())
     kept = " ".join(parts[:limit]).strip()
     truncated = len(parts) > limit
@@ -527,10 +527,11 @@ def _journal(repo, deadline=None):
 def _prune(history, keep):
     files = sorted(history.glob("*.md"))
     for stale in files[: max(0, len(files) - keep)]:
-        try:
+        # suppress(OSError): pruning is housekeeping. A file that cannot be
+        # removed — a permission change, a racing process — must not take the
+        # handoff down with it.
+        with suppress(OSError):
             stale.unlink()
-        except OSError:
-            pass
 
 
 def _cap_words(text, limit):

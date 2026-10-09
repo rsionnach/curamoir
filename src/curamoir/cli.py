@@ -13,7 +13,11 @@ from curamoir.brief import due_for_brief_from_config, write_brief
 from curamoir.doctor import diagnose, render_report
 from curamoir.handoff import write_handoff
 from curamoir.scaffold import (
-    AlreadyInitialised, TemplateDrift, detect_languages, detect_modules, init_repo,
+    AlreadyInitialised,
+    TemplateDrift,
+    detect_languages,
+    detect_modules,
+    init_repo,
 )
 from curamoir.status import collect_status, render_status
 

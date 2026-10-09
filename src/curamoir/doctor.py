@@ -549,6 +549,24 @@ def _probe_bd(level, fix, repo=None):
     return Finding("bd", "ok", "available")
 
 
+#: The candidates the hook wrappers try, in their order. doctor must resolve the
+#: interpreter the WRAPPERS will use, not the one named `python3` — on a machine
+#: with 3.12 installed alongside an older default, asking only about `python3`
+#: reported an error for hooks that work perfectly. The list is duplicated from
+#: `scripts/curamoir-hook-*` rather than read from them, because doctor must not
+#: depend on parsing shell; a test asserts the two agree.
+WRAPPER_INTERPRETERS = ("python3.14", "python3.13", "python3.12", "python3", "python")
+
+
+def _wrapper_interpreter():
+    """The interpreter a hook wrapper would exec, or None if there is none."""
+    for candidate in WRAPPER_INTERPRETERS:
+        found = shutil.which(candidate)
+        if found is not None:
+            return found
+    return None
+
+
 def _probe_python(resolved, level, detail, fix):
     """The version the WRAPPERS would use, not the one running this code.
 
@@ -607,18 +625,16 @@ def _check_tools(tools, repo=None):
             findings.append(_probe_bd(level, fix, repo=repo))
             continue
         if available is None and name == "python3":
-            resolved = shutil.which("python3") or shutil.which("python")
+            resolved = _wrapper_interpreter()
             findings.append(_probe_python(resolved, level, detail, fix))
             continue
         if available is None:
-            if name == "python3":
-                # What the WRAPPERS need: `command -v python3`, falling back to
-                # `python`. Resolving sys.executable instead made this check
-                # unfailable, because the running interpreter exists by
-                # definition — while the hooks it stands for could all be dead.
-                available = bool(shutil.which("python3") or shutil.which("python"))
-            else:
-                available = shutil.which(name) is not None
+            # `bd` and `python3` are handled above and `continue` out, so this
+            # is the generic arm only. It used to carry a python3 branch that
+            # became unreachable when `_probe_python` took over, with the whole
+            # rationale for probing the WRAPPERS' interpreter still attached —
+            # and a reader who trusts a comment edits the copy it sits on.
+            available = shutil.which(name) is not None
         findings.append(
             Finding(name, "ok", "available") if available
             else Finding(name, level, detail, fix=fix)

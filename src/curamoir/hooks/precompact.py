@@ -12,10 +12,10 @@ trade.
 import sys
 
 from curamoir.handoff import record_turn, write_handoff
+from curamoir.hooks._entry import run
 
 #: Well inside PreCompact's 30s, and generous: losing this one costs the most.
 PRE_COMPACT_BUDGET_SECONDS = 15
-from curamoir.hooks._entry import run
 
 
 def _handle(payload, repo):

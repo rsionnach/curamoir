@@ -42,6 +42,7 @@ def run(handler):
         return 0
     return 0
 
+
 def in_curamoir_job(env, repo=None):
     """Whether we are running inside a cúramóir job.
 

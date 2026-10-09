@@ -20,7 +20,9 @@ PRICES = PriceTable({
     "claude-opus-5": {"input": 5.00, "output": 25.00},
 })
 
-OCTOBER = lambda: datetime(2026, 10, 5, tzinfo=timezone.utc)
+def OCTOBER():
+    """A fixed clock, so month attribution is not a function of the test's date."""
+    return datetime(2026, 10, 5, tzinfo=timezone.utc)
 
 
 def spend(ledger, model, input_tokens, output_tokens, at="2026-10-02T12:00:00+00:00"):

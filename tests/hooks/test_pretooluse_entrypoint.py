@@ -79,7 +79,7 @@ def test_the_supervisor_lock_is_the_fallback_when_env_is_scrubbed(tmp_path):
 
 
 def test_a_non_bash_tool_is_ignored():
-    result, decision = run_hook("irrelevant", env={"CURAMOIR_JOB": "sweep"}, tool_name="Read")
+    _, decision = run_hook("irrelevant", env={"CURAMOIR_JOB": "sweep"}, tool_name="Read")
 
     assert decision is None
 
@@ -115,3 +115,35 @@ def test_the_hook_still_lets_a_job_do_its_work():
         result, decision = run_hook(command, env={"CURAMOIR_JOB": "sweep"})
         assert result.returncode == 0, result.stderr
         assert decision is None, f"WRONGLY REFUSED THROUGH THE HOOK: {command}"
+
+
+def test_every_refusal_that_reaches_the_agent_names_something_to_do():
+    """E0-R5 makes "name the safe alternative" an acceptance criterion, and the
+    spec's reason is that an agent told only "no" retries the same thing or
+    invents worse.
+
+    `Decision.alternative` had no reader: the hook emitted only `reason`.
+    `destructive.py` folds its alternative into `reason` itself, so the denylist
+    criterion held — but the length cap, the unparseable case and the
+    unterminated heredoc each set `alternative` and never mentioned it, so
+    those three reached the agent as a refusal with no next step.
+    """
+    from curamoir.hooks import judge_command
+    from curamoir.hooks.pretooluse import refusal_text
+
+    commands = [
+        "echo " + "a" * 20_000,                  # the length cap
+        'git push -f "unclosed',                 # unparseable
+        "cat <<EOF\nrm -rf /",                   # unterminated heredoc
+        "terraform apply",                       # not allowlisted
+        "git reset --hard",                      # destructive
+        "bash -c 'rm -rf /'",                    # unverifiable
+    ]
+    for command in commands:
+        decision = judge_command(command, in_job=True)
+        assert decision.deny, command
+        text = refusal_text(decision)
+        assert decision.alternative, f"{command!r} sets no alternative"
+        assert decision.alternative in text, (
+            f"the agent is told {text!r} and never told what to do instead"
+        )

@@ -9,6 +9,7 @@ unenforced check is visible, and these are the paths where it was not.
 """
 
 import os
+from datetime import timezone
 
 import pytest
 
@@ -31,9 +32,11 @@ def test_a_ledger_failure_does_not_replace_the_exception_the_job_died_of(tmp_pat
     ledger = Ledger(state / "ledger.jsonl")
     os.chmod(state, 0o500)
     try:
-        with pytest.raises(RuntimeError, match="the real failure"):
-            with JobRun(job="sweep", ledger=ledger):
-                raise RuntimeError("the real failure the operator needs to see")
+        with (
+            pytest.raises(RuntimeError, match="the real failure"),
+            JobRun(job="sweep", ledger=ledger),
+        ):
+            raise RuntimeError("the real failure the operator needs to see")
     finally:
         os.chmod(state, 0o700)
 
@@ -87,7 +90,7 @@ def test_a_lock_timestamped_in_the_future_is_treated_as_stale(tmp_path):
     machine blocked the repo forever with a message that gave no hint that
     clearing the lock was safe."""
     import json
-    from datetime import datetime, timedelta, timezone
+    from datetime import datetime, timedelta
 
     lock = tmp_path / ".curamoir" / "state" / "lock"
     lock.parent.mkdir(parents=True)

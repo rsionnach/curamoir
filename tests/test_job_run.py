@@ -49,9 +49,8 @@ def test_refused_job_writes_one_job_line_carrying_the_reason(tmp_path):
 def test_a_crashing_job_still_writes_its_line(tmp_path):
     ledger = Ledger(tmp_path / "ledger.jsonl")
 
-    with pytest.raises(RuntimeError):
-        with JobRun(ledger, job="review"):
-            raise RuntimeError("model call exploded")
+    with pytest.raises(RuntimeError), JobRun(ledger, job="review"):
+        raise RuntimeError("model call exploded")
 
     lines = job_lines(ledger)
     assert len(lines) == 1

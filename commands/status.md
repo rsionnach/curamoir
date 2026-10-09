@@ -18,8 +18,11 @@ everything else and a developer skimming will miss them:
 
 - **PAUSED.** Nothing is running on a schedule. Say so first.
 - **A held lock.** A job is in progress, or a crashed job left the lock behind.
-  If the lock looks stale, say so and mention that `/curamoir:doctor` will say
-  more.
+  If the lock looks stale say so, and name the file — `.curamoir/state/lock` —
+  since clearing it by hand is the fix. Do not promise that
+  `/curamoir:doctor` will say more: it does not check the lock, and
+  `/curamoir:status` is the only thing that reads it.
 
 If spend is close to the ceiling, say that plainly too: at the ceiling,
-scheduled jobs stop refusing to run quietly rather than overrunning.
+scheduled jobs refuse to run rather than overrunning — quietly, recording the
+refusal in the ledger.

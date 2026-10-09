@@ -67,7 +67,7 @@ def main(argv=None, stdin=None, stdout=None):
                     "hookSpecificOutput": {
                         "hookEventName": "PreToolUse",
                         "permissionDecision": "deny",
-                        "permissionDecisionReason": decision.reason,
+                        "permissionDecisionReason": refusal_text(decision),
                     }
                 },
                 stdout,
@@ -94,6 +94,23 @@ def main(argv=None, stdin=None, stdout=None):
 # judge the command, so a missed `dcg` verdict costs only dcg's extra coverage.
 # A wrong refusal costs every command in the job.
 _COULD_NOT_RUN = (2, 64, 126, 127)
+
+
+def refusal_text(decision):
+    """What the agent is told: the reason, and what to do instead.
+
+    E0-R5 makes naming the safe alternative an acceptance criterion, because an
+    agent told only "no" retries the same thing or invents worse. The hook used
+    to emit `reason` alone, and `Decision.alternative` had no reader anywhere —
+    so the three refusals that keep their alternative OUT of the reason (the
+    length cap, unparseable quoting, an unterminated heredoc) arrived with
+    nothing to act on. A structured field with no consumer reads as "this gets
+    shown", which is why it is joined here rather than dropped.
+    """
+    reason = decision.reason or "blocked by cúramóir"
+    if decision.alternative and decision.alternative not in reason:
+        return f"{reason} Try instead: {decision.alternative}."
+    return reason
 
 
 def _delegate_to_dcg(command):

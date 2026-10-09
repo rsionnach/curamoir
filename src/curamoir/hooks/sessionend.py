@@ -12,10 +12,10 @@ and a write.
 import sys
 
 from curamoir.handoff import write_handoff
+from curamoir.hooks._entry import run
 
 #: Inside the 1.5s SessionEnd hooks share, with room to write the file.
 SESSION_END_BUDGET_SECONDS = 1.2
-from curamoir.hooks._entry import run
 
 
 def _handle(_payload, repo):

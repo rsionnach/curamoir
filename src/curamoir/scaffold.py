@@ -28,7 +28,7 @@ NOT_SOURCE = (
 # test suite graded as production code would skew every module's grade and spend
 # review passes on it. `docs` is here rather than in NOT_SOURCE because a docs
 # directory can legitimately contain Python (conf.py, examples).
-NEVER_MODULES = NOT_SOURCE + ("tests", "docs")
+NEVER_MODULES = (*NOT_SOURCE, "tests", "docs")
 PYTHON_MARKERS = ("pyproject.toml", "setup.py", "setup.cfg", "Pipfile", "requirements.txt")
 TYPESCRIPT_MARKERS = ("tsconfig.json", "package.json")
 
@@ -205,9 +205,20 @@ def _copy_template(source, destination):
     if source.exists():
         destination.write_text(source.read_text(encoding="utf-8"), encoding="utf-8")
     else:
+        # This is the ONLY branch that runs today: `templates/principles.md`
+        # does not exist yet (Epic 2 ships it). So the text has to stand on its
+        # own — it is the first file a new user opens, and the previous version
+        # sent them to `docs/principles-authoring.md` and an `examples/`
+        # directory, neither of which exists.
         destination.write_text(
             "# Golden principles\n\n"
-            "No principles yet. See docs/principles-authoring.md, or copy a "
-            "starter set from the plugin's examples/ directory.\n",
+            "No principles yet. A starter set ships with Epic 2, which has not "
+            "landed.\n\n"
+            "Write your own: one principle per section, each with\n\n"
+            "- an `id` a lint rule can cite (e.g. `no-bare-except`),\n"
+            "- the rule as one imperative sentence,\n"
+            "- why it matters in this repository,\n"
+            "- a short example of a violation and its fix.\n\n"
+            "`/curamoir:doctor` reports how many it can parse.\n",
             encoding="utf-8",
         )

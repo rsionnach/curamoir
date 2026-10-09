@@ -244,7 +244,7 @@ def test_the_defaults_handed_out_on_a_missing_config_cannot_be_mutated(tmp_path)
     from copy import deepcopy
     snapshot = deepcopy(DEFAULTS)
     collect_status(repo)
-    assert DEFAULTS == snapshot
+    assert snapshot == DEFAULTS
 
 
 def test_the_grades_section_says_not_available_independently_of_cadence(tmp_path):

@@ -131,9 +131,9 @@ def _strip_heredoc_bodies(tokens):
     """(tokens with heredoc bodies removed, whether one was left unterminated).
 
     A heredoc body is data, not commands. Without removing it, writing a file
-    that merely MENTIONS `rm -rf` — this project's own `docs/security.md` does —
-    is refused, and a guard that blocks writing its own documentation is one the
-    developer switches off.
+    that merely MENTIONS `rm -rf` — security documentation, a rule fixture,
+    this module's own tests — is refused, and a guard that blocks writing its
+    own documentation is one the developer switches off.
 
     The operator and its terminator word stay, because they are the command's
     own tokens and the shell branch needs to see them: `bash <<EOF` is inline
@@ -527,10 +527,13 @@ def judge_command(command, in_job):
                     f"blocked by cúramóir: {reason}. A job may run only recognised "
                     "commands, because a guard that is behind on an allowlist "
                     "costs a retry while one behind on a denylist costs the "
-                    "repository. If this command is legitimate, add it to the "
-                    "allowlist in curamoir.yaml and say why in the bead."
+                    "repository. If this command is legitimate, the list is "
+                    "ALLOWED in curamoir/hooks/policy.py — widening it is a "
+                    "code change, so file a bead rather than editing config."
                 ),
-                alternative="add it to the allowlist in curamoir.yaml",
+                alternative=(
+                    "file a bead to widen ALLOWED in curamoir/hooks/policy.py"
+                ),
                 category=category,
             )
 

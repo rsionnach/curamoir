@@ -193,7 +193,7 @@ def test_the_consumer_list_holds_only_programs_the_allowlist_admits():
     """A program on the consumer list that the allowlist refuses anyway is dead
     weight that READS as permission — `awk` and `sed` were both there, and both
     are refused before the heredoc rule is ever reached."""
-    from curamoir.hooks.policy import ALLOWED, _HEREDOC_CONSUMERS, _INTERPRETERS
+    from curamoir.hooks.policy import _HEREDOC_CONSUMERS, _INTERPRETERS, ALLOWED
 
     for program in _HEREDOC_CONSUMERS:
         assert program in ALLOWED, f"{program} is on the consumer list but not allowlisted"

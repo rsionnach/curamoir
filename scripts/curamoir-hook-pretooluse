@@ -12,7 +12,15 @@ set -u
 
 root="${CLAUDE_PLUGIN_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 
-for interpreter in python3 python; do
+# Most specific first. The loop used to be `python3 python`, which takes the
+# first interpreter that EXISTS rather than one that can run this code — so on a
+# machine whose `python3` predates the floor in pyproject.toml, every hook died
+# on an import and, because command hooks fail OPEN, protected nothing while
+# looking installed. Naming the versioned binaries first costs nothing (a
+# `command -v` each) and picks the right one wherever a conforming interpreter
+# is installed alongside an older default. /curamoir:doctor still reports the
+# case where none is.
+for interpreter in python3.14 python3.13 python3.12 python3 python; do
   if command -v "$interpreter" >/dev/null 2>&1; then
     PYTHONPATH="${root}/src${PYTHONPATH:+:${PYTHONPATH}}" \
       exec "$interpreter" -m curamoir.hooks.pretooluse

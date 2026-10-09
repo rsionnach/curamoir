@@ -19,6 +19,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from curamoir.budget import PriceTable, UnknownModel, combined_shortfall, month_to_date
+from curamoir.cadence import scheduled_jobs
 from curamoir.config import DEFAULTS, ConfigError, load_config_text
 from curamoir.grades import graded_modules
 from curamoir.ledger import Ledger
@@ -223,8 +224,9 @@ def _summarise_grades(grades):
 
 
 def _summarise_cadence(cadence):
-    if not cadence:
-        return NOT_AVAILABLE + " (no scheduled runs yet — Epic 10)"
-    return ", ".join(f"{job}: {when}" for job, when in sorted(cadence.items()))
+    scheduled = scheduled_jobs(cadence)
+    if not scheduled:
+        return NOT_AVAILABLE + " (no cadence recorded yet — Epic 10)"
+    return ", ".join(f"{name} {summary}" for name, summary in sorted(scheduled.items()))
 
 

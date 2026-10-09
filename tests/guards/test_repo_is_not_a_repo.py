@@ -19,7 +19,6 @@ My own docstring in `test_unknown_repo.py` claimed "the bypass is unreachable
 even from a caller that defeats layer 1". It was unreachable for one value.
 """
 
-from pathlib import Path
 
 import pytest
 

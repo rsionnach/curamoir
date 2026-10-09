@@ -3,6 +3,13 @@
 One vocabulary, three readers: the guard layer raises them, the ledger records
 them (E0-R9), and the away-brief groups by them (E9-R2). Changing a string here
 changes all three, so they are defined once and only here.
+
+A reason names the CHECK, not the outcome. `Degraded` reuses the same reason as
+a refusal — `Degraded(Reason.PAUSED, ...)` means "the PAUSE check could not
+run", not "this repo is paused" — so a consumer that groups by reason alone
+reports a repo as paused when it never was. The disambiguator is `severity`,
+written alongside the reason by `Gateway._record_line`, and E9-R2 must read
+both.
 """
 
 from enum import Enum

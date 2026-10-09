@@ -98,7 +98,7 @@ def test_the_budgets_are_set_and_inside_what_hooks_json_allows():
 
     assert isinstance(SESSION_END_BUDGET_SECONDS, (int, float))
     assert 0 < SESSION_END_BUDGET_SECONDS <= 1.5, "SessionEnd hooks share 1.5s"
-    assert SESSION_END_BUDGET_SECONDS < timeout_for("SessionEnd")
+    assert timeout_for("SessionEnd") > SESSION_END_BUDGET_SECONDS
 
     assert isinstance(PRE_COMPACT_BUDGET_SECONDS, (int, float))
     assert 0 < PRE_COMPACT_BUDGET_SECONDS < timeout_for("PreCompact")

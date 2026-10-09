@@ -16,6 +16,7 @@ sight.
 """
 
 import json
+from contextlib import suppress
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -284,6 +285,14 @@ def _read_json(path):
 
 
 def _cap_words(text, limit):
+    """Markdown capped at `limit` words, stopping at the first line that does
+    not fit.
+
+    `break`, not `continue` — the opposite of `handoff._cap_words`, and
+    deliberately so. A handoff must keep its short structural fields even when
+    one long line does not fit; a brief links out instead (E9-R4), so stopping
+    cleanly beats keeping fragments from further down.
+    """
     """Link out rather than truncate. E9-R4: "Anything beyond links out."
 
     A section cut mid-sentence is worse than a short brief, so whole lines are
@@ -323,9 +332,8 @@ def write_brief(repo, now=None, post_issue=None, post=False):
     path = write_artefact(repo / ".curamoir" / "briefs" / "latest.md", rendered)
 
     if post and post_issue is not None:
-        try:
+        # suppress(Exception): the brief is already on disk by now, and a failed
+        # post must not lose it. Recorded by the caller's ledger line.
+        with suppress(Exception):
             post_issue(f"cúramóir brief — {brief['at'][:10]}", rendered)
-        except Exception:
-            # Recorded by the caller's ledger line; never fatal here.
-            pass
     return path

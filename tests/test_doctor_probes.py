@@ -7,6 +7,7 @@ shape-only, and each produced a confident "ok" for a setup that does not work.
 
 import os
 import stat
+from pathlib import Path
 
 from curamoir.doctor import diagnose
 from curamoir.scaffold import init_repo
@@ -141,3 +142,22 @@ def test_a_freshly_initialised_repo_passes_the_gitignore_check(tmp_path):
     init_repo(tmp_path)
 
     assert finding(diagnose(tmp_path), "gitignore").level == "ok"
+
+
+def test_doctor_probes_the_interpreter_the_wrappers_would_actually_use():
+    """doctor resolved `python3` while the wrappers try the versioned binaries
+    first, so a machine with 3.12 installed beside an older default got an
+    error for hooks that work. The two lists are duplicated — doctor must not
+    parse shell — so this asserts they agree."""
+    import re
+
+    from curamoir.doctor import WRAPPER_INTERPRETERS
+
+    for wrapper in sorted(Path("scripts").iterdir()):
+        text = wrapper.read_text(encoding="utf-8")
+        match = re.search(r"for interpreter in ([^;]+); do", text)
+        if not match:
+            continue
+        assert tuple(match.group(1).split()) == WRAPPER_INTERPRETERS, (
+            f"{wrapper} tries a different order than doctor probes"
+        )

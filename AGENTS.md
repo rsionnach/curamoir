@@ -148,3 +148,14 @@ For more details, see README.md and docs/QUICKSTART.md.
 - If push fails, resolve and retry until it succeeds
 
 <!-- END BEADS INTEGRATION -->
+
+## Why there is no CLAUDE.md
+
+This repository is itself a Claude Code plugin, and `claude plugin validate
+--strict` rejects a `CLAUDE.md` at the plugin root:
+
+    root: CLAUDE.md at the plugin root is not loaded as project context.
+    To ship context with your plugin, use a skill (skills/<name>/SKILL.md).
+
+So a `CLAUDE.md` here would not be read AND would fail the manifest check that
+`tests/plugin/test_manifest.py` runs. This file carries the content instead.

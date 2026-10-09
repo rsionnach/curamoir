@@ -7,6 +7,7 @@ meant to tell you why crashes with a traceback".
 
 import json
 import subprocess
+from datetime import timezone
 
 import pytest
 
@@ -181,7 +182,13 @@ def test_the_python3_check_fails_when_python3_is_not_on_path(tmp_path, monkeypat
     original_which = doctor.shutil.which
 
     def which(name):
-        return None if name in ("python3", "python") else original_which(name)
+        # Hide every candidate the WRAPPERS try, taken from doctor's own list
+        # rather than spelled out here: naming `python3` and `python` by hand
+        # stopped covering the case as soon as the wrappers learned to prefer
+        # `python3.12` first, and the test went green on a machine that had one.
+        if name in doctor.WRAPPER_INTERPRETERS:
+            return None
+        return original_which(name)
 
     monkeypatch.setattr(doctor.shutil, "which", which)
 
@@ -379,8 +386,9 @@ def test_an_entry_with_an_unusable_timestamp_is_not_counted_as_zero(tmp_path):
                     "at": "08/10/2026"}) + "\n",
         encoding="utf-8")
 
+    from datetime import datetime
+
     from curamoir.budget import month_to_date
-    from datetime import datetime, timezone
 
     spend = month_to_date(ledger, PRICES, datetime(2026, 10, 8, tzinfo=timezone.utc))
 

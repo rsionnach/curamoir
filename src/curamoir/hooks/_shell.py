@@ -15,7 +15,6 @@ So: lex ONCE, with a lexer that knows about quoting, and let the passes judge
 tokens. Separators, redirections and heredocs are tokens here, not substrings.
 """
 
-import re
 import shlex
 
 #: Characters the lexer emits as their own tokens rather than folding into

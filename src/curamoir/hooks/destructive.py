@@ -43,7 +43,6 @@ from curamoir.hooks._shell import (
 )
 from curamoir.hooks.verdict import Category, Decision, Rule, Unverifiable
 
-
 # Programs whose misuse this list exists to stop.
 _DANGEROUS = ("rm", "git", "find")
 
@@ -245,7 +244,7 @@ def _judge(tokens):
         recursive = "r" in flags
         if recursive and "--no-preserve-root" in flags:
             return Rule(
-                                "rm -r --no-preserve-root can delete the filesystem root",
+                "rm -r --no-preserve-root can delete the filesystem root",
                 "delete named paths without --no-preserve-root",
             )
         if recursive:
@@ -287,7 +286,7 @@ def _judge(tokens):
 
     if subcommand == "reset" and ("--hard" in flags or "--merge" in flags):
         return Rule(
-                        "git reset --hard discards uncommitted work irrecoverably",
+            "git reset --hard discards uncommitted work irrecoverably",
             "git stash",
         )
 
@@ -299,12 +298,12 @@ def _judge(tokens):
         # `--delete` is folded to "d" by _LONG_SYNONYMS, so check that spelling.
         if "d" in flags or delete_refspec:
             return Rule(
-                                "git push --delete (or an empty refspec) deletes a remote branch outright",
+                "git push --delete (or an empty refspec) deletes a remote branch outright",
                 "delete the branch locally and let the PR close it",
             )
         if (_is_forced(flags) and not leased) or plus_refspec:
             return Rule(
-                                "git push --force can overwrite a remote branch's history",
+                "git push --force can overwrite a remote branch's history",
                 "git push --force-with-lease",
             )
         return None
@@ -348,13 +347,13 @@ def _judge(tokens):
         )
         if not staged_only:
             return Rule(
-                                "git restore overwrites the working tree from a commit with no backup",
+                "git restore overwrites the working tree from a commit with no backup",
                 "git stash push <path>",
             )
 
     if subcommand == "clean" and _is_forced(flags):
         return Rule(
-                        "git clean -f deletes untracked files with no recovery path",
+            "git clean -f deletes untracked files with no recovery path",
             "git clean -n",
         )
 
@@ -362,7 +361,7 @@ def _judge(tokens):
         # -D is exactly -d --force. Either spelling discards unmerged work.
         if "D" in flags or ("d" in flags and _is_forced(flags)):
             return Rule(
-                                "git branch -D deletes a branch even if its work is unmerged",
+                "git branch -D deletes a branch even if its work is unmerged",
                 "git branch -d",
             )
         return None
@@ -374,43 +373,43 @@ def _judge(tokens):
     # an agent tries after being refused.
     if subcommand == "reflog" and positionals and positionals[0] == "expire":
         return Rule(
-                        "git reflog expire destroys the recovery log that makes other git operations undoable",
+            "git reflog expire destroys the recovery log that makes other git operations undoable",
             "git reflog",
         )
 
     if subcommand == "gc" and any(flag.startswith("--prune") for flag in flags):
         return Rule(
-                        "git gc --prune discards unreachable objects, finalising earlier destruction",
+            "git gc --prune discards unreachable objects, finalising earlier destruction",
             "git gc --auto",
         )
 
     if subcommand == "update-ref" and "d" in flags:
         return Rule(
-                        "git update-ref -d deletes a ref outright, with no reflog entry for the deletion",
+            "git update-ref -d deletes a ref outright, with no reflog entry for the deletion",
             "git branch -d",
         )
 
     if subcommand == "worktree" and positionals and positionals[0] == "remove" and _is_forced(flags):
         return Rule(
-                        "git worktree remove --force discards a worktree including uncommitted work",
+            "git worktree remove --force discards a worktree including uncommitted work",
             "git worktree remove (without --force)",
         )
 
     if subcommand == "submodule" and positionals and positionals[0] == "deinit" and _is_forced(flags):
         return Rule(
-                        "git submodule deinit -f discards a submodule's local modifications",
+            "git submodule deinit -f discards a submodule's local modifications",
             "git submodule deinit (without -f)",
         )
 
     if subcommand == "filter-branch":
         return Rule(
-                        "git filter-branch rewrites history across the whole repository",
+            "git filter-branch rewrites history across the whole repository",
             "git filter-repo on a clone, reviewed before pushing",
         )
 
     if subcommand == "stash" and positionals and positionals[0] in ("drop", "clear"):
         return Rule(
-                        "git stash drop/clear destroys stashed work permanently",
+            "git stash drop/clear destroys stashed work permanently",
             "git stash list",
         )
 

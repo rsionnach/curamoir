@@ -13,7 +13,7 @@ The defaults here are the spec's §6.3 block as amended by the five decisions:
 
 import pytest
 
-from curamoir.config import ConfigError, load_config, DEFAULTS
+from curamoir.config import DEFAULTS, ConfigError, load_config
 
 
 def test_an_empty_config_yields_the_documented_defaults():

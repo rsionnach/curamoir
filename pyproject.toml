@@ -11,7 +11,7 @@ requires-python = ">=3.12"
 dependencies = ["pyyaml>=6"]
 
 [project.optional-dependencies]
-dev = ["pytest>=8"]
+dev = ["pytest>=8", "ruff>=0.6", "pyflakes>=3"]
 
 [build-system]
 requires = ["hatchling"]
@@ -24,3 +24,63 @@ packages = ["src/curamoir"]
 testpaths = ["tests"]
 # -W error: a guardrail that warns instead of refusing is a bug, not a note.
 addopts = "-W error --strict-markers"
+
+# A project whose thesis is the mechanical enforcement of a repository's own
+# standards had no linter, and hand-enforced its house style instead. Every
+# style finding in the excellence review — fourteen misaligned arguments, two
+# misplaced imports, a stray blank line, an unexplained function-local import —
+# is something `ruff` would have caught for free. Configured now so the
+# argument applies to us as well: E13-R4 wires it into CI.
+[tool.ruff]
+line-length = 96
+target-version = "py312"
+src = ["src"]
+# `fixtures/sample-repo/` holds DELIBERATELY defective code — planted
+# violations the sweep and the lint runner are graded on finding (PLANTED.json
+# records them). Linting it would report the fixture's whole purpose as errors,
+# and "fixing" them would destroy the fixture.
+extend-exclude = ["fixtures/sample-repo"]
+
+[tool.ruff.lint]
+# E/W pycodestyle, F pyflakes, I import order, UP pyupgrade, B bugbear,
+# SIM simplify, RUF ruff-specific. Deliberately not the whole catalogue: a
+# linter that fires on style nobody agreed to is one the developer switches
+# off, which is this project's own argument about guardrails.
+select = ["E", "W", "F", "I", "UP", "B", "SIM", "RUF"]
+ignore = [
+    # The house style is long explanatory comments and docstrings that state
+    # WHY; a hard line limit on prose would shorten the reasoning rather than
+    # the code. E501 is enforced on code by `line-length` above.
+    "E501",
+    # `Reason` and `Category` inherit from `str` and `Enum` and define `__str__`
+    # explicitly, because what they serialise to is a contract: the ledger
+    # records it (E0-R9), the brief groups by it (E9-R2) and tests assert on it.
+    # `StrEnum` would make that implicit, which is the opposite of what those
+    # two classes are for.
+    "UP042",
+    # `datetime.UTC` is only an alias for `timezone.utc`, and adopting it
+    # raises the EFFECTIVE floor for the hook wrappers from "whatever `python3`
+    # resolves to" to 3.11+. The wrappers run on the developer's PATH python —
+    # 3.9 on this machine, which /curamoir:doctor reports as an error — so this
+    # autofix turned a graceful degradation into eight subprocess failures.
+    # requires-python is 3.12 and the wrapper floor is a real open question
+    # (cm-bzb), but it is not one a style rule should decide.
+    "UP017",
+    # Same reason, measured the same way: rewriting `Optional[Path]` to
+    # `Path | None` needs 3.10+, and it broke `import curamoir.cli` under the
+    # wrappers' interpreter with `TypeError: unsupported operand type(s) for |`.
+    # Both rules are correct for the DECLARED floor and wrong for the one the
+    # wrappers actually get, which is the bug to fix rather than the syntax.
+    "UP045",
+    # `curamoir.guards.__all__` is grouped by ROLE with a comment per group —
+    # the vocabulary, the chokepoint, the five guards in the order the spec
+    # lists them. The grouping is the documentation; sorting it alphabetically
+    # would scatter the five guards through the types.
+    "RUF022",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests deliberately reach into private names to pin internal invariants that
+# have no public surface — `_blank_single_quoted`, `_archive_name`,
+# `_without_empty_headings`. That is the point of those tests.
+"tests/**" = ["SLF001"]
