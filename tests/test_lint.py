@@ -136,14 +136,21 @@ def lint(repo, *args, capsys):
     return code, captured.out, captured.err
 
 
-def fake_ast_grep(tmp_path, stdout="", stderr="", exit_code=0):
+def fake_ast_grep(tmp_path, stdout="", stderr="", exit_code=0, log=None):
     """An executable standing in for ast-grep, for the paths the real binary
-    cannot be made to take on demand (and for machines without it)."""
+    cannot be made to take on demand (and for machines without it). With `log`,
+    each call appends its argv and working directory there as a JSON line."""
     script = tmp_path / "bin" / "ast-grep"
     script.parent.mkdir(parents=True, exist_ok=True)
+    record = (
+        f"open({str(log)!r}, 'a').write(json.dumps("
+        "{'argv': sys.argv[1:], 'cwd': os.getcwd()}) + '\\n')\n"
+        if log is not None else ""
+    )
     script.write_text(
         "#!/usr/bin/env python3\n"
-        "import sys\n"
+        "import json, os, sys\n"
+        f"{record}"
         f"sys.stdout.write({stdout!r})\n"
         f"sys.stderr.write({stderr!r})\n"
         f"sys.exit({exit_code})\n",
@@ -154,6 +161,16 @@ def fake_ast_grep(tmp_path, stdout="", stderr="", exit_code=0):
 
 
 ALL_REGEX_RULES = (NO_BARE_PRINT, NO_UNCHAINED_RAISE, NO_VARIANT_MODULE)
+
+
+def recorded_output_for(repo):
+    """RECORDED_AST_GREP_OUTPUT as ast-grep prints it for THIS copy of the
+    fixture. The recording was made with repo-relative paths; the runner now
+    passes absolute ones (see `_ast_grep_batch`), and ast-grep echoes a path
+    exactly as it was given (checked against 0.50.0), so the only edit is to
+    prefix the repo root onto `file`."""
+    root = json.dumps(str(Path(repo).resolve()))[1:-1]
+    return RECORDED_AST_GREP_OUTPUT.replace('"file":"src/', f'"file":"{root}/src/')
 
 
 # --- acceptance: one record per planted violation, every field present -------
@@ -373,6 +390,49 @@ def test_a_root_level_file_matches_a_double_star_glob(tmp_path, capsys):
     assert "setup.py" in [r["path"] for r in json.loads(out)["violations"]]
 
 
+def test_a_symlink_is_not_followed_so_its_target_cannot_leak_into_the_output(tmp_path, capsys):
+    """Security. `match` quotes the matched text, so a committed symlink
+    `leak.py -> ~/.ssh/id_rsa` (or to an env file) in an untrusted PR would
+    otherwise have CI print whatever of the target a rule matched. A symlink is
+    not repository content — git stores only its target path — so it is not
+    linted, neither the file kind nor the directory kind. Its NAME is reported
+    on stderr, so the skip is not silent; the target's contents never are."""
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "secret.env").write_text('print("TOKEN=hunter2")\n', encoding="utf-8")
+    (outside / "tree").mkdir()
+    (outside / "tree" / "module.py").write_text('print("TOKEN=hunter3")\n', encoding="utf-8")
+    # The rule quotes the whole call, so a followed symlink would put the
+    # target's text in `match`, as a real rule's broader pattern could.
+    repo = sample_repo(tmp_path, NO_BARE_PRINT.replace("print\\('", "print\\(.*'"))
+    (repo / "src" / "leak.py").symlink_to(outside / "secret.env")
+    (repo / "src" / "linked").symlink_to(outside / "tree", target_is_directory=True)
+
+    code, out, err = lint(repo, "--format", "json", capsys=capsys)
+
+    assert "hunter" not in out and "hunter" not in err
+    paths = {r["path"] for r in json.loads(out)["violations"]}
+    assert paths == {"src/sample/core/billing.py", "src/sample/web/handlers.py"}
+    assert "src/leak.py" in err and "src/linked" in err
+    assert code == EXIT_VIOLATIONS
+
+
+def test_symlinks_are_not_handed_to_ast_grep_either(tmp_path):
+    """ast-grep reads what it is given, symlink or not (checked: 0.50.0
+    matches through an explicitly named symlinked file), so the runner's file
+    list is the only place to stop it."""
+    outside = tmp_path / "outside.py"
+    outside.write_text('print("TOKEN=hunter2")\n', encoding="utf-8")
+    repo = sample_repo(tmp_path, AST_GREP_PRINT)
+    (repo / "src" / "leak.py").symlink_to(outside)
+    log = tmp_path / "ast-grep-calls.jsonl"
+
+    run_lint(repo, ast_grep=fake_ast_grep(tmp_path, stdout="[]", exit_code=1, log=log))
+
+    argv = [arg for line in log.read_text().splitlines() for arg in json.loads(line)["argv"]]
+    assert not any(arg.endswith("leak.py") for arg in argv)
+
+
 # --- checking nothing is never reported as clean ------------------------------
 
 def test_an_ast_grep_rule_without_ast_grep_is_skipped_loudly_and_fails(tmp_path, capsys,
@@ -403,7 +463,7 @@ def test_ast_grep_matches_are_converted_to_one_based_locations(tmp_path):
     conversion is pinned on machines without the binary."""
     repo = sample_repo(tmp_path, AST_GREP_PRINT)
 
-    result = run_lint(repo, ast_grep=fake_ast_grep(tmp_path, stdout=RECORDED_AST_GREP_OUTPUT,
+    result = run_lint(repo, ast_grep=fake_ast_grep(tmp_path, stdout=recorded_output_for(repo),
                                                    exit_code=0))
 
     assert [(v.path, v.line, v.col, v.match) for v in result.violations] == [
@@ -459,6 +519,69 @@ def test_the_real_ast_grep_rejecting_a_pattern_fails_the_run(tmp_path):
 
     with pytest.raises(LintError):
         run_lint(repo, ast_grep=shutil.which("ast-grep"))
+
+
+def test_ast_grep_never_runs_where_it_could_find_the_repos_sgconfig(tmp_path):
+    """Security. ast-grep looks for `sgconfig.yml` in its working directory and
+    every ancestor, and `run` honours it (checked against 0.50.0): its
+    `languageGlobs` can make a rule silently match nothing, a broken one fails
+    the run, and its `customLanguages` name a native library that ast-grep
+    versions without the `--custom-languages` opt-in load. A PR can add that
+    file, so the runner points `--config` at an empty config of its own and
+    runs from a scratch directory outside the repo, naming files absolutely."""
+    repo = sample_repo(tmp_path, AST_GREP_PRINT)
+    log = tmp_path / "ast-grep-calls.jsonl"
+
+    run_lint(repo, ast_grep=fake_ast_grep(tmp_path, stdout="[]", exit_code=1, log=log))
+
+    root = repo.resolve()
+    calls = [json.loads(line) for line in log.read_text().splitlines()]
+    assert calls
+    for call in calls:
+        cwd = Path(call["cwd"]).resolve()
+        assert root != cwd and root not in cwd.parents
+        config = [arg.split("=", 1)[1] for arg in call["argv"] if arg.startswith("--config=")]
+        assert len(config) == 1
+        assert root not in Path(config[0]).resolve().parents
+        files = call["argv"][call["argv"].index("--") + 1:]
+        assert files and all(Path(f).is_absolute() and root in Path(f).parents for f in files)
+
+
+def test_an_ast_grep_path_outside_the_repo_is_a_runner_error(tmp_path):
+    """The runner names files absolutely and converts ast-grep's paths back.
+    A path that does not convert is not dropped, which would read as clean."""
+    repo = sample_repo(tmp_path, AST_GREP_PRINT)
+    stray = RECORDED_AST_GREP_OUTPUT.replace('"file":"src/', '"file":"/elsewhere/src/')
+
+    with pytest.raises(LintError) as caught:
+        run_lint(repo, ast_grep=fake_ast_grep(tmp_path, stdout=stray, exit_code=0))
+
+    assert "/elsewhere/src/sample/core/billing.py" in str(caught.value)
+
+
+HOSTILE_SGCONFIGS = {
+    # Observed at b3e7d87 with ast-grep 0.50.0: `.py` files re-mapped to
+    # JavaScript are skipped under `--lang=python`, so the rule exits 1 —
+    # "no matches" — and the gate passes having checked nothing.
+    "languageGlobs": "ruleDirs: []\nlanguageGlobs:\n  javascript: ['*.py']\n",
+    # Observed: ast-grep exits 8 ("Cannot parse configuration"), failing a
+    # run that a PR could thereby block at will.
+    "unparseable": "this: [is: not valid\n",
+}
+
+
+@pytest.mark.skipif(shutil.which("ast-grep") is None, reason="ast-grep is not installed")
+@pytest.mark.parametrize("config", sorted(HOSTILE_SGCONFIGS))
+def test_the_real_ast_grep_ignores_an_sgconfig_in_the_repo(tmp_path, config):
+    repo = sample_repo(tmp_path, AST_GREP_PRINT)
+    (repo / "sgconfig.yml").write_text(HOSTILE_SGCONFIGS[config], encoding="utf-8")
+    (repo / "src" / "sgconfig.yml").write_text(HOSTILE_SGCONFIGS[config], encoding="utf-8")
+
+    result = run_lint(repo, ast_grep=shutil.which("ast-grep"))
+
+    planted = sorted((v["path"], v["line"]) for v in PLANTED["violations"]
+                     if v["principle_id"] == "structured-logging")
+    assert sorted((v.path, v.line) for v in result.violations) == planted
 
 
 def test_a_rule_citing_an_unknown_principle_is_a_runner_error(tmp_path, capsys):

@@ -280,3 +280,20 @@ the runner lints the repository, not a list of files):
   TypeScript, TSX, JavaScript, Go, Rust, YAML). Markdown and TOML are not among
   them; use `regex` there.
 - `ast-grep` columns are as ast-grep reports them.
+- Symlinks are not followed, file or directory. In CI the tree is often an
+  unreviewed PR, and `match` quotes matched text, so a committed
+  `leak.py -> ~/.ssh/id_rsa` would otherwise have the lint print part of the
+  target. A symlink's name (never its target or contents) is listed on stderr;
+  it does not change the exit code, and is absent from the JSON. The cost: a
+  symlink is not linted even when its target is inside the repo — that target
+  is linted at its own path — and a `target: path` rule does not see a
+  symlink's name.
+- The repository's own `sgconfig.yml` is never read. ast-grep looks for one in
+  its working directory and every ancestor, and one in a PR could re-map file
+  types so an `ast-grep` rule silently matches nothing, break the run, or (on
+  ast-grep versions that load `customLanguages` native libraries without
+  `--custom-languages allow`) run native code. So ast-grep runs from a scratch
+  directory outside the repo with `--config` pointing at an empty config of
+  cúramóir's own. The same holds in reverse: settings a project put in
+  `sgconfig.yml` for its own ast-grep use (custom languages, `languageGlobs`)
+  do not apply to `curamoir-lint`'s rules.

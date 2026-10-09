@@ -9,7 +9,9 @@ agent told what to do instead does that.
 
 **What it is for.** A gate in CI and pre-commit, so its exit code is the real
 output and its worst failure is passing after checking nothing — which looks
-exactly like a clean repo. Every way of checking nothing therefore exits 2:
+exactly like a clean repo. So every way a rule can fail to check exits 2; the
+one deliberate exception is a repo with no rules at all, which exits 0 with a
+note on stderr, because a fresh repo is not a failing one:
 
     0  every rule ran and nothing met the threshold
     1  every rule ran and at least one violation met the threshold
@@ -36,6 +38,11 @@ matchers search the same file list, computed here from the rule's
 `files`/`languages`/`exclude`, so scoping cannot differ by matcher and ast-grep
 is never asked about a path that does not exist (it exits 1 for that AND for
 "no matches", which would make an error indistinguishable from a clean run).
+
+**Untrusted input.** In CI the repository is often an unreviewed PR, so nothing
+in it may decide what the runner reads or executes. Two consequences: symlinks
+are not followed (see `_repository_files`), and ast-grep never sees the repo's
+own `sgconfig.yml` (see `_ast_grep_batch`).
 """
 
 import argparse
@@ -45,6 +52,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -133,6 +141,10 @@ class LintResult:
     violations: tuple = ()
     checked: tuple = ()
     skipped: tuple = ()
+    #: Repo-relative paths of symlinks that were not followed. Reported on
+    #: stderr, not in the JSON: they are not a rule's result, and leaving them
+    #: out keeps the schema (and its version) unchanged.
+    symlinks: tuple = ()
 
     @property
     def complete(self):
@@ -156,7 +168,7 @@ def run_lint(repo, ast_grep=None):
     except (RuleError, PrincipleError) as invalid:
         raise LintError(str(invalid)) from invalid
 
-    files = _repository_files(repo)
+    files, symlinks = _repository_files(repo)
     violations, checked, skipped = [], [], []
     for rule in sorted(rules, key=lambda r: r.id):
         if rule.matcher == "ast-grep" and ast_grep is None:
@@ -191,7 +203,7 @@ def run_lint(repo, ast_grep=None):
         checked.append(rule.id)
 
     violations.sort(key=lambda v: (v.path, v.line, v.col, v.rule_id))
-    return LintResult(tuple(violations), tuple(checked), tuple(skipped))
+    return LintResult(tuple(violations), tuple(checked), tuple(skipped), tuple(symlinks))
 
 
 def exit_code(result, fail_on):
@@ -279,6 +291,15 @@ def main(argv=None):
         )
     for skipped in result.skipped:
         print(f"curamoir-lint: skipped {skipped.rule_id}: {skipped.reason}", file=sys.stderr)
+    if result.symlinks:
+        # Names only, never targets or contents. Not an incomplete run: a
+        # symlink is not repository content, and its target, if it is in the
+        # repo, is linted at its own path.
+        print(
+            f"curamoir-lint: did not follow {len(result.symlinks)} symlink(s): "
+            + ", ".join(result.symlinks),
+            file=sys.stderr,
+        )
     return exit_code(result, fail_on)
 
 
@@ -308,20 +329,40 @@ def _which_ast_grep():
 
 
 def _repository_files(repo):
-    """Every file under `repo`, as sorted repo-relative POSIX paths.
+    """(files, symlinks) under `repo`, each sorted repo-relative POSIX paths.
 
     A plain walk rather than `git ls-files`, so the runner works on an export,
     a CI checkout without history, or a directory that is not a repo at all.
     ALWAYS_EXCLUDED is pruned whatever a rule says; .gitignore is not read, so
     a generated directory outside that list is searched.
+
+    Symlinks are returned apart and never linted. `match` quotes matched text,
+    so a PR committing `leak.py -> ~/.ssh/id_rsa` would otherwise have CI print
+    whatever of the target a rule matched; and ast-grep reads a symlink it is
+    named. os.walk already declines to descend a directory symlink but does
+    list file symlinks, so both kinds are filtered here explicitly. Only the
+    walk is guarded: the repo root itself may be a symlink (the caller chose
+    it), and a symlink swapped in between this walk and the read is out of
+    scope — a CI checkout does not change under the runner.
     """
-    found = []
+    found, symlinks = [], []
     for directory, subdirectories, names in os.walk(repo):
-        subdirectories[:] = sorted(d for d in subdirectories if d not in ALWAYS_EXCLUDED)
         base = Path(directory).relative_to(repo)
+        kept = []
+        for name in sorted(subdirectories):
+            if name in ALWAYS_EXCLUDED:
+                continue
+            if os.path.islink(os.path.join(directory, name)):
+                symlinks.append((base / name).as_posix())
+            else:
+                kept.append(name)
+        subdirectories[:] = kept
         for name in names:
-            found.append((base / name).as_posix())
-    return sorted(found)
+            if os.path.islink(os.path.join(directory, name)):
+                symlinks.append((base / name).as_posix())
+            else:
+                found.append((base / name).as_posix())
+    return sorted(found), sorted(symlinks)
 
 
 def _scoped(files, rule):
@@ -406,23 +447,49 @@ def _ast_grep_matches(repo, rule, files, binary):
         if language is not None:
             by_language.setdefault(language, []).append(path)
     matches = []
-    for language, paths in sorted(by_language.items()):
-        for start in range(0, len(paths), AST_GREP_BATCH):
-            matches.extend(_ast_grep_batch(
-                repo, rule, binary, language, paths[start:start + AST_GREP_BATCH],
-            ))
+    with tempfile.TemporaryDirectory(prefix="curamoir-lint-") as scratch:
+        config = Path(scratch) / "sgconfig.yml"
+        config.write_text("ruleDirs: []\n", encoding="utf-8")
+        for language, paths in sorted(by_language.items()):
+            for start in range(0, len(paths), AST_GREP_BATCH):
+                matches.extend(_ast_grep_batch(
+                    repo, rule, binary, language, paths[start:start + AST_GREP_BATCH],
+                    scratch=scratch, config=config,
+                ))
     return matches
 
 
-def _ast_grep_batch(repo, rule, binary, language, batch):
-    """(path, line, col, text) from one ast-grep run over files of one language."""
+def _ast_grep_batch(repo, rule, binary, language, batch, scratch, config):
+    """(path, line, col, text) from one ast-grep run over files of one language.
+
+    ast-grep must never read the repo's own configuration. It looks for
+    `sgconfig.yml` in its working directory and every ancestor, and `run`
+    honours what it finds. Verified against 0.50.0, with the file in the cwd:
+    `languageGlobs: {javascript: ['*.py']}` made a `--lang=python` search
+    return `[]`, exit 1 — a rule silently checking nothing; an unparseable file
+    failed the run (exit 8); and `customLanguages` with a `libraryPath` was
+    only skipped because 0.50.0 ignores native libraries unless given
+    `--custom-languages allow` — a version without that guard loads them,
+    which is a PR running native code in CI. Two defences, each sufficient on
+    0.50.0 and kept together because neither depends on the other:
+
+    - `--config` names cúramóir's own empty config (`scratch/sgconfig.yml`).
+      Verified: with it, an unparseable `sgconfig.yml` in the cwd is not read.
+    - The cwd is `scratch`, a fresh temp directory outside the repo, so
+      ancestor discovery finds nothing of the repo's; files are therefore
+      named absolutely. Verified: from a neutral cwd the same unparseable
+      repo config is not read. ast-grep echoes each path as given, and they
+      are converted back to repo-relative POSIX paths below.
+    """
+    root = repo.resolve()
     command = [
-        binary, "run", f"--pattern={rule.pattern}", f"--lang={language}",
-        "--json=compact", "--", *batch,
+        binary, "run", f"--config={config}", f"--pattern={rule.pattern}",
+        f"--lang={language}", "--json=compact", "--",
+        *(str(root / path) for path in batch),
     ]
     try:
         completed = subprocess.run(
-            command, cwd=str(repo), capture_output=True, text=True, check=False,
+            command, cwd=scratch, capture_output=True, text=True, check=False,
         )
     except OSError as failure:
         raise LintError(f"rule {rule.id!r}: could not run ast-grep ({binary}): {failure}") \
@@ -443,13 +510,26 @@ def _ast_grep_batch(repo, rule, binary, language, batch):
         ) from unparseable
     return [
         (
-            Path(record["file"]).as_posix(),
+            _repo_relative(root, rule, record["file"]),
             record["range"]["start"]["line"] + 1,
             record["range"]["start"]["column"] + 1,
             record["text"],
         )
         for record in records
     ]
+
+
+def _repo_relative(root, rule, reported):
+    """ast-grep's absolute path for a match, as a repo-relative POSIX path. A
+    path that is not under the repo is an error rather than a dropped match:
+    dropping it would read as one violation fewer, i.e. as cleaner."""
+    try:
+        return Path(reported).relative_to(root).as_posix()
+    except ValueError as stray:
+        raise LintError(
+            f"rule {rule.id!r}: ast-grep reported a match in {reported}, "
+            f"which is not under {root}"
+        ) from stray
 
 
 def _anchor(heading):
