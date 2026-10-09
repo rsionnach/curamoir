@@ -154,8 +154,16 @@ def test_an_attached_option_value_is_read_as_the_option_it_is(command):
 CONSUMERS_THAT_ARE_NOT = [
     pytest.param("git apply <<EOF\npatch\nEOF", id="git_apply_patch_from_stdin"),
     pytest.param("git am <<EOF\npatch\nEOF", id="git_am_patch_from_stdin"),
-    pytest.param("gh api --input - <<EOF\n{}\nEOF", id="gh_api_body_from_stdin"),
-    pytest.param("bd import <<EOF\n{}\nEOF", id="bd_import_from_stdin"),
+]
+
+# The other side of the same line, and the reason it is a line rather than a
+# list: a consumer may READ its stdin, and `git apply` APPLIES it. A heredoc
+# body is how `gh pr create` takes a multi-line body without a temp file, and
+# opening PRs is core to a sweep.
+CONSUMERS_THAT_ARE = [
+    pytest.param("gh pr create --body-file - <<EOF\nbody\nEOF", id="gh_pr_body"),
+    pytest.param("gh api --input - <<EOF\n{}\nEOF", id="gh_api_body"),
+    pytest.param("bd create 'title' --description=- <<EOF\nd\nEOF", id="bd_description"),
 ]
 
 
@@ -164,6 +172,13 @@ def test_a_program_that_acts_on_its_stdin_is_not_a_data_consumer(command):
     decision = judge_command(command, True)
 
     assert decision.deny, f"{command.splitlines()[0]!r} acts on call-time input"
+
+
+@pytest.mark.parametrize("command", CONSUMERS_THAT_ARE)
+def test_a_program_that_reads_its_stdin_as_data_may_have_a_heredoc(command):
+    decision = judge_command(command, True)
+
+    assert not decision.deny, f"refused as {decision.category}: {decision.reason}"
 
 
 def test_the_ordinary_use_of_those_programs_is_untouched():
@@ -183,3 +198,29 @@ def test_the_consumer_list_holds_only_programs_the_allowlist_admits():
     for program in _HEREDOC_CONSUMERS:
         assert program in ALLOWED, f"{program} is on the consumer list but not allowlisted"
         assert program not in _INTERPRETERS, f"{program} is both a consumer and an interpreter"
+
+
+# A backslash-escaped apostrophe is a LITERAL apostrophe to the shell, not a
+# quote — so there is no single-quoted span, and everything between two of them
+# is expanded. The three-state scan read them as quotes and blanked the middle,
+# which is the same deletion the regex it replaced performed, reached by a
+# different spelling.
+ESCAPES_MUST_DENY = [
+    pytest.param("echo \\'$(terraform apply)\\'", id="escaped_quotes_around_substitution"),
+    pytest.param("echo \\'$HOME\\'", id="escaped_quotes_around_variable"),
+    pytest.param("echo \\'`terraform apply`\\'", id="escaped_quotes_around_backticks"),
+    pytest.param('echo "a\\\\" $(terraform apply)', id="escaped_double_quote"),
+]
+
+
+@pytest.mark.parametrize("command", ESCAPES_MUST_DENY)
+def test_an_escaped_quote_is_a_literal_character_not_a_quote(command):
+    decision = judge_command(command, True)
+
+    assert decision.deny, f"the shell expands {command!r}"
+
+
+def test_a_backslash_inside_single_quotes_is_itself_literal():
+    """Inside single quotes a backslash has no special meaning, so it must not
+    start an escape and swallow the closing quote."""
+    assert not judge_command("echo 'a\\\\b $(date)'", True).deny

@@ -86,7 +86,15 @@ def is_separator(token):
 
 
 def unquoted(command):
-    """`command`'s tokens with single-quoted spans blanked, aligned 1:1 with `lex`.
+    """`command`'s tokens with single-quoted spans blanked.
+
+    NOT positionally aligned with `lex`: this lexes with `posix=False`, which
+    splits differently where quotes abut — `echo 'a'"'"'b'` is two tokens to
+    `lex` and four here. Only `_unverifiable` consumes this, and it scans for
+    patterns without ever indexing across the two lists. An earlier docstring
+    claimed a 1:1 correspondence, which is the same class of mistake as the one
+    that claimed quoted `$` was literal: a reader would reach for the
+    correspondence and it is not there.
 
     Posix lexing strips the quotes, so by the time a token reaches a pattern
     there is no way to tell `'(WIP|TODO)'` — literal text to the shell — from a
@@ -115,14 +123,33 @@ def _blank_single_quoted(token):
     whatever apostrophes appear around it, so the command ran while the guard
     saw a token with no substitution left in it.
 
-    This is the same state machine the shell uses, so there is no residual
-    spelling for it to miss. Double-quoted spans are KEPT, because the shell
-    still expands `$`, `` ` `` and `${...}` inside them — refusing there is
-    correct rather than a false positive.
+    The shell's state machine for quotes AND escapes. The escape half is named
+    because its absence was invisible without it: the first version tracked only
+    the two quote states and claimed in this docstring to be complete, so
+    `echo \\'$(terraform apply)\\'` read the escaped apostrophes as quotes and
+    blanked everything between them — the same deletion the regex it replaced
+    performed, reached by a different spelling. A backslash-escaped quote is a
+    literal character, and the shell expands what sits between two of them.
+
+    Double-quoted spans are KEPT, because the shell still expands `$`,
+    `` ` `` and `${...}` inside them — refusing there is correct rather than a
+    false positive.
     """
     kept = []
-    in_single = in_double = False
+    in_single = in_double = escaped = False
     for character in token:
+        if escaped:
+            # Consumed as data, whatever it is, and crucially without being
+            # allowed to change the quote state.
+            escaped = False
+            if not in_single:
+                kept.append(character)
+            continue
+        # A backslash is literal INSIDE single quotes, where nothing escapes.
+        if character == "\\" and not in_single:
+            escaped = True
+            kept.append(character)
+            continue
         if character == "'" and not in_double:
             in_single = not in_single
             continue

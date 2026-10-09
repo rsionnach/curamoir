@@ -224,16 +224,22 @@ _INLINE_CODE_OPTIONS = {
 _HEREDOC_CONSUMERS = frozenset({
     "cat", "tee", "grep", "egrep", "fgrep", "rg", "sort", "uniq", "wc", "head",
     "tail", "cut", "tr", "diff", "jq", "yq",
+    # `gh` and `bd` READ their stdin as a request body or a record. That is the
+    # distinction that matters, and `git` is on the other side of it: a
+    # consumer may read its stdin, and `git apply` APPLIES it. A heredoc body
+    # is the normal way to give `gh pr create` a multi-line body without a temp
+    # file, and opening PRs is core to a sweep, so removing these two with
+    # `git` was collateral rather than a decision.
+    "gh", "bd",
 })
 
 # Deliberately NOT on that list, each for a stated reason:
 #
-# - `git` and `gh`. `git apply <<EOF` applies a patch composed at call time,
-#   which rewrites the working tree with no backup — the same family as
-#   `git checkout <path>`, which this module already refuses. `gh api --input -`
-#   posts a call-time body to an API with destructive endpoints. Writing the
-#   patch or the body to a file first costs a retry and makes it reviewable.
-# - `bd`. It writes to a database from stdin, which is not reading data.
+# - `git`. `git apply <<EOF` and `git am <<EOF` apply a patch composed at call
+#   time, which rewrites the working tree with no backup — the same family as
+#   `git checkout <path>`, which this module already refuses by name. The
+#   asymmetry was stated by the guard itself: `cat > app.py <<EOF` was denied
+#   while `git apply <<EOF` doing the same thing to the same file was allowed.
 # - `awk` and `sed`. They take a PROGRAM, not just data, and both are already
 #   refused by the allowlist (`awk` as an interpreter, `sed` by absence) — so
 #   listing them here would be dead weight that reads as permission.
