@@ -260,7 +260,12 @@ src/sample/core/billing.py:15:5: error [structured-logging/no-bare-print] print(
     rule: Emit diagnostics through the module logger, never through `print`.
     why:  .curamoir/principles.md#structured-logging
     fix:  logger.info(...), or logger.debug(...) while debugging
+...
+5 violations from 3 rule(s); 3 at or above 'error'
 ```
+
+One block per violation, in location order, then a summary line: how many
+violations, from how many rules that ran, and how many meet the threshold.
 
 ### In CI and pre-commit
 
@@ -287,6 +292,12 @@ the runner lints the repository, not a list of files):
 
 ### Limits, stated
 
+What the runner does not do, or does differently from what you might assume.
+The first group matters when writing a rule; the second when wiring the
+runner into CI or pre-commit.
+
+**For rule authors**
+
 - Files are found by walking the repository, not with `git ls-files`, so the
   runner works on an export or a shallow checkout. `.gitignore` is not read; the
   directories listed under *Scoping* are always skipped.
@@ -301,6 +312,11 @@ the runner lints the repository, not a list of files):
   printed, and the run exits 2. Dropping the file instead would report the
   rule as checked having searched nothing. Narrow `files:` or add the file to
   `exclude:`.
+- The one file an `ast-grep` rule leaves out of its scope is one whose whole
+  name is a suffix, such as a file named `.py`: it matches `**/*.py`, but
+  ast-grep does not search it under `--lang=python` either, and counting it
+  as a file with no grammar would let any commit skip the rule. A `regex`
+  rule still searches it.
 - Lines are counted the way ast-grep counts them: only `\n` ends one. A CRLF
   file reads as its lines; a form feed or a U+2028 inside a string does not
   start a new line, and neither does a lone `\r` (which some editors do break
@@ -309,6 +325,14 @@ the runner lints the repository, not a list of files):
   A UTF-8 byte order mark is not a column: the regex matcher skips it, and
   ast-grep's line-1 columns in such a file (which 0.50.0 shifts by one) are
   corrected, so both matchers agree with the editor.
+- Symlinks are not linted (see below), even when the target is inside the
+  repo — that target is linted at its own path — and a `target: path` rule
+  does not see a symlink's name.
+- Settings a project put in its own `sgconfig.yml` (custom languages,
+  `languageGlobs`) do not apply to `curamoir-lint`'s rules; see below for why.
+
+**For CI and pre-commit**
+
 - The wrapper never starts Python inside the repository. `python -m` puts its
   working directory ahead of everything else on `sys.path`, so a `yaml.py` or
   `curamoir/` committed at the root of a PR would otherwise run as the linter.
@@ -316,21 +340,19 @@ the runner lints the repository, not a list of files):
   directory only after pinning its import path, so `--repo` still means what
   it meant where you typed it. An inherited `PYTHONPATH` is kept (after
   `src/`), as in every cúramóir wrapper: it is set by whoever runs the lint,
-  not by the repository.
+  not by the repository. Its relative entries are resolved against the
+  directory you invoked the wrapper from, as you would expect; empty entries
+  (which Python reads as "the working directory", i.e. the repository) are
+  dropped.
 - Symlinks are not followed, file or directory. In CI the tree is often an
   unreviewed PR, and `match` quotes matched text, so a committed
   `leak.py -> ~/.ssh/id_rsa` would otherwise have the lint print part of the
   target. A symlink's name (never its target or contents) is listed on stderr;
-  it does not change the exit code, and is absent from the JSON. The cost: a
-  symlink is not linted even when its target is inside the repo — that target
-  is linted at its own path — and a `target: path` rule does not see a
-  symlink's name.
+  it does not change the exit code, and is absent from the JSON.
 - The repository's own `sgconfig.yml` is never read. ast-grep looks for one in
   its working directory and every ancestor, and one in a PR could re-map file
   types so an `ast-grep` rule silently matches nothing, break the run, or (on
   ast-grep versions that load `customLanguages` native libraries without
   `--custom-languages allow`) run native code. So ast-grep runs from a scratch
   directory outside the repo with `--config` pointing at an empty config of
-  cúramóir's own. The same holds in reverse: settings a project put in
-  `sgconfig.yml` for its own ast-grep use (custom languages, `languageGlobs`)
-  do not apply to `curamoir-lint`'s rules.
+  cúramóir's own.

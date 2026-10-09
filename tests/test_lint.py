@@ -44,6 +44,7 @@ from curamoir.lint import (
     run_lint,
 )
 from curamoir.principles import load_principles
+from curamoir.rules import AST_GREP_LANGUAGES
 
 ROOT = Path(__file__).resolve().parents[1]
 FIXTURE = ROOT / "fixtures" / "sample-repo"
@@ -122,6 +123,9 @@ def sample_repo(tmp_path, *rules, config=None):
     directory = repo / ".curamoir" / "rules"
     directory.mkdir(parents=True, exist_ok=True)
     for text in rules:
+        # Each file is named for its rule, so every rule text here must open
+        # with its `id:` line; parsing the YAML would make this helper
+        # depend on what it is helping to test.
         rule_id = text.split("\n", 1)[0].split(":", 1)[1].strip()
         (directory / f"{rule_id}.yaml").write_text(text, encoding="utf-8")
     if config is not None:
@@ -276,6 +280,49 @@ def test_the_json_document_has_a_stable_top_level_shape(tmp_path, capsys):
     assert document["complete"] is True
     assert document["rules_checked"] == ["no-bare-print", "no-unchained-raise", "no-variant-module"]
     assert document["rules_skipped"] == []
+
+
+def test_the_documented_json_shape_is_the_one_emitted():
+    """docs/rules-authoring.md is where a sweep author learns the contract, so
+    its example and its field table must be the fields the runner emits."""
+    import re
+
+    doc = (ROOT / "docs" / "rules-authoring.md").read_text(encoding="utf-8")
+    example = json.loads(re.search(r"```json\n(.*?)```", doc, re.DOTALL).group(1))
+    table = re.findall(r"^\| `([a-z_]+)`(?:, `([a-z_]+)`)? \|", doc.split("### JSON")[1], re.M)
+    documented = {name for pair in table for name in pair if name}
+
+    assert tuple(example) == (
+        "version", "fail_on", "complete", "rules_checked", "rules_skipped", "violations",
+    )
+    assert tuple(example["violations"][0]) == RECORD_FIELDS
+    assert documented == set(RECORD_FIELDS)
+
+
+def test_the_documented_human_output_is_the_one_emitted(tmp_path, capsys):
+    """The doc's example is the fixture's real output, abbreviated at `...`:
+    the lines before it open the report and the line after it ends it."""
+    doc = (ROOT / "docs" / "rules-authoring.md").read_text(encoding="utf-8")
+    example = doc.split("### Human (the default)")[1].split("```")[1].strip("\n").splitlines()
+    head, tail = example[:example.index("...")], example[example.index("...") + 1:]
+    repo = sample_repo(tmp_path, *ALL_REGEX_RULES)
+
+    _, out, _ = lint(repo, capsys=capsys)
+
+    lines = out.splitlines()
+    assert lines[:len(head)] == head
+    assert lines[-len(tail):] == tail
+
+
+def test_the_documented_ast_grep_suffixes_are_the_mapped_ones():
+    """Rule authors read the suffix list in docs/rules-authoring.md; the runner
+    reads AST_GREP_LANGUAGES. They must be the same list."""
+    import re
+
+    doc = (ROOT / "docs" / "rules-authoring.md").read_text(encoding="utf-8")
+    passage = doc.split("searches only suffixes with a mapped grammar:")[1].split("(each checked")[0]
+
+    assert set(re.findall(r"`(\.[a-z]+)`", passage)) == set(AST_GREP_LANGUAGES)
 
 
 def test_violations_are_ordered_by_location_so_runs_diff_cleanly(tmp_path, capsys):
@@ -788,21 +835,32 @@ def test_with_no_pyyaml_anywhere_the_wrapper_says_so_and_exits_two(tmp_path):
     assert "PyYAML" in result.stderr
 
 
-def test_the_documented_json_shape_is_the_one_emitted():
-    """docs/rules-authoring.md is where a sweep author learns the contract, so
-    its example and its field table must be the fields the runner emits."""
-    import re
+def test_a_relative_pythonpath_means_what_it_meant_where_the_wrapper_was_invoked(tmp_path):
+    """The wrapper starts Python in its own `src/`, so an inherited relative
+    `PYTHONPATH=vendor` (a CI job providing PyYAML that way) would resolve
+    there instead, and the run would exit 2 for want of PyYAML. Each entry is
+    made absolute against the invoking directory first. Empty entries, which
+    Python reads as the working directory, are dropped: the working directory
+    is the repository, and that is what Python must never import from."""
+    import yaml
 
-    doc = (ROOT / "docs" / "rules-authoring.md").read_text(encoding="utf-8")
-    example = json.loads(re.search(r"```json\n(.*?)```", doc, re.DOTALL).group(1))
-    table = re.findall(r"^\| `([a-z_]+)`(?:, `([a-z_]+)`)? \|", doc.split("### JSON")[1], re.M)
-    documented = {name for pair in table for name in pair if name}
+    invoked_from = tmp_path / "ci"
+    shutil.copytree(Path(yaml.__file__).parent, invoked_from / "vendor" / "yaml",
+                    ignore=shutil.ignore_patterns("__pycache__"))
+    markers = tmp_path / "markers"
+    markers.mkdir()
+    _plant_hostile_modules(invoked_from, markers)
+    repo = sample_repo(tmp_path, *ALL_REGEX_RULES)
 
-    assert tuple(example) == (
-        "version", "fail_on", "complete", "rules_checked", "rules_skipped", "violations",
+    result = subprocess.run(
+        [str(WRAPPER), "--repo", str(repo), "--format", "json"],
+        capture_output=True, text=True, cwd=str(invoked_from),
+        env=_environment(_shims(tmp_path, "-S"), pythonpath=":vendor:"),
     )
-    assert tuple(example["violations"][0]) == RECORD_FIELDS
-    assert documented == set(RECORD_FIELDS)
+
+    assert sorted(p.name for p in markers.iterdir()) == []
+    assert result.returncode == EXIT_VIOLATIONS, result.stderr
+    assert len(json.loads(result.stdout)["violations"]) == len(PLANTED["violations"])
 
 
 # --- the wrapper imports nothing from the repository it lints ----------------
@@ -1007,6 +1065,45 @@ def test_an_ast_grep_rule_over_a_mapped_suffix_passes_the_language(tmp_path):
     )
     assert languages == ["java", "javascript", "typescript"]
     assert result.complete
+
+
+
+def test_a_file_named_only_a_suffix_does_not_make_an_ast_grep_rule_skip(tmp_path):
+    """A repo-root file named `.py` fully matches `**/*.py`, but has no suffix
+    of its own (`Path(".py").suffix == ""`), so it read as a file with no
+    grammar and skipped the whole rule: exit 2, forced by any commit. ast-grep
+    under `--lang` does not search such a file either (see the real-binary
+    test below), so it is left out of the rule's scope and the rule runs."""
+    repo = sample_repo(tmp_path, AST_GREP_PRINT)
+    (repo / ".py").write_text("print(1)\n", encoding="utf-8")
+    log = tmp_path / "ast-grep-calls.jsonl"
+
+    result = run_lint(repo, ast_grep=fake_ast_grep(tmp_path, stdout="[]", exit_code=1, log=log))
+
+    assert result.complete
+    assert result.checked == ("no-bare-print-ast",)
+    searched = []
+    for line in log.read_text().splitlines():
+        argv = json.loads(line)["argv"]
+        searched += [Path(f).relative_to(repo.resolve()).as_posix()
+                     for f in argv[argv.index("--") + 1:]]
+    assert "src/sample/core/billing.py" in searched
+    assert ".py" not in searched
+
+
+@pytest.mark.skipif(shutil.which("ast-grep") is None, reason="ast-grep is not installed")
+def test_the_real_ast_grep_does_not_search_a_file_named_only_a_suffix(tmp_path):
+    """Why leaving `.py` out of scope loses nothing: named explicitly, under
+    `--lang=python`, ast-grep 0.50.0 finds no match in it."""
+    (tmp_path / ".py").write_text("print(1)\n", encoding="utf-8")
+
+    completed = subprocess.run(
+        [shutil.which("ast-grep"), "run", "--pattern=print($$$A)", "--lang=python",
+         "--json=compact", "--", str(tmp_path / ".py")],
+        capture_output=True, text=True, cwd=str(tmp_path), check=False,
+    )
+
+    assert (completed.returncode, json.loads(completed.stdout)) == (1, [])
 
 
 # --- writing the report is inside the gate -----------------------------------

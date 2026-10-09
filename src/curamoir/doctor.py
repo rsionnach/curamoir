@@ -29,6 +29,7 @@ from pathlib import Path
 
 from curamoir.config import ConfigError, load_config_text
 from curamoir.guards.lock import LOCK_PATH
+from curamoir.rules import AST_GREP_INSTALL
 from curamoir.scaffold import detect_languages, detect_modules
 
 LEVEL_ORDER = {"error": 0, "warning": 1, "ok": 2}
@@ -691,7 +692,7 @@ def _check_tools(tools, repo=None):
         ("ast-grep", "warning",
          "AST-matched rules will be skipped, so curamoir-lint reports an incomplete "
          "run and exits 2; regex rules still run",
-         "pip install ast-grep-cli  (or npm i -g @ast-grep/cli, or brew install ast-grep)"),
+         AST_GREP_INSTALL),
         ("python3", "error",
          "no python3 (or python) on PATH, so every hook wrapper exits silently",
          "Install Python 3.12 or later and ensure python3 is on PATH."),

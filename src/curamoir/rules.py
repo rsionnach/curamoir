@@ -100,6 +100,11 @@ AST_GREP_LANGUAGES = {
     ".html": "html", ".css": "css",
 }
 
+#: How to install ast-grep, for anything that finds it missing.
+AST_GREP_INSTALL = (
+    "pip install ast-grep-cli  (or npm i -g @ast-grep/cli, or brew install ast-grep)"
+)
+
 
 def _searchable_by_ast_grep(language):
     """Whether every file pattern of `language` has an ast-grep grammar."""

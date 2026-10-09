@@ -43,8 +43,27 @@ root="$(cd "$here/.." && pwd)" || { echo "curamoir-lint: cannot locate its own d
 # PYTHONPATH is still PREPENDED to, not replaced, as in every other wrapper: it
 # comes from whoever invoked the lint (a CI job, a test harness), not from the
 # repository, and replacing it would break an interpreter whose PyYAML is only
-# reachable through it.
+# reachable through it. Its relative entries are made absolute against the
+# invoking directory before the `cd`, so `PYTHONPATH=vendor` still means the
+# `vendor` the caller meant. Empty entries are dropped: Python reads one as
+# the working directory, which is the repository — exactly what must not be
+# importable.
 invoked_from="$PWD"
+inherited_pythonpath=""
+IFS=: read -r -a entries <<< "${PYTHONPATH:-}"
+for entry in ${entries[@]+"${entries[@]}"}; do
+  case "$entry" in
+    "") continue ;;
+    /*) ;;
+    *) entry="$invoked_from/$entry" ;;
+  esac
+  inherited_pythonpath="${inherited_pythonpath:+${inherited_pythonpath}:}$entry"
+done
+if [ -n "$inherited_pythonpath" ]; then
+  export PYTHONPATH="$inherited_pythonpath"
+else
+  unset PYTHONPATH
+fi
 cd "$root/src" || { echo "curamoir-lint: cannot enter $root/src" >&2; exit 2; }
 export PYTHONSAFEPATH=1
 
@@ -73,5 +92,5 @@ if [ -z "$chosen" ]; then
   exit 2
 fi
 
-CURAMOIR_LINT_CWD="$invoked_from" PYTHONPATH="${root}/src${PYTHONPATH:+:${PYTHONPATH}}" \
+CURAMOIR_LINT_INVOKED_FROM="$invoked_from" PYTHONPATH="${root}/src${PYTHONPATH:+:${PYTHONPATH}}" \
   exec "$chosen" -m curamoir.lint "$@"

@@ -61,8 +61,12 @@ from pathlib import Path
 
 from curamoir.config import DEFAULTS, ConfigError, load_config_text
 from curamoir.principles import PrincipleError, load_principles
+
+# AST_GREP_LANGUAGES lives in `rules` because `parse_rule` refuses an ast-grep
+# rule over a language it lacks; the run uses it to pick each file's `--lang`.
 from curamoir.rules import (
     ALWAYS_EXCLUDED,
+    AST_GREP_INSTALL,
     AST_GREP_LANGUAGES,
     SEVERITIES,
     RuleError,
@@ -93,21 +97,13 @@ PRINCIPLES_PATH = ".curamoir/principles.md"
 #: exceed the OS argument-length limit, which fails the whole call.
 AST_GREP_BATCH = 200
 
-#: Which suffixes an ast-grep rule can search, and with which `--lang`, is
-#: `rules.AST_GREP_LANGUAGES`: it lives there because `parse_rule` refuses an
-#: ast-grep rule over a language it lacks, and is imported here for the run.
-
 #: Set by scripts/curamoir-lint to the directory it was invoked from. The
 #: wrapper starts Python in its own `src/` so that nothing in the linted repo
-#: is on sys.path; `main` moves back here before reading any argument.
-INVOKED_FROM_ENV = "CURAMOIR_LINT_CWD"
+#: is on sys.path; `main` moves back here before resolving any path argument.
+INVOKED_FROM_ENV = "CURAMOIR_LINT_INVOKED_FROM"
 
 #: The UTF-8 byte order mark, which no editor counts as a column.
 UTF8_BOM = b"\xef\xbb\xbf"
-
-AST_GREP_INSTALL = (
-    "pip install ast-grep-cli  (or npm i -g @ast-grep/cli, or brew install ast-grep)"
-)
 
 
 class LintError(Exception):
@@ -179,38 +175,17 @@ def run_lint(repo, ast_grep=None):
     files, symlinks = _repository_files(repo)
     violations, checked, skipped = [], [], []
     for rule in sorted(rules, key=lambda r: r.id):
-        if rule.matcher == "ast-grep" and ast_grep is None:
-            skipped.append(Skipped(
-                rule.id,
-                f"ast-grep is not installed, so this ast-grep rule did not run. "
-                f"Install it: {AST_GREP_INSTALL}",
-            ))
-            continue
-        # load_rules has already resolved the id, so this cannot be None.
-        principle = principles.by_id(rule.principle)
         scoped = _scoped(files, rule)
-        if rule.matcher == "ast-grep":
-            unsearchable = [p for p in scoped if Path(p).suffix not in AST_GREP_LANGUAGES]
-            if unsearchable:
-                # Handled like a missing ast-grep, not as a LintError: the rule
-                # cannot honestly be called checked, but the other rules' work
-                # list is still worth printing — and which files exist is up to
-                # the repo, so a PR adding one `.txt` must not blank the report.
-                # Dropping the files instead was the bug: reported as checked,
-                # exit 0, having searched nothing.
-                shown = ", ".join(unsearchable[:5])
-                more = f" and {len(unsearchable) - 5} more" if len(unsearchable) > 5 else ""
-                skipped.append(Skipped(
-                    rule.id,
-                    f"its scope includes files ast-grep has no grammar for here "
-                    f"({shown}{more}), so it did not run. Narrow `files:` or add "
-                    "them to `exclude:`; for prose or config, write a `regex` rule.",
-                ))
-                continue
+        reason = _why_rule_cannot_run(rule, scoped, ast_grep)
+        if reason is not None:
+            skipped.append(reason)
+            continue
         if rule.matcher == "ast-grep":
             matches = _ast_grep_matches(repo, rule, scoped, ast_grep)
         else:
             matches = _regex_matches(repo, rule, scoped)
+        # load_rules has already resolved the id, so this cannot be None.
+        principle = principles.by_id(rule.principle)
         for path, line, col, text in matches:
             violations.append(Violation(
                 path=path, line=line, col=col,
@@ -232,12 +207,46 @@ def run_lint(repo, ast_grep=None):
     return LintResult(tuple(violations), tuple(checked), tuple(skipped), tuple(symlinks))
 
 
+def _why_rule_cannot_run(rule, scoped, ast_grep):
+    """A Skipped saying why `rule` cannot honestly run over `scoped`, or None.
+
+    Both reasons are ast-grep's: it is absent, or the rule's scope includes a
+    file it has no grammar for. Either way the rule is skipped and named rather
+    than raised as a LintError: it cannot be called checked, but the other
+    rules' work list is still worth printing. And which files exist is the
+    repo's to choose, so one stray `.txt` in a PR must not blank the report.
+    """
+    if rule.matcher != "ast-grep":
+        return None
+    if ast_grep is None:
+        return Skipped(
+            rule.id,
+            f"ast-grep is not installed, so this ast-grep rule did not run. "
+            f"Install it: {AST_GREP_INSTALL}",
+        )
+    unsearchable = [path for path in scoped if _ast_grep_language(path) is None]
+    if not unsearchable:
+        return None
+    shown = ", ".join(unsearchable[:5])
+    more = f" and {len(unsearchable) - 5} more" if len(unsearchable) > 5 else ""
+    return Skipped(
+        rule.id,
+        f"its scope includes files ast-grep has no grammar for here "
+        f"({shown}{more}), so it did not run. Narrow `files:` or add "
+        "them to `exclude:`; for prose or config, write a `regex` rule.",
+    )
+
+
+def _at_or_above(severity, fail_on):
+    """Whether a violation of `severity` meets the `fail_on` threshold."""
+    return SEVERITIES.index(severity) >= SEVERITIES.index(fail_on)
+
+
 def exit_code(result, fail_on):
     """The gate. See the module docstring for why 2 outranks 1."""
     if not result.complete:
         return EXIT_ERROR
-    floor = SEVERITIES.index(fail_on)
-    if any(SEVERITIES.index(v.severity) >= floor for v in result.violations):
+    if any(_at_or_above(v.severity, fail_on) for v in result.violations):
         return EXIT_VIOLATIONS
     return EXIT_CLEAN
 
@@ -267,10 +276,7 @@ def format_human(result, fail_on):
         lines.append(f"    rule: {v.principle_rule}")
         lines.append(f"    why:  {v.why_link}")
         lines.append(f"    fix:  {v.fix}")
-    failing = sum(
-        1 for v in result.violations
-        if SEVERITIES.index(v.severity) >= SEVERITIES.index(fail_on)
-    )
+    failing = sum(1 for v in result.violations if _at_or_above(v.severity, fail_on))
     noun = "violation" if len(result.violations) == 1 else "violations"
     lines.append(
         f"{len(result.violations)} {noun} from {len(result.checked)} rule(s); "
@@ -432,14 +438,28 @@ def _repository_files(repo):
 
 
 def _scoped(files, rule):
-    """The files `rule` applies to: its patterns, minus its exclusions."""
+    """The files `rule` applies to: its patterns, minus its exclusions.
+
+    For an ast-grep rule, also minus any file whose whole name is a suffix
+    (`.py`): it fully matches `**/*.py`, but has no suffix of its own, so it
+    would read as a file with no grammar and skip the rule — exit 2, at the
+    will of any commit. Leaving it out loses nothing: named explicitly under
+    `--lang=python`, ast-grep 0.50.0 does not search it either. A regex rule
+    keeps it, since a regex can search anything.
+    """
     include = [glob_regex(pattern) for pattern in rule.file_patterns()]
     exclude = [glob_regex(pattern) for pattern in rule.exclude]
     return [
         path for path in files
         if any(p.fullmatch(path) for p in include)
         and not any(p.fullmatch(path) for p in exclude)
+        and not (rule.matcher == "ast-grep" and Path(path).name in AST_GREP_LANGUAGES)
     ]
+
+
+def _ast_grep_language(path):
+    """The `--lang` for `path`, or None when ast-grep has no grammar for it."""
+    return AST_GREP_LANGUAGES.get(Path(path).suffix)
 
 
 def _regex_matches(repo, rule, files):
@@ -504,21 +524,20 @@ def _ast_grep_matches(repo, rule, files, binary):
     """
     by_language = {}
     for path in files:
-        by_language.setdefault(AST_GREP_LANGUAGES[Path(path).suffix], []).append(path)
+        by_language.setdefault(_ast_grep_language(path), []).append(path)
     matches = []
     with tempfile.TemporaryDirectory(prefix="curamoir-lint-") as scratch:
-        config = Path(scratch) / "sgconfig.yml"
-        config.write_text("ruleDirs: []\n", encoding="utf-8")
+        (Path(scratch) / "sgconfig.yml").write_text("ruleDirs: []\n", encoding="utf-8")
         for language, paths in sorted(by_language.items()):
             for start in range(0, len(paths), AST_GREP_BATCH):
                 matches.extend(_ast_grep_batch(
                     repo, rule, binary, language, paths[start:start + AST_GREP_BATCH],
-                    scratch=scratch, config=config,
+                    scratch=scratch,
                 ))
     return matches
 
 
-def _ast_grep_batch(repo, rule, binary, language, batch, scratch, config):
+def _ast_grep_batch(repo, rule, binary, language, batch, scratch):
     """(path, line, col, text) from one ast-grep run over files of one language.
 
     ast-grep must never read the repo's own configuration. It looks for
@@ -542,7 +561,8 @@ def _ast_grep_batch(repo, rule, binary, language, batch, scratch, config):
     """
     root = repo.resolve()
     command = [
-        binary, "run", f"--config={config}", f"--pattern={rule.pattern}",
+        binary, "run", f"--config={Path(scratch) / 'sgconfig.yml'}",
+        f"--pattern={rule.pattern}",
         f"--lang={language}", "--json=compact", "--",
         *(str(root / path) for path in batch),
     ]
