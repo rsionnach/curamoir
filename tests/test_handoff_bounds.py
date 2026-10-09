@@ -312,3 +312,41 @@ def test_a_heading_with_a_body_is_always_kept():
     lines = ["## Intended next step", "", "Run the sweep.", "", "## Last decision", "", "x"]
 
     assert _without_empty_headings(lines) == lines
+
+
+def test_a_supplied_note_is_not_also_rendered_as_the_last_decision(tmp_path):
+    """Found by the first real use of `/curamoir:handoff`, on cúramóir itself.
+
+    `write_handoff` journals the note so it survives the next automatic write,
+    then `build_handoff` reads the journal for `last_decision` — and gets back
+    the note it was just handed. So the note printed twice in a file bounded at
+    400 words whose entire purpose is being skimmable.
+
+    The semantics are the worse half: "Last decision" is meant to be what the
+    PREVIOUS turn concluded. Echoing the note the developer just wrote tells
+    them something they typed thirty seconds ago and crowds out the thing they
+    wanted it for.
+    """
+    repo = git_repo(tmp_path)
+    note = "M2 is three beads in; next is the lint runner."
+
+    write_handoff(repo, note=note)
+
+    rendered = (repo / ".curamoir" / "handoff" / "latest.md").read_text(encoding="utf-8")
+    assert rendered.count(note) == 1, "the note is rendered twice"
+    assert f"> {note}" in rendered, "the note must still lead the file"
+
+
+def test_an_earlier_decision_still_shows_when_a_new_note_is_supplied(tmp_path):
+    """The fix must not silence the section: a genuinely earlier decision is
+    exactly what it is for."""
+    from curamoir.handoff import record_turn
+
+    repo = git_repo(tmp_path)
+    record_turn(repo, note="Chose the deadline-based git bound.")
+
+    write_handoff(repo, note="Now writing the lint runner.")
+
+    rendered = (repo / ".curamoir" / "handoff" / "latest.md").read_text(encoding="utf-8")
+    assert "Now writing the lint runner." in rendered
+    assert "deadline-based git bound" in rendered, "the real last decision vanished"

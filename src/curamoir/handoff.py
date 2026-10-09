@@ -59,7 +59,7 @@ NO_THREAD_TO_PICK_UP = (
 )
 
 
-def build_handoff(repo, deadline_seconds=None):
+def build_handoff(repo, deadline_seconds=None, note=None):
     """Everything the handoff reports, as plain data.
 
     No model call. DEC-8 (owner, 2026-10-07) settled that the last decision is
@@ -83,19 +83,31 @@ def build_handoff(repo, deadline_seconds=None):
         "branch": _branch(repo, deadline=deadline),
         "uncommitted": _uncommitted(repo, deadline=deadline),
         "in_progress": in_progress,
-        "last_decision": _last_decision(journal),
+        "last_decision": _last_decision(journal, excluding=note),
         "next_step": _next_step(journal, in_progress),
         "note": None,
     }
 
 
-def _last_decision(journal):
+def _last_decision(journal, excluding=None):
     """The most recent journal note, bounded.
 
     Free: the Stop hook hands us `last_assistant_message` each turn, so this
     needs no model call and no transcript parsing.
+
+    `excluding` is the note THIS write is rendering. `write_handoff` journals
+    the developer's note first, so that it survives the next automatic write —
+    and then this read handed the same text straight back, so the note appeared
+    twice in a file bounded at 400 words whose point is being skimmable. The
+    semantics were the worse half: "Last decision" means what the PREVIOUS turn
+    concluded, and echoing something typed thirty seconds ago crowds out the
+    thing the section exists for. Found by the first real use of
+    `/curamoir:handoff`, on cúramóir itself.
     """
     notes = [entry["note"] for entry in journal if entry.get("note")]
+    if excluding is not None:
+        wanted = excluding.strip()
+        notes = [note for note in notes if note.strip() != wanted]
     return _first_sentences(notes[-1], MAX_DECISION_SENTENCES) if notes else ""
 
 
@@ -214,7 +226,7 @@ def write_handoff(repo, keep_history=None, note=None, next_step=None,
     latest = directory / "latest.md"
 
     try:
-        handoff = build_handoff(repo, deadline_seconds=deadline_seconds)
+        handoff = build_handoff(repo, deadline_seconds=deadline_seconds, note=note)
         handoff["note"] = note.strip() if note and note.strip() else None
         rendered = render_handoff(handoff)
     except Exception as error:
