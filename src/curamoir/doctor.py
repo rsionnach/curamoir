@@ -65,6 +65,7 @@ def diagnose(repo, tools=None):
     findings.append(_check_pyyaml(tools))
     findings.append(_check_config(base))
     findings.append(_check_principles(repo))
+    findings.append(_check_rules(repo))
     findings.extend(_check_modules(repo))
     findings.append(_check_pause(base))
     findings.extend(_check_hooks(repo))
@@ -178,6 +179,43 @@ def _check_principles(repo):
         for tier in ("principle", "rule", "guard")
     )
     return Finding("principles", "ok", f"{count} parsed ({tiers})")
+
+
+def _check_rules(repo):
+    """Load every rule, so a broken one is found by asking rather than mid-run.
+
+    E2-R3 validates everything at load time precisely so this check can exist:
+    a sweep that dies on rule 7 of 11 has already paid for six, and it fails
+    without naming a file. Here the same error arrives with the filename, the
+    field, and nothing spent.
+    """
+    from curamoir.rules import RuleError, load_rules
+
+    directory = repo / ".curamoir" / "rules"
+    if not directory.is_dir():
+        return Finding(
+            "rules", "warning",
+            "no .curamoir/rules/ directory, so nothing is mechanically enforced",
+            fix="Run /curamoir:init, then see docs/rules-authoring.md.",
+        )
+    try:
+        rules = load_rules(repo)
+    except RuleError as invalid:
+        return Finding(
+            "rules", "error", str(invalid),
+            fix="Fix the field named above; /curamoir:doctor will reload.",
+        )
+    if not rules:
+        return Finding(
+            "rules", "warning",
+            "no rules defined, so every principle is enforced by review only",
+            fix="Write one for the correction you repeat most; see docs/rules-authoring.md.",
+        )
+    by_matcher = ", ".join(
+        f"{matcher}: {sum(1 for r in rules if r.matcher == matcher)}"
+        for matcher in ("ast-grep", "regex")
+    )
+    return Finding("rules", "ok", f"{len(rules)} loaded ({by_matcher})")
 
 
 def _check_modules(repo):
