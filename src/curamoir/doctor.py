@@ -64,6 +64,7 @@ def diagnose(repo, tools=None):
 
     findings.append(_check_pyyaml(tools))
     findings.append(_check_config(base))
+    findings.append(_check_principles(repo))
     findings.extend(_check_modules(repo))
     findings.append(_check_pause(base))
     findings.extend(_check_hooks(repo))
@@ -135,6 +136,48 @@ def _check_config(base):
             fix="Correct the keys named above in .curamoir/curamoir.yaml.",
         )
     return Finding("config", "ok", "valid")
+
+
+def _check_principles(repo):
+    """How many principles parse, and whether the file is readable at all.
+
+    A count rather than a pass/fail, because every answer is legitimate: a repo
+    initialised before Epic 2 shipped a starter set has none, a repo whose owner
+    deleted what did not apply has few, and both are working as intended. What
+    is NOT legitimate is a file that does not parse — a sweep would then look
+    for nothing and report success, so that is an error with the parser's own
+    message, which names the principle and the field (E2-R1).
+    """
+    from curamoir.principles import PrincipleError, load_principles
+
+    path = repo / ".curamoir" / "principles.md"
+    if not path.is_file():
+        return Finding(
+            "principles", "warning",
+            "principles.md is missing, so a sweep has nothing to look for",
+            fix="Run /curamoir:init to seed the starter set.",
+        )
+    try:
+        parsed = load_principles(repo)
+    except PrincipleError as invalid:
+        return Finding(
+            "principles", "error",
+            f"principles.md does not parse: {invalid}",
+            fix="Fix the field named above; /curamoir:doctor will recount.",
+        )
+    count = len(parsed.principles)
+    if count == 0:
+        return Finding(
+            "principles", "warning",
+            "principles.md parses but defines none, so a sweep has nothing to "
+            "look for",
+            fix="Add a principle, or re-seed from the plugin's templates/principles.md.",
+        )
+    tiers = ", ".join(
+        f"{tier}: {sum(1 for p in parsed.principles if p.tier == tier)}"
+        for tier in ("principle", "rule", "guard")
+    )
+    return Finding("principles", "ok", f"{count} parsed ({tiers})")
 
 
 def _check_modules(repo):
