@@ -100,3 +100,7 @@ def test_init_keeps_the_journal_and_lock_out_of_git(tmp_path):
 
     assert "journal.jsonl" in ignore
     assert "lock" in ignore
+    # `*.tmp` was added to GITIGNORE and asserted nowhere, so removing it left
+    # the suite green — a stray temp from a writer killed mid-write would have
+    # gone on being committed with nobody noticing.
+    assert "*.tmp" in ignore
