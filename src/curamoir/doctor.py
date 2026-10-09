@@ -689,7 +689,8 @@ def _check_tools(tools, repo=None):
          "GitHub operations unavailable: no PR creation, no issue filing, no PR cap",
          "brew install gh && gh auth login"),
         ("ast-grep", "warning",
-         "AST-matched rules will be skipped; regex rules still run",
+         "AST-matched rules will be skipped, so curamoir-lint reports an incomplete "
+         "run and exits 2; regex rules still run",
          "pip install ast-grep-cli  (or npm i -g @ast-grep/cli, or brew install ast-grep)"),
         ("python3", "error",
          "no python3 (or python) on PATH, so every hook wrapper exits silently",

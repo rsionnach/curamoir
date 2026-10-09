@@ -130,6 +130,10 @@ rules:
   # it reaches disk, which is what makes a guard possible. regex is the escape
   # hatch for things no AST pattern can express, such as file naming.
   matcher: ast-grep
+  # curamoir-lint exits non-zero on any violation at or above this severity
+  # (info < warning < error). Lower it to make warnings fail CI and pre-commit;
+  # `curamoir-lint --fail-on` overrides it for one run.
+  fail_on: error
 
 smoke:
   # Run in a clean container on a cadence, so a broken quickstart is caught

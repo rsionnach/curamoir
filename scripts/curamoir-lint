@@ -1,0 +1,55 @@
+#!/usr/bin/env bash
+# curamoir-lint: run .curamoir/rules/*.yaml against a repository (E2-R4).
+#
+# Standalone by design (E2-R5): no model, no network, and no cúramóir install.
+# It needs only this file, the `src/` directory beside it, a Python 3 with
+# PyYAML, and — for ast-grep rules — the `ast-grep` binary. So CI can
+# `git clone` cúramóir and call this script, and a pre-commit `local` hook can
+# point at it, without the plugin being installed anywhere.
+#
+# Exit codes are the contract: 0 clean, 1 violations at or above the threshold,
+# 2 the run cannot be trusted (see src/curamoir/lint.py). That includes this
+# wrapper finding no Python: a gate that exits 0 because it could not start
+# waves every commit through.
+#
+# Unlike the hook wrappers, CLAUDE_PLUGIN_ROOT is deliberately NOT consulted. A
+# lint gate runs outside Claude Code, and inheriting a stale plugin root from a
+# developer's shell would lint with a different copy of the code than the one
+# that was invoked. The script's own location is the only answer.
+set -uo pipefail
+
+# Parameter expansion rather than `dirname`, so locating src/ does not depend
+# on PATH (a pre-commit or CI environment can be very sparse).
+source="${BASH_SOURCE[0]}"
+case "$source" in
+  */*) here="${source%/*}" ;;
+  *) here="." ;;
+esac
+root="$(cd "$here/.." && pwd)" || { echo "curamoir-lint: cannot locate its own directory" >&2; exit 2; }
+
+# The same candidates in the same order as every other wrapper (a test asserts
+# they agree with doctor), with one difference: the hooks take the first that
+# EXISTS, and this takes the first that can import PyYAML, falling back to the
+# first that exists. Rule files are YAML, and a machine where `python3.14` is a
+# bare Homebrew install and `python3.12` has PyYAML is ordinary — taking the
+# first would refuse to lint while a working interpreter sat on PATH. One probe
+# per candidate is affordable here in a way it is not on a per-Bash-call hook.
+# src/curamoir/lint.py keeps to syntax that imports on 3.9 (cm-bzb), so the
+# fallback still runs far enough to say what is missing.
+chosen=""
+for interpreter in python3.14 python3.13 python3.12 python3 python; do
+  if command -v "$interpreter" >/dev/null 2>&1; then
+    [ -n "$chosen" ] || chosen="$interpreter"
+    if "$interpreter" -c "import yaml" >/dev/null 2>&1; then
+      chosen="$interpreter"
+      break
+    fi
+  fi
+done
+
+if [ -z "$chosen" ]; then
+  echo "curamoir-lint: needs python3 on PATH, and found none. Nothing was checked." >&2
+  exit 2
+fi
+
+PYTHONPATH="${root}/src${PYTHONPATH:+:${PYTHONPATH}}" exec "$chosen" -m curamoir.lint "$@"

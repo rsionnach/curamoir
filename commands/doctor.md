@@ -16,7 +16,8 @@ Relay every finding with its fix. Then help with the fixes, in this order:
    for instance. Do not install software without asking.
 2. **Warnings second.** These are degraded-but-usable modes, and some are
    choices rather than faults. `bd` missing means findings go to GitHub only;
-   `ast-grep` missing means AST rules skip while regex rules still run. Say what
+   `ast-grep` missing means AST rules skip while regex rules still run — and
+   `curamoir-lint` then exits 2, so a CI or pre-commit gate fails. Say what
    the developer loses, and let them decide whether they care.
 
 Be accurate about the hook check specifically. It runs the real hook against a

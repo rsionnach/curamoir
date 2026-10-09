@@ -267,6 +267,22 @@ def test_explicit_file_globs_override_language_inference(tmp_path):
     assert rule.file_patterns() == ("**/*.py", "**/*.ts")
 
 
+def test_an_ast_grep_rule_cannot_target_a_path(tmp_path):
+    """ast-grep matches inside a file's syntax tree, and a filename is not in
+    it. Before E2-R4 this loaded fine and would have run as a rule that can
+    never fire — a lint that quietly checks nothing — so it is refused here,
+    naming the matcher that can."""
+    text = RULE.replace("matcher: regex", "matcher: ast-grep") + "target: path\n"
+
+    with pytest.raises(RuleError) as caught:
+        load_rules(write(tmp_path, text))
+
+    message = str(caught.value)
+    assert "no-bare-print.yaml" in message
+    assert "target" in message
+    assert "regex" in message
+
+
 # --- rule ids are references too ----------------------------------------
 
 def test_two_rules_with_the_same_id_are_refused(tmp_path):

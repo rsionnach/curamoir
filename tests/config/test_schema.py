@@ -162,3 +162,32 @@ def test_the_template_keeps_its_comments_because_init_writes_commented_defaults(
     text = template.read_text(encoding="utf-8")
 
     assert text.count("#") >= 20, "template has lost its explanatory comments"
+
+
+def test_the_lint_threshold_defaults_to_error_and_is_a_closed_vocabulary():
+    """E2-R4: `curamoir-lint` exits non-zero on a violation at or above the
+    CONFIGURED severity, so the threshold is a key. Closed, because a typo here
+    would otherwise move the gate without anybody deciding to: `fail_on: eror`
+    must be refused by name, not read as "never fail"."""
+    assert DEFAULTS["rules"]["fail_on"] == "error"
+    for severity in ("info", "warning", "error"):
+        assert load_config({"rules": {"fail_on": severity}})["rules"]["fail_on"] == severity
+
+    with pytest.raises(ConfigError) as caught:
+        load_config({"rules": {"fail_on": "eror"}})
+
+    assert "rules.fail_on" in str(caught.value)
+
+
+def test_the_template_states_the_lint_threshold():
+    """The template shows every default so a developer can see what will happen
+    before it does; a gate threshold is the last thing to leave implicit."""
+    from pathlib import Path
+
+    from curamoir.config import load_config_text
+
+    template = Path(__file__).resolve().parents[2] / "templates" / "curamoir.yaml"
+    text = template.read_text(encoding="utf-8")
+
+    assert "fail_on:" in text
+    assert load_config_text(text)["rules"]["fail_on"] == DEFAULTS["rules"]["fail_on"]

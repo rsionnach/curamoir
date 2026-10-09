@@ -265,6 +265,15 @@ def parse_rule(text, source, known_principles):
             f"{source}: rule {rule_id!r} has target {target!r}; allowed: "
             f"{', '.join(TARGETS)}."
         )
+    if target == "path" and matcher != "regex":
+        # ast-grep matches inside a file's syntax tree and a filename is not in
+        # it, so this rule would load, run, and never fire: a lint that quietly
+        # checks nothing. DEC-3's escape hatch exists for exactly this case.
+        raise RuleError(
+            f"{source}: rule {rule_id!r} has target 'path' with matcher "
+            f"{matcher!r}. A filename is not in any syntax tree, so only the "
+            "'regex' matcher can match one; use `matcher: regex`."
+        )
 
     return Rule(
         id=rule_id,

@@ -109,7 +109,10 @@ DEFAULTS = {
         "keep_history": 10,
         "brief_threshold_days": 5,
     },
-    "rules": {"matcher": "ast-grep"},
+    # E2-R4: `curamoir-lint` exits non-zero on a violation at or above
+    # `fail_on`. `error` by default, so `warning` and `info` are reported
+    # without failing a build nobody asked to be strict.
+    "rules": {"matcher": "ast-grep", "fail_on": "error"},
     "smoke": {
         "command": "bash scripts/quickstart.sh",
         "container": "python:3.12-slim",
@@ -170,7 +173,9 @@ SCHEMA = {
         "keep_history": COUNT,
         "brief_threshold_days": COUNT,
     },
-    "rules": {"matcher": ("ast-grep", "regex")},
+    # `fail_on` is closed like every other vocabulary here: `fail_on: eror`
+    # read as "never fail" would loosen a gate without anybody deciding to.
+    "rules": {"matcher": ("ast-grep", "regex"), "fail_on": ("info", "warning", "error")},
     "smoke": {"command": STRING, "container": STRING},
 }
 

@@ -85,10 +85,11 @@ ast-grep pattern was fiddly: a fiddly structural pattern is still the one that
 will be right in six months.
 
 `ast-grep` is a separate binary. `/curamoir:doctor` reports whether it is
-installed. When it is not, the lint runner will **skip** those rules with a
-warning rather than silently passing them — a lint that quietly checks nothing
-is worse than one that fails. (That behaviour belongs to the runner, E2-R4,
-which has not landed; the doctor check has.) Install it with one of:
+installed. When it is not, `curamoir-lint` **skips** those rules, still runs the
+regex ones and prints what they found, names the skipped rules on stderr, and
+exits 2 — a lint that quietly checks nothing is worse than one that fails, and
+a gate that passes on a machine missing its matcher passes everywhere it is
+missing. Install it with one of:
 
 ```
 pip install ast-grep-cli
@@ -147,6 +148,135 @@ naming the file and the field:
 - a message using a variable that does not exist
 - two rules sharing an id
 - an unknown language
+- `target: path` with the `ast-grep` matcher (a filename is in no syntax tree,
+  so the rule could never fire)
 
 `/curamoir:doctor` loads every rule for exactly this reason: so a broken rule is
 something you find when you ask, rather than during an unattended run.
+
+## Running `curamoir-lint`
+
+```
+scripts/curamoir-lint [--repo PATH] [--format human|json] [--fail-on info|warning|error]
+```
+
+It makes no model calls and no network calls, and needs no cúramóir install
+(E2-R5): only `scripts/curamoir-lint`, the `src/` directory beside it, a Python 3
+that can import PyYAML (rule files are YAML), and `ast-grep` for ast-grep rules.
+The wrapper finds `src/` from its own location — never from
+`CLAUDE_PLUGIN_ROOT`, which a lint run outside Claude Code may have inherited
+stale — and of the interpreters it tries (`python3.14` … `python`, the same list
+as every wrapper) it takes the first that can import PyYAML.
+
+### Exit codes
+
+| code | meaning |
+|---|---|
+| `0` | every rule ran, and no violation is at or above the threshold |
+| `1` | every rule ran, and at least one violation is at or above the threshold |
+| `2` | the result cannot be trusted: a rule, `principles.md` or `curamoir.yaml` did not load, `ast-grep` is needed and missing or failed, no Python was found, or an internal error |
+
+`2` outranks `1`. A run that skipped rules has not shown them clean, so it is
+reported as incomplete even if what did run found something. When rules were
+skipped the partial report is still printed; for every other `2`, stdout is
+empty and the reason is on stderr.
+
+The threshold is `--fail-on`, else `rules.fail_on` in `.curamoir/curamoir.yaml`,
+else `error`. Every violation is reported whatever its severity; the threshold
+decides only the exit code. A `curamoir.yaml` that does not validate is a `2`,
+not a fall-back to the default — a gate loosened without anyone being told is
+the failure this tool exists to prevent.
+
+No rules at all is a `0`, with a note on stderr that nothing was checked: a
+fresh repo is not a failing one.
+
+### JSON (`--format json`)
+
+The sweep's work list (E3-R1), so the shape is a contract. `version` changes
+only when a field is removed, renamed or retyped.
+
+```json
+{
+  "version": 1,
+  "fail_on": "error",
+  "complete": true,
+  "rules_checked": ["no-bare-print"],
+  "rules_skipped": [],
+  "violations": [
+    {
+      "location": "src/sample/core/billing.py:15:5",
+      "path": "src/sample/core/billing.py",
+      "line": 15,
+      "col": 5,
+      "severity": "error",
+      "rule_id": "no-bare-print",
+      "principle_id": "structured-logging",
+      "principle_rule": "Emit diagnostics through the module logger, never through `print`.",
+      "message": "print( writes to stdout with no level or logger name",
+      "fix": "logger.info(...), or logger.debug(...) while debugging",
+      "why_link": ".curamoir/principles.md#structured-logging",
+      "match": "print("
+    }
+  ]
+}
+```
+
+| field | what it is |
+|---|---|
+| `location` | `path:line:col`, for anything that opens a location |
+| `path` | repo-relative, `/`-separated |
+| `line`, `col` | 1-based. A `target: path` rule reports `1:1`, the file itself |
+| `severity` | the rule's |
+| `rule_id`, `principle_id` | the rule and the one principle it cites |
+| `principle_rule` | the principle's one-sentence `rule`, so the agent need not open `principles.md` |
+| `message` | the rule's `message`, rendered |
+| `fix` | the rule's `fix`; if it has none, the principle's `good` example, which is a corrected form by definition |
+| `why_link` | `.curamoir/principles.md#<anchor>`: the principle's heading, where its `why` is |
+| `match` | the text that matched (for a path rule, the part of the path) |
+
+`violations` is sorted by path, line, column and rule id, so two runs over the
+same tree are byte-identical. `rules_skipped` entries are
+`{"rule_id": ..., "reason": ...}`, and `complete` is false exactly when there are
+any.
+
+### Human (the default)
+
+```
+src/sample/core/billing.py:15:5: error [structured-logging/no-bare-print] print( writes to stdout with no level or logger name
+    rule: Emit diagnostics through the module logger, never through `print`.
+    why:  .curamoir/principles.md#structured-logging
+    fix:  logger.info(...), or logger.debug(...) while debugging
+```
+
+### In CI and pre-commit
+
+CI needs a checkout of cúramóir, not an install:
+
+```yaml
+- run: pip install pyyaml ast-grep-cli
+- run: git clone --depth 1 https://github.com/rsionnach/curamoir /tmp/curamoir
+- run: /tmp/curamoir/scripts/curamoir-lint --format json > lint.json
+```
+
+Pre-commit, as a `local` hook pointing at that checkout (`pass_filenames: false`:
+the runner lints the repository, not a list of files):
+
+```yaml
+- repo: local
+  hooks:
+    - id: curamoir-lint
+      name: curamoir-lint
+      entry: /path/to/curamoir/scripts/curamoir-lint
+      language: system
+      pass_filenames: false
+```
+
+### Limits, stated
+
+- Files are found by walking the repository, not with `git ls-files`, so the
+  runner works on an export or a shallow checkout. `.gitignore` is not read; the
+  directories listed under *Scoping* are always skipped.
+- An `ast-grep` rule searches only files ast-grep has a grammar for (Python,
+  TypeScript, TSX, JavaScript, Go, Rust, YAML). Markdown and TOML are not among
+  them; use `regex` there.
+- `ast-grep` columns are as ast-grep reports them.
