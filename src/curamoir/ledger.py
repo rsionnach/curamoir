@@ -36,6 +36,13 @@ class Ledger:
 
     def __init__(self, path):
         self._path = Path(path)
+        # Initialised here, not left to `entries()`. `unreadable_lines()`
+        # already guarded against being read first with a defensive `getattr`,
+        # which is the tell that the ordering is not enforceable — and the
+        # newer `note_unaccounted` did not share the guard, so it raised
+        # AttributeError on the same object.
+        self._unreadable = 0
+        self._unaccounted = 0
 
     def record(self, job, reason, message, kind="job", **fields):
         """Append one entry. Never rewrites or reorders existing lines.
@@ -62,7 +69,12 @@ class Ledger:
             # line, which `unreadable_lines()` then reports accurately.
             if handle.tell() and not self._ends_with_newline():
                 handle.write("\n")
-            handle.write(json.dumps(entry, sort_keys=True) + "\n")
+            # `default=str` so a value that is not JSON — a Path, a datetime —
+            # is logged as text rather than raising. `**fields` is the
+            # documented extension point, so an unserialisable value there is
+            # an ordinary slip; losing the whole audit line over it, or failing
+            # a job that had already succeeded, is not a trade worth making.
+            handle.write(json.dumps(entry, sort_keys=True, default=str) + "\n")
         return entry
 
     def _ends_with_newline(self):
@@ -86,8 +98,8 @@ class Ledger:
         even though it parsed. Folding it into the same counter means the
         existing lower-bound wording covers it without a second vocabulary.
         """
-        if self._unreadable is not None:
-            self._unreadable += count
+        if self._unaccounted is not None:
+            self._unaccounted += count
 
     def entries(self):
         """Every readable entry, oldest first. Missing file reads as empty.
@@ -101,6 +113,9 @@ class Ledger:
         spend is the single failure the budget guard exists to prevent, so the
         count is surfaced via `unreadable_lines()`.
         """
+        # Parse failures are recomputed by each read; `_unaccounted` is NOT
+        # reset here, because it records what a different pass found in the
+        # same file and zeroing it would understate the total silently.
         self._unreadable = 0
         if not self._path.exists():
             return []
@@ -141,8 +156,12 @@ class Ledger:
         from zero: a caller that cannot tell those apart will enforce a spend
         ceiling against a total it never obtained.
 
-        Meaningful only after `entries()`. Returns `None` if that has not been
-        called, so a caller that asks first gets "unknown" rather than a
-        confident zero.
+        The sum of two separately-stored counts: lines that would not parse,
+        and entries that parsed but whose spend could not be attributed (see
+        `note_unaccounted`). One public number, because a caller only ever
+        needs to ask "did any of this file fail to reach the total"; two
+        private ones, because only the first is recomputed by a read.
         """
-        return getattr(self, "_unreadable", None)
+        if self._unreadable is None:
+            return None
+        return self._unreadable + (self._unaccounted or 0)

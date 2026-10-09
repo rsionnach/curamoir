@@ -29,6 +29,13 @@ import math
 from copy import deepcopy
 
 NUMBER = "number"
+#: A whole number of 0 or more. Every key that COUNTS something takes this
+#: rather than NUMBER, because a count indexes and slices: `max_open_prs: -1`
+#: made the PR cap refuse every job (`len(ours) < -1`), and `max_per_run: 2.5`
+#: is a slice bound. The finiteness rule generalised by TYPE and the
+#: non-negativity rule by name suffix, which left thirteen of these open; this
+#: is the vocabulary that was missing. The money keys stay NUMBER, because they
+#: are legitimately fractional.
 COUNT = "whole number of 0 or more"
 STRING = "string"
 BOOLEAN = "boolean"
@@ -112,7 +119,7 @@ DEFAULTS = {
 # Types and allowed values, keyed the same way as DEFAULTS. A key absent here is
 # unknown and rejected by name.
 SCHEMA = {
-    "version": NUMBER,
+    "version": COUNT,
     "modules": {
         "strategy": ("auto", "top-level-dirs", "explicit"),
         "include": STRING_LIST,
@@ -137,17 +144,17 @@ SCHEMA = {
     "review": {
         "lenses": STRING_LIST,
         "excellence_min_grade": ("A", "B", "C", "D", "F"),
-        "modules_per_run": NUMBER,
-        "random_extra": NUMBER,
-        "backoff": {"clean_rounds_to_double": NUMBER, "max_interval": STRING},
+        "modules_per_run": COUNT,
+        "random_extra": COUNT,
+        "backoff": {"clean_rounds_to_double": COUNT, "max_interval": STRING},
     },
-    "sweep": {"max_open_prs": NUMBER, "max_files_per_pr": NUMBER},
-    "promotion": {"fix_threshold": NUMBER, "window_days": NUMBER},
+    "sweep": {"max_open_prs": COUNT, "max_files_per_pr": COUNT},
+    "promotion": {"fix_threshold": COUNT, "window_days": COUNT},
     "filing": {
         "beads": ("auto", "on", "off"),
         "github": BOOLEAN,
         "labels": STRING_LIST,
-        "max_per_run": NUMBER,
+        "max_per_run": COUNT,
     },
     "guardrails": {
         # Only `never` exists. §6.3 documents only `never`, and
@@ -159,9 +166,9 @@ SCHEMA = {
         "use_dcg_if_present": BOOLEAN,
     },
     "handoff": {
-        "session_start_token_budget": NUMBER,
+        "session_start_token_budget": COUNT,
         "keep_history": COUNT,
-        "brief_threshold_days": NUMBER,
+        "brief_threshold_days": COUNT,
     },
     "rules": {"matcher": ("ast-grep", "regex")},
     "smoke": {"command": STRING, "container": STRING},

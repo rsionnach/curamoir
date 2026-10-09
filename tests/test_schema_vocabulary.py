@@ -51,3 +51,40 @@ def test_a_whole_handoff_cycle_survives_a_zero_keep_history(tmp_path):
     init_repo(tmp_path)
     assert write_handoff(tmp_path, note="one", keep_history=0) is not None
     assert write_handoff(tmp_path, note="two", keep_history=0) is not None
+
+
+#: Every key that COUNTS something. The finiteness rule generalised by type and
+#: the non-negativity rule by name suffix, so these thirteen still accepted a
+#: negative and a fraction — `sweep.max_open_prs: -1` makes the PR cap refuse
+#: every job, because `len(ours) < -1` is never true.
+COUNT_KEYS = [
+    ("review", "modules_per_run"),
+    ("review", "random_extra"),
+    ("sweep", "max_open_prs"),
+    ("sweep", "max_files_per_pr"),
+    ("promotion", "fix_threshold"),
+    ("promotion", "window_days"),
+    ("filing", "max_per_run"),
+    ("handoff", "session_start_token_budget"),
+    ("handoff", "brief_threshold_days"),
+]
+
+
+@pytest.mark.parametrize("section, key", COUNT_KEYS)
+@pytest.mark.parametrize("value", [-1, 2.5, True])
+def test_a_count_key_rejects_what_cannot_be_a_count(section, key, value):
+    with pytest.raises(ConfigError) as caught:
+        load_config({section: {key: value}})
+
+    assert f"{section}.{key}" in str(caught.value)
+
+
+def test_the_shipped_configuration_still_validates():
+    """A schema that rejects what the project itself ships is worse than a
+    permissive one, because it fails on the first run."""
+    from pathlib import Path
+
+    from curamoir.config import DEFAULTS, load_config_text
+
+    assert load_config(DEFAULTS)
+    assert load_config_text(Path("templates/curamoir.yaml").read_text(encoding="utf-8"))
