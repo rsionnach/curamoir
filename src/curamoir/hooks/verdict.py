@@ -45,6 +45,17 @@ class Rule:
 
 
 @dataclass(frozen=True)
+class Unverifiable(Rule):
+    """A rule that fired because the guard could not finish reading the command.
+
+    Same shape as a `Rule`, different category: "too long" and "too many
+    dangerous tokens to check in the time budget" are both "unverifiable", and
+    reporting one of them as DESTRUCTIVE would make the category — which DEC-9
+    exists so callers can assert on instead of the prose — disagree with itself.
+    """
+
+
+@dataclass(frozen=True)
 class Decision:
     """A verdict on one command, as returned to the hook.
 

@@ -382,10 +382,10 @@ def test_an_entry_with_an_unusable_timestamp_is_not_counted_as_zero(tmp_path):
     from curamoir.budget import month_to_date
     from datetime import datetime, timezone
 
-    total = month_to_date(ledger, PRICES, datetime(2026, 10, 8, tzinfo=timezone.utc))
+    spend = month_to_date(ledger, PRICES, datetime(2026, 10, 8, tzinfo=timezone.utc))
 
-    assert total == 0.0, "an unparseable date cannot be attributed to this month"
-    assert ledger.unreadable_lines() == 1, (
+    assert spend.usd == 0.0, "an unparseable date cannot be attributed to this month"
+    assert spend.unaccounted == 1, (
         "$12 of real spend contributed $0 with no signal that anything was missed"
     )
 

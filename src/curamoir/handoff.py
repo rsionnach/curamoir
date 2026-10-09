@@ -218,10 +218,16 @@ def write_handoff(repo, keep_history=None, note=None, next_step=None,
         handoff["note"] = note.strip() if note and note.strip() else None
         rendered = render_handoff(handoff)
     except Exception as error:
+        # Marked, like any other content-free handoff. This branch builds its
+        # string directly rather than through `render_handoff`, so it did not
+        # get the marker — and a handoff that says only "could not be built" is
+        # content-free by definition, so the eviction it guards against came
+        # back on the one path that exists for things going wrong.
         rendered = (
             "# cúramóir handoff\n\n"
             f"- **when:** {datetime.now(timezone.utc).isoformat(timespec='seconds')}\n"
             f"- **state:** unavailable — the handoff could not be built ({error})\n"
+            f"\n{_CONTENT_FREE_MARKER}\n"
         )
 
     try:
@@ -300,12 +306,17 @@ def _archive(latest, history):
     unlikely; `O_EXCL` makes losing one impossible.
     """
     written = datetime.fromtimestamp(latest.stat().st_mtime, tz=timezone.utc)
-    stamp = written.strftime("%Y-%m-%dT%H-%M-%S")
+    # Microseconds, not seconds. At second resolution two handoffs from one
+    # second collided, and the numbered suffix that fixed that introduced a
+    # worse problem: `_prune` deletes files and so FREES low indices, and this
+    # loop scans from zero for the first free slot — so a newly archived
+    # handoff took the name of a deleted older one and `_prune`, which sorts by
+    # name, then discarded the newest. Microseconds make the stamp itself
+    # unique and monotonic, and the index below is only a tiebreak.
+    stamp = written.strftime("%Y-%m-%dT%H-%M-%S-%f")
     body = latest.read_text(encoding="utf-8")
-    # Zero-padded, so that lexical order stays chronological order: `_prune`
-    # sorts by filename, and `-10` sorts before `-2`.
-    for suffix in ("", *(f"-{n:03d}" for n in range(1, 1000))):
-        candidate = history / f"{stamp}{suffix}.md"
+    for index in range(1000):
+        candidate = history / _archive_name(stamp, index)
         try:
             with open(candidate, "x", encoding="utf-8") as handle:
                 handle.write(body)
@@ -313,6 +324,21 @@ def _archive(latest, history):
         except FileExistsError:
             continue
     return None
+
+
+def _archive_name(stamp, index):
+    """`<stamp>-<index>.md`, with the index ALWAYS present and zero-padded.
+
+    `_prune` sorts by filename, so the names have to sort the way time does —
+    and three separate things had to be true for that to hold. Unpadded
+    indices put `-10` before `-2`. Omitting the index for the first entry of a
+    second put it AFTER its own successors, because `'-' < '.'`. And a
+    second-resolution stamp let `_prune`'s deletions free an index that the
+    next write would reuse, giving a new handoff an old name. The stamp carries
+    microseconds for that last one, which leaves the index as a tiebreak that
+    should never be needed.
+    """
+    return f"{stamp}-{index:03d}.md"
 
 
 def record_turn(repo, note, at=None, next_step=None):

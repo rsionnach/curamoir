@@ -36,13 +36,11 @@ class Ledger:
 
     def __init__(self, path):
         self._path = Path(path)
-        # Initialised here, not left to `entries()`. `unreadable_lines()`
-        # already guarded against being read first with a defensive `getattr`,
-        # which is the tell that the ordering is not enforceable — and the
-        # newer `note_unaccounted` did not share the guard, so it raised
-        # AttributeError on the same object.
-        self._unreadable = 0
-        self._unaccounted = 0
+        # None, not 0: "nobody has read this file yet" is not "this file had
+        # no unreadable lines". Initialised here rather than left to
+        # `entries()` because the call ordering is not enforceable, which the
+        # defensive `getattr` this replaces was the tell for.
+        self._unreadable = None
 
     def record(self, job, reason, message, kind="job", **fields):
         """Append one entry. Never rewrites or reorders existing lines.
@@ -89,18 +87,6 @@ class Ledger:
         except OSError:
             return True
 
-    def note_unaccounted(self, count=1):
-        """Record spend a consumer read but could not attribute to a month.
-
-        `unreadable_lines()` answers one question — how much of this file did
-        not make it into the total — and an entry carrying token counts with an
-        unparseable `at` fails that test just as surely as a truncated line,
-        even though it parsed. Folding it into the same counter means the
-        existing lower-bound wording covers it without a second vocabulary.
-        """
-        if self._unaccounted is not None:
-            self._unaccounted += count
-
     def entries(self):
         """Every readable entry, oldest first. Missing file reads as empty.
 
@@ -113,9 +99,6 @@ class Ledger:
         spend is the single failure the budget guard exists to prevent, so the
         count is surfaced via `unreadable_lines()`.
         """
-        # Parse failures are recomputed by each read; `_unaccounted` is NOT
-        # reset here, because it records what a different pass found in the
-        # same file and zeroing it would understate the total silently.
         self._unreadable = 0
         if not self._path.exists():
             return []
@@ -156,12 +139,13 @@ class Ledger:
         from zero: a caller that cannot tell those apart will enforce a spend
         ceiling against a total it never obtained.
 
-        The sum of two separately-stored counts: lines that would not parse,
-        and entries that parsed but whose spend could not be attributed (see
-        `note_unaccounted`). One public number, because a caller only ever
-        needs to ask "did any of this file fail to reach the total"; two
-        private ones, because only the first is recomputed by a read.
+        Meaningful only after `entries()`. Returns `None` if that has not been
+        called, so a caller that asks first gets "unknown" rather than a
+        confident zero.
+
+        Counts lines, and nothing else. Spend that parsed but could not be
+        attributed to a month is `Spend.unaccounted`, reported by
+        `month_to_date` to whoever asked — not recorded here, because a count
+        with two producers on one field has no reset that is right for both.
         """
-        if self._unreadable is None:
-            return None
-        return self._unreadable + (self._unaccounted or 0)
+        return self._unreadable

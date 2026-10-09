@@ -66,12 +66,18 @@ class JobRun:
     def _write(self):
         try:
             self._write_line()
-        except OSError as failure:
-            # The ledger is the audit trail, not the job. If it cannot be
-            # written — a read-only checkout, a full disk — the operator still
-            # needs the exception the job actually died of, so this one is
-            # reported and swallowed rather than raised from __exit__ where it
-            # would replace the real one.
+        except Exception as failure:
+            # `except Exception`, and the breadth is the point rather than an
+            # oversight. The invariant this method holds is directional and
+            # type-agnostic — NO ledger problem may fail the job it audits —
+            # and an exception allowlist cannot express that. `default=str` in
+            # `record()` closes the value-encoding path, but not the others:
+            # `sort_keys=True` sorts before `default` is consulted, so a dict
+            # keyed by both ints and strings raises TypeError; a circular
+            # reference raises ValueError; a value whose `__str__` raises
+            # raises that. Each one failed a job that had already SUCCEEDED,
+            # with no line written — E0-R9 broken in the one direction nothing
+            # else catches. Not silent: it goes to stderr.
             print(
                 f"cúramóir could not write the ledger line for {self._job!r}: "
                 f"{failure}",

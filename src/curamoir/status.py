@@ -18,7 +18,7 @@ from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
 
-from curamoir.budget import PriceTable, UnknownModel, month_to_date
+from curamoir.budget import PriceTable, UnknownModel, combined_shortfall, month_to_date
 from curamoir.config import DEFAULTS, ConfigError, load_config_text
 from curamoir.grades import graded_modules
 from curamoir.ledger import Ledger
@@ -150,7 +150,7 @@ def _read_spend(base, config, now):
     ceiling = config["budget"]["monthly_ceiling_usd"]
     ledger = Ledger(base / "state" / "ledger.jsonl")
     try:
-        total = month_to_date(ledger, PriceTable(config["budget"]["prices"]), now())
+        spend = month_to_date(ledger, PriceTable(config["budget"]["prices"]), now())
     except UnknownModel as unknown:
         return {
             "unavailable": True, "month_to_date_usd": None, "ceiling_usd": ceiling,
@@ -158,9 +158,12 @@ def _read_spend(base, config, now):
             "detail": f"ledger names unpriced model {unknown.args[0]!r}",
         }
 
-    unreadable = ledger.unreadable_lines()
+    # Lines that would not parse PLUS entries that could not be attributed:
+    # both mean some of the file did not reach the total, which is the one
+    # thing the caveat below has to say.
+    unreadable = combined_shortfall(ledger.unreadable_lines(), spend.unaccounted)
     return {
-        "unavailable": False, "month_to_date_usd": round(total, 2),
+        "unavailable": False, "month_to_date_usd": round(spend.usd, 2),
         "ceiling_usd": ceiling,
         "unreadable_lines": unreadable,
         "detail": (

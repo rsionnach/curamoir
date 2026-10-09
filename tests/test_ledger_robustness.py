@@ -52,21 +52,25 @@ def test_an_unserialisable_field_is_recorded_as_its_repr_not_dropped(tmp_path):
     assert "/tmp/x" in ledger.entries()[0]["artefact"]
 
 
-def test_the_unreadable_count_is_known_before_any_read(tmp_path):
-    """`unreadable_lines()` guarded against being called first; the newer
-    `note_unaccounted` did not, and raised AttributeError on the same object."""
-    ledger = Ledger(tmp_path / "ledger.jsonl")
+def test_the_unreadable_count_is_unknown_before_any_read(tmp_path):
+    """"Nobody has read this file yet" is not "this file had no unreadable
+    lines", and the distinction is the same unknown-versus-zero one that
+    `entries()`'s own OSError branch exists to preserve.
 
-    ledger.note_unaccounted()
+    The first version of this test asserted `in (None, 0, 1)`, which no
+    implementation can fail except by raising — so it was green whichever
+    answer the code gave. Pinned now.
+    """
+    assert Ledger(tmp_path / "ledger.jsonl").unreadable_lines() is None
 
-    assert ledger.unreadable_lines() in (None, 0, 1)
 
-
-def test_unattributable_spend_survives_a_later_read(tmp_path):
-    """The two contributors to the count have different lifecycles: `entries()`
-    recomputes parse failures, which is right, and used to discard notes
-    contributed from outside by `month_to_date`'s separate pass, which is a
-    silent understatement from the one counter built to prevent exactly that."""
+def test_repeated_reads_on_one_handle_report_the_same_count(tmp_path):
+    """Unattributable spend was briefly recorded ON the ledger, which gave one
+    field two producers with different lifecycles and no correct reset: zeroing
+    it on each read discarded what the spend pass found, and not zeroing it
+    made repeated reads report phantom unreadable lines — a ledger that looks
+    like it is corrupting itself. `month_to_date` reports the count instead, so
+    neither a reset nor an accumulation can be wrong."""
     import json
 
     from curamoir.budget import PriceTable, month_to_date
@@ -79,9 +83,10 @@ def test_unattributable_spend_survives_a_later_read(tmp_path):
                     "at": "not a date"}) + "\n",
         encoding="utf-8")
 
-    month_to_date(ledger, prices, datetime(2026, 10, 8, tzinfo=timezone.utc))
-    before = ledger.unreadable_lines()
-    ledger.entries()
+    when = datetime(2026, 10, 8, tzinfo=timezone.utc)
+    counts = [month_to_date(ledger, prices, when).unaccounted for _ in range(3)]
 
-    assert before == 1
-    assert ledger.unreadable_lines() == 1, "a later read discarded the note"
+    assert counts == [1, 1, 1], f"repeated reads disagreed: {counts}"
+    assert ledger.unreadable_lines() == 0, (
+        "unattributable spend is not an unreadable LINE; the line parsed fine"
+    )

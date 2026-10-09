@@ -192,40 +192,107 @@ _INLINE_INPUT = frozenset({"<<", "<<-", "<<<", "-s", "/dev/stdin", "-"})
 #: Options whose VALUE is program text rather than data. A shell is not the only
 #: program that will run what it is handed on stdin: `make -f -` reads a
 #: makefile whose recipes are shell, `docker build -f -` a Dockerfile whose RUN
-#: lines are shell, `pip install -r /dev/stdin` a requirements file. Testing
-#: `_INLINE_INPUT` only inside the SHELLS branch left every one of those open —
-#: the same hole as `bash <<EOF`, through a different door.
+#: lines are shell, `pip install -r /dev/stdin` a requirements file.
 #:
 #: This is NOT the "`make` runs repo-controlled code, which is an accepted
 #: trade" case: that trade is about a committed Makefile. Text composed at call
 #: time is the line this module draws.
 _PROGRAM_TEXT_OPTIONS = frozenset({
     "-f", "--file", "--makefile", "-r", "--requirement", "-c", "--config",
+    "--script",
 })
+
+#: Options that mean "run this string", whatever the string is. `-c` on
+#: npm/yarn/pnpm means what `-c` means on bash: `npm exec -c 'rm -rf /'` runs
+#: inline shell. Separate from the table above, which is about a value that
+#: happens to be a stdin marker.
+_INLINE_CODE_OPTIONS = {
+    "npm": frozenset({"-c", "--call"}),
+    "yarn": frozenset({"-c", "--call"}),
+    "pnpm": frozenset({"-c", "--call"}),
+}
+
+#: Programs a heredoc may legitimately feed, because they consume it as DATA.
+#:
+#: An allowlist, deliberately, and the second time this module has had to make
+#: that move. The previous rule listed the programs whose stdin is program text
+#: — and `uv run -` takes its script as a POSITIONAL, so it was not on the list
+#: and ran anyway. Enumerating the dangerous side of this is the denylist
+#: problem all over again: every runner that grows a `-` spelling is a new hole
+#: nobody notices. Naming the harmless side instead means an unrecognised
+#: program with a heredoc is refused, which costs a retry and a line here.
+_HEREDOC_CONSUMERS = frozenset({
+    "cat", "tee", "grep", "egrep", "fgrep", "rg", "sort", "uniq", "wc", "head",
+    "tail", "cut", "tr", "diff", "jq", "yq", "sed", "awk", "column", "fmt",
+    "bd", "gh", "git",
+})
+
+
+def _option_pairs(arguments):
+    """`(name, value)` for each option in `arguments`, however it is spelled.
+
+    `-f V`, `-fV`, `--file=V` and `--file V` are the same option with the same
+    value, and testing whole tokens saw only the first: `make --file=-` and
+    `make -f-` both reopened a door that `make -f -` had closed.
+
+    `-f=V` is deliberately NOT read as `-f` with value `V`. GNU make treats
+    `-f=-` as a file literally named `=-` ("No rule to make target '=-'"), so
+    normalising it would refuse a command that does nothing of the kind.
+    """
+    pairs = []
+    index = 0
+    while index < len(arguments):
+        argument = arguments[index]
+        index += 1
+        if not argument.startswith("-") or argument in ("-", "--"):
+            continue
+        if argument.startswith("--"):
+            if "=" in argument:
+                name, _, value = argument.partition("=")
+                pairs.append((name, value))
+                continue
+            name = argument
+        else:
+            name, attached = argument[:2], argument[2:]
+            if attached and not attached.startswith("="):
+                pairs.append((name, attached))
+                continue
+            if attached:
+                continue   # `-f=V`: the value really is "=V"
+        following = arguments[index] if index < len(arguments) else None
+        pairs.append((name, following))
+    return pairs
 
 
 def _inline_program_text(program, arguments):
     """A refusal if `arguments` hand `program` text to run, else None."""
-    for index, argument in enumerate(arguments):
-        if argument not in _PROGRAM_TEXT_OPTIONS:
-            continue
-        following = arguments[index + 1] if index + 1 < len(arguments) else None
-        if following in _INLINE_INPUT:
+    for name, value in _option_pairs(arguments):
+        if name in _INLINE_CODE_OPTIONS.get(program, ()):
             return (
                 Category.UNVERIFIABLE,
-                f"{program!r} is being handed its {argument} from stdin, so the "
+                f"{program} {name} runs the string that follows as a command, "
+                "composed at call time and verifiable by nothing. Put it in a "
+                "committed script and run that instead",
+            )
+        if name in _PROGRAM_TEXT_OPTIONS and value in _INLINE_INPUT:
+            return (
+                Category.UNVERIFIABLE,
+                f"{program!r} is being handed its {name} from stdin, so the "
                 "guard cannot read what it would run. Put it in a committed "
                 "file and name that file instead",
             )
-    # A heredoc anywhere alongside a program-text option is the same thing
-    # spelled differently: `make -f - <<EOF` and `make -f /dev/stdin` both run
-    # the body. The heredoc operator survives `_strip_heredoc_bodies` precisely
-    # so it can be seen here.
-    if HEREDOCS.intersection(arguments) and _PROGRAM_TEXT_OPTIONS.intersection(arguments):
+
+    # A surviving heredoc or here-string operator is legitimate only into a
+    # program that consumes it as DATA. Inverted from a list of the programs
+    # that would RUN it, which is the denylist shape: `uv run -` takes its
+    # script as a positional and so was not on any option list.
+    if HEREDOCS.intersection(arguments) and program not in _HEREDOC_CONSUMERS:
         return (
             Category.UNVERIFIABLE,
-            f"{program!r} is being handed program text in a heredoc, which the "
-            "guard cannot verify. Put it in a committed file and run that",
+            f"{program!r} is being fed a heredoc, and it is not one of the "
+            "programs cúramóir knows to consume one as data — so the guard "
+            "cannot tell whether the body is data or a program. Write the text "
+            "to a file and name that file instead",
         )
     return None
 

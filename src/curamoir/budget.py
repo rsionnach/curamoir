@@ -9,6 +9,7 @@ G4 is "make the cost of doing this visible and capped". This module is the
 "capped" half; /curamoir:cost (E11-R2) is the "visible" half.
 """
 
+from dataclasses import dataclass
 from datetime import datetime, timezone
 
 from curamoir.guards.context import unusable_repo
@@ -19,14 +20,34 @@ from curamoir.ledger import Ledger, parse_ledger_timestamp
 PER_MILLION = 1_000_000
 
 
+@dataclass(frozen=True)
+class Spend:
+    """What a month's ledger read came to, and how much of it was unusable.
+
+    Two numbers, because one of them is a caveat on the other: `unaccounted`
+    counts entries that carried token counts but could not be priced or dated,
+    which makes `usd` a LOWER BOUND rather than a total.
+
+    Returned rather than recorded on the ledger. It was briefly stored there,
+    which gave one field two producers with different lifecycles and no correct
+    reset: zeroing it on each read discarded what this pass found, and not
+    zeroing it made two reads on one handle report phantom unreadable lines.
+    Both are wrong, and neither is wrong if the count never lands on the handle.
+    """
+
+    usd: float
+    unaccounted: int = 0
+
+
 def month_to_date(ledger, prices, now):
-    """Total USD for ledger entries dated in `now`'s calendar month (UTC).
+    """Spend for ledger entries dated in `now`'s calendar month (UTC).
 
     Shared by the E0-R4 budget guard and E1-R3's /curamoir:status so the two can
     never disagree about what a month's spend is. Raises UnknownModel for an
     entry naming a model the price table does not cover.
     """
     total = 0.0
+    unaccounted = 0
     for entry in ledger.entries():
         if entry.get("input_tokens") is None and entry.get("output_tokens") is None:
             continue
@@ -35,16 +56,29 @@ def month_to_date(ledger, prices, now):
             # Tokens with no usable date is unattributable spend, not $0. Left
             # uncounted it would read as "nothing spent" with the unreadable
             # tally at zero, so nothing downstream would hedge the total.
-            ledger.note_unaccounted()
+            unaccounted += 1
             continue
         if (when.year, when.month) != (now.year, now.month):
             continue
         tokens = _token_counts(entry)
         if tokens is None:
-            ledger.note_unaccounted()
+            unaccounted += 1
             continue
         total += prices.cost(entry.get("model"), *tokens)
-    return total
+    return Spend(usd=total, unaccounted=unaccounted)
+
+
+def combined_shortfall(unreadable, unaccounted):
+    """How much of the ledger did not reach the total, or None if unknown.
+
+    Unreadable LINES plus unattributable ENTRIES. Two sources, one number,
+    because every consumer asks the same question of it: is this total a lower
+    bound? Shared by the budget guard and `/curamoir:status` so the two cannot
+    word the same caveat from different arithmetic.
+    """
+    if unreadable is None:
+        return None
+    return unreadable + unaccounted
 
 
 def _token_counts(entry):
@@ -132,8 +166,12 @@ class Budget:
 
         ledger = Ledger(context.repo / ".curamoir" / "state" / "ledger.jsonl")
         try:
-            spent = month_to_date(ledger, self._prices, self._now())
-            unreadable = ledger.unreadable_lines()
+            spend = month_to_date(ledger, self._prices, self._now())
+            spent = spend.usd
+            # One number for the caller: both "a line would not parse" and "an
+            # entry could not be attributed" mean the same thing here — some of
+            # this file did not reach the total, so the total is a lower bound.
+            unreadable = combined_shortfall(ledger.unreadable_lines(), spend.unaccounted)
         except UnknownModel as unknown:
             # Do NOT treat an unpriced model as $0. Undercounting is the one
             # failure this guard exists to prevent, so say the cap is unenforced

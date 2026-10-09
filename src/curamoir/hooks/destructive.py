@@ -41,7 +41,7 @@ from curamoir.hooks._shell import (
     segments,
     strip_redirections,
 )
-from curamoir.hooks.verdict import Category, Decision, Rule
+from curamoir.hooks.verdict import Category, Decision, Rule, Unverifiable
 
 
 # Programs whose misuse this list exists to stop.
@@ -474,7 +474,12 @@ def _inspect(tokens, depth):
             # MAX_COMMAND_CHARS — and took 6.4s against a 5s hook budget that
             # fails open. Refusing unverified is the same trade the length
             # bound makes, and nothing real comes close to this many.
-            return Rule(
+            # UNVERIFIABLE, not DESTRUCTIVE, though the rule lives in the
+            # destructive pass: this is "the guard could not finish reading
+            # it", which is the length bound's category and UNVERIFIABLE's own
+            # definition. DEC-9 exists so callers assert the category rather
+            # than the prose, so the two bounds must not report differently.
+            return Unverifiable(
                 f"this command names {len(positions)} potentially destructive "
                 "programs, too many for the guard to check inside its time "
                 "budget — and a hook that times out permits the action",
@@ -531,7 +536,10 @@ def judge_destructive(command, in_job):
         deny=True,
         reason=f"blocked by cúramóir: {rule.reason}. Use `{rule.alternative}` instead.",
         alternative=rule.alternative,
-        category=Category.DESTRUCTIVE,
+        category=(
+            Category.UNVERIFIABLE if isinstance(rule, Unverifiable)
+            else Category.DESTRUCTIVE
+        ),
     )
 
 

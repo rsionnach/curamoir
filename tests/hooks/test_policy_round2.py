@@ -143,7 +143,7 @@ def test_an_absurd_number_of_dangerous_tokens_is_refused_unverified():
     decision = judge_command("echo " + "rm " * 5300, True)
 
     assert decision.deny
-    assert decision.category is Category.DESTRUCTIVE
+    assert decision.category is Category.UNVERIFIABLE
     assert "time budget" in decision.reason
 
 

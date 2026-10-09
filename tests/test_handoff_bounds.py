@@ -153,10 +153,15 @@ def test_a_long_next_step_renders_its_body_not_a_bare_heading(tmp_path):
     write_handoff(repo, note="short note", next_step="word " * 600)
 
     rendered = (repo / ".curamoir" / "handoff" / "latest.md").read_text(encoding="utf-8")
-    if "## Intended next step" in rendered:
-        after = rendered.split("## Intended next step", 1)[1].lstrip("\n")
-        body = [line for line in after.splitlines() if line.strip()]
-        assert body and not body[0].startswith("##"), "the heading has no body"
+    # Unconditional. Wrapping this in `if "## Intended next step" in rendered`
+    # let the bug switch the assertion off: drop the bound and
+    # `_without_empty_headings` deletes the heading, so the `if` is false and
+    # the test passes vacuously.
+    assert "## Intended next step" in rendered
+    after = rendered.split("## Intended next step", 1)[1].lstrip("\n")
+    body = [line for line in after.splitlines() if line.strip()]
+    assert body and not body[0].startswith("##"), "the heading has no body"
+    assert not body[0].startswith("_Truncated"), "the heading's body is the notice"
 
 
 def test_a_handoff_written_in_the_future_is_not_reported_as_negative_age(tmp_path):
@@ -173,3 +178,137 @@ def test_a_handoff_written_in_the_future_is_not_reported_as_negative_age(tmp_pat
     age = collect_status(repo)["handoff"]["age_days"]
 
     assert age is None or age >= 0, f"reported an age of {age}"
+
+
+# --- retention order, and the paths the marker has to cover ---------------
+
+def test_pruning_keeps_the_newest_handoffs_not_the_oldest(tmp_path, monkeypatch):
+    """`_prune` sorts by filename, and the unsuffixed first entry of a second
+    sorts AFTER its own suffixed successors, because `'-' < '.'`. Zero-padding
+    the suffixes fixed `-10` before `-2` and left this inverse, so a
+    same-second burst kept the OLDEST entries and discarded the newest.
+    """
+    repo = initialised(tmp_path)
+    monkeypatch.setenv("PATH", "")
+    for index in range(12):
+        write_handoff(repo, note=f"SESSION {index:02d}", keep_history=3)
+
+    history = repo / ".curamoir" / "handoff" / "history"
+    # Read the NOTE line only. A note is journalled, so `_last_decision`
+    # replays an earlier one into later handoffs, and counting every mention
+    # would conflate "this handoff" with "the one before it".
+    sessions = sorted(
+        int(line.split("SESSION ")[1][:2])
+        for path in history.iterdir()
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if line.startswith("> SESSION ")
+    )
+
+    assert len(sessions) == 3, sessions
+    assert min(sessions) >= 8, f"kept the oldest handoffs, not the newest: {sessions}"
+
+
+def test_the_archive_name_orders_chronologically_as_text():
+    """`_prune` compares names, so the names have to sort the way time does."""
+    from curamoir.handoff import _archive_name
+
+    names = [_archive_name("2026-10-09T08-50-18", index) for index in range(3)]
+
+    assert names == sorted(names), names
+
+
+def test_a_handoff_that_could_not_be_built_is_marked_content_free(tmp_path, monkeypatch):
+    """`write_handoff`'s except branch builds its string directly and never
+    calls `render_handoff`, so the one path that exists for things going wrong
+    produced an unmarked — therefore "informative" — handoff, and the eviction
+    came back on it."""
+    import curamoir.handoff as handoff_module
+    from curamoir.handoff import _CONTENT_FREE_MARKER
+
+    repo = initialised(tmp_path)
+    latest = repo / ".curamoir" / "handoff" / "latest.md"
+    latest.parent.mkdir(parents=True, exist_ok=True)
+    latest.write_text("# cúramóir handoff\n\n> THE ONE THAT MATTERS\n", encoding="utf-8")
+
+    def explode(*_args, **_kwargs):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(handoff_module, "build_handoff", explode)
+    for _ in range(12):
+        write_handoff(repo, keep_history=10)
+
+    assert _CONTENT_FREE_MARKER in latest.read_text(encoding="utf-8")
+    archived = "\n".join(
+        p.read_text(encoding="utf-8")
+        for p in (repo / ".curamoir" / "handoff" / "history").iterdir()
+    )
+    assert "THE ONE THAT MATTERS" in archived
+
+
+def test_the_marker_is_emitted_only_for_a_content_free_handoff(tmp_path, monkeypatch):
+    """Both directions, because the marker IS the on-disk half of the gate and
+    nothing else asserts on it."""
+    from curamoir.handoff import _CONTENT_FREE_MARKER, build_handoff, render_handoff
+
+    repo = git_repo(tmp_path)
+    informative = render_handoff(dict(build_handoff(repo), note="a real note"))
+    assert _CONTENT_FREE_MARKER not in informative
+
+    second = tmp_path / "b"
+    second.mkdir()
+    monkeypatch.setenv("PATH", "")
+    assert _CONTENT_FREE_MARKER in render_handoff(build_handoff(initialised(second)))
+
+
+def test_a_marked_file_is_not_archived_and_an_unmarked_one_is(tmp_path):
+    """`_file_is_informative` is what reads the marker next session."""
+    from curamoir.handoff import _CONTENT_FREE_MARKER, _file_is_informative
+
+    marked = tmp_path / "marked.md"
+    marked.write_text(f"# handoff\n\n{_CONTENT_FREE_MARKER}\n", encoding="utf-8")
+    legacy = tmp_path / "legacy.md"
+    legacy.write_text("# handoff\n\n- **branch:** main\n", encoding="utf-8")
+
+    assert not _file_is_informative(marked)
+    assert _file_is_informative(legacy), "a handoff written before the marker existed"
+
+
+def test_a_heading_whose_body_does_not_fit_is_dropped_entirely():
+    """`_without_empty_headings` tested directly, because it is no longer
+    reachable end to end — and that is the honest reason rather than a
+    convenience.
+
+    Both section bodies are bounded now (the note and the next step at render,
+    the last decision at 60 words by `_first_sentences`), so no input makes
+    `_cap_words` skip a body while keeping its heading. The helper is the net
+    that catches the next unbounded field someone adds, so it is pinned here as
+    a unit: an end-to-end test for it would have to be written against a bug
+    that no longer exists, and stubbing the helper to identity left every other
+    test in this file green.
+    """
+    from curamoir.handoff import _without_empty_headings
+
+    kept = _without_empty_headings([
+        "# cúramóir handoff",
+        "",
+        "- **branch:** main",
+        "",
+        "## Intended next step",      # body skipped by _cap_words
+        "",
+        "## Last decision",
+        "",
+        "Chose the thread-based timeout.",
+    ])
+
+    assert "## Intended next step" not in kept, "a heading with no body survived"
+    assert "## Last decision" in kept, "a heading WITH a body was dropped"
+    assert kept[-1] == "Chose the thread-based timeout."
+
+
+def test_a_heading_with_a_body_is_always_kept():
+    """The net must not eat real sections."""
+    from curamoir.handoff import _without_empty_headings
+
+    lines = ["## Intended next step", "", "Run the sweep.", "", "## Last decision", "", "x"]
+
+    assert _without_empty_headings(lines) == lines

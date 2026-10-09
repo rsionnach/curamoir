@@ -86,17 +86,13 @@ def is_separator(token):
 
 
 def unquoted(command):
-    """`command`'s tokens with single-quoted spans removed, aligned 1:1 with `lex`.
+    """`command`'s tokens with single-quoted spans blanked, aligned 1:1 with `lex`.
 
     Posix lexing strips the quotes, so by the time a token reaches a pattern
     there is no way to tell `'(WIP|TODO)'` — literal text to the shell — from a
     subshell, or a single-quoted `$HOME` from a variable reference. Both were
     refused, and a guard that refuses `grep -nE '(WIP|TODO)'` and
     `git commit -m 'fix $HOME handling'` is one the developer turns off.
-
-    Single-quoted spans are dropped because the shell treats them as literal.
-    Double-quoted spans are KEPT, because the shell still expands `$` and
-    backticks inside them — so refusing there is correct, not a false positive.
     """
     lexer = shlex.shlex(command or "", posix=False, punctuation_chars=PUNCTUATION)
     lexer.whitespace_split = True
@@ -105,11 +101,36 @@ def unquoted(command):
         raw = list(lexer)
     except ValueError:
         return None
-    return [_SINGLE_QUOTED.sub("", token) for token in raw]
+    return [_blank_single_quoted(token) for token in raw]
 
 
-#: A single-quoted span, which the shell takes literally.
-_SINGLE_QUOTED = re.compile(r"'[^']*'")
+def _blank_single_quoted(token):
+    """`token` with the contents of single-quoted spans removed.
+
+    A three-state scan, not a regex, because whether an apostrophe opens a
+    quote depends on the state to its left — which a regex cannot express. The
+    regex this replaces was `'[^']*'`, and inside `"don't … won't"` it matched
+    the span `'t … won'` and deleted it, taking any `$(...)` between the two
+    apostrophes with it. The shell expands `$(...)` inside double quotes
+    whatever apostrophes appear around it, so the command ran while the guard
+    saw a token with no substitution left in it.
+
+    This is the same state machine the shell uses, so there is no residual
+    spelling for it to miss. Double-quoted spans are KEPT, because the shell
+    still expands `$`, `` ` `` and `${...}` inside them — refusing there is
+    correct rather than a false positive.
+    """
+    kept = []
+    in_single = in_double = False
+    for character in token:
+        if character == "'" and not in_double:
+            in_single = not in_single
+            continue
+        if character == '"' and not in_single:
+            in_double = not in_double
+        if not in_single:
+            kept.append(character)
+    return "".join(kept)
 
 
 def segments(tokens):
