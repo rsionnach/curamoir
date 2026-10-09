@@ -803,3 +803,254 @@ def test_the_documented_json_shape_is_the_one_emitted():
     )
     assert tuple(example["violations"][0]) == RECORD_FIELDS
     assert documented == set(RECORD_FIELDS)
+
+
+# --- the wrapper imports nothing from the repository it lints ----------------
+
+HOSTILE_MODULES = ("yaml.py", "json.py", "tempfile.py", "curamoir/__init__.py")
+
+
+def _plant_hostile_modules(repo, markers):
+    """Modules at the repo root that shadow what the runner imports. Each one,
+    if imported, leaves a marker and kills the process with a distinctive code.
+    No `print(` and no `raise`, so the test rules do not fire on them and the
+    planted count is unchanged."""
+    for name in HOSTILE_MODULES:
+        path = repo / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        marker = markers / name.replace("/", "-")
+        path.write_text(
+            "import os, pathlib\n"
+            f"pathlib.Path({str(marker)!r}).write_text('imported')\n"
+            "os._exit(77)\n",
+            encoding="utf-8",
+        )
+
+
+@pytest.mark.parametrize("repo_argument", [None, ".", "relative"])
+def test_the_wrapper_never_imports_modules_from_the_repo_it_lints(tmp_path, repo_argument):
+    """Security. Pre-commit and CI run the wrapper from the linted repo's root,
+    and `python -m` / `python -c` put the working directory at the front of
+    sys.path, ahead of PYTHONPATH — so a `yaml.py` or `curamoir/` committed in a
+    PR would run as the linter. The wrapper must start Python somewhere neutral
+    and still lint the directory it was invoked from (or the relative --repo it
+    was given, resolved against where it was invoked)."""
+    repo = sample_repo(tmp_path, *ALL_REGEX_RULES)
+    markers = tmp_path / "markers"
+    markers.mkdir()
+    _plant_hostile_modules(repo, markers)
+    if repo_argument == "relative":
+        cwd, extra = tmp_path, ["--repo", repo.name]
+    else:
+        cwd, extra = repo, ([] if repo_argument is None else ["--repo", repo_argument])
+
+    result = subprocess.run(
+        [str(WRAPPER), *extra, "--format", "json"],
+        capture_output=True, text=True, cwd=str(cwd),
+        env=_environment(_shims(tmp_path)),
+    )
+
+    assert sorted(p.name for p in markers.iterdir()) == []
+    assert result.returncode == EXIT_VIOLATIONS, result.stderr
+    assert len(json.loads(result.stdout)["violations"]) == len(PLANTED["violations"])
+
+
+def test_the_wrapper_names_a_missing_relative_repo_as_given(tmp_path):
+    """The relative path the user typed is the one the error names, so moving
+    the interpreter's working directory must not change what --repo means."""
+    result = subprocess.run(
+        [str(WRAPPER), "--repo", "nowhere"],
+        capture_output=True, text=True, cwd=str(tmp_path),
+        env=_environment(_shims(tmp_path)),
+    )
+
+    assert result.returncode == EXIT_ERROR
+    assert "nowhere is not a directory" in result.stderr
+
+
+# --- regex locations agree with editors and ast-grep -------------------------
+
+def _locations(repo, path):
+    result = run_lint(repo)
+    return [(v.line, v.col, v.match) for v in result.violations if v.path == path]
+
+
+@pytest.mark.parametrize(("content", "expected"), [
+    # A form feed on its own line is a line to an editor, not a page break
+    # that ends one line and starts another.
+    (b'a = 1\n\x0c\nb = "\xc3\xa9"; print(1)\n', [(3, 10, "print(")]),
+    # Mid-line form feed and vertical tab: str.splitlines() breaks on both.
+    (b'a = 1 \x0c\x0b b = 2; print(1)\n', [(1, 17, "print(")]),
+    # U+2028 and U+0085 inside a string literal are characters, not breaks.
+    ('x = "\u2028\u0085"\nprint(1)\n'.encode("utf-8"), [(2, 1, "print(")]),
+    # CRLF still counts one line per CRLF, and the \r is not part of a line.
+    (b'a = 1\r\nprint(1)\r\nb = 2\r\n', [(2, 1, "print(")]),
+    # A lone CR is not a line break to ast-grep (tree-sitter counts \n).
+    (b'a = 1\rprint(1)\n', [(1, 7, "print(")]),
+    # A UTF-8 BOM is not a column an editor shows.
+    (b'\xef\xbb\xbfprint(1)\n', [(1, 1, "print(")]),
+])
+def test_regex_lines_and_columns_count_only_newlines(tmp_path, content, expected):
+    repo = sample_repo(tmp_path, NO_BARE_PRINT)
+    (repo / "src" / "edge.py").write_bytes(content)
+
+    assert _locations(repo, "src/edge.py") == expected
+
+
+def test_a_trailing_newline_does_not_add_a_phantom_empty_line(tmp_path):
+    """Splitting on "\\n" leaves an empty last element after a final newline;
+    a regex that matches an empty line must not report a line the editor does
+    not have."""
+    rule = NO_BARE_PRINT.replace("'(?<![\\w.])print\\('", "'^$'")
+    repo = sample_repo(tmp_path, rule)
+    (repo / "src" / "edge.py").write_bytes(b"a = 1\n\nb = 2\n")
+
+    assert _locations(repo, "src/edge.py") == [(2, 1, "")]
+
+
+@pytest.mark.skipif(shutil.which("ast-grep") is None, reason="ast-grep is not installed")
+@pytest.mark.parametrize(("content", "expected"), [
+    (b'a = 1\n\x0c\nb = "\xc3\xa9"; print(1)\n', [(3, 10)]),
+    (b'a = 1\r\nprint(1)\r\n', [(2, 1)]),
+    (b'\xef\xbb\xbfprint(1); print(2)\nprint(3)\n', [(1, 1), (1, 11), (2, 1)]),
+    (b'\xef\xbb\xbfx = "\xc3\xa9"; print(1)\n', [(1, 10)]),
+])
+def test_both_matchers_report_the_same_location_for_the_same_call(tmp_path, content,
+                                                                   expected):
+    """The real ast-grep is the reference for lines (it counts only `\n`), and
+    an editor for columns (a BOM is not one): the regex rule and the ast-grep
+    rule must put each `print(...)` call at the same line and column, and that
+    must be where an editor shows it. Agreement alone is not enough — before,
+    both matchers counted the BOM, and agreed on the wrong column."""
+    repo = sample_repo(tmp_path, NO_BARE_PRINT, AST_GREP_PRINT)
+    (repo / "src" / "edge.py").write_bytes(content)
+
+    result = run_lint(repo, ast_grep=shutil.which("ast-grep"))
+
+    by_rule = {
+        rule: [(v.line, v.col) for v in result.violations
+               if v.path == "src/edge.py" and v.rule_id == rule]
+        for rule in ("no-bare-print", "no-bare-print-ast")
+    }
+    assert by_rule["no-bare-print"] == expected
+    assert by_rule["no-bare-print-ast"] == expected
+
+
+def test_ast_grep_columns_on_a_bom_file_are_corrected_to_the_editors(tmp_path):
+    """ast-grep 0.50.0 counts a UTF-8 BOM as column 0 of line 0 (verified:
+    `\\ufeffprint(1)` is reported at column 1). Replayed here so the correction
+    is pinned on machines without the binary; lines after the first, and files
+    without a BOM, are untouched."""
+    repo = sample_repo(tmp_path, AST_GREP_PRINT)
+    (repo / "src" / "bom.py").write_bytes(b"\xef\xbb\xbfprint(1)\nprint(2)\n")
+    root = str(repo.resolve())
+    recorded = json.dumps([
+        {"text": "print(1)", "file": f"{root}/src/bom.py",
+         "range": {"start": {"line": 0, "column": 1}, "end": {"line": 0, "column": 9}}},
+        {"text": "print(2)", "file": f"{root}/src/bom.py",
+         "range": {"start": {"line": 1, "column": 0}, "end": {"line": 1, "column": 8}}},
+    ])
+
+    result = run_lint(repo, ast_grep=fake_ast_grep(tmp_path, stdout=recorded, exit_code=0))
+
+    assert [(v.line, v.col) for v in result.violations] == [(1, 1), (2, 1)]
+
+
+# --- an ast-grep rule never silently skips a file it was scoped to -----------
+
+def _ast_grep_rule(scope):
+    return AST_GREP_PRINT.replace("languages: [python]", scope)
+
+
+def test_an_ast_grep_rule_scoped_to_files_with_no_grammar_is_skipped_loudly(tmp_path,
+                                                                            capsys,
+                                                                            monkeypatch):
+    """Before: the `.md` file was dropped from the rule's file list, the rule was
+    reported as checked, and the run exited 0 having checked nothing. A file
+    the rule was scoped to and could not search makes the rule incomplete,
+    handled like a missing ast-grep: skipped by name, partial report kept,
+    exit 2."""
+    repo = sample_repo(tmp_path, NO_UNCHAINED_RAISE, _ast_grep_rule('files: ["docs/**"]'))
+    (repo / "docs").mkdir()
+    (repo / "docs" / "guide.md").write_text("print(1)\n", encoding="utf-8")
+    fake = fake_ast_grep(tmp_path, stdout="[]", exit_code=1)
+    monkeypatch.setenv("PATH", str(Path(fake).parent))
+
+    code, out, err = lint(repo, "--format", "json", capsys=capsys)
+
+    document = json.loads(out)
+    assert code == EXIT_ERROR
+    assert document["complete"] is False
+    assert document["rules_checked"] == ["no-unchained-raise"]
+    [skipped] = document["rules_skipped"]
+    assert skipped["rule_id"] == "no-bare-print-ast"
+    assert "docs/guide.md" in skipped["reason"]
+    assert "no-bare-print-ast" in err
+
+
+def test_an_ast_grep_rule_over_a_mapped_suffix_passes_the_language(tmp_path):
+    """`.java`, `.cjs`, `.mts` were unmapped and silently dropped. Each now
+    reaches ast-grep with the `--lang` 0.50.0 infers for that suffix."""
+    repo = sample_repo(
+        tmp_path, _ast_grep_rule('files: ["**/*.java", "**/*.cjs", "**/*.mts"]'),
+    )
+    for name in ("A.java", "b.cjs", "c.mts"):
+        (repo / name).write_text("x\n", encoding="utf-8")
+    log = tmp_path / "ast-grep-calls.jsonl"
+
+    result = run_lint(repo, ast_grep=fake_ast_grep(tmp_path, stdout="[]", exit_code=1, log=log))
+
+    languages = sorted(
+        arg.split("=", 1)[1]
+        for line in log.read_text().splitlines()
+        for arg in json.loads(line)["argv"] if arg.startswith("--lang=")
+    )
+    assert languages == ["java", "javascript", "typescript"]
+    assert result.complete
+
+
+# --- writing the report is inside the gate -----------------------------------
+
+def _run_module(repo, **kwargs):
+    environment = _environment(os.environ["PATH"], pythonpath=str(ROOT / "src"))
+    environment.update(kwargs.pop("env", {}))
+    return subprocess.run(
+        [sys.executable, "-m", "curamoir.lint", "--repo", str(repo)],
+        env=environment, **kwargs,
+    )
+
+
+def test_a_report_the_terminal_cannot_encode_exits_two_not_one(tmp_path):
+    """Exit 1 means "violations"; a crash while printing must not read as one.
+    Here the only violation is a warning (exit 0 if printed), and its match
+    contains a character stdout's encoding cannot represent."""
+    rule = NO_BARE_PRINT.replace("severity: error", "severity: warning").replace(
+        "'(?<![\\w.])print\\('", "'print\\(.*'")
+    repo = sample_repo(tmp_path, rule)
+    shutil.rmtree(repo / "src")
+    (repo / "src").mkdir()
+    (repo / "src" / "only.py").write_text('print("caf\u00e9")\n', encoding="utf-8")
+
+    result = _run_module(repo, capture_output=True, text=True,
+                         env={"PYTHONIOENCODING": "ascii"})
+
+    assert result.returncode == EXIT_ERROR, result.stderr
+    assert "Traceback" not in result.stderr
+    assert "PYTHONIOENCODING" in result.stderr
+
+
+def test_a_closed_stdout_exits_two_without_a_traceback(tmp_path):
+    """`curamoir-lint | head -0`: the reader has gone before the report is
+    written. Not a lint result, so 2, and no traceback from the flush Python
+    attempts at shutdown."""
+    repo = sample_repo(tmp_path, *ALL_REGEX_RULES)
+    read_end, write_end = os.pipe()
+    os.close(read_end)
+    try:
+        result = _run_module(repo, stdout=write_end, stderr=subprocess.PIPE, text=True)
+    finally:
+        os.close(write_end)
+
+    assert result.returncode == EXIT_ERROR, result.stderr
+    assert "Traceback" not in result.stderr
+    assert "Exception ignored" not in result.stderr

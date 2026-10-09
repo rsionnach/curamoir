@@ -112,6 +112,17 @@ agree because both are written down:
 exclude: ["**/cli.py", "**/__main__.py", "**/conftest.py"]
 ```
 
+Globs are matched against repo-relative, `/`-separated paths. `**/` matches
+zero or more directories (so `**/*.py` includes a root-level `setup.py`); `*`,
+`?` and character classes match within one path segment. Classes follow
+fnmatch: `[abc]`, `[a-z]`, `[!abc]` for "none of these", `[[]` for a literal
+`[` — so a Next.js route file `app/[id]/page.tsx` is `app/[[]id]/page.tsx` —
+and an unclosed `[` is literal. A class that cannot compile, like `[z-a]`, is a
+load error.
+
+An `ast-grep` rule with no `languages` or `files` searches only the languages
+ast-grep can parse (not `markdown` or `toml`).
+
 Some directories are never searched whatever a rule says: `venv`, `.venv`,
 `__pycache__`, `node_modules`, `dist`, `build`, `.git`, `.curamoir`,
 `site-packages` and the usual caches.
@@ -150,6 +161,9 @@ naming the file and the field:
 - an unknown language
 - `target: path` with the `ast-grep` matcher (a filename is in no syntax tree,
   so the rule could never fire)
+- the `ast-grep` matcher over `languages: [markdown]` or `[toml]`, which
+  `curamoir-lint` has no ast-grep grammar for (the rule would search nothing)
+- a `files` or `exclude` glob that does not compile
 
 `/curamoir:doctor` loads every rule for exactly this reason: so a broken rule is
 something you find when you ask, rather than during an unattended run.
@@ -174,7 +188,7 @@ as every wrapper) it takes the first that can import PyYAML.
 |---|---|
 | `0` | every rule ran, and no violation is at or above the threshold |
 | `1` | every rule ran, and at least one violation is at or above the threshold |
-| `2` | the result cannot be trusted: a rule, `principles.md` or `curamoir.yaml` did not load, `ast-grep` is needed and missing or failed, no Python was found, or an internal error |
+| `2` | the result cannot be trusted: a rule, `principles.md` or `curamoir.yaml` did not load, `ast-grep` is needed and missing or failed, an `ast-grep` rule's scope includes a file ast-grep cannot parse, no Python was found, the report could not be written (stdout closed, or an encoding that cannot represent it — set `PYTHONIOENCODING=utf-8`), or an internal error |
 
 `2` outranks `1`. A run that skipped rules has not shown them clean, so it is
 reported as incomplete even if what did run found something. When rules were
@@ -276,10 +290,33 @@ the runner lints the repository, not a list of files):
 - Files are found by walking the repository, not with `git ls-files`, so the
   runner works on an export or a shallow checkout. `.gitignore` is not read; the
   directories listed under *Scoping* are always skipped.
-- An `ast-grep` rule searches only files ast-grep has a grammar for (Python,
-  TypeScript, TSX, JavaScript, Go, Rust, YAML). Markdown and TOML are not among
-  them; use `regex` there.
-- `ast-grep` columns are as ast-grep reports them.
+- An `ast-grep` rule searches only suffixes with a mapped grammar: `.py`
+  `.pyi`, `.ts` `.mts` `.cts`, `.tsx`, `.js` `.jsx` `.mjs` `.cjs`, `.go`,
+  `.rs`, `.yaml` `.yml`, `.json`, `.java`, `.kt`, `.scala`, `.c`, `.cpp` `.cc`
+  `.hpp`, `.cs`, `.rb`, `.php`, `.swift`, `.lua`, `.sh` `.bash`, `.html`,
+  `.css` (each checked against ast-grep 0.50.0). Markdown, TOML and `.h` are
+  not among them; use `regex` there. If a rule's `files:` scope takes in any
+  other file, the rule is **skipped**, not narrowed: it is listed in
+  `rules_skipped` with the files named, the other rules' report is still
+  printed, and the run exits 2. Dropping the file instead would report the
+  rule as checked having searched nothing. Narrow `files:` or add the file to
+  `exclude:`.
+- Lines are counted the way ast-grep counts them: only `\n` ends one. A CRLF
+  file reads as its lines; a form feed or a U+2028 inside a string does not
+  start a new line, and neither does a lone `\r` (which some editors do break
+  on — the two matchers agree with each other there, not with those editors).
+  Columns are 1-based characters.
+  A UTF-8 byte order mark is not a column: the regex matcher skips it, and
+  ast-grep's line-1 columns in such a file (which 0.50.0 shifts by one) are
+  corrected, so both matchers agree with the editor.
+- The wrapper never starts Python inside the repository. `python -m` puts its
+  working directory ahead of everything else on `sys.path`, so a `yaml.py` or
+  `curamoir/` committed at the root of a PR would otherwise run as the linter.
+  Python starts in cúramóir's own `src/` and moves back to the invoking
+  directory only after pinning its import path, so `--repo` still means what
+  it meant where you typed it. An inherited `PYTHONPATH` is kept (after
+  `src/`), as in every cúramóir wrapper: it is set by whoever runs the lint,
+  not by the repository.
 - Symlinks are not followed, file or directory. In CI the tree is often an
   unreviewed PR, and `match` quotes matched text, so a committed
   `leak.py -> ~/.ssh/id_rsa` would otherwise have the lint print part of the

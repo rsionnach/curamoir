@@ -27,6 +27,27 @@ case "$source" in
 esac
 root="$(cd "$here/.." && pwd)" || { echo "curamoir-lint: cannot locate its own directory" >&2; exit 2; }
 
+# Python must never start in the repository being linted. `python -c` and
+# `python -m` put the working directory at sys.path[0], AHEAD of PYTHONPATH, and
+# pre-commit and CI run this from the linted repo's root — so a `yaml.py`,
+# `json.py` or `curamoir/` committed in an unreviewed PR would be imported, and
+# executed, as the linter (and a hostile one exiting 1 reads as "violations").
+# `-P` / PYTHONSAFEPATH would drop that entry, but only on 3.11+, and the
+# fallback interpreter here may be 3.9. So the invoking directory is recorded,
+# and BOTH the PyYAML probe and the runner start in our own `src/`, whose
+# contents are the code being run anyway. lint.py moves back to the recorded
+# directory itself, after its imports, so `--repo` (default `.`, or a relative
+# path) means exactly what it meant to the person who typed it. PYTHONSAFEPATH
+# is set as well: belt and braces where it is understood, ignored where not.
+#
+# PYTHONPATH is still PREPENDED to, not replaced, as in every other wrapper: it
+# comes from whoever invoked the lint (a CI job, a test harness), not from the
+# repository, and replacing it would break an interpreter whose PyYAML is only
+# reachable through it.
+invoked_from="$PWD"
+cd "$root/src" || { echo "curamoir-lint: cannot enter $root/src" >&2; exit 2; }
+export PYTHONSAFEPATH=1
+
 # The same candidates in the same order as every other wrapper (a test asserts
 # they agree with doctor), with one difference: the hooks take the first that
 # EXISTS, and this takes the first that can import PyYAML, falling back to the
@@ -52,4 +73,5 @@ if [ -z "$chosen" ]; then
   exit 2
 fi
 
-PYTHONPATH="${root}/src${PYTHONPATH:+:${PYTHONPATH}}" exec "$chosen" -m curamoir.lint "$@"
+CURAMOIR_LINT_CWD="$invoked_from" PYTHONPATH="${root}/src${PYTHONPATH:+:${PYTHONPATH}}" \
+  exec "$chosen" -m curamoir.lint "$@"

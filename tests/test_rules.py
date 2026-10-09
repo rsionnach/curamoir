@@ -283,6 +283,78 @@ def test_an_ast_grep_rule_cannot_target_a_path(tmp_path):
     assert "regex" in message
 
 
+@pytest.mark.parametrize("language", ["markdown", "toml"])
+def test_an_ast_grep_rule_over_a_language_with_no_grammar_is_refused(tmp_path, language):
+    """Before: it loaded, ran, searched nothing (the runner had no `--lang` for
+    `.md` or `.toml`), and was reported as checked — exit 0 on nothing. Refused
+    at load like `target: path`, naming the matcher that can do it."""
+    text = RULE.replace("matcher: regex", "matcher: ast-grep").replace(
+        "languages: [python]", f"languages: [python, {language}]")
+
+    with pytest.raises(RuleError) as caught:
+        load_rules(write(tmp_path, text))
+
+    message = str(caught.value)
+    assert "no-bare-print.yaml" in message
+    assert language in message
+    assert "regex" in message
+
+
+@pytest.mark.parametrize("language", ["markdown", "toml"])
+def test_a_regex_rule_over_prose_languages_still_loads(tmp_path, language):
+    text = RULE.replace("languages: [python]", f"languages: [{language}]")
+
+    assert load_rules(write(tmp_path, text))[0].languages == (language,)
+
+
+def test_an_unscoped_ast_grep_rule_defaults_to_languages_it_can_parse(tmp_path):
+    """"No scope" means every language cúramóir names, and for an ast-grep rule
+    that has to mean every one ast-grep can parse, or the runner would find
+    `.md` files it cannot search and fail the rule."""
+    text = RULE.replace("matcher: regex", "matcher: ast-grep").replace(
+        "languages: [python]\n", "")
+
+    patterns = load_rules(write(tmp_path, text))[0].file_patterns()
+
+    assert "**/*.py" in patterns
+    assert not any(p.endswith((".md", ".toml")) for p in patterns)
+
+
+# --- globs ---------------------------------------------------------------
+
+@pytest.mark.parametrize(("pattern", "path", "matches"), [
+    ("src/[ab].py", "src/a.py", True),
+    ("src/[ab].py", "src/c.py", False),
+    ("src/[!ab].py", "src/c.py", True),
+    ("src/[!ab].py", "src/a.py", False),
+    ("src/[a-c].py", "src/b.py", True),
+    # A class is one character of one path segment, as in any glob.
+    ("src[!x]a.py", "src/a.py", False),
+    ("src[/]a.py", "src/a.py", False),
+    # `[[]` is the way to say a literal `[`, as with fnmatch.
+    ("app/[[]id].tsx", "app/[id].tsx", True),
+    ("app/[[]id].tsx", "app/i.tsx", False),
+    # An unclosed `[` is literal, as with fnmatch.
+    ("a[b.py", "a[b.py", True),
+    ("**/*.py", "setup.py", True),
+    ("**/*.py", "a/b/c.py", True),
+    ("*.py", "a/b.py", False),
+])
+def test_globs_support_character_classes(pattern, path, matches):
+    from curamoir.rules import glob_regex
+
+    assert bool(glob_regex(pattern).fullmatch(path)) is matches
+
+
+def test_a_glob_that_cannot_compile_is_refused_at_load_time(tmp_path):
+    text = RULE.replace("languages: [python]", 'files: ["src/[z-a].py"]')
+
+    with pytest.raises(RuleError) as caught:
+        load_rules(write(tmp_path, text))
+
+    assert "[z-a]" in str(caught.value)
+
+
 # --- rule ids are references too ----------------------------------------
 
 def test_two_rules_with_the_same_id_are_refused(tmp_path):

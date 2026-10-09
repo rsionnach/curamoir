@@ -16,7 +16,8 @@ note on stderr, because a fresh repo is not a failing one:
     0  every rule ran and nothing met the threshold
     1  every rule ran and at least one violation met the threshold
     2  the run cannot be trusted: a rule or the config did not load, ast-grep
-       is needed and absent, or ast-grep failed
+       is needed and absent, an ast-grep rule was scoped to a file it cannot
+       parse, ast-grep failed, or the report could not be written
 
 2 outranks 1, because "incomplete" is the more fundamental fact: a run that
 skipped half its rules and found one violation has not shown the other half
@@ -40,9 +41,11 @@ is never asked about a path that does not exist (it exits 1 for that AND for
 "no matches", which would make an error indistinguishable from a clean run).
 
 **Untrusted input.** In CI the repository is often an unreviewed PR, so nothing
-in it may decide what the runner reads or executes. Two consequences: symlinks
-are not followed (see `_repository_files`), and ast-grep never sees the repo's
-own `sgconfig.yml` (see `_ast_grep_batch`).
+in it may decide what the runner reads or executes. Three consequences: Python
+never starts inside it, so nothing in it can shadow a module this imports (see
+`scripts/curamoir-lint` and `_return_to_invocation_directory`); symlinks are
+not followed (see `_repository_files`); and ast-grep never sees the repo's own
+`sgconfig.yml` (see `_ast_grep_batch`).
 """
 
 import argparse
@@ -58,7 +61,14 @@ from pathlib import Path
 
 from curamoir.config import DEFAULTS, ConfigError, load_config_text
 from curamoir.principles import PrincipleError, load_principles
-from curamoir.rules import ALWAYS_EXCLUDED, SEVERITIES, RuleError, load_rules
+from curamoir.rules import (
+    ALWAYS_EXCLUDED,
+    AST_GREP_LANGUAGES,
+    SEVERITIES,
+    RuleError,
+    glob_regex,
+    load_rules,
+)
 
 EXIT_CLEAN = 0
 EXIT_VIOLATIONS = 1
@@ -83,19 +93,17 @@ PRINCIPLES_PATH = ".curamoir/principles.md"
 #: exceed the OS argument-length limit, which fails the whole call.
 AST_GREP_BATCH = 200
 
-#: File suffix to ast-grep `--lang`. The language is passed explicitly because
-#: without it ast-grep treats a pattern it cannot parse as one that matches
-#: nothing — exit 1, empty output, no warning (observed, 0.50.0) — which is a
-#: rule silently checking nothing. With `--lang` it warns about the "ERROR
-#: node", and that is caught below. Markdown and TOML have no entry: ast-grep
-#: has no grammar for TOML, and a rule over prose wants `regex` anyway.
-AST_GREP_LANGUAGES = {
-    ".py": "python", ".pyi": "python",
-    ".ts": "typescript", ".tsx": "tsx",
-    ".js": "javascript", ".jsx": "javascript", ".mjs": "javascript",
-    ".go": "go", ".rs": "rust",
-    ".yaml": "yaml", ".yml": "yaml",
-}
+#: Which suffixes an ast-grep rule can search, and with which `--lang`, is
+#: `rules.AST_GREP_LANGUAGES`: it lives there because `parse_rule` refuses an
+#: ast-grep rule over a language it lacks, and is imported here for the run.
+
+#: Set by scripts/curamoir-lint to the directory it was invoked from. The
+#: wrapper starts Python in its own `src/` so that nothing in the linted repo
+#: is on sys.path; `main` moves back here before reading any argument.
+INVOKED_FROM_ENV = "CURAMOIR_LINT_CWD"
+
+#: The UTF-8 byte order mark, which no editor counts as a column.
+UTF8_BOM = b"\xef\xbb\xbf"
 
 AST_GREP_INSTALL = (
     "pip install ast-grep-cli  (or npm i -g @ast-grep/cli, or brew install ast-grep)"
@@ -181,6 +189,24 @@ def run_lint(repo, ast_grep=None):
         # load_rules has already resolved the id, so this cannot be None.
         principle = principles.by_id(rule.principle)
         scoped = _scoped(files, rule)
+        if rule.matcher == "ast-grep":
+            unsearchable = [p for p in scoped if Path(p).suffix not in AST_GREP_LANGUAGES]
+            if unsearchable:
+                # Handled like a missing ast-grep, not as a LintError: the rule
+                # cannot honestly be called checked, but the other rules' work
+                # list is still worth printing — and which files exist is up to
+                # the repo, so a PR adding one `.txt` must not blank the report.
+                # Dropping the files instead was the bug: reported as checked,
+                # exit 0, having searched nothing.
+                shown = ", ".join(unsearchable[:5])
+                more = f" and {len(unsearchable) - 5} more" if len(unsearchable) > 5 else ""
+                skipped.append(Skipped(
+                    rule.id,
+                    f"its scope includes files ast-grep has no grammar for here "
+                    f"({shown}{more}), so it did not run. Narrow `files:` or add "
+                    "them to `exclude:`; for prose or config, write a `regex` rule.",
+                ))
+                continue
         if rule.matcher == "ast-grep":
             matches = _ast_grep_matches(repo, rule, scoped, ast_grep)
         else:
@@ -270,10 +296,31 @@ def main(argv=None):
     args = parser.parse_args(argv)
 
     try:
+        _return_to_invocation_directory()
         fail_on = args.fail_on or _configured_threshold(Path(args.repo))
         result = run_lint(args.repo, ast_grep=_which_ast_grep())
+        render = format_json if args.format == "json" else format_human
+        # Written and flushed inside the guard, so a report that cannot be
+        # written is a 2 like any other failure, not Python's 1 ("violations").
+        sys.stdout.write(render(result, fail_on))
+        sys.stdout.flush()
     except LintError as failure:
         print(f"curamoir-lint: {failure}", file=sys.stderr)
+        return EXIT_ERROR
+    except BrokenPipeError:
+        # The reader went away (`| head`). Point stdout at /dev/null so the
+        # flush Python attempts at shutdown does not print a traceback, and
+        # exit 2: whoever wanted the result did not get it.
+        os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
+        print("curamoir-lint: stdout was closed before the report was written",
+              file=sys.stderr)
+        return EXIT_ERROR
+    except UnicodeEncodeError as unencodable:
+        print(
+            f"curamoir-lint: the report could not be written in stdout's encoding "
+            f"({unencodable.encoding}); set PYTHONIOENCODING=utf-8",
+            file=sys.stderr,
+        )
         return EXIT_ERROR
     except Exception as unexpected:
         # Python exits 1 on an uncaught exception, which is this tool's code for
@@ -281,8 +328,6 @@ def main(argv=None):
         print(f"curamoir-lint: internal error: {unexpected!r}", file=sys.stderr)
         return EXIT_ERROR
 
-    render = format_json if args.format == "json" else format_human
-    sys.stdout.write(render(result, fail_on))
     if not result.checked and not result.skipped:
         print(
             "curamoir-lint: no rules in .curamoir/rules/, so nothing was checked. "
@@ -301,6 +346,27 @@ def main(argv=None):
             file=sys.stderr,
         )
     return exit_code(result, fail_on)
+
+
+def _return_to_invocation_directory():
+    """Move to where scripts/curamoir-lint was invoked, if it says.
+
+    The wrapper starts Python in its own `src/` so that `python -m` does not
+    put the linted repo at sys.path[0] (see the wrapper). Moving back is safe
+    only if no sys.path entry is relative, since a relative entry would now
+    resolve inside the repo for any later import (PyYAML is imported lazily).
+    `-m` makes its own entry absolute, but `''` or a relative PYTHONPATH entry
+    under `-S` stays relative — so every entry is pinned to where Python
+    started first. The variable is removed so ast-grep does not inherit it.
+    """
+    invoked_from = os.environ.pop(INVOKED_FROM_ENV, None)
+    if not invoked_from:
+        return
+    sys.path[:] = [os.path.abspath(entry) for entry in sys.path]
+    try:
+        os.chdir(invoked_from)
+    except OSError as failure:
+        raise LintError(f"cannot return to {invoked_from}: {failure}") from failure
 
 
 def _configured_threshold(repo):
@@ -367,38 +433,13 @@ def _repository_files(repo):
 
 def _scoped(files, rule):
     """The files `rule` applies to: its patterns, minus its exclusions."""
-    include = [_glob(pattern) for pattern in rule.file_patterns()]
-    exclude = [_glob(pattern) for pattern in rule.exclude]
+    include = [glob_regex(pattern) for pattern in rule.file_patterns()]
+    exclude = [glob_regex(pattern) for pattern in rule.exclude]
     return [
         path for path in files
         if any(p.fullmatch(path) for p in include)
         and not any(p.fullmatch(path) for p in exclude)
     ]
-
-
-def _glob(pattern):
-    """A glob as a regex over POSIX paths, with `**/` matching zero or more
-    directories. `fnmatch` has no `**`, so `**/*.py` would miss `setup.py` at
-    the root — a whole class of file silently unlinted."""
-    out = []
-    index = 0
-    while index < len(pattern):
-        if pattern.startswith("**/", index):
-            out.append("(?:.*/)?")
-            index += 3
-        elif pattern.startswith("**", index):
-            out.append(".*")
-            index += 2
-        elif pattern[index] == "*":
-            out.append("[^/]*")
-            index += 1
-        elif pattern[index] == "?":
-            out.append("[^/]")
-            index += 1
-        else:
-            out.append(re.escape(pattern[index]))
-            index += 1
-    return re.compile("".join(out))
 
 
 def _regex_matches(repo, rule, files):
@@ -415,17 +456,37 @@ def _regex_matches(repo, rule, files):
         return matches
     matches = []
     for path in files:
-        try:
-            # `replace`: one undecodable byte should not hide the rest of the
-            # file from the rule, and must not crash the run.
-            text = (repo / path).read_text(encoding="utf-8", errors="replace")
-        except OSError as unreadable:
-            raise LintError(f"rule {rule.id!r} could not read {path}: {unreadable}") \
-                from unreadable
-        for number, line in enumerate(text.splitlines(), start=1):
+        for number, line in enumerate(_lines(repo, rule, path), start=1):
             for found in compiled.finditer(line):
                 matches.append((path, number, found.start() + 1, found.group(0)))
     return matches
+
+
+def _lines(repo, rule, path):
+    """The file's lines as an editor and ast-grep number them.
+
+    Only `\n` ends a line. `read_text` would turn a lone `\r` into a break
+    (universal newlines) and `str.splitlines` also breaks on form feed,
+    vertical tab, `\x1c`-`\x1e`, U+0085, U+2028 and U+2029 — so a form feed on
+    its own line, or a U+2028 in a string literal, put every later violation
+    on the wrong line. A trailing `\r` is dropped from each line, so CRLF
+    files read as their lines; a lone `\r` stays a character. `utf-8-sig`
+    drops a leading BOM, which no editor shows as a column. Columns are
+    1-based characters (code points), as ast-grep's are.
+    """
+    try:
+        # `replace`: one undecodable byte should not hide the rest of the file
+        # from the rule, and must not crash the run.
+        with open(repo / path, encoding="utf-8-sig", errors="replace", newline="") as handle:
+            text = handle.read()
+    except OSError as unreadable:
+        raise LintError(f"rule {rule.id!r} could not read {path}: {unreadable}") \
+            from unreadable
+    lines = text.split("\n")
+    if lines[-1] == "":
+        # After a final newline (or in an empty file) there is no further line.
+        lines.pop()
+    return [line[:-1] if line.endswith("\r") else line for line in lines]
 
 
 def _ast_grep_matches(repo, rule, files, binary):
@@ -438,14 +499,12 @@ def _ast_grep_matches(repo, rule, files, binary):
     "ERROR" on stderr is a failure too, with ast-grep's own words quoted.
 
     Files are grouped by language so `--lang` can be explicit (see
-    AST_GREP_LANGUAGES); a scoped file whose suffix has no ast-grep grammar is
-    not searched by an ast-grep rule, since no AST pattern can match it.
+    AST_GREP_LANGUAGES). `run_lint` has already skipped any rule whose scope
+    includes a file with no mapping, so every file here has one.
     """
     by_language = {}
     for path in files:
-        language = AST_GREP_LANGUAGES.get(Path(path).suffix)
-        if language is not None:
-            by_language.setdefault(language, []).append(path)
+        by_language.setdefault(AST_GREP_LANGUAGES[Path(path).suffix], []).append(path)
     matches = []
     with tempfile.TemporaryDirectory(prefix="curamoir-lint-") as scratch:
         config = Path(scratch) / "sgconfig.yml"
@@ -508,15 +567,31 @@ def _ast_grep_batch(repo, rule, binary, language, batch, scratch, config):
         raise LintError(
             f"rule {rule.id!r}: ast-grep's output was not JSON: {completed.stdout[:200]!r}"
         ) from unparseable
-    return [
-        (
-            _repo_relative(root, rule, record["file"]),
-            record["range"]["start"]["line"] + 1,
-            record["range"]["start"]["column"] + 1,
-            record["text"],
-        )
-        for record in records
-    ]
+    matches = []
+    for record in records:
+        path = _repo_relative(root, rule, record["file"])
+        line = record["range"]["start"]["line"] + 1
+        col = record["range"]["start"]["column"] + 1
+        if line == 1 and col > 1 and _starts_with_bom(root / path):
+            # ast-grep 0.50.0 counts a UTF-8 BOM as the first character of line
+            # 1 (verified: `\ufeffprint(1)` is reported at column 1, 0-based),
+            # where editors and the regex matcher do not. Corrected so both
+            # matchers, and the editor, agree. This assumes 0.50.0's behaviour;
+            # a version that stopped counting the BOM would be over-corrected,
+            # which the real-binary test of matching locations would catch.
+            col -= 1
+        matches.append((path, line, col, record["text"]))
+    return matches
+
+
+def _starts_with_bom(path):
+    try:
+        with open(path, "rb") as handle:
+            return handle.read(len(UTF8_BOM)) == UTF8_BOM
+    except OSError:
+        # It was just searched; if it has gone since, the column is the least
+        # of what is wrong, and ast-grep's own is the best left.
+        return False
 
 
 def _repo_relative(root, rule, reported):

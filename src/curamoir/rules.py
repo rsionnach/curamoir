@@ -72,6 +72,50 @@ LANGUAGE_PATTERNS = {
     "toml": ("**/*.toml",),
 }
 
+#: File suffix to ast-grep `--lang`, for every suffix an `ast-grep` rule may
+#: search. E2-R4 passes the language explicitly because without it ast-grep
+#: treats a pattern it cannot parse as one that matches nothing — exit 1, empty
+#: output, no warning (observed, 0.50.0) — which is a rule silently checking
+#: nothing; with `--lang` it warns about the "ERROR node", and that is caught.
+#:
+#: Each entry was checked against ast-grep 0.50.0 (2026-10-09): the suffix is
+#: one it infers this language for on its own, and `--lang=<name>` is accepted
+#: and parses the file. Deliberately absent: `.toml` (no grammar: `--lang=toml`
+#: is "not supported"); `.md` (0.50.0 does accept `--lang=markdown`, but a rule
+#: over prose wants `regex`, and older ast-grep versions refuse the name); and
+#: `.h`, which is C to ast-grep and C++ to half the headers that carry it. A
+#: suffix missing here is never silently dropped: `parse_rule` refuses such a
+#: language and E2-R4 skips such a file's rule, loudly.
+AST_GREP_LANGUAGES = {
+    ".py": "python", ".pyi": "python",
+    ".ts": "typescript", ".mts": "typescript", ".cts": "typescript",
+    ".tsx": "tsx",
+    ".js": "javascript", ".jsx": "javascript", ".mjs": "javascript", ".cjs": "javascript",
+    ".go": "go", ".rs": "rust",
+    ".yaml": "yaml", ".yml": "yaml", ".json": "json",
+    ".java": "java", ".kt": "kotlin", ".scala": "scala",
+    ".c": "c", ".cpp": "cpp", ".cc": "cpp", ".hpp": "cpp", ".cs": "csharp",
+    ".rb": "ruby", ".php": "php", ".swift": "swift", ".lua": "lua",
+    ".sh": "bash", ".bash": "bash",
+    ".html": "html", ".css": "css",
+}
+
+
+def _searchable_by_ast_grep(language):
+    """Whether every file pattern of `language` has an ast-grep grammar."""
+    return all(
+        "." + pattern.rsplit(".", 1)[1] in AST_GREP_LANGUAGES
+        for pattern in LANGUAGE_PATTERNS[language]
+    )
+
+
+#: What an `ast-grep` rule with no `languages` or `files` searches: every
+#: language above that ast-grep can parse. Not all of them, or "no scope" would
+#: hand the runner `.md` files it cannot search and fail the rule.
+AST_GREP_DEFAULT_LANGUAGES = tuple(
+    language for language in LANGUAGE_PATTERNS if _searchable_by_ast_grep(language)
+)
+
 #: What a rule matches against: a line of a file, or the file's path.
 #: `no-file-variant-proliferation` matches a NAME, which is not a language.
 TARGETS = ("line", "path")
@@ -121,7 +165,12 @@ class Rule:
         """
         if self.files:
             return tuple(self.files)
-        languages = self.languages or tuple(LANGUAGE_PATTERNS)
+        if self.languages:
+            languages = self.languages
+        elif self.matcher == "ast-grep":
+            languages = AST_GREP_DEFAULT_LANGUAGES
+        else:
+            languages = tuple(LANGUAGE_PATTERNS)
         patterns = []
         for language in languages:
             patterns.extend(LANGUAGE_PATTERNS[language])
@@ -259,6 +308,32 @@ def parse_rule(text, source, known_principles):
             "Use `files:` with globs for anything that is not a language."
         )
 
+    if matcher == "ast-grep":
+        prose = [name for name in languages if not _searchable_by_ast_grep(name)]
+        if prose:
+            # The runner has no `--lang` for these, so the rule would load, run,
+            # search nothing, and be reported as checked: exit 0 on nothing.
+            raise RuleError(
+                f"{source}: rule {rule_id!r} uses the 'ast-grep' matcher over "
+                f"{', '.join(prose)}, which curamoir-lint has no ast-grep grammar "
+                "for, so the rule could never search those files. Use "
+                "`matcher: regex` for them (a separate rule), or drop them from "
+                "`languages`."
+            )
+
+    files = _sequence(data.get("files"))
+    exclude = _sequence(data.get("exclude"))
+    for field, globs in (("files", files), ("exclude", exclude)):
+        for glob in globs:
+            try:
+                glob_regex(glob)
+            except re.error as invalid:
+                raise RuleError(
+                    f"{source}: rule {rule_id!r} has a `{field}` glob {glob!r} "
+                    f"that is not valid: {invalid}. Character classes follow "
+                    "fnmatch: `[abc]`, `[a-z]`, `[!abc]`, and `[[]` for a literal `[`."
+                ) from invalid
+
     target = str(data.get("target", "line")).strip()
     if target not in TARGETS:
         raise RuleError(
@@ -284,11 +359,71 @@ def parse_rule(text, source, known_principles):
         message=message,
         fix=str(data.get("fix", "")),
         languages=languages,
-        files=_sequence(data.get("files")),
-        exclude=_sequence(data.get("exclude")),
+        files=files,
+        exclude=exclude,
         target=target,
         source=source,
     )
+
+
+def glob_regex(pattern):
+    """A rule glob as a compiled regex over repo-relative POSIX paths.
+
+    `**/` matches zero or more directories — `fnmatch` has no `**`, so `**/*.py`
+    would miss `setup.py` at the root, a whole class of file silently unlinted.
+    `*`, `?` and character classes match within one path segment, as in any
+    shell or gitignore glob. Classes follow fnmatch, because that is what an
+    author of `[abc]`, `[a-z]` or `[!abc]` expects, rather than the literal
+    brackets they once were: `[[]` is a literal `[` (a Next.js `[id].tsx` is
+    `[[]id].tsx`), and an unclosed `[` is literal. Raises `re.error` for a
+    class that cannot compile, such as `[z-a]`; `parse_rule` turns that into a
+    load error.
+    """
+    out = []
+    index = 0
+    while index < len(pattern):
+        if pattern.startswith("**/", index):
+            out.append("(?:.*/)?")
+            index += 3
+        elif pattern.startswith("**", index):
+            out.append(".*")
+            index += 2
+        elif pattern[index] == "*":
+            out.append("[^/]*")
+            index += 1
+        elif pattern[index] == "?":
+            out.append("[^/]")
+            index += 1
+        elif pattern[index] == "[":
+            translated, index = _glob_class(pattern, index)
+            out.append(translated)
+        else:
+            out.append(re.escape(pattern[index]))
+            index += 1
+    return re.compile("".join(out))
+
+
+def _glob_class(pattern, start):
+    """(regex, next index) for the `[...]` at `start`, fnmatch's way: a leading
+    `!` negates, a `]` straight after `[` or `[!` is a member, and with no
+    closing `]` the `[` is literal. The class never matches `/`."""
+    end = start + 1
+    if end < len(pattern) and pattern[end] == "!":
+        end += 1
+    if end < len(pattern) and pattern[end] == "]":
+        end += 1
+    end = pattern.find("]", end)
+    if end == -1:
+        return re.escape("["), start + 1
+    body = pattern[start + 1:end]
+    negated = body.startswith("!")
+    if negated:
+        body = body[1:]
+    # Escape every member but `-`, which is what makes a range.
+    members = "".join(c if c == "-" else re.escape(c) for c in body)
+    if negated:
+        return f"[^/{members}]", end + 1
+    return f"(?!/)[{members}]", end + 1
 
 
 def _load_yaml(text, source):
