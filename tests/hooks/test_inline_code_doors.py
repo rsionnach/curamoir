@@ -144,3 +144,42 @@ def test_an_attached_option_value_is_read_as_the_option_it_is(command):
 
     assert decision.deny, f"{command!r} hands over program text"
     assert decision.category is Category.UNVERIFIABLE
+
+
+# The consumer allowlist is only as good as what is on it. These were on it and
+# should not have been: a heredoc into `git apply` is a patch composed at call
+# time, which rewrites the working tree with no backup — the same family as
+# `git checkout <path>`, already refused — and `gh api --input -` posts a
+# call-time body to an API with destructive endpoints.
+CONSUMERS_THAT_ARE_NOT = [
+    pytest.param("git apply <<EOF\npatch\nEOF", id="git_apply_patch_from_stdin"),
+    pytest.param("git am <<EOF\npatch\nEOF", id="git_am_patch_from_stdin"),
+    pytest.param("gh api --input - <<EOF\n{}\nEOF", id="gh_api_body_from_stdin"),
+    pytest.param("bd import <<EOF\n{}\nEOF", id="bd_import_from_stdin"),
+]
+
+
+@pytest.mark.parametrize("command", CONSUMERS_THAT_ARE_NOT)
+def test_a_program_that_acts_on_its_stdin_is_not_a_data_consumer(command):
+    decision = judge_command(command, True)
+
+    assert decision.deny, f"{command.splitlines()[0]!r} acts on call-time input"
+
+
+def test_the_ordinary_use_of_those_programs_is_untouched():
+    """Removing them from the consumer list must not refuse the commands a job
+    actually runs — none of which feeds them a heredoc."""
+    for command in ("git commit -m 'done'", "git apply fix.patch",
+                    "gh pr create --title t --body b", "bd ready --json"):
+        assert not judge_command(command, True).deny, command
+
+
+def test_the_consumer_list_holds_only_programs_the_allowlist_admits():
+    """A program on the consumer list that the allowlist refuses anyway is dead
+    weight that READS as permission — `awk` and `sed` were both there, and both
+    are refused before the heredoc rule is ever reached."""
+    from curamoir.hooks.policy import ALLOWED, _HEREDOC_CONSUMERS, _INTERPRETERS
+
+    for program in _HEREDOC_CONSUMERS:
+        assert program in ALLOWED, f"{program} is on the consumer list but not allowlisted"
+        assert program not in _INTERPRETERS, f"{program} is both a consumer and an interpreter"

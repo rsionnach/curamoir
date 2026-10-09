@@ -223,9 +223,24 @@ _INLINE_CODE_OPTIONS = {
 #: program with a heredoc is refused, which costs a retry and a line here.
 _HEREDOC_CONSUMERS = frozenset({
     "cat", "tee", "grep", "egrep", "fgrep", "rg", "sort", "uniq", "wc", "head",
-    "tail", "cut", "tr", "diff", "jq", "yq", "sed", "awk", "column", "fmt",
-    "bd", "gh", "git",
+    "tail", "cut", "tr", "diff", "jq", "yq",
 })
+
+# Deliberately NOT on that list, each for a stated reason:
+#
+# - `git` and `gh`. `git apply <<EOF` applies a patch composed at call time,
+#   which rewrites the working tree with no backup — the same family as
+#   `git checkout <path>`, which this module already refuses. `gh api --input -`
+#   posts a call-time body to an API with destructive endpoints. Writing the
+#   patch or the body to a file first costs a retry and makes it reviewable.
+# - `bd`. It writes to a database from stdin, which is not reading data.
+# - `awk` and `sed`. They take a PROGRAM, not just data, and both are already
+#   refused by the allowlist (`awk` as an interpreter, `sed` by absence) — so
+#   listing them here would be dead weight that reads as permission.
+# - `column` and `fmt`, for that last reason alone: harmless, but not on the
+#   allowlist, so naming them here would describe a permission that does not
+#   exist. A test asserts this list is a subset of the allowlist, so the two
+#   cannot drift into disagreeing about what a job may run.
 
 
 def _option_pairs(arguments):
