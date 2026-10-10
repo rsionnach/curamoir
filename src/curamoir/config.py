@@ -206,16 +206,76 @@ def load_config(raw):
 
 
 def load_config_text(text):
-    """Parse YAML then validate. The only function that needs PyYAML."""
+    """Parse YAML then validate. With `safe_load_unique`, the only code here
+    that needs PyYAML."""
     try:
-        import yaml
+        raw = safe_load_unique(text)
     except ImportError as missing:  # pragma: no cover - environment-dependent
         raise ConfigError([
             "PyYAML is required to read curamoir.yaml but is not importable "
             f"({missing}). Install it with `pip install pyyaml`, or run "
             "`/curamoir:doctor`, which reports it as a missing prerequisite."
         ]) from None
-    return load_config(yaml.safe_load(text) or {})
+    except DuplicateKeyError as duplicate:
+        raise ConfigError([str(duplicate)]) from None
+    return load_config(raw or {})
+
+
+class DuplicateKeyError(ValueError):
+    """A YAML mapping names the same key twice."""
+
+
+def safe_load_unique(text):
+    """`yaml.safe_load`, except that a key repeated in one mapping raises
+    DuplicateKeyError rather than silently keeping the last value — which for
+    `rules.fail_on` or a rule's `severity` is a setting changed with both
+    lines in plain view. Shared by config and rule files. PyYAML must be
+    importable; the caller reports it missing in its own terms.
+
+    A key repeated after a `<<` merge is not a duplicate: overriding a merged
+    value is what the merge key is for.
+    """
+    import yaml
+
+    return yaml.load(text, Loader=_unique_key_loader())
+
+
+_UNIQUE_KEY_LOADER = []
+
+
+def _unique_key_loader():
+    """The SafeLoader subclass, built on first use so this module still
+    imports without PyYAML (see the module docstring)."""
+    if _UNIQUE_KEY_LOADER:
+        return _UNIQUE_KEY_LOADER[0]
+    import yaml
+
+    class UniqueKeyLoader(yaml.SafeLoader):
+        pass
+
+    def construct_mapping(loader, node, deep=False):
+        seen = {}
+        for key_node, _ in node.value:
+            if key_node.tag == "tag:yaml.org,2002:merge":
+                continue
+            key = loader.construct_object(key_node, deep=True)
+            line = key_node.start_mark.line + 1
+            try:
+                first = seen.get(key)
+                seen.setdefault(key, line)
+            except TypeError:
+                continue  # unhashable; SafeLoader's own error is the better one
+            if first is not None:
+                raise DuplicateKeyError(
+                    f"{key}: duplicate key, on lines {first} and {line}; YAML "
+                    "would silently keep only the last, so say which you mean once"
+                )
+        return loader.construct_mapping(node, deep=deep)
+
+    UniqueKeyLoader.add_constructor(
+        yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, construct_mapping)
+    _UNIQUE_KEY_LOADER.append(UniqueKeyLoader)
+    return UniqueKeyLoader
 
 
 def _validate(value, schema, prefix, problems):

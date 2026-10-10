@@ -3,6 +3,12 @@
 A rule turns one principle into something a machine checks. It lives in
 `.curamoir/rules/<rule-id>.yaml`, and `curamoir-lint` runs it.
 
+Rules are loaded from that directory itself, from files ending in lower-case
+`.yaml` or `.yml`. Notes (`*.md`) and dotfiles (`.gitkeep`) may sit beside
+them; anything else — a subdirectory, `X.YAML`, `x.yaml.disabled` — is a load
+error, because a rule filed where the loader does not look would never run
+while you believe it does.
+
 Rules are how a principle gets promoted from `principle` to `rule` on the
 ladder — so you write one when you have corrected the same violation about
 three times and are tired of saying it.
@@ -123,9 +129,17 @@ load error.
 An `ast-grep` rule with no `languages` or `files` searches only the languages
 ast-grep can parse (not `markdown` or `toml`).
 
-Some directories are never searched whatever a rule says: `venv`, `.venv`,
-`__pycache__`, `node_modules`, `dist`, `build`, `.git`, `.curamoir`,
-`site-packages` and the usual caches.
+Some directories are never searched whatever a rule says:
+
+- at any depth: `.git`, `.venv`, `__pycache__`, `node_modules`,
+  `site-packages`, `.tox`, `.mypy_cache`, `.pytest_cache`, `.beads` and
+  `.curamoir` — tooling and dependency directories no source package is
+  named;
+- at the repository root only: `build`, `dist` and `venv` — output and
+  environment directories there, but ordinary package names below it
+  (`src/app/build/`, `cmd/dist/`), which are searched. A nested virtualenv
+  named `venv` is therefore searched too; exclude it in the rule
+  (`exclude: ["**/venv/**"]`).
 
 ## The message is read by an agent
 
@@ -156,6 +170,14 @@ naming the file and the field:
 - more than one principle
 - an unknown severity or matcher
 - a regex that does not compile
+- a regex that matches at the start of any text (`x*`, `^`, `(foo)?`, `.*`),
+  which would report every line; `^$`, which matches only empty lines, is fine
+- a `target: line` regex containing a newline (`\n`, `\x0a`, or a literal
+  one) outside a character class: lines are matched without their newline,
+  so it could never match. `[^\n]` is fine
+- a key given twice in one mapping (YAML would silently keep the last)
+- anything in `.curamoir/rules/` that is not a rule, a note or a dotfile (see
+  the top of this page), or a `.curamoir/rules` that is not a directory
 - a message using a variable that does not exist
 - two rules sharing an id
 - an unknown language
@@ -172,7 +194,15 @@ something you find when you ask, rather than during an unattended run.
 
 ```
 scripts/curamoir-lint [--repo PATH] [--format human|json] [--fail-on info|warning|error]
+                      [--timeout SECONDS]
 ```
+
+`--timeout` bounds the whole run (default 600 seconds; `0` for no bound). Ten
+minutes is far above a healthy run and inside CI job limits, so reaching it
+means something is stuck, and the run exits 2 saying so rather than being
+killed with no reason or hanging a pre-commit. It is the only bound there is
+on a rule's regex that backtracks catastrophically on some line. Options must
+be spelled in full: `--re` is not `--repo`.
 
 It makes no model calls and no network calls, and needs no cúramóir install
 (E2-R5): only `scripts/curamoir-lint`, the `src/` directory beside it, a Python 3
@@ -188,12 +218,15 @@ as every wrapper) it takes the first that can import PyYAML.
 |---|---|
 | `0` | every rule ran, and no violation is at or above the threshold |
 | `1` | every rule ran, and at least one violation is at or above the threshold |
-| `2` | the result cannot be trusted: a rule, `principles.md` or `curamoir.yaml` did not load, `ast-grep` is needed and missing or failed, an `ast-grep` rule's scope includes a file ast-grep cannot parse, no Python was found, the report could not be written (stdout closed, or an encoding that cannot represent it — set `PYTHONIOENCODING=utf-8`), or an internal error |
+| `2` | the result cannot be trusted: a rule, `principles.md` or `curamoir.yaml` did not load (including a key given twice, or a `curamoir.yaml` that is a directory); `ast-grep` is needed and missing, failed, did not finish, or printed something other than a list of matches; a rule could not search every file in its scope (an `ast-grep` rule over a file it has no grammar for, or a file ast-grep skipped; any rule over a file that cannot be read); a directory in the repository could not be listed; the run exceeded `--timeout`; an invalid or empty option (`--repo ""`); no Python was found; the report could not be written (stdout closed, or an encoding that cannot represent it — set `PYTHONIOENCODING=utf-8`); or an internal error |
 
 `2` outranks `1`. A run that skipped rules has not shown them clean, so it is
 reported as incomplete even if what did run found something. When rules were
-skipped the partial report is still printed; for every other `2`, stdout is
-empty and the reason is on stderr.
+skipped — ast-grep missing, or a rule that could not search every file in
+its scope — the partial report is still printed, each skipped rule is in
+`rules_skipped` with the files named where they are known, and the other
+rules' findings are kept. For every other `2`, stdout is empty and the reason
+is on stderr.
 
 The threshold is `--fail-on`, else `rules.fail_on` in `.curamoir/curamoir.yaml`,
 else `error`. Every violation is reported whatever its severity; the threshold
@@ -266,6 +299,11 @@ src/sample/core/billing.py:15:5: error [structured-logging/no-bare-print] print(
 
 One block per violation, in location order, then a summary line: how many
 violations, from how many rules that ran, and how many meet the threshold.
+Each field is kept to its own line: newlines and other control characters in
+a path, message, rule or fix are shown escaped (`\n`, `\x1b`), so a match
+spanning lines cannot forge a `fix:` line. The JSON carries them as they are.
+In both formats a filename that is not valid UTF-8 is shown with its bad bytes
+escaped (`bad\xff.py`).
 
 ### In CI and pre-commit
 
@@ -327,7 +365,25 @@ runner into CI or pre-commit.
   corrected, so both matchers agree with the editor.
 - Symlinks are not linted (see below), even when the target is inside the
   repo — that target is linted at its own path — and a `target: path` rule
-  does not see a symlink's name.
+  does not see a symlink's name. Nor are FIFOs, sockets or devices (opening a
+  FIFO blocks forever); like symlinks, they are named on stderr and do not
+  change the exit code — git cannot store them, so they are not repository
+  content.
+- ast-grep silently skips a file it cannot read, cannot decode as UTF-8 (a
+  Latin-1 source with a coding cookie, say), or finds too large (0.50.0
+  searched a 3 MB file and skipped a 4 MB one). `curamoir-lint` asks for its
+  `--inspect=summary` count, and a rule whose files were skipped is
+  **skipped** like one over a file with no grammar: listed in `rules_skipped`
+  with the likely files named, exit 2. Re-encode the file as UTF-8 or add it
+  to `exclude:`. Empty files are not given to ast-grep at all (0.50.0 counts
+  them as skipped, and they can hold no match). UTF-16 sources are not
+  handled specially by either matcher.
+- A file a `regex` rule cannot read (permissions) skips that rule, named, the
+  same way; a directory that cannot be listed fails the whole run, since no
+  rule could check what is under it.
+- A `regex` rule decodes each file as UTF-8, replacing bytes that are not; a
+  binary file in a broad `files:` scope is searched as such. Scope rules to
+  the files they mean.
 - Settings a project put in its own `sgconfig.yml` (custom languages,
   `languageGlobs`) do not apply to `curamoir-lint`'s rules; see below for why.
 
@@ -344,6 +400,25 @@ runner into CI or pre-commit.
   directory you invoked the wrapper from, as you would expect; empty entries
   (which Python reads as "the working directory", i.e. the repository) are
   dropped.
+- If the wrapper is reached through a symlink (a link in `~/bin`, say), it
+  follows the link to find `src/`; that needs `readlink` on PATH, the one
+  external command it uses. It is a bash script: run it as itself or with
+  `bash`, not with `sh` or `dash`.
+- `ast-grep` is looked up only in absolute PATH entries. A relative entry
+  (`.`, `bin`, or an empty one) would resolve inside the repository, letting
+  a PR choose the binary its own rules are checked with.
+- `--timeout` uses `SIGALRM`, so it bounds the run on Linux and macOS when
+  `curamoir-lint` runs as its own process (as the wrapper does). Where that
+  is unavailable — Windows, or `curamoir.lint.main` called from a non-main
+  thread — the run has no overall bound, and only each `ast-grep` call is
+  limited, by the same number of seconds.
+- `python -m curamoir.lint` directly (without the wrapper) lints relative to
+  its own working directory, and reads `CURAMOIR_LINT_INVOKED_FROM` if set: a
+  directory to change to first, which is how the wrapper passes on where it
+  was invoked. Leave it unset when calling the module yourself.
+- `--repo` should be the repository root: rules, principles and config are
+  read from its `.curamoir/`. Pointed at a subdirectory with no `.curamoir/`,
+  the run finds no rules and exits 0 with its note on stderr.
 - Symlinks are not followed, file or directory. In CI the tree is often an
   unreviewed PR, and `match` quotes matched text, so a committed
   `leak.py -> ~/.ssh/id_rsa` would otherwise have the lint print part of the

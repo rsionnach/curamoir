@@ -35,10 +35,13 @@ out the places the principle itself exempts, `fix` for the remediation E2-R4
 prints, and `target` to match a path rather than a line.
 """
 
+import os
 import re
+import stat
 from dataclasses import dataclass
 from pathlib import Path
 
+from curamoir.config import DuplicateKeyError, safe_load_unique
 from curamoir.principles import PrincipleError, load_principles
 
 #: E2-R3's required fields. `fix` is not among them, though E2-R4 prints it:
@@ -125,13 +128,37 @@ AST_GREP_DEFAULT_LANGUAGES = tuple(
 #: `no-file-variant-proliferation` matches a NAME, which is not a language.
 TARGETS = ("line", "path")
 
-#: Never searched, whatever a rule says. Extracted from the source lint
-#: scripts' shared EXCLUDE_DIRS, which every one of them carried.
+#: Never searched, at any depth, whatever a rule says: tooling and dependency
+#: directories, whose names nobody gives a source package. Extracted from the
+#: source lint scripts' shared EXCLUDE_DIRS, less the three below.
 ALWAYS_EXCLUDED = (
-    "venv", ".venv", "__pycache__", ".beads", ".curamoir", "node_modules",
-    "dist", "build", ".git", ".tox", ".mypy_cache", ".pytest_cache",
-    "site-packages",
+    ".git",             # VCS internals, including a submodule's
+    ".venv",            # a virtualenv, wherever a monorepo puts one
+    "__pycache__",      # bytecode
+    "node_modules",     # installed JS dependencies, nested per package
+    "site-packages",    # installed Python dependencies, inside a venv
+    ".tox", ".mypy_cache", ".pytest_cache",  # tool caches
+    ".beads",           # the issue tracker's data
+    ".curamoir",        # cúramóir's own state, rules and principles
 )
+
+#: Never searched at the repository ROOT only. Each is a conventional output or
+#: environment directory there, and an ordinary package name below it —
+#: `src/app/build/`, `cmd/dist/`, a `venv` helper module — so pruning them at
+#: any depth silently unlinted real source. A nested virtualenv named `venv`
+#: is therefore searched; exclude it in the rule (`exclude: ["**/venv/**"]`).
+ROOT_EXCLUDED = ("build", "dist", "venv")
+
+#: A rule file's suffix, exactly. Besides rule files, `.curamoir/rules/` may
+#: hold notes (`*.md`) and dotfiles (`.gitkeep`, an editor's `.DS_Store`);
+#: anything else is refused at load, because a rule filed where the loader
+#: does not look — `rules/python/x.yaml`, `X.YAML`, `x.yaml.disabled` — would
+#: never run while its author believes it does.
+RULE_SUFFIXES = (".yaml", ".yml")
+
+#: Deliberately dissimilar texts a regex is tried against at load: one that
+#: matches at the start of every one of them matches at the start of any line.
+EVERY_LINE_PROBES = ("", " ", "a", "0", "#", "}", "\t")
 
 
 class RuleError(Exception):
@@ -215,8 +242,13 @@ def load_rules(repo):
     """
     repo = Path(repo)
     directory = repo / ".curamoir" / "rules"
-    if not directory.is_dir():
+    if not os.path.lexists(directory):
         return []
+    if not directory.is_dir():
+        raise RuleError(
+            f"{directory} exists but is not a directory, so no rule in it can "
+            "be loaded. Rules live in .curamoir/rules/<rule-id>.yaml."
+        )
 
     try:
         principles = {p.id for p in load_principles(repo).principles}
@@ -228,12 +260,12 @@ def load_rules(repo):
 
     rules = []
     seen = {}
-    for path in sorted(directory.glob("*.yaml")) + sorted(directory.glob("*.yml")):
-        rule = parse_rule(
-            path.read_text(encoding="utf-8"),
-            source=path.name,
-            known_principles=principles,
-        )
+    for path in _rule_files(directory):
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as unreadable:
+            raise RuleError(f"{path.name}: cannot be read: {unreadable}") from unreadable
+        rule = parse_rule(text, source=path.name, known_principles=principles)
         if rule.id in seen:
             raise RuleError(
                 f"rule id {rule.id!r} is defined in both {seen[rule.id]} and "
@@ -243,6 +275,41 @@ def load_rules(repo):
         seen[rule.id] = path.name
         rules.append(rule)
     return rules
+
+
+def _rule_files(directory):
+    """The rule files in `directory`, sorted, refusing anything the loader
+    would otherwise pass over in silence (see RULE_SUFFIXES). Each entry is
+    stat'ed, following a symlink as reading it would: a rule is a regular
+    file, and a FIFO named `x.yaml` would block the read forever."""
+    rule_files, refused = [], []
+    for path in sorted(directory.iterdir()):
+        name = path.name
+        try:
+            mode = path.stat().st_mode
+        except OSError as unreadable:
+            refused.append(f"{name} (cannot be read: {unreadable.strerror})")
+            continue
+        if name.endswith(RULE_SUFFIXES):
+            if stat.S_ISREG(mode):
+                rule_files.append(path)
+            else:
+                refused.append(f"{name} (not a regular file)")
+        elif stat.S_ISDIR(mode):
+            refused.append(f"{name}/ (rules are not loaded from subdirectories)")
+        elif name.lower().endswith(RULE_SUFFIXES):
+            refused.append(f"{name} (the suffix must be lower-case .yaml or .yml)")
+        elif not (name.lower().endswith(".md") or name.startswith(".")):
+            refused.append(f"{name} (not a rule: only *.yaml, *.yml, notes in *.md "
+                           "and dotfiles may be here)")
+    if refused:
+        raise RuleError(
+            f"{directory} holds entries that are not loaded as rules: "
+            + "; ".join(refused)
+            + ". Each would look like a rule that runs and is not, so move, "
+            "rename or delete it."
+        )
+    return rule_files
 
 
 def parse_rule(text, source, known_principles):
@@ -290,16 +357,6 @@ def parse_rule(text, source, known_principles):
             "escape hatch for what no AST pattern can express."
         )
 
-    pattern = str(data["pattern"])
-    if matcher == "regex":
-        try:
-            re.compile(pattern)
-        except re.error as invalid:
-            raise RuleError(
-                f"{source}: rule {rule_id!r} has a pattern that is not a valid "
-                f"regex: {invalid}. Caught now rather than mid-sweep, which "
-                "would already have spent the budget for the rules before it."
-            ) from invalid
 
     message = str(data["message"])
     _check_template(message, rule_id, source)
@@ -345,6 +402,10 @@ def parse_rule(text, source, known_principles):
             f"{source}: rule {rule_id!r} has target {target!r}; allowed: "
             f"{', '.join(TARGETS)}."
         )
+
+    pattern = str(data["pattern"])
+    if matcher == "regex":
+        _check_regex(pattern, target, rule_id, source)
     if target == "path" and matcher != "regex":
         # ast-grep matches inside a file's syntax tree and a filename is not in
         # it, so this rule would load, run, and never fire: a lint that quietly
@@ -444,9 +505,70 @@ def _load_yaml(text, source):
             "/curamoir:doctor reports this as a missing prerequisite."
         ) from missing
     try:
-        return yaml.safe_load(text)
+        return safe_load_unique(text)
+    except DuplicateKeyError as duplicate:
+        raise RuleError(f"{source}: {duplicate}") from duplicate
     except yaml.YAMLError as invalid:
         raise RuleError(f"{source}: not valid YAML: {invalid}") from invalid
+
+
+def _check_regex(pattern, target, rule_id, source):
+    """Refuse a regex that cannot do its job: one that does not compile, one
+    that matches at the start of any text (`x*`, `^`, `(foo)?`: it would
+    report every line, or every path, so its real findings drown — `^$`,
+    which matches only empty lines, is fine), and — for `target: line` — one that needs a
+    newline, which no line contains because lines are split on it: a rule that
+    loads, runs and can never fire."""
+    try:
+        compiled = re.compile(pattern)
+    except re.error as invalid:
+        raise RuleError(
+            f"{source}: rule {rule_id!r} has a pattern that is not a valid "
+            f"regex: {invalid}. Caught now rather than mid-sweep, which "
+            "would already have spent the budget for the rules before it."
+        ) from invalid
+    if all(compiled.match(probe) for probe in EVERY_LINE_PROBES):
+        raise RuleError(
+            f"{source}: rule {rule_id!r} has a pattern that matches the empty "
+            "string at the start of any text, so it would report every line "
+            "(or path) it is given and its real findings would drown. Make it "
+            "require at least one character."
+        )
+    if target == "line" and _needs_newline(compiled):
+        raise RuleError(
+            f"{source}: rule {rule_id!r} has a pattern containing a newline, "
+            "but `target: line` matches one line at a time, without its "
+            "newline, so it could never match. Match within a line instead."
+        )
+
+
+def _needs_newline(compiled):
+    """Whether the parsed regex has a literal newline outside a character
+    class. Read from the parse tree, not the text, because `\n`, `\x0a`,
+    `\012` and a raw newline all mean one, and `[^\n]` — the common, harmless
+    case — is inside a class. A newline in an optional branch counts too: that
+    branch is dead, which is still a mistake worth naming."""
+    try:
+        from re import _parser as parser  # 3.11+
+    except ImportError:  # 3.9, 3.10: the same module, before its rename
+        import sre_parse as parser
+
+    def subpatterns(value):
+        if isinstance(value, parser.SubPattern):
+            yield value
+        elif isinstance(value, (list, tuple)):
+            for item in value:
+                yield from subpatterns(item)
+
+    def walk(pattern):
+        for op, value in pattern:
+            if op is parser.LITERAL and value == ord("\n"):
+                return True
+            if op is not parser.IN and any(walk(sub) for sub in subpatterns(value)):
+                return True
+        return False
+
+    return walk(parser.parse(compiled.pattern, compiled.flags))
 
 
 def _present(value):

@@ -191,3 +191,19 @@ def test_the_template_states_the_lint_threshold():
 
     assert "fail_on:" in text
     assert load_config_text(text)["rules"]["fail_on"] == DEFAULTS["rules"]["fail_on"]
+
+
+def test_a_duplicate_key_is_reported_not_last_wins():
+    """`fail_on: error` then `fail_on: info` would silently loosen the gate."""
+    from curamoir.config import load_config_text
+
+    with pytest.raises(ConfigError, match="fail_on"):
+        load_config_text("rules:\n  fail_on: error\n  fail_on: info\n")
+
+
+def test_a_merge_key_may_still_be_overridden():
+    """`<<: *base` then the key itself is YAML's override idiom, not a duplicate."""
+    from curamoir.config import load_config_text
+
+    config = load_config_text("rules:\n  <<: {fail_on: error}\n  fail_on: info\n")
+    assert config["rules"]["fail_on"] == "info"

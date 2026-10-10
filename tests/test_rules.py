@@ -439,3 +439,100 @@ def test_doctor_says_so_when_nothing_is_mechanically_enforced(tmp_path):
 
     assert finding.level == "warning"
     assert "rules-authoring" in (finding.fix or "")
+
+
+# --- nothing in rules/ is silently ignored --------------------------------
+
+def test_a_subdirectory_of_rules_is_refused_not_ignored(tmp_path):
+    """Rules are loaded from the directory itself; one filed under a
+    subdirectory would never run while its author believes it does."""
+    repo = write(tmp_path, RULE)
+    (repo / ".curamoir" / "rules" / "python").mkdir()
+    write(repo, RULE.replace("no-bare-print", "nested"), name="python/nested.yaml")
+
+    with pytest.raises(RuleError, match="python"):
+        load_rules(repo)
+
+
+@pytest.mark.parametrize("name", ["Upper.YAML", "Mixed.Yml"])
+def test_a_rule_file_with_a_wrongly_cased_suffix_is_refused(tmp_path, name):
+    repo = write(tmp_path, RULE)
+    write(repo, RULE.replace("no-bare-print", "other"), name=name)
+
+    with pytest.raises(RuleError, match=name):
+        load_rules(repo)
+
+
+def test_an_unrecognised_file_in_rules_is_refused(tmp_path):
+    repo = write(tmp_path, RULE)
+    write(repo, "id: x\n", name="no-shell.yaml.disabled")
+
+    with pytest.raises(RuleError, match=r"no-shell\.yaml\.disabled"):
+        load_rules(repo)
+
+
+@pytest.mark.parametrize("name", ["NOTES.md", ".gitkeep", ".DS_Store"])
+def test_notes_and_dotfiles_in_rules_are_allowed(tmp_path, name):
+    repo = write(tmp_path, RULE)
+    (repo / ".curamoir" / "rules" / name).write_text("notes\n", encoding="utf-8")
+
+    assert len(load_rules(repo)) == 1
+
+
+def test_a_directory_named_like_a_rule_file_is_a_load_error(tmp_path):
+    repo = write(tmp_path, RULE)
+    (repo / ".curamoir" / "rules" / "x.yaml").mkdir()
+
+    with pytest.raises(RuleError, match=r"x\.yaml"):
+        load_rules(repo)
+
+
+def test_a_rules_path_that_is_a_file_is_a_load_error_not_no_rules(tmp_path):
+    (tmp_path / ".curamoir").mkdir()
+    (tmp_path / ".curamoir" / "rules").write_text("id: x\n", encoding="utf-8")
+
+    with pytest.raises(RuleError, match="rules"):
+        load_rules(tmp_path)
+
+
+def test_a_duplicate_key_in_a_rule_is_refused(tmp_path):
+    """Last-wins would let a second `severity:` quietly replace the first."""
+    text = RULE + "severity: info\n"
+
+    with pytest.raises(RuleError, match="severity"):
+        load_rules(write(tmp_path, text))
+
+
+# --- a regex rule that could never fire, or always fires ------------------
+
+@pytest.mark.parametrize("pattern", ["'print\\(\\n'", '"print\\n"', "'a\\x0ab'"])
+def test_a_line_regex_that_needs_a_newline_is_refused(tmp_path, pattern):
+    """Lines are matched one at a time, without their `\\n`, so a pattern that
+    needs one can never match: a rule that checks nothing."""
+    text = RULE.replace("pattern: '^\\s*print\\('", f"pattern: {pattern}")
+    assert f"pattern: {pattern}" in text
+
+    with pytest.raises(RuleError, match="newline"):
+        load_rules(write(tmp_path, text))
+
+
+def test_a_negated_newline_class_is_fine(tmp_path):
+    text = RULE.replace("pattern: '^\\s*print\\('", "pattern: 'print\\([^\\n]*'")
+
+    assert load_rules(write(tmp_path, text))[0].pattern == "print\\([^\\n]*"
+
+
+@pytest.mark.parametrize("pattern", ["'x*'", "'^'", "'(print)?'", "'.*'"])
+def test_a_regex_that_matches_at_the_start_of_any_line_is_refused(tmp_path, pattern):
+    """It would report every line, burying whatever it was written to find."""
+    text = RULE.replace("pattern: '^\\s*print\\('", f"pattern: {pattern}")
+    assert f"pattern: {pattern}" in text
+
+    with pytest.raises(RuleError, match="empty"):
+        load_rules(write(tmp_path, text))
+
+
+def test_a_regex_for_empty_lines_is_not_refused_for_matching_empty_text(tmp_path):
+    text = RULE.replace("pattern: '^\\s*print\\('", "pattern: '^$'")
+
+    assert load_rules(write(tmp_path, text))[0].pattern == "^$"

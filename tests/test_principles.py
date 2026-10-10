@@ -265,3 +265,13 @@ def test_the_fixture_defines_every_principle_its_planted_violations_cite():
     }
     assert cited, "the fixture cites no principle ids, so this test proves nothing"
     assert cited <= defined, f"cited but undefined: {sorted(cited - defined)}"
+
+
+def test_ids_whose_anchors_collide_are_refused():
+    """E2-R4 links each violation to `principles.md#<anchor>`, and a renderer
+    lowercases headings: `no-print` and `No-Print` share one anchor, so one
+    principle's violations would link to the other's `why`."""
+    second = ONE.replace("structured-logging", "Structured-Logging").split("\n", 2)[2]
+
+    with pytest.raises(PrincipleError, match="anchor"):
+        parse_principles(ONE + "\n" + second)

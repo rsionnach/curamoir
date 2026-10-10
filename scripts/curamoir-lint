@@ -19,8 +19,30 @@
 set -uo pipefail
 
 # Parameter expansion rather than `dirname`, so locating src/ does not depend
-# on PATH (a pre-commit or CI environment can be very sparse).
+# on PATH (a pre-commit or CI environment can be very sparse). When invoked
+# through a symlink (how a checkout is usually put on PATH), the link is
+# followed to the real script first, since src/ is beside that, not the link.
+# `readlink` without `-f`, one hop at a time, because macOS's bash 3.2 era
+# userland has no `readlink -f`; it is the one external command this needs,
+# and only when there is a symlink. The hop limit stops a symlink loop.
 source="${BASH_SOURCE[0]}"
+hops=0
+while [ -L "$source" ]; do
+  hops=$((hops + 1))
+  link="$(readlink "$source")" && [ "$hops" -le 40 ] || {
+    echo "curamoir-lint: cannot resolve the symlink $source to its own directory" >&2
+    exit 2
+  }
+  case "$link" in
+    /*) source="$link" ;;
+    *)
+      case "$source" in
+        */*) source="${source%/*}/$link" ;;
+        *) source="$link" ;;
+      esac
+      ;;
+  esac
+done
 case "$source" in
   */*) here="${source%/*}" ;;
   *) here="." ;;
@@ -51,6 +73,9 @@ root="$(cd "$here/.." && pwd)" || { echo "curamoir-lint: cannot locate its own d
 invoked_from="$PWD"
 inherited_pythonpath=""
 IFS=: read -r -a entries <<< "${PYTHONPATH:-}"
+# `${entries[@]+"${entries[@]}"}` rather than `"${entries[@]}"`: with no
+# PYTHONPATH the array is empty, and bash before 4.4 (macOS ships 3.2) treats
+# expanding an empty array under `set -u` as an unbound variable and exits.
 for entry in ${entries[@]+"${entries[@]}"}; do
   case "$entry" in
     "") continue ;;

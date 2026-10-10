@@ -190,6 +190,7 @@ def parse_principles(text):
             )
         seen[principle.id] = line_number
         principles.append(principle)
+    _refuse_shared_anchors(principles)
 
     return PrinciplesFile(
         preamble=tuple(preamble),
@@ -197,6 +198,32 @@ def parse_principles(text):
         trailer=(),
         ends_with_newline=ends_with_newline,
     )
+
+
+def anchor(heading):
+    """The fragment a Markdown renderer gives `## <heading>`: lowercased, with
+    anything but word characters, spaces and hyphens dropped, spaces to hyphens.
+    Principle ids are slugs already, so this is usually the id unchanged."""
+    slug = re.sub(r"[^\w\- ]", "", heading.strip().lower())
+    return slug.replace(" ", "-")
+
+
+def _refuse_shared_anchors(principles):
+    """E2-R4 links every violation to `principles.md#<anchor>`. Two ids that
+    differ only in what a renderer drops — `no-print` and `No-Print` — share an
+    anchor, so one principle's violations would link to the other's `why`."""
+    owners = {}
+    for principle in principles:
+        slug = anchor(principle.id)
+        if slug in owners:
+            first = owners[slug]
+            raise PrincipleError(
+                f"principles {first.id!r} (line {first.line_number}) and "
+                f"{principle.id!r} (line {principle.line_number}) have the same "
+                f"heading anchor, #{slug}, so a link to one opens the other. "
+                "Rename one of them."
+            )
+        owners[slug] = principle
 
 
 def serialise_principles(parsed):
