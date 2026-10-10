@@ -1,0 +1,19 @@
+# typed-errors, for Python. Matches `raise RuntimeError(...)`, chained or not:
+# a `from error` adds context but the caller still cannot catch it by name.
+#
+# One base class per rule, because a rule has one pattern. `raise
+# Exception(...)` is the same principle; copy this file as
+# `no-raise-bare-exception.yaml` with that pattern if your code has it.
+# Builtins with a precise meaning (`ValueError`, `KeyError`) are not matched.
+#
+# Tests are excluded: the principle is about application code, and a test
+# double raising RuntimeError to simulate a failure is not one.
+id: no-raise-runtime-error
+principle: typed-errors
+severity: warning
+matcher: ast-grep
+pattern: 'raise RuntimeError($$$ARGS)'
+message: "{match} raises a base class no caller can catch without catching everything"
+fix: "define a domain error (class RateLoadError(ProjectError): ...) and raise that, chaining the cause with `from error`"
+languages: [python]
+exclude: ["**/tests/**", "**/test_*.py", "**/*_test.py", "**/conftest.py"]

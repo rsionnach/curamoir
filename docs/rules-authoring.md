@@ -13,6 +13,10 @@ Rules are how a principle gets promoted from `principle` to `rule` on the
 ladder — so you write one when you have corrected the same violation about
 three times and are tired of saying it.
 
+Working examples against the starter principles, in Python and TypeScript, are
+in `examples/`; its README says how to install them and what each does not
+catch.
+
 ## The shape
 
 Required fields only:

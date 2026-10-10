@@ -76,9 +76,41 @@ def test_every_planted_violation_is_actually_present_at_its_recorded_line(manife
         )
 
 
+def test_every_bundled_rule_finding_is_present_at_its_recorded_line(manifest):
+    """E2-R6's plants: what the bundled example rules in `examples/` must find.
+    The same anti-drift check as for `violations`."""
+    findings = manifest["bundled_rule_findings"]
+
+    assert findings
+    for finding in findings:
+        path = FIXTURE / finding["path"]
+        assert path.is_file(), finding
+        lines = path.read_text(encoding="utf-8").splitlines()
+        assert 1 <= finding["line"] <= len(lines), finding
+        assert finding["evidence"] in lines[finding["line"] - 1], (
+            f"{finding['path']}:{finding['line']} no longer contains "
+            f"{finding['evidence']!r} — the fixture has drifted"
+        )
+
+
+def test_bundled_rule_findings_cite_starter_principles(manifest):
+    """They are checked against `templates/principles.md`, not the fixture's
+    three-principle subset: the examples are written for a repo `/curamoir:init`
+    seeded, and two of them cite principles E3's subset leaves out."""
+    from curamoir.principles import parse_principles
+
+    starter = parse_principles(
+        (ROOT / "templates" / "principles.md").read_text(encoding="utf-8")
+    )
+    defined = {p.id for p in starter.principles}
+
+    for finding in manifest["bundled_rule_findings"]:
+        assert finding["principle_id"] in defined, finding
+
+
 def test_every_planted_item_names_the_criterion_that_needs_it(manifest):
     """So a later reader can tell why a plant exists before changing it."""
-    for group in ("violations", "bugs"):
+    for group in ("violations", "bugs", "bundled_rule_findings"):
         for item in manifest[group]:
             assert item["needed_by"], item
 

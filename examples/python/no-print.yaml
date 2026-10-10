@@ -1,0 +1,17 @@
+# structured-logging, for Python. Matches every call to the builtin `print`,
+# however its arguments are laid out — including `print(..., file=sys.stderr)`,
+# which is still output with no level or logger name.
+#
+# The principle exempts CLI entry points, where logging is initialised. A
+# pattern cannot know which code is an entry point, so the exemption is by
+# file name: extend `exclude` with your own entry points rather than deleting
+# the rule.
+id: no-print
+principle: structured-logging
+severity: error
+matcher: ast-grep
+pattern: 'print($$$ARGS)'
+message: "{match} writes to stdout or stderr with no level, logger name or structure"
+fix: "logger = logging.getLogger(__name__) at module level, then logger.info(...) or logger.debug(...)"
+languages: [python]
+exclude: ["**/cli.py", "**/__main__.py", "**/conftest.py"]

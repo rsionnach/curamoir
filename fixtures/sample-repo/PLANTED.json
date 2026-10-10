@@ -38,6 +38,49 @@
       "needed_by": "E2-R3 regex matcher (DEC-3 escape hatch: no AST pattern matches a filename)"
     }
   ],
+  "_bundled_rule_findings_comment": "What the bundled example rules in examples/ must find here, exactly (E2-R6). Kept out of `violations` because E3's criterion is exactly 5 violations across 3 principles, and two of these principles are not in this fixture's principles.md: the examples are checked against a copy seeded with templates/principles.md, as /curamoir:init seeds a repo. Line numbers are generated, as above.",
+  "bundled_rule_findings": [
+    {
+      "rule_id": "no-print",
+      "principle_id": "structured-logging",
+      "path": "src/sample/core/billing.py",
+      "line": 15,
+      "evidence": "print(\"calculating line total\")",
+      "needed_by": "E2-R6: the bundled Python structured-logging rule; the same plant as in `violations`"
+    },
+    {
+      "rule_id": "no-print",
+      "principle_id": "structured-logging",
+      "path": "src/sample/web/handlers.py",
+      "line": 22,
+      "evidence": "print(f\"request failed: {exception}\")",
+      "needed_by": "E2-R6: the bundled Python structured-logging rule; the same plant as in `violations`"
+    },
+    {
+      "rule_id": "no-raise-runtime-error",
+      "principle_id": "typed-errors",
+      "path": "src/sample/core/billing.py",
+      "line": 37,
+      "evidence": "raise RuntimeError(\"could not load rates\")",
+      "needed_by": "E2-R6: the bundled typed-errors rule. The same line as an errors-carry-context plant in `violations`; templates/principles.md gives it as the `bad` example of both principles"
+    },
+    {
+      "rule_id": "no-assert-mock-called",
+      "principle_id": "tests-assert-behaviour",
+      "path": "tests/test_billing.py",
+      "line": 30,
+      "evidence": "assert mock_open.called",
+      "needed_by": "E2-R6: the bundled tests-assert-behaviour rule"
+    },
+    {
+      "rule_id": "no-console-log",
+      "principle_id": "structured-logging",
+      "path": "src/sample/web/notify.ts",
+      "line": 5,
+      "evidence": "console.log(`notify: ${message}`);",
+      "needed_by": "E2-R6: the bundled TypeScript rule, the proof that the format is not Python-specific"
+    }
+  ],
   "bugs": [
     {
       "lens": "correctness",

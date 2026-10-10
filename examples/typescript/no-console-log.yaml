@@ -1,0 +1,16 @@
+# structured-logging, for TypeScript. Here to prove the rule format is not
+# Python-specific (spec operating assumption 6), so it is deliberately the
+# smallest rule that does: the same fields as the Python ones, a different
+# `languages`, an ast-grep pattern in TypeScript syntax.
+#
+# Matches `console.log(...)` only; `console.error`, `console.warn` and
+# `console.debug` are the same principle and each wants its own rule.
+id: no-console-log
+principle: structured-logging
+severity: error
+matcher: ast-grep
+pattern: 'console.log($$$ARGS)'
+message: "{match} writes to the console with no level, logger name or structure"
+fix: "use the project's logger (logger.info(...) or logger.debug(...)) instead of console.log"
+languages: [typescript]
+exclude: []
