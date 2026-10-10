@@ -41,7 +41,7 @@ import stat
 from dataclasses import dataclass
 from pathlib import Path
 
-from curamoir.config import DuplicateKeyError, safe_load_unique
+from curamoir.config import RefusedYAMLError, one_line, safe_load_unique
 from curamoir.principles import PrincipleError, load_principles
 
 #: E2-R3's required fields. `fix` is not among them, though E2-R4 prints it:
@@ -157,16 +157,23 @@ ROOT_EXCLUDED = ("build", "dist", "venv")
 RULE_SUFFIXES = (".yaml", ".yml")
 
 #: Deliberately dissimilar texts a regex is tried against at load: one that
-#: matches at the start of every one of them matches at the start of any line.
-EVERY_LINE_PROBES = ("", " ", "a", "0", "#", "}", "\t")
+#: finds an empty match somewhere in every one of them would find one on any
+#: line. Not the empty string, which `^$` (empty lines only) rightly matches.
+EVERY_LINE_PROBES = (" ", "a", "0", "#", "}", "\t", "abc")
 
 
 class RuleError(Exception):
     """A rule file could not be read as a rule.
 
     Every message names the file, because the reader's next action is to open
-    it, and the field, because that is the line to change.
+    it, and the field, because that is the line to change. Both come from the
+    repository, so the message is made one line here (see `one_line`): a
+    filename or value holding a newline or an escape sequence must not forge
+    a line of lint's or doctor's output.
     """
+
+    def __init__(self, message):
+        super().__init__(one_line(message))
 
 
 @dataclass(frozen=True)
@@ -443,7 +450,9 @@ def glob_regex(pattern):
     brackets they once were: `[[]` is a literal `[` (a Next.js `[id].tsx` is
     `[[]id].tsx`), and an unclosed `[` is literal. Raises `re.error` for a
     class that cannot compile, such as `[z-a]`; `parse_rule` turns that into a
-    load error.
+    load error. DOTALL, because a newline is a character a filename may hold:
+    without it `**` stopped at one, and a directory so named hid every file
+    under it from every `**/` rule.
     """
     out = []
     index = 0
@@ -466,7 +475,7 @@ def glob_regex(pattern):
         else:
             out.append(re.escape(pattern[index]))
             index += 1
-    return re.compile("".join(out))
+    return re.compile("".join(out), re.DOTALL)
 
 
 def _glob_class(pattern, start):
@@ -506,19 +515,25 @@ def _load_yaml(text, source):
         ) from missing
     try:
         return safe_load_unique(text)
-    except DuplicateKeyError as duplicate:
-        raise RuleError(f"{source}: {duplicate}") from duplicate
+    except RefusedYAMLError as refused:
+        raise RuleError(f"{source}: {refused}") from refused
     except yaml.YAMLError as invalid:
-        raise RuleError(f"{source}: not valid YAML: {invalid}") from invalid
+        # PyYAML's message spans lines (a caret under the offending column),
+        # which RuleError would escape into `\n`s; its words read better
+        # joined with spaces.
+        raise RuleError(f"{source}: not valid YAML: {' '.join(str(invalid).split())}") \
+            from invalid
 
 
 def _check_regex(pattern, target, rule_id, source):
     """Refuse a regex that cannot do its job: one that does not compile, one
-    that matches at the start of any text (`x*`, `^`, `(foo)?`: it would
-    report every line, or every path, so its real findings drown — `^$`,
-    which matches only empty lines, is fine), and — for `target: line` — one that needs a
-    newline, which no line contains because lines are split on it: a rule that
-    loads, runs and can never fire."""
+    that finds an empty match in any text (`x*`, `^`, `(foo)?`, `$`, `\\s*$`:
+    it would report every line, or every path, so its real findings drown —
+    `^$`, which matches only empty lines, is fine), and — for `target: line` —
+    one that needs a newline, which no line contains because lines are split
+    on it: a rule that loads, runs and can never fire. The probes are a
+    sample, not a proof: a pattern empty-matching only text unlike all of
+    them still loads."""
     try:
         compiled = re.compile(pattern)
     except re.error as invalid:
@@ -527,12 +542,12 @@ def _check_regex(pattern, target, rule_id, source):
             f"regex: {invalid}. Caught now rather than mid-sweep, which "
             "would already have spent the budget for the rules before it."
         ) from invalid
-    if all(compiled.match(probe) for probe in EVERY_LINE_PROBES):
+    if all(_finds_empty_match(compiled, probe) for probe in EVERY_LINE_PROBES):
         raise RuleError(
             f"{source}: rule {rule_id!r} has a pattern that matches the empty "
-            "string at the start of any text, so it would report every line "
-            "(or path) it is given and its real findings would drown. Make it "
-            "require at least one character."
+            "string in any text, so it would report every line (or path) it is "
+            "given and its real findings would drown. Make it require at least "
+            "one character."
         )
     if target == "line" and _needs_newline(compiled):
         raise RuleError(
@@ -540,6 +555,12 @@ def _check_regex(pattern, target, rule_id, source):
             "but `target: line` matches one line at a time, without its "
             "newline, so it could never match. Match within a line instead."
         )
+
+
+def _finds_empty_match(compiled, text):
+    """Whether `compiled` matches the empty string anywhere in `text` — at the
+    start (`x*`) or anywhere after (`$`, `\\s*$`, `\\Z`)."""
+    return any(found.start() == found.end() for found in compiled.finditer(text))
 
 
 def _needs_newline(compiled):

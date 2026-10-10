@@ -47,7 +47,10 @@ case "$source" in
   */*) here="${source%/*}" ;;
   *) here="." ;;
 esac
-root="$(cd "$here/.." && pwd)" || { echo "curamoir-lint: cannot locate its own directory" >&2; exit 2; }
+# `-P`, so `..` is the parent of the directory the script really is in: when
+# `scripts/` itself is a symlink (the script inside it is not), the logical
+# `..` would be the link's parent, which has no `src/`.
+root="$(cd -P "$here/.." && pwd -P)" || { echo "curamoir-lint: cannot locate its own directory" >&2; exit 2; }
 
 # Python must never start in the repository being linted. `python -c` and
 # `python -m` put the working directory at sys.path[0], AHEAD of PYTHONPATH, and

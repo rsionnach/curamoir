@@ -139,7 +139,9 @@ Some directories are never searched whatever a rule says:
   environment directories there, but ordinary package names below it
   (`src/app/build/`, `cmd/dist/`), which are searched. A nested virtualenv
   named `venv` is therefore searched too; exclude it in the rule
-  (`exclude: ["**/venv/**"]`).
+  (`exclude: ["**/venv/**"]`). "Root" is the directory given as `--repo`:
+  linting a monorepo's subpackage with `--repo packages/web` prunes
+  `packages/web/build`, not `build` at the top of the monorepo.
 
 ## The message is read by an agent
 
@@ -170,12 +172,17 @@ naming the file and the field:
 - more than one principle
 - an unknown severity or matcher
 - a regex that does not compile
-- a regex that matches at the start of any text (`x*`, `^`, `(foo)?`, `.*`),
-  which would report every line; `^$`, which matches only empty lines, is fine
+- a regex that matches the empty string in any text (`x*`, `^`, `(foo)?`,
+  `.*`, `$`, `\s*$`), which would report every line; `^$`, which matches only
+  empty lines, and `\s+$` are fine
 - a `target: line` regex containing a newline (`\n`, `\x0a`, or a literal
   one) outside a character class: lines are matched without their newline,
   so it could never match. `[^\n]` is fine
 - a key given twice in one mapping (YAML would silently keep the last)
+- a YAML anchor, alias or merge key (`&name`, `*name`, `<<:`), here and in
+  `curamoir.yaml`: each sets a value away from the key it applies to, where a
+  reader of that key does not see it, and nothing in files this small needs
+  them
 - anything in `.curamoir/rules/` that is not a rule, a note or a dotfile (see
   the top of this page), or a `.curamoir/rules` that is not a directory
 - a message using a variable that does not exist
@@ -197,7 +204,8 @@ scripts/curamoir-lint [--repo PATH] [--format human|json] [--fail-on info|warnin
                       [--timeout SECONDS]
 ```
 
-`--timeout` bounds the whole run (default 600 seconds; `0` for no bound). Ten
+`--timeout` bounds the whole run (default 600 seconds; `0` for no bound; at
+most 1000000). Ten
 minutes is far above a healthy run and inside CI job limits, so reaching it
 means something is stuck, and the run exits 2 saying so rather than being
 killed with no reason or hanging a pre-commit. It is the only bound there is
@@ -225,7 +233,10 @@ reported as incomplete even if what did run found something. When rules were
 skipped — ast-grep missing, or a rule that could not search every file in
 its scope — the partial report is still printed, each skipped rule is in
 `rules_skipped` with the files named where they are known, and the other
-rules' findings are kept. For every other `2`, stdout is empty and the reason
+rules' findings are kept. So are a skipped rule's own findings in the files
+it did search: they are real violations, and are listed in `violations` like
+any other, while the rule stays in `rules_skipped` (not `rules_checked`) and
+the run exits 2, because what it could not search has not been shown clean. For every other `2`, stdout is empty and the reason
 is on stderr.
 
 The threshold is `--fail-on`, else `rules.fail_on` in `.curamoir/curamoir.yaml`,
@@ -298,12 +309,18 @@ src/sample/core/billing.py:15:5: error [structured-logging/no-bare-print] print(
 ```
 
 One block per violation, in location order, then a summary line: how many
-violations, from how many rules that ran, and how many meet the threshold.
+violations, from how many rules that ran (and, if any were skipped, how
+many), and how many meet the threshold.
 Each field is kept to its own line: newlines and other control characters in
 a path, message, rule or fix are shown escaped (`\n`, `\x1b`), so a match
-spanning lines cannot forge a `fix:` line. The JSON carries them as they are.
-In both formats a filename that is not valid UTF-8 is shown with its bad bytes
-escaped (`bad\xff.py`).
+spanning lines cannot forge a `fix:` line. Every note on stderr is escaped
+the same way, since most quote the repository: a filename, a config key,
+ast-grep's own message. The escaping is one-way — a file named with a
+backslash and an `n` prints exactly like one named with a newline — so where
+the exact name matters, read the JSON: its `path`, `line` and `col` are
+exact, with control characters carried as JSON escapes. In both formats a
+filename that is not valid UTF-8 is shown with its bad bytes escaped
+(`bad\xff.py`), the one case where the JSON is not the name byte for byte.
 
 ### In CI and pre-commit
 
@@ -411,7 +428,9 @@ runner into CI or pre-commit.
   `curamoir-lint` runs as its own process (as the wrapper does). Where that
   is unavailable — Windows, or `curamoir.lint.main` called from a non-main
   thread — the run has no overall bound, and only each `ast-grep` call is
-  limited, by the same number of seconds.
+  limited, by the same number of seconds. When a call is cut off, ast-grep's
+  whole process group is killed, so an `ast-grep` that is a wrapper script
+  around the real binary leaves nothing running (Windows: only the child).
 - `python -m curamoir.lint` directly (without the wrapper) lints relative to
   its own working directory, and reads `CURAMOIR_LINT_INVOKED_FROM` if set: a
   directory to change to first, which is how the wrapper passes on where it

@@ -62,6 +62,23 @@ def test_invalid_config_is_an_error_naming_the_offending_key(tmp_path):
     assert any(len(f.detail.splitlines()) >= 1 for f in config)
 
 
+def test_a_duplicate_key_in_config_is_named_by_doctor_and_status(tmp_path):
+    """The hooks fall back to the defaults on an invalid config, by policy; so
+    the two commands a person runs to look must say which key is the problem."""
+    from curamoir.status import collect_status, render_status
+
+    repo = initialised(tmp_path)
+    (repo / ".curamoir" / "curamoir.yaml").write_text(
+        "version: 1\nrules:\n  fail_on: error\n  fail_on: info\n", encoding="utf-8")
+
+    findings = diagnose(repo, tools={"python3": True, "yaml": True})
+    rendered = render_status(collect_status(repo))
+
+    config = by_name(findings, "config")
+    assert any(f.level == "error" and "fail_on: duplicate key" in f.detail for f in config)
+    assert "fail_on: duplicate key" in rendered
+
+
 def test_missing_bd_is_degraded_not_an_error(tmp_path):
     """filing.beads: auto means GitHub-only with a ledger note, which is a
     documented mode rather than a failure."""

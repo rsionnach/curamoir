@@ -339,6 +339,10 @@ def test_an_unscoped_ast_grep_rule_defaults_to_languages_it_can_parse(tmp_path):
     ("**/*.py", "setup.py", True),
     ("**/*.py", "a/b/c.py", True),
     ("*.py", "a/b.py", False),
+    # A newline is a character a name may hold; `**` must not stop at one, or
+    # a directory named with one would hide everything under it from a rule.
+    ("**/*.py", "a\nb/c.py", True),
+    ("src/**", "src/a\nb/c.txt", True),
 ])
 def test_globs_support_character_classes(pattern, path, matches):
     from curamoir.rules import glob_regex
@@ -522,8 +526,9 @@ def test_a_negated_newline_class_is_fine(tmp_path):
     assert load_rules(write(tmp_path, text))[0].pattern == "print\\([^\\n]*"
 
 
-@pytest.mark.parametrize("pattern", ["'x*'", "'^'", "'(print)?'", "'.*'"])
-def test_a_regex_that_matches_at_the_start_of_any_line_is_refused(tmp_path, pattern):
+@pytest.mark.parametrize("pattern", ["'x*'", "'^'", "'(print)?'", "'.*'", "'$'", "'\\s*$'",
+                                     "'[ \\t]*$'", "'\\Z'", "'\\r?$'"])
+def test_a_regex_that_matches_empty_text_on_any_line_is_refused(tmp_path, pattern):
     """It would report every line, burying whatever it was written to find."""
     text = RULE.replace("pattern: '^\\s*print\\('", f"pattern: {pattern}")
     assert f"pattern: {pattern}" in text
@@ -536,3 +541,43 @@ def test_a_regex_for_empty_lines_is_not_refused_for_matching_empty_text(tmp_path
     text = RULE.replace("pattern: '^\\s*print\\('", "pattern: '^$'")
 
     assert load_rules(write(tmp_path, text))[0].pattern == "^$"
+
+
+@pytest.mark.parametrize("pattern", ["'\\s+$'", "'^$'", "'[ \\t]+$'"])
+def test_a_regex_that_needs_something_to_match_is_not_refused(tmp_path, pattern):
+    text = RULE.replace("pattern: '^\\s*print\\('", f"pattern: {pattern}")
+    assert f"pattern: {pattern}" in text
+
+    assert load_rules(write(tmp_path, text))
+
+
+@pytest.mark.parametrize("extra", [
+    "<<: {severity: info}\n",
+    "fix: &f fixed\n",
+])
+def test_merge_keys_and_anchors_are_refused_in_a_rule(tmp_path, extra):
+    with pytest.raises(RuleError, match=r"merge|anchor|alias"):
+        load_rules(write(tmp_path, RULE.replace("fix:", "old_fix:").replace(
+            "old_fix: ", "# ") + extra))
+
+
+def test_a_value_echoed_in_a_rule_error_cannot_redraw_the_terminal(tmp_path):
+    text = RULE.replace("languages: [python]", 'languages: ["py\\e[31m\\nforged"]')
+
+    with pytest.raises(RuleError) as caught:
+        load_rules(write(tmp_path, text))
+
+    assert "\x1b" not in str(caught.value)
+    assert "\n" not in str(caught.value)
+
+
+def test_a_filename_echoed_in_a_rule_error_cannot_redraw_the_terminal(tmp_path):
+    repo = write(tmp_path, RULE)
+    (repo / ".curamoir" / "rules" / "evil\x1b[2J\nforged.txt").write_text("", encoding="utf-8")
+
+    with pytest.raises(RuleError) as caught:
+        load_rules(repo)
+
+    assert "\x1b" not in str(caught.value)
+    assert "\n" not in str(caught.value)
+    assert "evil\\x1b[2J\\nforged.txt" in str(caught.value)

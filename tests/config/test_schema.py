@@ -201,9 +201,50 @@ def test_a_duplicate_key_is_reported_not_last_wins():
         load_config_text("rules:\n  fail_on: error\n  fail_on: info\n")
 
 
-def test_a_merge_key_may_still_be_overridden():
-    """`<<: *base` then the key itself is YAML's override idiom, not a duplicate."""
+@pytest.mark.parametrize("text", [
+    # Two merge keys in one mapping: once passed the duplicate check unseen.
+    "x: &a {fail_on: info}\nrules:\n  <<: *a\n  <<: {fail_on: info}\n",
+    "rules:\n  <<: {fail_on: info}\n  <<: {matcher: regex}\n",
+    # One merge key, setting fail_on where a reader of `rules:` sees no fail_on.
+    "rules:\n  <<: {fail_on: info}\n  matcher: regex\n",
+    # The override idiom: fail_on is in plain view, but so is a merge.
+    "rules:\n  <<: {fail_on: error}\n  fail_on: info\n",
+])
+def test_a_merge_key_is_refused(text):
+    """A merge sets a key away from where a reader looks for it; nothing in a
+    file this small needs one."""
     from curamoir.config import load_config_text
 
-    config = load_config_text("rules:\n  <<: {fail_on: error}\n  fail_on: info\n")
-    assert config["rules"]["fail_on"] == "info"
+    with pytest.raises(ConfigError, match=r"merge|anchor"):
+        load_config_text(text)
+
+
+@pytest.mark.parametrize("text", [
+    "rules:\n  matcher: &m regex\n  fail_on: error\nsmoke:\n  command: *m\n",
+    "rules:\n  matcher: &m regex\n",
+])
+def test_anchors_and_aliases_are_refused(text):
+    """An alias sets a value where it is not written; an anchor is only there
+    to be aliased."""
+    from curamoir.config import load_config_text
+
+    with pytest.raises(ConfigError, match=r"anchor|alias"):
+        load_config_text(text)
+
+
+@pytest.mark.parametrize("text", [
+    'rules:\n  "a\\e[31m\\n  - forged": 1\n  "a\\e[31m\\n  - forged": 2\n',
+    '"evil\\e[2J\\n  - forged": 1\n',
+    'budget:\n  prices:\n    "m\\e[1m\\n  - forged": {input: x, output: 1}\n',
+])
+def test_a_key_echoed_in_an_error_cannot_forge_a_line_or_redraw_the_terminal(text):
+    """lint, doctor and status all print these; a key is the file's to choose."""
+    from curamoir.config import load_config_text
+
+    with pytest.raises(ConfigError) as caught:
+        load_config_text(text)
+
+    message = str(caught.value)
+    assert "\x1b" not in message
+    assert "\\x1b" in message
+    assert not any(line.startswith("  - forged") for line in message.splitlines())

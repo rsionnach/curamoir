@@ -1470,3 +1470,220 @@ def test_a_path_that_is_not_utf8_is_shown_escaped_in_both_formats():
     assert "bad\\xff.py:1:1" in human
     document.encode("utf-8")
     human.encode("utf-8")
+
+
+# --- nothing the repo controls reaches stderr unescaped -----------------------
+
+HOSTILE_NAME = "evil\x1b[31m\ncuramoir-lint: forged.py"
+
+
+def _assert_stderr_is_ours(err):
+    """Every stderr line is one of the runner's notes, and none redraws the
+    terminal: a committed filename must not forge a CI log line."""
+    assert "\x1b" not in err
+    assert all(line.startswith("curamoir-lint: ") for line in err.splitlines()), err
+    assert not any(line.startswith("curamoir-lint: forged") for line in err.splitlines())
+
+
+def test_repo_controlled_names_reach_stderr_escaped(tmp_path, capsys, monkeypatch):
+    """A symlink, a FIFO and a file with no ast-grep grammar, each named to
+    forge a line and recolour the terminal. All three are named on stderr."""
+    repo = sample_repo(tmp_path, _ast_grep_rule('files: ["src/**"]'))
+    (repo / "src" / (HOSTILE_NAME + ".link")).symlink_to(repo / "README.md")
+    os.mkfifo(repo / "src" / (HOSTILE_NAME + ".fifo"))
+    (repo / "src" / (HOSTILE_NAME + ".txt")).write_text("x\n", encoding="utf-8")
+    fake = fake_ast_grep(tmp_path, stdout="[]", exit_code=1)
+    monkeypatch.setenv("PATH", str(Path(fake).parent))
+
+    code, _, err = lint(repo, capsys=capsys)
+
+    assert code == EXIT_ERROR
+    _assert_stderr_is_ours(err)
+    assert err.count("evil\\x1b[31m\\ncuramoir-lint: forged.py") >= 3
+
+
+def test_ast_grep_stderr_is_echoed_escaped(tmp_path, capsys, monkeypatch):
+    repo = sample_repo(tmp_path, AST_GREP_PRINT)
+    fake = fake_ast_grep(tmp_path, stdout="", exit_code=3,
+                         stderr="boom\x1b[2J\ncuramoir-lint: forged\n")
+    monkeypatch.setenv("PATH", str(Path(fake).parent))
+
+    code, _, err = lint(repo, capsys=capsys)
+
+    assert code == EXIT_ERROR
+    _assert_stderr_is_ours(err)
+    assert "boom\\x1b[2J" in err
+
+
+def test_a_hostile_config_key_reaches_stderr_escaped(tmp_path, capsys):
+    repo = sample_repo(tmp_path, *ALL_REGEX_RULES,
+                       config='rules:\n  "a\\e[31m\\ncuramoir-lint: forged": 1\n')
+
+    code, _, err = lint(repo, capsys=capsys)
+
+    assert code == EXIT_ERROR
+    _assert_stderr_is_ours(err)
+
+
+# --- review minors -------------------------------------------------------------
+
+@pytest.mark.parametrize("value", ["1e300", "1e7"])
+def test_a_timeout_too_large_for_the_timer_is_a_usage_error(capsys, value):
+    with pytest.raises(SystemExit) as caught:
+        main(["--timeout", value])
+
+    assert caught.value.code == EXIT_ERROR
+    assert "--timeout" in capsys.readouterr().err
+
+
+def _grandchild_spawning_ast_grep(tmp_path):
+    """A wrapper-script install of ast-grep: a shell that starts the real work
+    as a grandchild. Its pid is written down so the test can look for it."""
+    pidfile = tmp_path / "grandchild.pid"
+    script = tmp_path / "bin" / "ast-grep"
+    script.parent.mkdir(parents=True, exist_ok=True)
+    script.write_text(f"#!/bin/sh\n/bin/sleep 60 &\necho $! > '{pidfile}'\nwait\n",
+                      encoding="utf-8")
+    script.chmod(0o755)
+    return str(script), pidfile
+
+
+def _gone_within(pid, seconds):
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return True
+        time.sleep(0.05)
+    os.kill(pid, 9)  # do not leave it behind whatever the verdict
+    return False
+
+
+@pytest.mark.skipif(not hasattr(os, "killpg"), reason="process groups are POSIX")
+def test_a_timed_out_ast_grep_call_leaves_no_grandchild(tmp_path):
+    repo = sample_repo(tmp_path, AST_GREP_PRINT)
+    fake, pidfile = _grandchild_spawning_ast_grep(tmp_path)
+
+    with pytest.raises(LintError):
+        run_lint(repo, ast_grep=fake, ast_grep_timeout=1)
+
+    assert _gone_within(int(pidfile.read_text()), 5)
+
+
+@pytest.mark.skipif(not hasattr(os, "killpg"), reason="process groups are POSIX")
+def test_the_run_timeout_leaves_no_ast_grep_grandchild(tmp_path, capsys, monkeypatch):
+    repo = sample_repo(tmp_path, AST_GREP_PRINT)
+    fake, pidfile = _grandchild_spawning_ast_grep(tmp_path)
+    monkeypatch.setenv("PATH", str(Path(fake).parent))
+
+    code, _, err = lint(repo, "--timeout", "1", capsys=capsys)
+
+    assert code == EXIT_ERROR
+    assert "did not finish within 1" in err
+    assert _gone_within(int(pidfile.read_text()), 5)
+
+
+def test_the_wrapper_runs_from_a_symlinked_scripts_directory(tmp_path):
+    """`ln -s /opt/curamoir/scripts ~/tools`: the script itself is not a
+    symlink, its directory is, and `src/` is beside the real one."""
+    wrapper = _vendored_copy(tmp_path)
+    repo = sample_repo(tmp_path, *ALL_REGEX_RULES)
+    (tmp_path / "elsewhere").mkdir()
+    (tmp_path / "elsewhere" / "scripts").symlink_to(wrapper.parent, target_is_directory=True)
+
+    result = subprocess.run(
+        [str(tmp_path / "elsewhere" / "scripts" / "curamoir-lint"), "--repo", str(repo)],
+        capture_output=True, text=True, env=_environment(_shims(tmp_path)),
+    )
+
+    assert result.returncode == EXIT_VIOLATIONS, result.stderr
+
+
+@pytest.mark.parametrize("start", [{"line": -1, "column": 0}, {"line": 0, "column": -3}])
+def test_a_negative_ast_grep_location_is_a_runner_error(tmp_path, start):
+    repo = sample_repo(tmp_path, AST_GREP_PRINT)
+    record = {"text": "print(1)", "file": str(repo.resolve() / "src" / "x.py"),
+              "range": {"start": start}}
+
+    with pytest.raises(LintError, match="no-bare-print-ast"):
+        run_lint(repo, ast_grep=fake_ast_grep(tmp_path, stdout=json.dumps([record])))
+
+
+def test_a_size_guess_is_not_named_when_unreadable_files_explain_the_skip(tmp_path):
+    """ast-grep says how many it skipped, not which. One file is not UTF-8 and
+    one skip was reported, so the large file, which ast-grep searched, is not
+    named as a suspect."""
+    repo = sample_repo(tmp_path, AST_GREP_PRINT)
+    (repo / "src" / "legacy.py").write_bytes(b"name = 'caf\xe9'\n")
+    (repo / "src" / "big.py").write_text("x = 1\n" * 600_000, encoding="utf-8")
+
+    result = run_lint(repo, ast_grep=fake_ast_grep(tmp_path, stdout="[]", exit_code=1,
+                                                   skipped=1))
+
+    [skipped] = result.skipped
+    assert "src/legacy.py: not UTF-8" in skipped.reason
+    assert "big.py" not in skipped.reason
+
+
+def test_a_partly_searched_ast_grep_rule_keeps_what_it_found(tmp_path, capsys, monkeypatch):
+    """The rule is skipped (it did not search its whole scope, so exit 2), but
+    the matches it found in the files it did search are real and reported."""
+    repo = sample_repo(tmp_path, AST_GREP_PRINT)
+    fake = fake_ast_grep(tmp_path, stdout=recorded_output_for(repo), exit_code=0, skipped=1)
+    monkeypatch.setenv("PATH", str(Path(fake).parent))
+
+    code, out, _ = lint(repo, "--format", "json", capsys=capsys)
+
+    document = json.loads(out)
+    assert code == EXIT_ERROR
+    assert document["complete"] is False
+    assert document["rules_checked"] == []
+    assert [s["rule_id"] for s in document["rules_skipped"]] == ["no-bare-print-ast"]
+    assert [(v["rule_id"], v["line"]) for v in document["violations"]] == [
+        ("no-bare-print-ast", 15), ("no-bare-print-ast", 22)]
+
+
+def test_the_report_is_written_after_the_time_limit_is_lifted(tmp_path, monkeypatch):
+    """An alarm during the write would leave half a JSON document on stdout,
+    where an error run promises nothing. The report is rendered inside the
+    bound and written outside it."""
+    import contextlib
+    import io
+
+    import curamoir.lint as module
+
+    state = {"bounded": False}
+    writes = []
+
+    @contextlib.contextmanager
+    def recording_limit(seconds):
+        state["bounded"] = True
+        try:
+            yield
+        finally:
+            state["bounded"] = False
+
+    class Recorder(io.StringIO):
+        def write(self, text):
+            writes.append(state["bounded"])
+            return super().write(text)
+
+    monkeypatch.setattr(module, "_time_limit", recording_limit)
+    monkeypatch.setattr(sys, "stdout", Recorder())
+    repo = sample_repo(tmp_path, *ALL_REGEX_RULES)
+
+    assert main(["--repo", str(repo), "--format", "json"]) == EXIT_VIOLATIONS
+    assert writes and not any(writes)
+
+
+@pytest.mark.skipif(shutil.which("ast-grep") is None, reason="ast-grep is not installed")
+@pytest.mark.parametrize("content", [b"   \n\t\n", b"\xef\xbb\xbf", b"\r\n\r\n"],
+                         ids=["whitespace", "bom", "crlf"])
+def test_a_file_with_no_code_is_not_a_false_skip(tmp_path, content):
+    repo = sample_repo(tmp_path, AST_GREP_PRINT)
+    (repo / "src" / "blank.py").write_bytes(content)
+
+    result = run_lint(repo, ast_grep=shutil.which("ast-grep"))
+
+    assert result.complete, result.skipped

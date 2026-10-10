@@ -24,8 +24,9 @@ note on stderr, because a fresh repo is not a failing one:
 2 outranks 1, because "incomplete" is the more fundamental fact: a run that
 skipped half its rules and found one violation has not shown the other half
 clean. When rules were skipped the partial report is still printed, so the work
-it did find is not lost; for any other runner error stdout is empty and the
-reason is on stderr. (The one gap: if the interpreter cannot import this module
+it did find is not lost — including what a skipped rule found in the files it
+did search; for any other runner error stdout is empty and the reason is on
+stderr. (The one gap: if the interpreter cannot import this module
 at all, Python itself exits 1. The wrapper picks the interpreter carefully —
 cm-bzb — and this module keeps to syntax that imports on 3.9 for that reason.)
 
@@ -51,7 +52,10 @@ ast-grep never sees the repo's own `sgconfig.yml` (see `_ast_grep_batch`);
 and ast-grep is never found through a relative PATH entry (see
 `_which_ast_grep`). Anything in it that could stall the run — a regex that
 backtracks on a committed line, a file ast-grep chokes on — is bounded by
-`--timeout` (see `_time_limit`).
+`--timeout` (see `_time_limit`). And every string it supplies that reaches
+stderr — a filename, a config key, ast-grep's echo of either — is printed
+through `one_line`, so a committed name cannot forge a CI log line or redraw
+the terminal (see `_note`).
 """
 
 import argparse
@@ -66,11 +70,11 @@ import subprocess
 import sys
 import tempfile
 import threading
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from pathlib import Path
 
-from curamoir.config import DEFAULTS, ConfigError, load_config_text
+from curamoir.config import DEFAULTS, ConfigError, load_config_text, one_line, printable
 from curamoir.principles import PrincipleError, anchor, load_principles
 
 # AST_GREP_LANGUAGES lives in `rules` because `parse_rule` refuses an ast-grep
@@ -124,6 +128,11 @@ UTF8_BOM = b"\xef\xbb\xbf"
 #: being killed by CI with no reason given, or hanging a pre-commit forever.
 DEFAULT_TIMEOUT = 600
 
+#: The largest `--timeout`, in seconds (about eleven days). Far beyond any real
+#: run, and well inside what `setitimer` accepts: 1e300 overflowed it, which
+#: surfaced as an internal error rather than as a usage error.
+MAX_TIMEOUT = 1_000_000
+
 #: The empty ast-grep config written into the scratch directory and passed as
 #: `--config` (see `_ast_grep_batch`).
 SCRATCH_SGCONFIG = "sgconfig.yml"
@@ -142,12 +151,6 @@ AST_GREP_SUMMARY = re.compile(
 #: file and skipped a 4 MB one), so it is named as a likely cause.
 AST_GREP_LIKELY_TOO_LARGE = 3_000_000
 
-#: Characters that would break one record into several lines, or redraw the
-#: terminal: C0 and C1 controls, DEL, and the Unicode line and paragraph
-#: separators. Escaped in the human report.
-CONTROL_CHARACTERS = re.compile("[\x00-\x1f\x7f-\x9f\u2028\u2029]")
-
-
 class LintError(Exception):
     """The run cannot be trusted. Always exit 2, with this message on stderr."""
 
@@ -156,7 +159,15 @@ class RuleIncomplete(Exception):
     """One rule could not search every file in its scope. The rule is skipped
     and named, not raised as a LintError: it cannot be called checked, but the
     other rules' work list is still worth printing. Which files exist is the
-    repo's to choose, so one bad file in a PR must not blank the report."""
+    repo's to choose, so one bad file in a PR must not blank the report.
+
+    `matches` are what the rule found in the files it did search. They are
+    real, so they are reported; the rule is still skipped, so the run still
+    exits 2 — what it could not search has not been shown clean."""
+
+    def __init__(self, reason, matches=()):
+        super().__init__(reason)
+        self.matches = list(matches)
 
 
 class RunTimedOut(BaseException):
@@ -241,6 +252,7 @@ def run_lint(repo, ast_grep=None, ast_grep_timeout=DEFAULT_TIMEOUT):
         if reason is not None:
             skipped.append(reason)
             continue
+        complete = True
         try:
             if rule.matcher == "ast-grep":
                 matches = _ast_grep_matches(repo, rule, scoped, ast_grep, ast_grep_timeout)
@@ -248,7 +260,7 @@ def run_lint(repo, ast_grep=None, ast_grep_timeout=DEFAULT_TIMEOUT):
                 matches = _regex_matches(repo, rule, scoped)
         except RuleIncomplete as incomplete:
             skipped.append(Skipped(rule.id, str(incomplete)))
-            continue
+            matches, complete = incomplete.matches, False
         # load_rules has already resolved the id, so this cannot be None.
         principle = principles.by_id(rule.principle)
         for path, line, col, text in matches:
@@ -266,7 +278,8 @@ def run_lint(repo, ast_grep=None, ast_grep_timeout=DEFAULT_TIMEOUT):
                 why_link=f"{PRINCIPLES_PATH}#{anchor(rule.principle)}",
                 match=text,
             ))
-        checked.append(rule.id)
+        if complete:
+            checked.append(rule.id)
 
     violations.sort(key=lambda v: (v.path, v.line, v.col, v.rule_id))
     return LintResult(tuple(violations), tuple(checked), tuple(skipped), tuple(symlinks),
@@ -320,11 +333,11 @@ def format_json(result, fail_on):
         "version": SCHEMA_VERSION,
         "fail_on": fail_on,
         "complete": result.complete,
-        "rules_checked": [_printable(rule_id) for rule_id in result.checked],
-        "rules_skipped": [{"rule_id": _printable(s.rule_id), "reason": _printable(s.reason)}
+        "rules_checked": [printable(rule_id) for rule_id in result.checked],
+        "rules_skipped": [{"rule_id": printable(s.rule_id), "reason": printable(s.reason)}
                           for s in result.skipped],
         "violations": [
-            {name: _printable(value) if isinstance(value, str) else value
+            {name: printable(value) if isinstance(value, str) else value
              for name, value in v.record().items()}
             for v in result.violations
         ],
@@ -342,45 +355,30 @@ def format_human(result, fail_on):
     """
     lines = []
     for v in result.violations:
-        lines.append(_one_line(f"{v.path}:{v.line}:{v.col}: {v.severity} "
-                               f"[{v.principle_id}/{v.rule_id}] {v.message}"))
-        lines.append(f"    rule: {_one_line(v.principle_rule)}")
-        lines.append(f"    why:  {_one_line(v.why_link)}")
-        lines.append(f"    fix:  {_one_line(v.fix)}")
+        lines.append(one_line(f"{v.path}:{v.line}:{v.col}: {v.severity} "
+                              f"[{v.principle_id}/{v.rule_id}] {v.message}"))
+        lines.append(f"    rule: {one_line(v.principle_rule)}")
+        lines.append(f"    why:  {one_line(v.why_link)}")
+        lines.append(f"    fix:  {one_line(v.fix)}")
     failing = sum(1 for v in result.violations if _at_or_above(v.severity, fail_on))
     noun = "violation" if len(result.violations) == 1 else "violations"
+    # A skipped rule's violations are listed too (see RuleIncomplete), so the
+    # count of rules that ran is not the count the violations came from.
+    skipped = f"; {len(result.skipped)} rule(s) skipped" if result.skipped else ""
     lines.append(
-        f"{len(result.violations)} {noun} from {len(result.checked)} rule(s); "
+        f"{len(result.violations)} {noun} from {len(result.checked)} rule(s){skipped}; "
         f"{failing} at or above {fail_on!r}"
     )
     return "\n".join(lines) + "\n"
 
 
-def _printable(text):
-    """`text` as it can be written in UTF-8. A filename that is not UTF-8
-    reaches Python on Linux with surrogate escapes, which no encoder will
-    write, so the run would fail at the last step; shown instead as the bytes
-    it holds (`bad\\xff.py`), as `ls -b` would."""
-    try:
-        raw = text.encode("utf-8", "surrogateescape")
-    except UnicodeEncodeError:
-        # A surrogate that is not an escaped byte: not from the filesystem.
-        return text.encode("utf-8", "backslashreplace").decode("utf-8")
-    return raw.decode("utf-8", "backslashreplace")
-
-
-def _one_line(text):
-    """`text`, printable, with every control character escaped."""
-    return CONTROL_CHARACTERS.sub(_escape_control, _printable(text))
-
-
-def _escape_control(found):
-    character = found.group(0)
-    named = {"\n": "\\n", "\r": "\\r", "\t": "\\t"}.get(character)
-    if named:
-        return named
-    code = ord(character)
-    return f"\\x{code:02x}" if code < 0x100 else f"\\u{code:04x}"
+def _note(message):
+    """Write one line to stderr. Every stderr line goes through here, because
+    nearly every message quotes the repository — a filename, a config key,
+    ast-grep's echo of a path — and `one_line` escapes it, so a name holding a
+    newline or an escape sequence cannot forge a CI log line or redraw the
+    terminal."""
+    print(f"curamoir-lint: {one_line(message)}", file=sys.stderr)
 
 
 def main(argv=None):
@@ -417,79 +415,74 @@ def main(argv=None):
             result = run_lint(args.repo, ast_grep=_which_ast_grep(),
                               ast_grep_timeout=args.timeout or None)
             render = format_json if args.format == "json" else format_human
-            # Written and flushed inside the guard, so a report that cannot be
-            # written is a 2 like any other failure, not Python's 1.
-            sys.stdout.write(render(result, fail_on))
-            sys.stdout.flush()
+            report = render(result, fail_on)
+        # Written after the timer is cancelled, so an alarm cannot cut the
+        # report off half-way (leaving truncated JSON where an error run
+        # promises nothing), and still inside the guard, so a report that
+        # cannot be written is a 2 like any other failure, not Python's 1.
+        # The cost: a reader that stops reading blocks this write unbounded.
+        sys.stdout.write(report)
+        sys.stdout.flush()
     except RunTimedOut:
-        print(
-            f"curamoir-lint: the run did not finish within {args.timeout:g} seconds "
+        _note(
+            f"the run did not finish within {args.timeout:g} seconds "
             "(--timeout), so nothing it found can be trusted. A rule whose regex "
             "backtracks on some line, or a very large repository, are the likely "
-            "causes; raise --timeout for the second.",
-            file=sys.stderr,
+            "causes; raise --timeout for the second."
         )
         return EXIT_ERROR
     except LintError as failure:
-        print(f"curamoir-lint: {failure}", file=sys.stderr)
+        _note(str(failure))
         return EXIT_ERROR
     except BrokenPipeError:
         # The reader went away (`| head`). Point stdout at /dev/null so the
         # flush Python attempts at shutdown does not print a traceback, and
         # exit 2: whoever wanted the result did not get it.
         os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
-        print("curamoir-lint: stdout was closed before the report was written",
-              file=sys.stderr)
+        _note("stdout was closed before the report was written")
         return EXIT_ERROR
     except UnicodeEncodeError as unencodable:
-        print(
-            f"curamoir-lint: the report could not be written in stdout's encoding "
-            f"({unencodable.encoding}); set PYTHONIOENCODING=utf-8",
-            file=sys.stderr,
+        _note(
+            f"the report could not be written in stdout's encoding "
+            f"({unencodable.encoding}); set PYTHONIOENCODING=utf-8"
         )
         return EXIT_ERROR
     except Exception as unexpected:
         # Python exits 1 on an uncaught exception, which is this tool's code for
         # "violations found". A crash must not read as a lint result.
-        print(f"curamoir-lint: internal error: {unexpected!r}", file=sys.stderr)
+        _note(f"internal error: {unexpected!r}")
         return EXIT_ERROR
 
     if not result.checked and not result.skipped:
-        print(
-            "curamoir-lint: no rules in .curamoir/rules/, so nothing was checked. "
-            "See docs/rules-authoring.md to write one.",
-            file=sys.stderr,
+        _note(
+            "no rules in .curamoir/rules/, so nothing was checked. "
+            "See docs/rules-authoring.md to write one."
         )
     for skipped in result.skipped:
-        print(f"curamoir-lint: skipped {skipped.rule_id}: {skipped.reason}", file=sys.stderr)
+        _note(f"skipped {skipped.rule_id}: {skipped.reason}")
     if result.symlinks:
         # Names only, never targets or contents. Not an incomplete run: a
         # symlink is not repository content, and its target, if it is in the
         # repo, is linted at its own path.
-        print(
-            f"curamoir-lint: did not follow {len(result.symlinks)} symlink(s): "
-            + ", ".join(result.symlinks),
-            file=sys.stderr,
-        )
+        _note(f"did not follow {len(result.symlinks)} symlink(s): "
+              + ", ".join(result.symlinks))
     if result.not_regular:
         # Not an incomplete run either: git cannot store a FIFO, socket or
         # device, so none is repository content — and opening a FIFO blocks.
-        print(
-            f"curamoir-lint: did not read {len(result.not_regular)} item(s) that "
-            "are not regular files: " + ", ".join(result.not_regular),
-            file=sys.stderr,
-        )
+        _note(f"did not read {len(result.not_regular)} item(s) that are not "
+              "regular files: " + ", ".join(result.not_regular))
     return exit_code(result, fail_on)
 
 
 def _seconds(text):
-    """`--timeout`'s value: a finite number of seconds, 0 or more."""
+    """`--timeout`'s value: a number of seconds from 0 to MAX_TIMEOUT."""
     try:
         value = float(text)
     except ValueError:
         value = -1.0
-    if not math.isfinite(value) or value < 0:
-        raise argparse.ArgumentTypeError(f"{text!r} is not a number of seconds (0 or more)")
+    if not (math.isfinite(value) and 0 <= value <= MAX_TIMEOUT):
+        raise argparse.ArgumentTypeError(
+            f"{text!r} is not a number of seconds from 0 to {MAX_TIMEOUT}")
     return value
 
 
@@ -502,8 +495,8 @@ def _time_limit(seconds):
     backtracks. So this is POSIX-only (SIGALRM, via setitimer) and main-thread
     only. Elsewhere — Windows, or `main` called from a worker thread — the run
     has no overall bound and only each ast-grep call is limited, by its
-    subprocess timeout. An alarm arriving during a subprocess call kills the
-    child: `subprocess.run` does that for any exception.
+    subprocess timeout. An alarm arriving during an ast-grep call kills the
+    child's whole process group on its way out (see `_run_ast_grep`).
     """
     usable = (
         seconds
@@ -564,7 +557,11 @@ def _configured_threshold(repo):
                         "it may set cannot be read")
     try:
         config = load_config_text(path.read_text(encoding="utf-8"))
-    except (ConfigError, OSError) as invalid:
+    except ConfigError as invalid:
+        # One line, like every stderr note; ConfigError's own str lists the
+        # problems one per line.
+        raise LintError(f"{path}: invalid: " + "; ".join(invalid.problems)) from invalid
+    except OSError as invalid:
         raise LintError(f"{path}: {invalid}") from invalid
     except Exception as invalid:  # a YAML syntax error is PyYAML's own type
         raise LintError(f"{path}: not valid YAML: {invalid}") from invalid
@@ -711,7 +708,8 @@ def _regex_matches(repo, rule, files):
         raise RuleIncomplete(
             f"it could not read {len(unreadable)} file(s) in its scope "
             f"({', '.join(unreadable)}), so it did not check them. Make them "
-            "readable, or add them to `exclude:`."
+            "readable, or add them to `exclude:`.",
+            matches,
         )
     return matches
 
@@ -765,15 +763,26 @@ def _ast_grep_matches(repo, rule, files, binary, timeout):
     for path in files:
         if not _is_empty(repo / path):
             by_language.setdefault(_ast_grep_language(path), []).append(path)
-    matches = []
+    matches, unsearched = [], []
     with tempfile.TemporaryDirectory(prefix="curamoir-lint-") as scratch:
         (Path(scratch) / SCRATCH_SGCONFIG).write_text("ruleDirs: []\n", encoding="utf-8")
         for language, paths in sorted(by_language.items()):
             for start in range(0, len(paths), AST_GREP_BATCH):
-                matches.extend(_ast_grep_batch(
+                found, reason = _ast_grep_batch(
                     repo, rule, binary, language, paths[start:start + AST_GREP_BATCH],
                     scratch=scratch, timeout=timeout,
-                ))
+                )
+                matches.extend(found)
+                if reason:
+                    unsearched.append(reason)
+    if unsearched:
+        # Every batch is still run: what the others find is reported too.
+        raise RuleIncomplete(
+            "; ".join(unsearched) + ", so this rule did not search its whole scope. "
+            "ast-grep skips files it cannot read, cannot decode as UTF-8, or finds "
+            "too large: fix them, or add them to `exclude:`.",
+            matches,
+        )
     return matches
 
 
@@ -787,7 +796,9 @@ def _is_empty(path):
 
 
 def _ast_grep_batch(repo, rule, binary, language, batch, scratch, timeout):
-    """(path, line, col, text) from one ast-grep run over files of one language.
+    """(matches, unsearched) from one ast-grep run over files of one language:
+    (path, line, col, text) for each match, and why not every file was
+    searched, or None.
 
     ast-grep must never read the repo's own configuration. It looks for
     `sgconfig.yml` in its working directory and every ancestor, and `run`
@@ -816,10 +827,7 @@ def _ast_grep_batch(repo, rule, binary, language, batch, scratch, timeout):
         *(str(root / path) for path in batch),
     ]
     try:
-        completed = subprocess.run(
-            command, cwd=scratch, capture_output=True, text=True, check=False,
-            timeout=timeout,
-        )
+        returncode, stdout, stderr = _run_ast_grep(command, scratch, timeout)
     except subprocess.TimeoutExpired as hung:
         raise LintError(
             f"rule {rule.id!r}: ast-grep did not finish within {timeout:g} seconds on "
@@ -829,21 +837,21 @@ def _ast_grep_batch(repo, rule, binary, language, batch, scratch, timeout):
         raise LintError(f"rule {rule.id!r}: could not run ast-grep ({binary}): {failure}") \
             from failure
     inspect, messages = [], []
-    for line in completed.stderr.splitlines():
+    for line in stderr.splitlines():
         (inspect if line.startswith(INSPECT_PREFIX) else messages).append(line)
     # Inspect lines echo paths the runner does not choose (the scratch
     # directory's), so only ast-grep's own messages are searched for ERROR.
     message = "\n".join(messages).strip()
-    if completed.returncode not in (0, 1) or "ERROR" in message:
+    if returncode not in (0, 1) or "ERROR" in message:
         raise LintError(
             f"rule {rule.id!r} ({rule.source}): ast-grep failed "
-            f"(exit {completed.returncode}): {message or 'no message'}. "
+            f"(exit {returncode}): {message or 'no message'}. "
             "If the pattern is the problem, the ast-grep playground shows how "
             "it parses: https://ast-grep.github.io/playground.html"
         )
-    _require_every_file_searched(root, rule, batch, inspect)
+    unsearched = _unsearched(root, rule, batch, inspect)
     matches = []
-    for record in _ast_grep_records(rule, completed.stdout):
+    for record in _ast_grep_records(rule, stdout):
         path = _repo_relative(root, rule, record["file"])
         line = record["range"]["start"]["line"] + 1
         col = record["range"]["start"]["column"] + 1
@@ -856,12 +864,46 @@ def _ast_grep_batch(repo, rule, binary, language, batch, scratch, timeout):
             # which the real-binary test of matching locations would catch.
             col -= 1
         matches.append((path, line, col, record["text"]))
-    return matches
+    return matches, unsearched
 
 
-def _require_every_file_searched(root, rule, batch, inspect):
-    """Raise RuleIncomplete unless ast-grep's summary says it searched every
-    file in `batch`; LintError if there is no summary to go on."""
+def _run_ast_grep(command, cwd, timeout):
+    """(returncode, stdout, stderr) of one ast-grep call, raising
+    subprocess.TimeoutExpired after `timeout` seconds.
+
+    ast-grep runs in a session of its own, and any exception here — the
+    timeout, `--timeout`'s RunTimedOut, a Ctrl-C — kills its whole process
+    group. `subprocess.run` kills only the child, and an ast-grep installed as
+    a wrapper script (npm's, say) does its work in a grandchild, which would
+    run on after the gate had exited. The limit: an alarm landing inside
+    `Popen` itself, between the fork and its return, still leaves the child,
+    as nothing here yet knows its pid. Windows has no process groups; there
+    only the child is killed.
+    """
+    with subprocess.Popen(command, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                          text=True, start_new_session=True) as process:
+        try:
+            stdout, stderr = process.communicate(timeout=timeout)
+        except BaseException:
+            _kill_process_group(process)
+            raise
+    return process.returncode, stdout, stderr
+
+
+def _kill_process_group(process):
+    if hasattr(os, "killpg"):
+        # With start_new_session the child leads its own group, whose id is
+        # its pid. OSError: the group is already gone, so nothing is left.
+        with suppress(OSError):
+            os.killpg(process.pid, signal.SIGKILL)
+    else:
+        process.kill()
+    process.wait()
+
+
+def _unsearched(root, rule, batch, inspect):
+    """Why ast-grep's summary says it did not search every file in `batch`, or
+    None if it did; LintError if there is no summary to go on."""
     summaries = [found for found in map(AST_GREP_SUMMARY.fullmatch, inspect) if found]
     if len(summaries) != 1:
         raise LintError(
@@ -872,36 +914,37 @@ def _require_every_file_searched(root, rule, batch, inspect):
     scanned, skipped = (int(count) for count in summaries[0].groups())
     unsearched = skipped + max(0, len(batch) - scanned)
     if not unsearched:
-        return
-    named = _likely_skipped(root, batch)
+        return None
+    named = _likely_skipped(root, batch, unsearched)
     if len(named) < unsearched:
         named.append("ast-grep does not say which" + (" others" if named else ""))
-    raise RuleIncomplete(
-        f"ast-grep skipped {unsearched} of the {len(batch)} file(s) it was given "
-        f"({'; '.join(named)}), so this rule did not search its whole scope. "
-        "ast-grep skips files it cannot read, cannot decode as UTF-8, or finds "
-        "too large: fix them, or add them to `exclude:`."
-    )
+    return (f"ast-grep skipped {unsearched} of the {len(batch)} file(s) it was given "
+            f"({'; '.join(named)})")
 
 
-def _likely_skipped(root, batch):
+def _likely_skipped(root, batch, unsearched):
     """The files in `batch` ast-grep would skip, as far as can be told from
-    outside, each with the reason. Read only once a skip has been reported."""
-    named = []
+    outside, each with the reason. Read only once a skip has been reported.
+
+    A file that cannot be read or decoded is certainly skipped; one over
+    AST_GREP_LIKELY_TOO_LARGE only possibly, so sizes are named only when the
+    certain ones do not account for all `unsearched` — otherwise a large file
+    ast-grep did search would be named as a suspect."""
+    certain, large = [], []
     for path in batch:
         try:
             content = (root / path).read_bytes()
         except OSError as failure:
-            named.append(f"{path}: unreadable ({failure.strerror or failure})")
+            certain.append(f"{path}: unreadable ({failure.strerror or failure})")
             continue
         try:
             content.decode("utf-8")
         except UnicodeDecodeError:
-            named.append(f"{path}: not UTF-8")
+            certain.append(f"{path}: not UTF-8")
             continue
         if len(content) > AST_GREP_LIKELY_TOO_LARGE:
-            named.append(f"{path}: {len(content)} bytes, possibly too large")
-    return named
+            large.append(f"{path}: {len(content)} bytes, possibly too large")
+    return certain if len(certain) >= unsearched else certain + large
 
 
 def _ast_grep_records(rule, stdout):
@@ -930,6 +973,7 @@ def _is_match_record(record):
         start = record["range"]["start"]
         return (isinstance(record["file"], str) and isinstance(record["text"], str)
                 and all(isinstance(start[key], int) and not isinstance(start[key], bool)
+                        and start[key] >= 0
                         for key in ("line", "column")))
     except (KeyError, TypeError):
         return False

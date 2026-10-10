@@ -26,6 +26,7 @@ third-party imports cannot be assumed present. Everything else here is stdlib.
 """
 
 import math
+import re
 from copy import deepcopy
 
 NUMBER = "number"
@@ -180,11 +181,58 @@ SCHEMA = {
 }
 
 
+#: Characters that would break one message into several lines, or redraw the
+#: terminal: C0 and C1 controls, DEL, and the Unicode line and paragraph
+#: separators.
+CONTROL_CHARACTERS = re.compile("[\x00-\x1f\x7f-\x9f\u2028\u2029]")
+
+
+def printable(text):
+    """`text` as it can be written in UTF-8. A filename that is not UTF-8
+    reaches Python on Linux with surrogate escapes, which no encoder will
+    write; shown instead as the bytes it holds (`bad\\xff.py`), as `ls -b`
+    would."""
+    try:
+        raw = text.encode("utf-8", "surrogateescape")
+    except UnicodeEncodeError:
+        # A surrogate that is not an escaped byte: not from the filesystem.
+        return text.encode("utf-8", "backslashreplace").decode("utf-8")
+    return raw.decode("utf-8", "backslashreplace")
+
+
+def one_line(text):
+    """`text`, printable, with every control character escaped (`\\n`,
+    `\\x1b`), so it is one line that cannot redraw a terminal.
+
+    Here, in the module every reader of repository text already imports
+    (rules and lint import this one, never the reverse), so a key, a value or
+    a filename from the repo is escaped by the error that echoes it. Escaping
+    is one-way: a name holding a backslash and an `n` prints exactly like one
+    holding a newline. Idempotent, since its output has no control characters.
+    """
+    return CONTROL_CHARACTERS.sub(_escape_control, printable(str(text)))
+
+
+def _escape_control(found):
+    character = found.group(0)
+    named = {"\n": "\\n", "\r": "\\r", "\t": "\\t"}.get(character)
+    if named:
+        return named
+    code = ord(character)
+    return f"\\x{code:02x}" if code < 0x100 else f"\\u{code:04x}"
+
+
 class ConfigError(Exception):
-    """Configuration that cannot be loaded, with every problem named."""
+    """Configuration that cannot be loaded, with every problem named.
+
+    Each problem is made one line here, not where it is written: problems
+    echo keys and values from the file, and lint, doctor and status print
+    them, so a key holding a newline or an escape sequence would otherwise
+    forge a line of their output. Done once here so a new message cannot
+    forget it."""
 
     def __init__(self, problems):
-        self.problems = list(problems)
+        self.problems = [one_line(problem) for problem in problems]
         super().__init__(
             "invalid curamoir.yaml:\n"
             + "\n".join(f"  - {problem}" for problem in self.problems)
@@ -216,24 +264,38 @@ def load_config_text(text):
             f"({missing}). Install it with `pip install pyyaml`, or run "
             "`/curamoir:doctor`, which reports it as a missing prerequisite."
         ]) from None
-    except DuplicateKeyError as duplicate:
-        raise ConfigError([str(duplicate)]) from None
+    except RefusedYAMLError as refused:
+        raise ConfigError([str(refused)]) from None
     return load_config(raw or {})
 
 
-class DuplicateKeyError(ValueError):
+class RefusedYAMLError(ValueError):
+    """Valid YAML that curamoir.yaml and rule files do not accept, because it
+    would let a value be set somewhere a reader of the key does not see it.
+    The message is one line (see `one_line`)."""
+
+    def __init__(self, message):
+        super().__init__(one_line(message))
+
+
+class DuplicateKeyError(RefusedYAMLError):
     """A YAML mapping names the same key twice."""
 
 
 def safe_load_unique(text):
-    """`yaml.safe_load`, except that a key repeated in one mapping raises
-    DuplicateKeyError rather than silently keeping the last value — which for
-    `rules.fail_on` or a rule's `severity` is a setting changed with both
-    lines in plain view. Shared by config and rule files. PyYAML must be
+    """`yaml.safe_load`, refusing what would set a value out of a reader's
+    sight (RefusedYAMLError). Shared by config and rule files. PyYAML must be
     importable; the caller reports it missing in its own terms.
 
-    A key repeated after a `<<` merge is not a duplicate: overriding a merged
-    value is what the merge key is for.
+    - A key repeated in one mapping (DuplicateKeyError). YAML keeps the last,
+      which for `rules.fail_on` or a rule's `severity` is a setting changed
+      with both lines in plain view.
+    - Merge keys (`<<`), anchors (`&`) and aliases (`*`), anywhere. A merge
+      sets keys of a mapping from elsewhere, and two of them in one mapping
+      passed the duplicate check; an alias sets a value where it is not
+      written; an anchor exists only to be aliased. Nothing in files this
+      small needs them, and refusing all three is a rule that is simple to
+      state and to check.
     """
     import yaml
 
@@ -251,13 +313,27 @@ def _unique_key_loader():
     import yaml
 
     class UniqueKeyLoader(yaml.SafeLoader):
-        pass
+        def compose_node(self, parent, index):
+            # Checked on the event stream, before PyYAML resolves the alias,
+            # so the line given is the one the author wrote it on.
+            event = self.peek_event()
+            if isinstance(event, yaml.AliasEvent) or getattr(event, "anchor", None):
+                raise RefusedYAMLError(
+                    f"line {event.start_mark.line + 1}: YAML anchors and aliases "
+                    "(`&name`, `*name`) are not accepted here: an alias sets a "
+                    "value away from the key it applies to. Write the value out."
+                )
+            return super().compose_node(parent, index)
 
     def construct_mapping(loader, node, deep=False):
         seen = {}
         for key_node, _ in node.value:
             if key_node.tag == "tag:yaml.org,2002:merge":
-                continue
+                raise RefusedYAMLError(
+                    f"line {key_node.start_mark.line + 1}: YAML merge keys (`<<`) "
+                    "are not accepted here: a merge sets keys away from where a "
+                    "reader of the mapping looks for them. Write the keys out."
+                )
             key = loader.construct_object(key_node, deep=True)
             line = key_node.start_mark.line + 1
             try:
@@ -279,6 +355,8 @@ def _unique_key_loader():
 
 
 def _validate(value, schema, prefix, problems):
+    # Keys and values are echoed raw here; ConfigError makes each problem one
+    # line, so a hostile key cannot forge one.
     for key, given in value.items():
         path = f"{prefix}{key}"
         if key not in schema:
