@@ -52,6 +52,21 @@ FIXTURE = ROOT / "fixtures" / "sample-repo"
 WRAPPER = ROOT / "scripts" / "curamoir-lint"
 PLANTED = json.loads((FIXTURE / "PLANTED.json").read_text(encoding="utf-8"))
 
+# The tests that run the real ast-grep skip where it is not on PATH, which on a
+# machine meant to have it would let them pass having run nothing. So where it
+# is required, its absence fails test_ast_grep_is_installed_where_it_is_required
+# instead: set CURAMOIR_REQUIRE_AST_GREP=1 to require it, or run under CI
+# (`CI` set and not "0"/"false", as GitHub Actions and most CI services do).
+# CI is safe to require it of because the `dev` extras install ast-grep-cli.
+needs_ast_grep = pytest.mark.skipif(shutil.which("ast-grep") is None,
+                                    reason="ast-grep is not installed")
+
+
+def _ast_grep_required():
+    def truthy(name):
+        return os.environ.get(name, "").strip().lower() not in ("", "0", "false")
+    return truthy("CURAMOIR_REQUIRE_AST_GREP") or truthy("CI")
+
 # --- test rules, one per principle the fixture plants a violation of ---------
 
 NO_BARE_PRINT = textwrap.dedent("""\
@@ -147,11 +162,14 @@ def fake_ast_grep(tmp_path, stdout="", stderr="", exit_code=0, log=None, summary
     cannot be made to take on demand (and for machines without it). With `log`,
     each call appends its argv and working directory there as a JSON line.
 
-    With `summary`, it also writes the line real ast-grep 0.50.0 writes to
-    stderr under `--inspect=summary`, counting every file it was given as
+    With `summary`, it also writes the two lines real ast-grep 0.50.0 writes
+    to stderr under `--inspect=summary`, in its order: the project line
+    (`projectDir` is the directory of the `--config` file, as the real binary
+    reports it), then the file line, counting every file it was given as
     scanned and `skipped` of them as skipped (the runner refuses output
-    without it). The interpreter is this one, named absolutely, so a test may
-    give the runner a PATH holding nothing but the fake."""
+    without it). So the runner's "other inspect lines are ignored" path is
+    taken by default. The interpreter is this one, named absolutely, so a test
+    may give the runner a PATH holding nothing but the fake."""
     script = tmp_path / "bin" / "ast-grep"
     script.parent.mkdir(parents=True, exist_ok=True)
     record = (
@@ -161,6 +179,10 @@ def fake_ast_grep(tmp_path, stdout="", stderr="", exit_code=0, log=None, summary
     )
     inspect = (
         "files = sys.argv[sys.argv.index('--') + 1:]\n"
+        "config = [a.split('=', 1)[1] for a in sys.argv if a.startswith('--config=')]\n"
+        "project = ('isProject=true,projectDir=' + os.path.dirname(config[0])"
+        " if config else 'isProject=false')\n"
+        "sys.stderr.write(f'sg: summary|project: {project}\\n')\n"
         "sys.stderr.write(f'sg: summary|file: scannedFileCount={len(files)},"
         f"skippedFileCount={skipped}\\n')\n"
         if summary else ""
@@ -565,7 +587,19 @@ def test_ast_grep_failing_is_a_runner_error_naming_the_rule(tmp_path, stdout, st
     assert "no-bare-print-ast" in str(caught.value)
 
 
-@pytest.mark.skipif(shutil.which("ast-grep") is None, reason="ast-grep is not installed")
+def test_ast_grep_is_installed_where_it_is_required():
+    """The @needs_ast_grep tests skip without the binary; where it is required
+    (see needs_ast_grep), a skip would be a gate passing unchecked."""
+    if shutil.which("ast-grep") is not None:
+        return
+    if not _ast_grep_required():
+        pytest.skip("ast-grep is not required here (CURAMOIR_REQUIRE_AST_GREP / CI unset)")
+    pytest.fail(
+        "ast-grep is required here but not on PATH; install the dev extras "
+        "(ast-grep-cli), or the real-binary tests silently skip")
+
+
+@needs_ast_grep
 def test_the_real_ast_grep_finds_the_planted_prints(tmp_path):
     repo = sample_repo(tmp_path, AST_GREP_PRINT)
 
@@ -576,7 +610,7 @@ def test_the_real_ast_grep_finds_the_planted_prints(tmp_path):
     assert sorted((v.path, v.line) for v in result.violations) == planted
 
 
-@pytest.mark.skipif(shutil.which("ast-grep") is None, reason="ast-grep is not installed")
+@needs_ast_grep
 def test_the_real_ast_grep_rejecting_a_pattern_fails_the_run(tmp_path):
     repo = sample_repo(tmp_path, AST_GREP_PRINT.replace("print($$$ARGS)", "print($$$ARGS"))
 
@@ -633,7 +667,7 @@ HOSTILE_SGCONFIGS = {
 }
 
 
-@pytest.mark.skipif(shutil.which("ast-grep") is None, reason="ast-grep is not installed")
+@needs_ast_grep
 @pytest.mark.parametrize("config", sorted(HOSTILE_SGCONFIGS))
 def test_the_real_ast_grep_ignores_an_sgconfig_in_the_repo(tmp_path, config):
     repo = sample_repo(tmp_path, AST_GREP_PRINT)
@@ -713,18 +747,24 @@ def _vendored_copy(tmp_path):
     return vendored / "scripts" / "curamoir-lint"
 
 
-def _shims(tmp_path, *flags, without_yaml=()):
+def _shims(tmp_path, *flags, without_yaml=(), safepath=True):
     """A PATH directory where every interpreter name the wrapper tries runs
     THIS interpreter with `flags` — so the test, not whatever Homebrew left on
     the machine, decides what the wrapper gets. Names in `without_yaml` are
-    interpreters that exist but cannot import PyYAML."""
+    interpreters that exist but cannot import PyYAML.
+
+    With `safepath=False` each shim unsets PYTHONSAFEPATH before it execs, so
+    the interpreter behaves as a pre-3.11 one does, which ignores it: the
+    working directory goes back at the front of sys.path, and only the
+    wrapper's `cd` into its own `src/` keeps the linted repo off it."""
     shims = tmp_path / "shims"
     shims.mkdir(exist_ok=True)
+    unset = "" if safepath else "unset PYTHONSAFEPATH\n"
     for name in ("python3.14", "python3.13", "python3.12", "python3", "python"):
         if name in without_yaml:
             body = f'exec "{sys.executable}" -S -c "raise SystemExit(\'no PyYAML here\')"'
         else:
-            body = f'exec "{sys.executable}" {" ".join(flags)} "$@"'
+            body = f'{unset}exec "{sys.executable}" {" ".join(flags)} "$@"'
         shim = shims / name
         shim.write_text(f"#!/bin/sh\n{body}\n", encoding="utf-8")
         shim.chmod(0o755)
@@ -873,8 +913,17 @@ def _plant_hostile_modules(repo, markers):
         )
 
 
+# Each of the wrapper's two defences against importing from the linted repo is
+# tested on its own: with PYTHONSAFEPATH honoured (3.11+, as here) and with it
+# neutralised (a 3.9 fallback interpreter), where only the `cd` stands.
+SAFEPATH = pytest.mark.parametrize(
+    "safepath", [True, False], ids=["PYTHONSAFEPATH-honoured", "PYTHONSAFEPATH-ignored"])
+
+
+@SAFEPATH
 @pytest.mark.parametrize("repo_argument", [None, ".", "relative"])
-def test_the_wrapper_never_imports_modules_from_the_repo_it_lints(tmp_path, repo_argument):
+def test_the_wrapper_never_imports_modules_from_the_repo_it_lints(tmp_path, repo_argument,
+                                                                  safepath):
     """Security. Pre-commit and CI run the wrapper from the linted repo's root,
     and `python -m` / `python -c` put the working directory at the front of
     sys.path, ahead of PYTHONPATH — so a `yaml.py` or `curamoir/` committed in a
@@ -893,7 +942,7 @@ def test_the_wrapper_never_imports_modules_from_the_repo_it_lints(tmp_path, repo
     result = subprocess.run(
         [str(WRAPPER), *extra, "--format", "json"],
         capture_output=True, text=True, cwd=str(cwd),
-        env=_environment(_shims(tmp_path)),
+        env=_environment(_shims(tmp_path, safepath=safepath)),
     )
 
     assert sorted(p.name for p in markers.iterdir()) == []
@@ -914,7 +963,9 @@ def test_the_wrapper_names_a_missing_relative_repo_as_given(tmp_path):
     assert "nowhere is not a directory" in result.stderr
 
 
-def test_a_relative_pythonpath_means_what_it_meant_where_the_wrapper_was_invoked(tmp_path):
+@SAFEPATH
+def test_a_relative_pythonpath_means_what_it_meant_where_the_wrapper_was_invoked(tmp_path,
+                                                                                safepath):
     """The wrapper starts Python in its own `src/`, so an inherited relative
     `PYTHONPATH=vendor` (a CI job providing PyYAML that way) would resolve
     there instead, and the run would exit 2 for want of PyYAML. Each entry is
@@ -934,7 +985,7 @@ def test_a_relative_pythonpath_means_what_it_meant_where_the_wrapper_was_invoked
     result = subprocess.run(
         [str(WRAPPER), "--repo", str(repo), "--format", "json"],
         capture_output=True, text=True, cwd=str(invoked_from),
-        env=_environment(_shims(tmp_path, "-S"), pythonpath=":vendor:"),
+        env=_environment(_shims(tmp_path, "-S", safepath=safepath), pythonpath=":vendor:"),
     )
 
     assert sorted(p.name for p in markers.iterdir()) == []
@@ -982,7 +1033,7 @@ def test_a_trailing_newline_does_not_add_a_phantom_empty_line(tmp_path):
     assert _locations(repo, "src/edge.py") == [(2, 1, "")]
 
 
-@pytest.mark.skipif(shutil.which("ast-grep") is None, reason="ast-grep is not installed")
+@needs_ast_grep
 @pytest.mark.parametrize(("content", "expected"), [
     (b'a = 1\n\x0c\nb = "\xc3\xa9"; print(1)\n', [(3, 10)]),
     (b'a = 1\r\nprint(1)\r\n', [(2, 1)]),
@@ -1106,7 +1157,7 @@ def test_a_file_named_only_a_suffix_does_not_make_an_ast_grep_rule_skip(tmp_path
     assert ".py" not in searched
 
 
-@pytest.mark.skipif(shutil.which("ast-grep") is None, reason="ast-grep is not installed")
+@needs_ast_grep
 def test_the_real_ast_grep_does_not_search_a_file_named_only_a_suffix(tmp_path):
     """Why leaving `.py` out of scope loses nothing: named explicitly, under
     `--lang=python`, ast-grep 0.50.0 finds no match in it."""
@@ -1187,7 +1238,7 @@ def test_ast_grep_skipping_a_file_it_was_given_skips_the_rule(tmp_path):
     assert "skipped 1" in skipped.reason
 
 
-@pytest.mark.skipif(shutil.which("ast-grep") is None, reason="ast-grep is not installed")
+@needs_ast_grep
 def test_the_real_ast_grep_skipping_a_latin1_file_skips_the_rule_and_names_it(tmp_path,
                                                                               capsys):
     repo = sample_repo(tmp_path, NO_UNCHAINED_RAISE, AST_GREP_PRINT)
@@ -1677,7 +1728,7 @@ def test_the_report_is_written_after_the_time_limit_is_lifted(tmp_path, monkeypa
     assert writes and not any(writes)
 
 
-@pytest.mark.skipif(shutil.which("ast-grep") is None, reason="ast-grep is not installed")
+@needs_ast_grep
 @pytest.mark.parametrize("content", [b"   \n\t\n", b"\xef\xbb\xbf", b"\r\n\r\n"],
                          ids=["whitespace", "bom", "crlf"])
 def test_a_file_with_no_code_is_not_a_false_skip(tmp_path, content):
