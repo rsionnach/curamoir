@@ -354,7 +354,7 @@ def test_the_documented_json_shape_is_the_one_emitted():
 
     doc = (ROOT / "docs" / "curamoir-lint.md").read_text(encoding="utf-8")
     example = json.loads(re.search(r"```json\n(.*?)```", doc, re.DOTALL).group(1))
-    table = re.findall(r"^\| `([a-z_]+)`(?:, `([a-z_]+)`)? \|", doc.split("\n## JSON")[1], re.M)
+    table = re.findall(r"^\| `([a-z_]+)`(?:, `([a-z_]+)`)? \|", doc.split("\n## JSON")[1].split("\n## ")[0], re.M)
     documented = {name for pair in table for name in pair if name}
 
     assert tuple(example) == TOP_LEVEL_FIELDS
@@ -417,11 +417,15 @@ def test_the_authoring_and_runner_docs_point_at_each_other():
             for name in ("rules-authoring.md", "curamoir-lint.md")}
     for name, text in docs.items():
         other = next(n for n in docs if n != name)
-        links = re.findall(r"\]\((" + re.escape(other) + r")(?:#([a-z0-9_-]+))?\)", text)
+        # Any spelling of a link to the other doc (a ./ or docs/ prefix, any
+        # anchor case), so an odd spelling is checked rather than skipped.
+        links = re.findall(
+            r"\]\(((?:\./|docs/)?" + re.escape(other) + r")(?:#([^)\s]*))?\)", text
+        )
         assert links, f"{name} does not link to {other}"
         for _, anchor in links:
             assert not anchor or anchor in anchors(docs[other]), (name, anchor)
-        for anchor in re.findall(r"\]\(#([a-z0-9_-]+)\)", text):
+        for anchor in re.findall(r"\]\(#([^)\s]*)\)", text):
             assert anchor in anchors(text), (name, anchor)
 
 
