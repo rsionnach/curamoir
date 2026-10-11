@@ -17,6 +17,7 @@ starter principles, under which fixture-local rules citing the fixture's
 principles would no longer load.
 """
 
+import io
 import json
 import os
 import subprocess
@@ -24,11 +25,12 @@ import sys
 
 import pytest
 
-from curamoir import lint
+from curamoir import cli, lint, sweep
 from curamoir.sweep import NO_WORK, WORK, LintUntrusted, work_list
 from tests.test_lint import (
     ALL_REGEX_RULES,
     AST_GREP_PRINT,
+    NO_BARE_PRINT,
     NO_UNCHAINED_RAISE,
     NO_VARIANT_MODULE,
     PLANTED,
@@ -207,13 +209,6 @@ def test_a_report_that_the_reader_refuses_stops_the_sweep(tmp_path):
         work_list(tmp_path, lint=lint_)
 
 
-def test_output_that_is_not_json_stops_the_sweep(tmp_path):
-    lint_ = fake_lint(tmp_path, stdout="src/a.py:1:1: error ...\n", exit_code=1)
-
-    with pytest.raises(LintUntrusted):
-        work_list(tmp_path, lint=lint_)
-
-
 @pytest.mark.parametrize("exit_code, violations", [(0, [RECORD]), (1, [])])
 def test_an_exit_code_that_contradicts_the_report_stops_the_sweep(tmp_path, exit_code,
                                                                    violations):
@@ -238,6 +233,47 @@ def test_a_runner_that_hangs_stops_the_sweep(tmp_path):
 
     with pytest.raises(LintUntrusted, match="did not finish"):
         work_list(tmp_path, lint=lint_, timeout=1, grace=1)
+
+
+def test_an_empty_repo_is_refused_before_anything_runs(tmp_path):
+    """`Path("").resolve()` is the working directory, so resolving first would
+    bypass curamoir-lint's own refusal of `--repo ""` and lint wherever the
+    sweep happened to start. The stand-in leaves a mark if it is run at all."""
+    mark = tmp_path / "ran"
+    lint_ = fake_lint(tmp_path, stdout=report(), exit_code=0)
+    lint_.write_text(lint_.read_text(encoding="utf-8").replace(
+        "import sys, time\n", f"import sys, time\nopen({str(mark)!r}, 'w').close()\n"),
+        encoding="utf-8")
+
+    with pytest.raises(LintUntrusted, match="empty"):
+        work_list("", lint=lint_)
+    assert not mark.exists()
+
+
+def test_a_symlink_loop_repo_stops_the_sweep(tmp_path):
+    """On 3.9 `Path.resolve()` raises RuntimeError for a loop; on later
+    versions it may return the path and the lint refuses it. Either way the
+    sweep stops with LintUntrusted, not a traceback."""
+    (tmp_path / "a").symlink_to(tmp_path / "b")
+    (tmp_path / "b").symlink_to(tmp_path / "a")
+
+    with pytest.raises(LintUntrusted):
+        work_list(tmp_path / "a")
+
+
+@pytest.mark.parametrize("error", [RuntimeError("Symlink loop from 'a'"),
+                                   OSError("resolve failed")])
+def test_a_repo_that_cannot_be_resolved_stops_the_sweep(tmp_path, monkeypatch, error):
+    """3.9's symlink-loop RuntimeError, simulated so it is tested on any Python."""
+    lint_ = fake_lint(tmp_path, stdout=report(), exit_code=0)
+
+    def refuse(self, strict=False):
+        raise error
+
+    monkeypatch.setattr(sweep.Path, "resolve", refuse)
+
+    with pytest.raises(LintUntrusted, match="resolve"):
+        work_list(tmp_path / "repo", lint=lint_)
 
 
 # --- the deterministic helper the skill calls ---------------------------------
@@ -290,6 +326,56 @@ def test_the_cli_exits_2_with_nothing_on_stdout_when_the_lint_cannot_be_trusted(
     assert result.returncode == lint.EXIT_ERROR
     assert result.stdout == ""
     assert "do not edit anything" in result.stderr
+
+
+def test_the_cli_refuses_an_empty_repo_with_exit_2_and_nothing_on_stdout():
+    result = run_cli("sweep-work-list", "--repo", "")
+
+    assert result.returncode == lint.EXIT_ERROR
+    assert result.stdout == ""
+    assert "empty" in result.stderr
+
+
+def test_the_cli_writes_utf8_whatever_the_locale(tmp_path, monkeypatch):
+    """`ensure_ascii=False` keeps a message readable, but printed through an
+    ASCII stdout it would raise UnicodeEncodeError and exit 1 mid-contract.
+    The bytes are UTF-8 whatever the stream's encoding."""
+    stream = io.TextIOWrapper(io.BytesIO(), encoding="ascii")
+    lint_ = fake_lint(tmp_path, stdout=report(violations=[
+        dict(RECORD, message="naïve print — use the logger", path="src/café.py")]),
+        exit_code=1)
+    monkeypatch.setattr(cli, "work_list", lambda repo: work_list(repo, lint=lint_))
+    monkeypatch.setattr(sys, "stdout", stream)
+
+    code = cli.main(["sweep-work-list", "--repo", str(tmp_path)])
+
+    stream.flush()
+    printed = json.loads(stream.buffer.getvalue().decode("utf-8"))
+    assert code == 0
+    violation = printed["principles"][0]["violations"][0]
+    assert violation["message"] == "naïve print — use the logger"
+    assert printed["paths"] == ["src/café.py"]
+
+
+def test_the_cli_writes_utf8_under_an_ascii_locale_end_to_end(tmp_path):
+    """The same through a real process with PYTHONIOENCODING=ascii, with a
+    rule whose message is not ASCII (the fixture's own messages are)."""
+    non_ascii = NO_BARE_PRINT.replace("with no level or logger name",
+                                      "with no level — naïve logging")
+    assert non_ascii != NO_BARE_PRINT
+    repo = sample_repo(tmp_path, non_ascii, NO_UNCHAINED_RAISE, NO_VARIANT_MODULE)
+    environment = {**os.environ, "PYTHONPATH": str(ROOT / "src"),
+                   "PYTHONIOENCODING": "ascii"}
+
+    result = subprocess.run(
+        [sys.executable, "-m", "curamoir.cli", "sweep-work-list", "--repo", str(repo)],
+        capture_output=True, env=environment, timeout=120,
+    )
+
+    assert result.returncode == 0, result.stderr
+    printed = json.loads(result.stdout.decode("utf-8"))
+    messages = [v["message"] for p in printed["principles"] for v in p["violations"]]
+    assert any("— naïve logging" in message for message in messages)
 
 
 # --- the skill ---------------------------------------------------------------

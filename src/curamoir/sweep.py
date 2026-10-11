@@ -34,10 +34,11 @@ filtering at the threshold would drop two of E3's five planted violations.)
 How many the sweep then fixes is E3-R3's cap and E3-R2's scope, decided later
 with severity available on every item.
 
-**Order.** By principle, then path, line, column and rule, then fingerprint
-(unique within a report, so the order is total). The PR body lists fixes by
-principle and the ledger counts them by principle (E3-R3, E3-R5), so grouping
-here keeps both stable across runs without each re-sorting.
+**Order.** By principle, then path, line, column and rule, then end line and
+end column, then fingerprint (unique within a report, so the order is total).
+The PR body lists fixes by principle and the ledger counts them by principle
+(E3-R3, E3-R5), so grouping here keeps both stable across runs without each
+re-sorting.
 
 Syntax that imports on 3.9, like the rest of what `scripts/curamoir` runs.
 """
@@ -48,7 +49,13 @@ from collections import OrderedDict
 from dataclasses import dataclass
 from pathlib import Path
 
-from curamoir.lint_report import SEVERITIES, LintReport, LintReportError, parse_report
+from curamoir.lint_report import (
+    SEVERITIES,
+    LintReport,
+    LintReportError,
+    ReportedViolation,
+    parse_report,
+)
 
 #: The standalone runner beside this checkout's `src/`, which is the one CI runs.
 LINT = Path(__file__).resolve().parents[2] / "scripts" / "curamoir-lint"
@@ -71,8 +78,14 @@ _STDERR_TAIL = 2000
 
 class LintUntrusted(Exception):
     """The lint's report cannot be acted on, so the sweep must stop without
-    editing anything. `exit_code` is the runner's, or None if it never
-    exited."""
+    editing anything.
+
+    `str(exc)` is the text the ledger and the brief show: a `JobRun` records
+    a failure as f"{type}: {exc}", so the message must say what went wrong
+    on its own. After a newline it may carry the tail of the runner's stderr,
+    up to _STDERR_TAIL characters. `exit_code` is the runner's, or None if it
+    never exited (or never ran); it is for callers that branch on it, and
+    JobRun does not record it today."""
 
     def __init__(self, message, exit_code=None):
         super().__init__(message)
@@ -85,7 +98,10 @@ class WorkList:
     docstring), and the report they came from (for its notes, tools and
     rules_checked, which the ledger line and PR body will want)."""
 
-    items: tuple
+    #: Lint violations only for now; cm-fkd.2 (E3-R1b) will widen this to
+    #: include tier-1 findings, which are not ReportedViolations. A string, so
+    #: 3.9 never evaluates `tuple[...]` (dataclasses only read it).
+    items: "tuple[ReportedViolation, ...]"
     report: LintReport
 
     @property
@@ -97,7 +113,7 @@ class WorkList:
     @property
     def principle_ids(self):
         """The principles with work, sorted."""
-        return tuple(OrderedDict.fromkeys(item.principle_id for item in self.items))
+        return tuple(sorted({item.principle_id for item in self.items}))
 
     @property
     def paths(self):
@@ -116,9 +132,25 @@ class WorkList:
 def work_list(repo, lint=LINT, timeout=DEFAULT_TIMEOUT, grace=DEFAULT_GRACE):
     """Run the lint over `repo` and return its work list, or raise
     LintUntrusted. `lint` is the runner to call (a test may pass a stand-in)."""
+    if isinstance(repo, str) and repo == "":
+        # curamoir-lint refuses `--repo ""`, but `_run` resolves first and
+        # Path("").resolve() is the working directory, which would lint
+        # wherever the sweep started. Refused here, as the runner would. (A
+        # Path cannot be caught: Path("") is already ".".)
+        raise LintUntrusted(
+            "the repository is empty: pass the repository root, not an empty string")
     code, stdout, stderr = _run(repo, lint, timeout, grace)
     if code not in (0, 1):
         raise LintUntrusted(_untrusted_message(code, stdout, stderr), exit_code=code)
+    report = _check_trusted(code, stdout)
+    items = tuple(sorted(report.violations, key=_order))
+    return WorkList(items=items, report=report)
+
+
+def _check_trusted(code, stdout):
+    """The report from a run that exited 0 or 1, if it can be acted on: it
+    reads as schema 1, it is complete, and it agrees with its exit code.
+    Otherwise raise LintUntrusted."""
     try:
         report = parse_report(stdout)
     except LintReportError as error:
@@ -139,8 +171,7 @@ def work_list(repo, lint=LINT, timeout=DEFAULT_TIMEOUT, grace=DEFAULT_GRACE):
             f"curamoir-lint exited {code} but its report has {failing} violation(s) at "
             f"or above fail_on {report.fail_on!r}; the exit code and the report disagree",
             exit_code=code)
-    items = tuple(sorted(report.violations, key=_order))
-    return WorkList(items=items, report=report)
+    return report
 
 
 def _order(item):
@@ -149,11 +180,23 @@ def _order(item):
 
 
 def _run(repo, lint, timeout, grace):
-    command = [str(lint), "--repo", str(Path(repo).resolve()), "--format", "json",
+    try:
+        resolved = Path(repo).resolve()
+    except (OSError, RuntimeError) as error:
+        # Before 3.13 a symlink loop raises RuntimeError, which main()'s
+        # OSError handler would not catch (a traceback, exit 1); 3.13 returns
+        # the path and the lint refuses it itself.
+        raise LintUntrusted(f"the repository {repo} cannot be resolved: {error}") from error
+    command = [str(lint), "--repo", str(resolved), "--format", "json",
                "--timeout", str(timeout)]
     # The report must be writable whatever the inherited locale: an encoding
     # that cannot represent a path is an exit 2 (docs/curamoir-lint.md).
     environment = dict(os.environ, PYTHONIOENCODING="utf-8")
+    # The backstop kills the runner's own process only. ast-grep, which the
+    # runner starts in a session of its own, can outlive it and keep running
+    # until it finishes; the sweep has stopped either way, so nothing acts on
+    # its output. Killing it too would mean a process group per run here, which
+    # a weekly job that already gave up does not need.
     try:
         result = subprocess.run(
             command, capture_output=True, env=environment, timeout=timeout + grace,

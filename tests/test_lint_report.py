@@ -100,6 +100,17 @@ def test_text_that_is_not_a_json_object_is_refused(text):
         parse_report(text)
 
 
+def test_bytes_are_accepted_as_utf8():
+    report = parse_report(json.dumps(DOCUMENT, ensure_ascii=False).encode("utf-8"))
+
+    assert report.violations[0].rule_id == "no-bare-print"
+
+
+def test_non_utf8_bytes_are_refused():
+    with pytest.raises(LintReportError):
+        parse_report(b'{"schema_version": 1, "x": "\xff"}')
+
+
 # --- additive changes: ignore what we do not know ----------------------------
 
 def test_unknown_top_level_fields_are_ignored():
@@ -215,6 +226,20 @@ def test_a_position_that_is_not_a_positive_integer_is_refused(value):
         parse(with_record(line=value))
 
 
+@pytest.mark.parametrize("end", [{"end_line": 14}, {"end_line": 15, "end_col": 4}])
+def test_an_end_before_the_start_is_refused(end):
+    """RECORD starts at 15:5. The end is exclusive, so an end equal to the
+    start is an empty span and allowed; one before it locates no text."""
+    with pytest.raises(LintReportError, match="before"):
+        parse(with_record(**end))
+
+
+def test_an_end_equal_to_the_start_is_accepted():
+    violation = parse(with_record(end_line=15, end_col=5)).violations[0]
+
+    assert (violation.end_line, violation.end_col) == (15, 5)
+
+
 @pytest.mark.parametrize("field", ["path", "match", "fingerprint", "message"])
 def test_a_string_field_that_is_not_a_string_is_refused(field):
     with pytest.raises(LintReportError, match=field):
@@ -266,7 +291,7 @@ def test_a_repeated_fingerprint_is_refused():
     """Within one report every fingerprint is unique; the idempotence and
     introduced-vs-found checks rely on it as an identity."""
     with pytest.raises(LintReportError, match="fingerprint"):
-        parse(document(violations=[RECORD, dict(RECORD, line=16, location="x")]))
+        parse(document(violations=[RECORD, dict(RECORD, line=16, end_line=16, location="x")]))
 
 
 # --- typed, immutable records ------------------------------------------------
@@ -286,17 +311,6 @@ def test_records_are_typed_and_immutable():
         violation.line = 16
     with pytest.raises(TypeError):
         report.tools["ast-grep"] = "0.50.0"
-
-
-def test_bytes_are_accepted_as_utf8():
-    report = parse_report(json.dumps(DOCUMENT, ensure_ascii=False).encode("utf-8"))
-
-    assert report.violations[0].rule_id == "no-bare-print"
-
-
-def test_non_utf8_bytes_are_refused():
-    with pytest.raises(LintReportError):
-        parse_report(b'{"schema_version": 1, "x": "\xff"}')
 
 
 # --- round trip: a real run ----------------------------------------------------

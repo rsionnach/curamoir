@@ -44,8 +44,9 @@ from typing import Optional
 #: The only version this reader understands.
 SCHEMA_VERSION = 1
 
-#: v1's closed vocabularies. Ordered: SEVERITIES from least to most severe,
-#: so a consumer can rank by index, as the runner does.
+#: v1's closed vocabularies, copied rather than imported (the module docstring,
+#: "Its own copy of v1", says why). Ordered: SEVERITIES from least to most
+#: severe, so a consumer can rank by index, as the runner does.
 SEVERITIES = ("info", "warning", "error")
 FIX_SOURCES = ("rule", "principle")
 
@@ -217,6 +218,13 @@ def _violation(record, where):
             raise LintReportError(
                 f"{where}.{field} must be a positive integer, not {value!r}")
         values[field] = value
+    # The end is exclusive, so an end equal to the start is an empty span; one
+    # before it locates no text, and a fix applied there would edit the wrong
+    # bytes.
+    if (values["end_line"], values["end_col"]) < (values["line"], values["col"]):
+        raise LintReportError(
+            f"{where} ends at {values['end_line']}:{values['end_col']}, before it "
+            f"starts at {values['line']}:{values['col']}")
     for field in _STRINGS:
         values[field] = _string(record[field], f"{where}.{field}")
     values["severity"] = _vocabulary(record["severity"], SEVERITIES, f"{where}.severity")

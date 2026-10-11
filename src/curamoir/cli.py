@@ -122,6 +122,8 @@ def _sweep_work_list(repo):
     try:
         result = work_list(repo)
     except LintUntrusted as untrusted:
+        # stderr's error handler is backslashreplace, so a path the locale
+        # cannot encode still reaches the developer rather than raising.
         print(f"{untrusted}\nThe sweep must stop here: do not edit anything.",
               file=sys.stderr)
         return 2
@@ -138,15 +140,40 @@ def _sweep_work_list(repo):
                 for item in items
             ],
         })
-    print(json.dumps({
+    text = json.dumps({
         "outcome": result.outcome,
         "count": len(result.items),
         "fail_on": result.report.fail_on,
         "rules_checked": list(result.report.rules_checked),
+        # Kinds only: the skill reports which notes there were (no_rules
+        # above all), not their paths or reasons.
         "notes": [note.kind for note in result.report.notes],
         "paths": list(result.paths),
         "principles": principles,
-    }, indent=2, ensure_ascii=False))
+    }, indent=2, ensure_ascii=False) + "\n"
+    # UTF-8 bytes whatever the locale: printed through stdout's own encoding,
+    # a non-ASCII path or message under an ASCII locale raises
+    # UnicodeEncodeError, which main() does not catch, and the skill would see
+    # a traceback and exit 1. The whole document is built before anything is
+    # written, so every failure above leaves stdout empty.
+    try:
+        buffer = getattr(sys.stdout, "buffer", None)
+        if buffer is None:
+            # An in-memory text stream (a test's capture) takes str whatever
+            # the locale.
+            sys.stdout.write(text)
+            sys.stdout.flush()
+        else:
+            sys.stdout.flush()
+            buffer.write(text.encode("utf-8"))
+            buffer.flush()
+    except OSError as failure:
+        # A closed pipe or full disk mid-write: stdout may hold part of the
+        # document, which the skill treats as not the work list. Exit 2 so it
+        # stops rather than reading main()'s exit-1 sentence as the result.
+        print(f"the work list could not be written: {failure}\n"
+              "The sweep must stop here: do not edit anything.", file=sys.stderr)
+        return 2
     return 0
 
 
