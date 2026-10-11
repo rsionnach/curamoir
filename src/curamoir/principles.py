@@ -19,6 +19,16 @@ that disagrees with the `id:` field, is not untidiness — it makes every
 downstream lookup resolve to something arbitrary while still appearing to work.
 Those are refused here, where there is a line number to report.
 
+**Why `permits` is the one optional field read.** E3-R2 forbids a sweep fix
+that changes a signature "without an explicit principle permitting it", so the
+format has to be able to say "this principle permits it". E2-R1 fixes eight
+fields and is silent on others, so an optional ninth is within it rather than a
+change to it; a principle without the line permits nothing, so every existing
+file means what it meant. Unlike `source`, cúramóir acts on `permits`
+(src/curamoir/fix_scope.py reads it), so its values are a closed vocabulary,
+PERMISSIONS, and anything else is refused: a typo read as "permits nothing"
+would silently reject the fixes its author meant to allow.
+
 **Why an unrecognised field is kept.** E2-R1 names eight required fields and
 says nothing about others. The bundled fixture carries a `source:` field
 recording where its wording came from, which is exactly the kind of thing an
@@ -39,6 +49,7 @@ a value may wrap onto indented continuation lines:
     - **bad:** `print("done")`
     - **tier:** principle
     - **promoted_on:** null
+    - **permits:** `signature_change`      (optional; see PERMISSIONS)
 """
 
 import re
@@ -54,6 +65,15 @@ REQUIRED_FIELDS = ("id", "title", "rule", "why", "good", "bad", "tier", "promote
 #: E2-R1's tier vocabulary, and E4's ladder in ascending strictness: a
 #: principle is advice, a rule is linted, a guard blocks.
 TIERS = ("principle", "rule", "guard")
+
+#: What a principle's optional `permits` field may name. One today: E3-R2's
+#: "no signature changes without an explicit principle permitting it".
+#: Closed, because fix_scope.py grants exactly what is listed here.
+PERMISSIONS = ("signature_change",)
+
+#: Optional fields cúramóir reads, as opposed to an author's extras (`source`),
+#: which are carried through untouched and never acted on.
+OPTIONAL_FIELDS = ("permits",)
 
 #: `## <id>` opens a principle. Anything before the first one is preamble and is
 #: preserved verbatim — it is where an author explains the file.
@@ -90,7 +110,11 @@ class Principle:
     bad: str
     tier: str
     promoted_on: Optional[str]
-    #: Fields the author added that E2-R1 does not require, such as `source`.
+    #: What the principle explicitly allows a fix to do (PERMISSIONS), from
+    #: its optional `permits` field. Empty unless the author wrote it.
+    permits: tuple = ()
+    #: Fields the author added that E2-R1 does not require and cúramóir does
+    #: not read, such as `source`.
     extra: dict = field(default_factory=dict)
     #: The verbatim source span, which `serialise_principles` reassembles.
     lines: tuple = ()
@@ -323,13 +347,13 @@ def _principle_from(heading_id, block, line_number):
     coerced = _coerce(values, declared, line_number)
     extra = {
         name: value for name, value in values.items()
-        if name not in REQUIRED_FIELDS
+        if name not in REQUIRED_FIELDS and name not in OPTIONAL_FIELDS
     }
     return Principle(lines=tuple(block), line_number=line_number, extra=extra, **coerced)
 
 
 def _coerce(values, declared, line_number):
-    """The eight required fields, validated and typed."""
+    """The eight required fields and the optional ones, validated and typed."""
     tier = values["tier"].strip()
     if tier not in TIERS:
         raise PrincipleError(
@@ -346,7 +370,33 @@ def _coerce(values, declared, line_number):
         "bad": values["bad"],
         "tier": tier,
         "promoted_on": _promoted_on(values["promoted_on"], declared, line_number),
+        "permits": _permits(values.get("permits"), declared, line_number),
     }
+
+
+def _permits(raw, declared, line_number):
+    """The `permits` field as a tuple of PERMISSIONS, each once, in the order
+    written; () when the field is absent.
+
+    Present but empty is refused rather than read as "nothing": a line that
+    says `permits:` and names nothing is more likely half-written than meant."""
+    if raw is None:
+        return ()
+    names = [part.strip().strip("`").strip() for part in raw.split(",")]
+    allowed = ", ".join(PERMISSIONS)
+    if not any(names):
+        raise PrincipleError(
+            f"principle {declared!r} (line {line_number}) has an empty permits "
+            f"field. Name what it permits ({allowed}) or remove the line."
+        )
+    unknown = [name for name in names if name not in PERMISSIONS]
+    if unknown:
+        raise PrincipleError(
+            f"principle {declared!r} (line {line_number}) permits "
+            f"{', '.join(repr(name) for name in unknown)}, which cúramóir does not "
+            f"know. The permissions it acts on are: {allowed}."
+        )
+    return tuple(dict.fromkeys(names))
 
 
 def _promoted_on(raw, declared, line_number):

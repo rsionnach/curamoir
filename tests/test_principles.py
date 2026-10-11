@@ -26,6 +26,7 @@ from pathlib import Path
 import pytest
 
 from curamoir.principles import (
+    PERMISSIONS,
     PrincipleError,
     load_principles,
     parse_principles,
@@ -275,3 +276,62 @@ def test_ids_whose_anchors_collide_are_refused():
 
     with pytest.raises(PrincipleError, match="anchor"):
         parse_principles(ONE + "\n" + second)
+
+
+# --- `permits`: the one optional field cúramóir reads (E3-R2) ------------------
+#
+# E3-R2 forbids a sweep fix that changes a signature "without an explicit
+# principle permitting it", so the format must be able to say so. E2-R1 names
+# eight required fields and says nothing about others (unknown ones are kept,
+# above), so an optional field is within it; what makes `permits` different
+# from `source` is that cúramóir ACTS on it, so its values are a closed
+# vocabulary and a typo is refused rather than read as "no permission".
+
+def test_a_principle_permits_nothing_unless_it_says_so():
+    assert parse_principles(ONE).principles[0].permits == ()
+
+
+@pytest.mark.parametrize("value", ["`signature_change`", "signature_change",
+                                   " `signature_change` "])
+def test_permits_names_what_the_principle_allows(value):
+    text = ONE + f"- **permits:** {value}\n"
+
+    parsed = parse_principles(text)
+
+    assert parsed.principles[0].permits == ("signature_change",)
+    assert "permits" not in parsed.principles[0].extra
+    assert serialise_principles(parsed) == text
+
+
+def test_permits_takes_a_comma_separated_list_and_keeps_each_once():
+    text = ONE + "- **permits:** `signature_change`, `signature_change`\n"
+
+    assert parse_principles(text).principles[0].permits == ("signature_change",)
+
+
+@pytest.mark.parametrize("value", ["`signature-change`", "signatures", "`signature_change`, x"])
+def test_an_unknown_permission_is_refused_naming_the_allowed_ones(value):
+    """A misspelt permission read as "permits nothing" would quietly reject
+    every fix the author meant to allow; read as "permits everything" it would
+    quietly allow what E3-R2 forbids. Neither is acceptable, so it is an error."""
+    with pytest.raises(PrincipleError) as refused:
+        parse_principles(ONE + f"- **permits:** {value}\n")
+
+    message = str(refused.value)
+    assert "structured-logging" in message and "permits" in message
+    for allowed in PERMISSIONS:
+        assert allowed in message
+
+
+def test_an_empty_permits_is_refused_rather_than_read_as_none():
+    with pytest.raises(PrincipleError, match="permits"):
+        parse_principles(ONE + "- **permits:**\n")
+
+
+def test_a_promotion_keeps_the_permission():
+    text = ONE + "- **permits:** `signature_change`\n"
+
+    promoted = parse_principles(text).with_field("structured-logging", "tier", "rule")
+
+    assert promoted.principles[0].permits == ("signature_change",)
+    assert promoted.principles[0].tier == "rule"

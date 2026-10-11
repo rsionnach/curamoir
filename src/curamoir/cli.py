@@ -21,7 +21,7 @@ from curamoir.scaffold import (
     init_repo,
 )
 from curamoir.status import collect_status, render_status
-from curamoir.sweep import LintUntrusted, work_list
+from curamoir.sweep import LintUntrusted, work_list, work_list_document
 
 
 def main(argv=None):
@@ -127,31 +127,7 @@ def _sweep_work_list(repo):
         print(f"{untrusted}\nThe sweep must stop here: do not edit anything.",
               file=sys.stderr)
         return 2
-    principles = []
-    for principle_id, items in result.by_principle().items():
-        principles.append({
-            "principle_id": principle_id,
-            "principle_rule": items[0].principle_rule,
-            "why_link": items[0].why_link,
-            "violations": [
-                {name: getattr(item, name) for name in (
-                    "path", "line", "col", "end_line", "end_col", "severity", "rule_id",
-                    "message", "fix", "fix_source", "match", "fingerprint")}
-                for item in items
-            ],
-        })
-    text = json.dumps({
-        "outcome": result.outcome,
-        "count": len(result.items),
-        "fail_on": result.report.fail_on,
-        "rules_checked": list(result.report.rules_checked),
-        # Kinds only, each once in first-seen order: the skill reports which
-        # notes there were (no_rules above all), not their paths or reasons,
-        # so 5000 symlinks are one entry, not 5000.
-        "notes": list(dict.fromkeys(note.kind for note in result.report.notes)),
-        "paths": list(result.paths),
-        "principles": principles,
-    }, indent=2, ensure_ascii=False) + "\n"
+    text = json.dumps(work_list_document(result), indent=2, ensure_ascii=False) + "\n"
     # UTF-8 bytes whatever the locale: printed through stdout's own encoding,
     # a non-ASCII path or message under an ASCII locale raises
     # UnicodeEncodeError, which main() does not catch, and the skill would see

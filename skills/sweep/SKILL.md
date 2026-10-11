@@ -52,16 +52,43 @@ exactly as CI does and refuses a report it cannot trust:
 The work list is everything the lint reported, at every severity. Nothing on
 it is optional because of its severity, and nothing off it is yours to fix.
 
-## 2. Fix (not yet: cm-fkd.3)
+## 2. The limits on a fix (E3-R2)
 
 E3-R2, verbatim: "Fixes MUST be scoped: only files with violations; no
 refactors beyond the violation; no new dependencies; no signature changes
-without an explicit principle permitting it." The files with violations are
-the work list's `paths`.
+without an explicit principle permitting it."
 
-How a fix is made and checked against those limits is cm-fkd.3's. Until it
-lands, this skill stops after step 1: report the work list (its count, its
-principle ids, and each violation's location) and change nothing.
+After you finish, cúramóir checks every change against these limits in code
+and opens no PR from a fix that breaks any of them:
+
+- Edit only the files in the work list's `paths`. Do not create, rename or
+  delete a file, and do not touch any other file.
+- Change only a violation's own lines and at most 3 lines either side
+  of it. The one exception is adding an import, or a module-level
+  assignment such as a logger, to the top of the module, before its first
+  function or class.
+- Do not change a dependency manifest or lockfile (pyproject.toml,
+  requirements files, package.json, uv.lock and the like), and do not import
+  a package the repository does not already use.
+- Do not add, remove or change the signature of any function, method or
+  class (its parameters, defaults, annotations, return type, decorators or
+  bases) unless the violation's principle says `permits: signature_change`.
+- If a violation cannot be fixed within these limits, leave it as it is and
+  say so. An unfixed violation is reported; an out-of-scope fix is discarded.
+
+The files with violations are the work list's `paths`, and a principle's
+`permits` field is in `.curamoir/principles.md`.
+
+These limits are checked in code, not taken on trust: `src/curamoir/fix_scope.py`
+compares the tree after a fix with the commit the lint ran on, and the
+scheduled sweep (`curamoir run sweep`) runs the fix step headless, with
+these same limits as its prompt (`src/curamoir/fix_step.py`), then refuses
+any change that breaks them. This text and that prompt are one text; a test
+fails if they differ.
+
+Until `curamoir run sweep` lands (cm-fkd.4), this skill stops after step 1:
+report the work list (its count, its principle ids, and each violation's
+location) and change nothing. A fix made here would reach no review step.
 
 ## 3. Still to come
 

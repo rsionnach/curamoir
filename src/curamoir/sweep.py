@@ -230,3 +230,36 @@ def _untrusted_message(code, stdout, stderr):
     if tail:
         message += f"\n{tail}"
     return message
+
+
+def work_list_document(result):
+    """`result` (a WorkList) as the JSON-ready document the fix agent reads:
+    what `curamoir sweep-work-list` prints for the interactive skill, and
+    what fix_step.py puts in the headless fix step's prompt, so the two
+    cannot describe the work differently. cúramóir-internal, not versioned;
+    the versioned contract is the lint's own report."""
+    principles = []
+    for principle_id, items in result.by_principle().items():
+        principles.append({
+            "principle_id": principle_id,
+            "principle_rule": items[0].principle_rule,
+            "why_link": items[0].why_link,
+            "violations": [
+                {name: getattr(item, name) for name in (
+                    "path", "line", "col", "end_line", "end_col", "severity", "rule_id",
+                    "message", "fix", "fix_source", "match", "fingerprint")}
+                for item in items
+            ],
+        })
+    return {
+        "outcome": result.outcome,
+        "count": len(result.items),
+        "fail_on": result.report.fail_on,
+        "rules_checked": list(result.report.rules_checked),
+        # Kinds only, each once in first-seen order: the skill reports which
+        # notes there were (no_rules above all), not their paths or reasons,
+        # so 5000 symlinks are one entry, not 5000.
+        "notes": list(dict.fromkeys(note.kind for note in result.report.notes)),
+        "paths": list(result.paths),
+        "principles": principles,
+    }

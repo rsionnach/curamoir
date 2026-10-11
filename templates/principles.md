@@ -34,6 +34,13 @@ corrected the same violation three times, promote it. `cúramóir` counts those
 corrections for you (E3-R5) and `/curamoir:promote` records the date in
 `promoted_on`. A principle nobody violates does not need to become a guard.
 
+**What the sweep may change** (E3). The weekly sweep fixes violations without
+changing any function's, method's or class's signature. A principle whose fix
+genuinely needs one — a parameter that must become typed, say — can allow it
+with an optional line, ``- **permits:** `signature_change` ``. It is the only
+permission there is, nothing in this starter set needs it, and cúramóir
+refuses any other value rather than guess what it meant.
+
 **Where this set came from.** Extracted from the NthLayer ecosystem's
 `docs/golden-principles.md` and `docs/conventions.md`, genericised to drop
 project-specific references — per the spec's operating assumption 5,
