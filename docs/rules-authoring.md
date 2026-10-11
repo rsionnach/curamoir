@@ -364,12 +364,17 @@ going. Within one report every fingerprint is unique.
 
 Each entry is an object with a `kind`, listed in this order and then by path:
 
-- `no_rules`: there are no rules, so nothing was checked (exit 0).
-- `ast_grep_version_unknown`: an `ast-grep` rule ran but `ast-grep --version`
-  could not be read; `reason` says what it printed. `tools["ast-grep"]` is
+- `no_rules` (keys: `kind`): there are no rules, so nothing was checked
+  (exit 0).
+- `ast_grep_version_unknown` (keys: `kind`, `reason`): an `ast-grep` rule ran
+  but `ast-grep --version` could not be read — it failed, printed something
+  else, or did not answer within 10 seconds (or `--timeout`, if shorter);
+  `reason` says which, naming the stream it quotes. `tools["ast-grep"]` is
   `null`.
-- `symlink_not_followed`: a symlink at `path` was not linted (see *Limits*).
-- `not_regular_file`: a FIFO, socket or device at `path` was not read.
+- `symlink_not_followed` (keys: `kind`, `path`): a symlink at `path` was not
+  linted (see *Limits*).
+- `not_regular_file` (keys: `kind`, `path`): a FIFO, socket or device at
+  `path` was not read.
 
 These are the facts the stderr notes give; stderr is unchanged by them. None
 changes the exit code.

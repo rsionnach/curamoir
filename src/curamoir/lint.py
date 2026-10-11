@@ -77,6 +77,7 @@ import threading
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Optional
 
 from curamoir import __version__
 from curamoir.config import DEFAULTS, ConfigError, load_config_text, one_line, printable
@@ -101,19 +102,9 @@ EXIT_ERROR = 2
 
 #: The JSON report's `schema_version`. The sweep (E3-R1) and the promotion
 #: ladder (E4-R4) parse the report, so its shape is a contract, and this number
-#: is how a consumer knows which contract it is reading. The policy, also in
-#: docs/rules-authoring.md:
-#:
-#: - Additive changes do NOT bump it: a new top-level field, record field,
-#:   `tools` entry or note `kind`. Consumers MUST ignore fields and note kinds
-#:   they do not know, so adding one never breaks a reader.
-#: - It IS bumped when a parser could misread an old report or a new one:
-#:   a field removed, renamed or retyped; a field whose meaning changes while
-#:   its type stays (how `col` is counted, whether `end_col` is exclusive, the
-#:   fingerprint recipe); and a new value in a closed vocabulary — `severity`
-#:   or `fix_source` — because a consumer ranking severities or branching on
-#:   the fix's origin cannot place a value it has never seen, and guessing
-#:   would loosen a gate.
+#: is how a consumer knows which contract it is reading. Bump it for any change
+#: a parser could misread, never for an additive one; the full policy is
+#: docs/rules-authoring.md, "Versioning" under "JSON".
 #:
 #: It is 1, not 2, although the field was called `version` before cm-9jv: no
 #: release or consumer ever read that shape, and a reader of `schema_version`
@@ -141,7 +132,8 @@ RECORD_FIELDS = (
 
 #: The `kind` of each entry in the report's `notes`, in the order they are
 #: listed: facts about the run that are not a rule's result. An open
-#: vocabulary — a consumer ignores a kind it does not know.
+#: vocabulary — a consumer ignores a kind it does not know. The source of
+#: truth: `report_notes` sorts by this order and refuses a kind not in it.
 NOTE_KINDS = (
     "no_rules", "ast_grep_version_unknown", "symlink_not_followed", "not_regular_file",
 )
@@ -200,6 +192,12 @@ AST_GREP_SUMMARY = re.compile(
 
 #: What `ast-grep --version` prints, verbatim from 0.50.0: `ast-grep 0.50.0`.
 AST_GREP_VERSION = re.compile(r"ast-grep (\S+)")
+
+#: The bound on `ast-grep --version`, in seconds, when `--timeout` allows
+#: more. It answers at once when healthy, so a hang there would otherwise
+#: spend the whole run's budget on a label and end in exit 2; with its own
+#: short bound it degrades to a null version and a note, as documented.
+AST_GREP_VERSION_TIMEOUT = 10
 
 #: Above this size a file may be one ast-grep skips (0.50.0 searched a 3 MB
 #: file and skipped a 4 MB one), so it is named as a likely cause.
@@ -285,8 +283,8 @@ class LintResult:
     #: The version of the ast-grep that ran this run's ast-grep rules, as it
     #: prints it; None when none ran, or when it could not be read, in which
     #: case `ast_grep_version_problem` says why.
-    ast_grep_version: object = None
-    ast_grep_version_problem: object = None
+    ast_grep_version: Optional[str] = None
+    ast_grep_version_problem: Optional[str] = None
 
     @property
     def complete(self):
@@ -314,19 +312,20 @@ def run_lint(repo, ast_grep=None, ast_grep_timeout=DEFAULT_TIMEOUT):
 
     files, symlinks, not_regular = _repository_files(repo)
     found, checked, skipped = [], [], []
-    version, version_problem, asked = None, None, False
+    # (version, problem) once asked; None until then.
+    ast_grep_answer = None
     for rule in sorted(rules, key=lambda r: r.id):
         scoped = _scoped(files, rule)
         reason = _why_rule_cannot_run(rule, scoped, ast_grep)
         if reason is not None:
             skipped.append(reason)
             continue
-        if rule.matcher == "ast-grep" and not asked:
+        if rule.matcher == "ast-grep" and ast_grep_answer is None:
             # Asked only once an ast-grep rule is about to run: a report
             # names the version that produced its results, and a run of regex
             # rules neither uses ast-grep nor should depend on it answering.
-            version, version_problem = _ast_grep_version(ast_grep, ast_grep_timeout)
-            asked = True
+            ast_grep_answer = _ast_grep_version(
+                ast_grep, _version_probe_timeout(ast_grep_timeout))
         complete = True
         try:
             if rule.matcher == "ast-grep":
@@ -357,17 +356,27 @@ def run_lint(repo, ast_grep=None, ast_grep_timeout=DEFAULT_TIMEOUT):
         if complete:
             checked.append(rule.id)
 
-    # Path, start and rule are the documented order; end and match only break
-    # the ties one rule can produce (two ast-grep matches starting at the same
-    # node), so the order — and the occurrence index below — never depends on
-    # the order a matcher happened to report in.
-    found.sort(key=lambda v: (v["path"], v["line"], v["col"], v["rule_id"],
-                              v["end_line"], v["end_col"], v["match"]))
+    version, version_problem = ast_grep_answer or (None, None)
+    return LintResult(_fingerprinted(found), tuple(checked), tuple(skipped), tuple(symlinks),
+                      tuple(not_regular), version, version_problem)
+
+
+def _fingerprinted(found):
+    """`found` (one dict of Violation fields per match, fingerprint aside) as
+    Violations in report order, each with its fingerprint.
+
+    The order is fixed before any occurrence index is assigned because the
+    index IS a position: "the Nth identical match in this file, in report
+    order". Assigned in the order the matchers happened to report, the same
+    tree could fingerprint differently between runs. Path, start and rule are
+    the documented order; end and match only break the ties one rule can
+    produce (two ast-grep matches starting at the same node).
+    """
+    ordered = sorted(found, key=lambda v: (v["path"], v["line"], v["col"], v["rule_id"],
+                                           v["end_line"], v["end_col"], v["match"]))
     violations, occurrences = [], {}
-    for fields in found:
-        # Keyed on the values as the record shows them, as the fingerprint is.
-        key = (printable(fields["rule_id"]), printable(fields["path"]),
-               _normalised(printable(fields["match"])))
+    for fields in ordered:
+        key = _fingerprint_key(fields["rule_id"], fields["path"], fields["match"])
         occurrence = occurrences.get(key, 0)
         occurrences[key] = occurrence + 1
         violations.append(Violation(
@@ -375,8 +384,14 @@ def run_lint(repo, ast_grep=None, ast_grep_timeout=DEFAULT_TIMEOUT):
             fingerprint=fingerprint(fields["rule_id"], fields["path"], fields["match"],
                                     occurrence),
         ))
-    return LintResult(tuple(violations), tuple(checked), tuple(skipped), tuple(symlinks),
-                      tuple(not_regular), version, version_problem)
+    return tuple(violations)
+
+
+def _fingerprint_key(rule_id, path, match):
+    """What a fingerprint identifies a violation by, occurrence aside: each
+    value as the JSON record shows it, so a consumer can recompute it from the
+    record, and the match without its whitespace."""
+    return printable(rule_id), printable(path), _normalised(printable(match))
 
 
 def fingerprint(rule_id, path, match, occurrence):
@@ -401,13 +416,12 @@ def fingerprint(rule_id, path, match, occurrence):
 
     `occurrence` tells identical matches in one file apart: the 0-based
     index of this one among the violations with the same rule, path and
-    normalised match, in file order. Its limit: deleting an earlier identical
+    normalised match, in report order. Its limit: deleting an earlier identical
     match shifts every later one down, so the last of them reads as gone and
     the others as unchanged, though it was the first that went. Location
     cannot break the tie instead without losing the survival of line moves.
     """
-    fields = (printable(rule_id), printable(path), _normalised(printable(match)),
-              str(occurrence))
+    fields = (*_fingerprint_key(rule_id, path, match), str(occurrence))
     canonical = b"".join(
         b"%d:%s," % (len(encoded), encoded)
         for encoded in (field.encode("utf-8") for field in fields)
@@ -431,8 +445,9 @@ def _ast_grep_version(binary, timeout):
     ast-grep that cannot run at all fails on the rule's own call just after.
 
     Run like every other call (see `_ast_grep_batch`): from a scratch
-    directory outside the repository, in its own process group, bounded by
-    the same timeout. RunTimedOut is a BaseException and passes through.
+    directory outside the repository, in its own process group, but bounded
+    by `_version_probe_timeout`, so a hang here costs seconds and a note
+    rather than the run. RunTimedOut is a BaseException and passes through.
     """
     try:
         with tempfile.TemporaryDirectory(prefix="curamoir-lint-") as scratch:
@@ -442,10 +457,27 @@ def _ast_grep_version(binary, timeout):
     except OSError as failure:
         return None, f"could not run `ast-grep --version` ({binary}): {failure}"
     printed = AST_GREP_VERSION.fullmatch(stdout.strip())
-    if returncode != 0 or printed is None:
-        return None, (f"`ast-grep --version` exited {returncode} and printed "
-                      f"{(stdout.strip() or stderr.strip())[:200]!r}")
-    return printed.group(1), None
+    if returncode == 0 and printed is not None:
+        return printed.group(1), None
+    # Name the stream quoted: a version on stderr is still not one on stdout,
+    # and a reader should not be told it was "printed" where it was not.
+    if stdout.strip():
+        said = f"printed {stdout.strip()[:200]!r} on stdout"
+    else:
+        said = f"printed nothing on stdout; stderr: {stderr.strip()[:200]!r}"
+    return None, f"`ast-grep --version` exited {returncode} and {said}"
+
+
+def _version_probe_timeout(ast_grep_timeout):
+    """AST_GREP_VERSION_TIMEOUT, or `ast_grep_timeout` when that is shorter.
+
+    Its limit: the run's whole budget is not tracked here, so with
+    `--timeout` at or under AST_GREP_VERSION_TIMEOUT a hanging probe can
+    still use all of it, and the run ends in exit 2 as for any other hang.
+    """
+    if ast_grep_timeout is None:
+        return AST_GREP_VERSION_TIMEOUT
+    return min(AST_GREP_VERSION_TIMEOUT, ast_grep_timeout)
 
 
 def _why_rule_cannot_run(rule, scoped, ast_grep):
@@ -498,14 +530,14 @@ def format_json(result, fail_on):
         "schema_version": SCHEMA_VERSION,
         # The tools whose behaviour the results depend on. Only ast-grep's
         # version varies by machine in a way that can change a result.
-        "tools": {"ast-grep": _optional(result.ast_grep_version)},
+        "tools": {"ast-grep": _printable_or_none(result.ast_grep_version)},
         "fail_on": fail_on,
         "complete": result.complete,
         "rules_checked": [printable(rule_id) for rule_id in result.checked],
         "rules_skipped": [{"rule_id": printable(s.rule_id), "reason": printable(s.reason)}
                           for s in result.skipped],
         "notes": [{name: printable(value) for name, value in note.items()}
-                  for note in notes(result)],
+                  for note in report_notes(result)],
         "violations": [
             {name: printable(value) if isinstance(value, str) else value
              for name, value in v.record().items()}
@@ -515,10 +547,16 @@ def format_json(result, fail_on):
     return json.dumps(document, indent=2, ensure_ascii=False) + "\n"
 
 
-def notes(result):
+def report_notes(result):
     """The run's notes, as the JSON lists them: facts that are not a rule's
     result but that a reader of the report should know — the same facts the
-    stderr notes give, in NOTE_KINDS order and then path order."""
+    stderr notes give, in NOTE_KINDS order and then path order.
+
+    Sorted by NOTE_KINDS rather than trusted to the order of the statements
+    below, so the documented order cannot drift from the emitted one. The sort
+    is stable, so within a kind the paths keep the walk's sorted order. A kind
+    missing from NOTE_KINDS is a bug here, raised rather than emitted: it
+    would be a note no documentation describes."""
     found = []
     if not result.checked and not result.skipped:
         found.append({"kind": "no_rules"})
@@ -527,10 +565,13 @@ def notes(result):
                       "reason": result.ast_grep_version_problem})
     found += [{"kind": "symlink_not_followed", "path": path} for path in result.symlinks]
     found += [{"kind": "not_regular_file", "path": path} for path in result.not_regular]
-    return found
+    unknown = sorted({note["kind"] for note in found} - set(NOTE_KINDS))
+    if unknown:
+        raise ValueError(f"note kind(s) {unknown} are not in NOTE_KINDS")
+    return sorted(found, key=lambda note: NOTE_KINDS.index(note["kind"]))
 
 
-def _optional(text):
+def _printable_or_none(text):
     return None if text is None else printable(text)
 
 

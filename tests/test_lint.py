@@ -161,7 +161,8 @@ def lint(repo, *args, capsys):
 
 
 def fake_ast_grep(tmp_path, stdout="", stderr="", exit_code=0, log=None, summary=True,
-                  sleep=0, skipped=0, version="ast-grep 0.50.0\n"):
+                  sleep=0, skipped=0, version="ast-grep 0.50.0\n",
+                  version_stream="stdout", version_sleep=0):
     """An executable standing in for ast-grep, for the paths the real binary
     cannot be made to take on demand (and for machines without it). With `log`,
     each call appends its argv and working directory there as a JSON line.
@@ -178,7 +179,8 @@ def fake_ast_grep(tmp_path, stdout="", stderr="", exit_code=0, log=None, summary
     `--version` is answered with `version` (by default what 0.50.0 prints) and
     exit 0, before any sleep, and logged like any call: the runner asks once
     per run for the JSON's `tools`, and a fake that answered it with match
-    JSON would test nothing."""
+    JSON would test nothing. `version_stream` is where that answer goes and
+    `version_sleep` how long it takes, for a probe that misbehaves."""
     script = tmp_path / "bin" / "ast-grep"
     script.parent.mkdir(parents=True, exist_ok=True)
     record = (
@@ -201,7 +203,8 @@ def fake_ast_grep(tmp_path, stdout="", stderr="", exit_code=0, log=None, summary
         "import json, os, sys, time\n"
         f"{record}"
         "if sys.argv[1:] == ['--version']:\n"
-        f"    sys.stdout.write({version!r})\n"
+        f"    time.sleep({version_sleep})\n"
+        f"    sys.{version_stream}.write({version!r})\n"
         "    sys.exit(0)\n"
         f"time.sleep({sleep})\n"
         f"sys.stdout.write({stdout!r})\n"
@@ -920,6 +923,18 @@ def test_with_no_pyyaml_anywhere_the_wrapper_says_so_and_exits_two(tmp_path):
     assert "PyYAML" in result.stderr
 
 
+def test_the_lint_modules_parse_as_python_3_9():
+    """The wrapper may fall back to a 3.9 interpreter (cm-bzb), where newer
+    syntax is an import error and Python's exit 1 would read as violations.
+    `feature_version` catches grammar, not newer library calls; the hand run
+    under 3.9 covers those."""
+    import ast
+
+    for name in ("__init__", "lint", "rules", "principles", "config"):
+        source = (ROOT / "src" / "curamoir" / f"{name}.py").read_text(encoding="utf-8")
+        ast.parse(source, filename=f"{name}.py", feature_version=(3, 9))
+
+
 # --- the wrapper imports nothing from the repository it lints ----------------
 
 HOSTILE_MODULES = ("yaml.py", "json.py", "tempfile.py", "curamoir/__init__.py")
@@ -1320,6 +1335,20 @@ def test_ast_grep_output_that_is_not_a_list_of_matches_is_a_runner_error(tmp_pat
 
     with pytest.raises(LintError, match="no-bare-print-ast"):
         run_lint(repo, ast_grep=fake_ast_grep(tmp_path, stdout=stdout, exit_code=exit_code))
+
+
+@pytest.mark.parametrize("end", [None, {"line": 0, "column": 3}, {"line": 0, "column": -1}])
+def test_an_ast_grep_record_without_a_usable_end_is_a_runner_error(tmp_path, end):
+    """Missing, or before its start: the region would be invented, and E3-R2's
+    "fix only the violation" would edit the wrong span."""
+    repo = sample_repo(tmp_path, AST_GREP_PRINT)
+    span = {"start": {"line": 0, "column": 4}}
+    if end is not None:
+        span["end"] = end
+    record = {"text": "print(1)", "file": str(repo.resolve() / "src" / "x.py"), "range": span}
+
+    with pytest.raises(LintError, match="no-bare-print-ast"):
+        run_lint(repo, ast_grep=fake_ast_grep(tmp_path, stdout=json.dumps([record])))
 
 
 def test_an_ast_grep_call_that_does_not_return_is_a_runner_error(tmp_path):
@@ -1793,6 +1822,8 @@ def _fingerprints(repo, path):
     return [v.fingerprint for v in run_lint(repo).violations if v.path == path]
 
 
+# --- cm-9jv: the fingerprint -------------------------------------------------
+
 def test_the_fingerprint_algorithm_is_pinned_to_one_exact_value():
     """Golden. A consumer compares fingerprints across runs, possibly across
     cúramóir versions, so the algorithm may not drift silently: changing it is
@@ -1877,6 +1908,8 @@ def test_the_fingerprint_is_computed_from_the_records_own_fields(tmp_path, capsy
             record["rule_id"], record["path"], record["match"], occurrence)
 
 
+# --- cm-9jv: where each match ends -------------------------------------------
+
 def test_regex_ends_are_one_based_and_exclusive_on_the_same_line(tmp_path):
     """A `target: line` regex sees one line without its newline (and a pattern
     that needs a newline is refused at load), so its match never spans lines."""
@@ -1939,6 +1972,8 @@ def test_both_matchers_report_the_same_region_for_the_same_call(tmp_path, conten
     assert by_rule["print-call"]
     assert by_rule["print-call"] == by_rule["no-bare-print-ast"]
 
+
+# --- cm-9jv: fix_source and tools --------------------------------------------
 
 def test_fix_source_says_where_the_fix_came_from(tmp_path, capsys):
     repo = sample_repo(tmp_path, *ALL_REGEX_RULES)
@@ -2013,6 +2048,70 @@ def test_the_real_ast_grep_version_is_the_one_it_prints(tmp_path, capsys):
     assert json.loads(out)["tools"] == {"ast-grep": printed}
 
 
+def test_a_version_on_stderr_is_named_as_stderr_not_as_printed(tmp_path, capsys,
+                                                               monkeypatch):
+    """The reason quotes what ast-grep said; quoting stderr as what it
+    "printed" would send a reader looking at stdout for it."""
+    repo = sample_repo(tmp_path, AST_GREP_PRINT)
+    fake = fake_ast_grep(tmp_path, stdout="[]", exit_code=1, version_stream="stderr")
+    monkeypatch.setenv("PATH", str(Path(fake).parent))
+
+    code, out, _ = lint(repo, "--format", "json", capsys=capsys)
+
+    (note,) = json.loads(out)["notes"]
+    assert note["reason"] == ("`ast-grep --version` exited 0 and printed nothing on stdout; "
+                              "stderr: 'ast-grep 0.50.0'")
+    assert code == EXIT_CLEAN
+
+
+def test_a_hanging_version_probe_is_a_note_not_a_timed_out_run(tmp_path, capsys,
+                                                               monkeypatch):
+    """The probe has its own short bound, so a hang there costs that bound
+    and a note, not the whole `--timeout` and an exit 2. The bound is patched
+    small here only to keep the test fast."""
+    import curamoir.lint as lint_module
+
+    monkeypatch.setattr(lint_module, "AST_GREP_VERSION_TIMEOUT", 0.5)
+    repo = sample_repo(tmp_path, AST_GREP_PRINT)
+    fake = fake_ast_grep(tmp_path, stdout="[]", exit_code=1, version_sleep=30)
+    monkeypatch.setenv("PATH", str(Path(fake).parent))
+
+    started = time.monotonic()
+    code, out, _ = lint(repo, "--format", "json", "--timeout", "60", capsys=capsys)
+
+    assert time.monotonic() - started < 10
+    document = json.loads(out)
+    assert code == EXIT_CLEAN
+    assert document["tools"] == {"ast-grep": None}
+    assert document["notes"] == [{
+        "kind": "ast_grep_version_unknown",
+        "reason": "`ast-grep --version` did not finish within 0.5 seconds",
+    }]
+
+
+# --- cm-9jv: notes -----------------------------------------------------------
+
+def test_notes_are_emitted_in_note_kinds_order_and_only_those_kinds():
+    """NOTE_KINDS is the documented order; a run with one of each kind must
+    list them in it, and nothing else."""
+    from curamoir.lint import LintResult, report_notes
+    result = LintResult(ast_grep_version_problem="it hung", symlinks=("s.link",),
+                        not_regular=("pipe",))
+
+    assert tuple(note["kind"] for note in report_notes(result)) == NOTE_KINDS
+
+
+def test_a_note_kind_missing_from_note_kinds_is_refused(monkeypatch):
+    """Emitting it would put an undocumented kind in the contract."""
+    import curamoir.lint as lint_module
+
+    monkeypatch.setattr(lint_module, "NOTE_KINDS", ("no_rules",))
+    result = lint_module.LintResult(symlinks=("s.link",))
+
+    with pytest.raises(ValueError, match="symlink_not_followed"):
+        lint_module.report_notes(result)
+
+
 def test_symlinks_and_other_non_files_are_notes_in_the_json(tmp_path, capsys):
     """Until now only stderr said so; a sweep reading the JSON could not tell
     a part of the tree had not been read. Paths are exact, like `path`."""
@@ -2052,6 +2151,8 @@ def test_a_note_path_that_is_not_utf8_is_escaped_like_a_record_path():
 
     assert document["notes"] == [{"kind": "symlink_not_followed", "path": "bad\\xff.link"}]
 
+
+# --- cm-9jv: version and CI pinning ------------------------------------------
 
 def test_the_version_flag_names_the_tool_and_the_schema(capsys):
     from curamoir import __version__
@@ -2102,29 +2203,3 @@ def test_the_ci_snippet_pins_curamoir_and_ast_grep():
 
     assert "'ast-grep-cli==0.50.*'" in snippet
     assert "--branch v" in snippet
-
-
-def test_the_lint_modules_parse_as_python_3_9():
-    """The wrapper may fall back to a 3.9 interpreter (cm-bzb), where newer
-    syntax is an import error and Python's exit 1 would read as violations.
-    `feature_version` catches grammar, not newer library calls; the hand run
-    under 3.9 covers those."""
-    import ast
-
-    for name in ("__init__", "lint", "rules", "principles", "config"):
-        source = (ROOT / "src" / "curamoir" / f"{name}.py").read_text(encoding="utf-8")
-        ast.parse(source, filename=f"{name}.py", feature_version=(3, 9))
-
-
-@pytest.mark.parametrize("end", [None, {"line": 0, "column": 3}, {"line": 0, "column": -1}])
-def test_an_ast_grep_record_without_a_usable_end_is_a_runner_error(tmp_path, end):
-    """Missing, or before its start: the region would be invented, and E3-R2's
-    "fix only the violation" would edit the wrong span."""
-    repo = sample_repo(tmp_path, AST_GREP_PRINT)
-    span = {"start": {"line": 0, "column": 4}}
-    if end is not None:
-        span["end"] = end
-    record = {"text": "print(1)", "file": str(repo.resolve() / "src" / "x.py"), "range": span}
-
-    with pytest.raises(LintError, match="no-bare-print-ast"):
-        run_lint(repo, ast_grep=fake_ast_grep(tmp_path, stdout=json.dumps([record])))
