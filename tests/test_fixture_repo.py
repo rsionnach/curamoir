@@ -61,35 +61,25 @@ def test_five_violations_across_three_principles_are_planted(manifest):
     assert len({v["principle_id"] for v in violations}) == 3
 
 
-def test_every_planted_violation_is_actually_present_at_its_recorded_line(manifest):
-    """The anti-drift check. If this fails, the fixture moved and every epic
-    that trusts these line numbers is about to fail for the wrong reason."""
-    for violation in manifest["violations"]:
-        path = FIXTURE / violation["path"]
-        assert path.is_file(), violation
+@pytest.mark.parametrize("key", ["violations", "bundled_rule_findings"])
+def test_every_planted_finding_is_present_at_its_recorded_line(manifest, key):
+    """The anti-drift check, for E3's `violations` and for the plants the
+    bundled example rules in `examples/` must find. If this fails, the fixture
+    moved and every epic that trusts these line numbers is about to fail for
+    the wrong reason."""
+    entries = manifest[key]
+
+    # An empty list would pass the loop below by checking nothing.
+    assert entries
+    for entry in entries:
+        path = FIXTURE / entry["path"]
+        assert path.is_file(), entry
         lines = path.read_text(encoding="utf-8").splitlines()
-        line_number = violation["line"]
-        assert 1 <= line_number <= len(lines), violation
-        assert violation["evidence"] in lines[line_number - 1], (
-            f"{violation['path']}:{line_number} no longer contains "
-            f"{violation['evidence']!r} — the fixture has drifted"
-        )
-
-
-def test_every_bundled_rule_finding_is_present_at_its_recorded_line(manifest):
-    """E2-R6's plants: what the bundled example rules in `examples/` must find.
-    The same anti-drift check as for `violations`."""
-    findings = manifest["bundled_rule_findings"]
-
-    assert findings
-    for finding in findings:
-        path = FIXTURE / finding["path"]
-        assert path.is_file(), finding
-        lines = path.read_text(encoding="utf-8").splitlines()
-        assert 1 <= finding["line"] <= len(lines), finding
-        assert finding["evidence"] in lines[finding["line"] - 1], (
-            f"{finding['path']}:{finding['line']} no longer contains "
-            f"{finding['evidence']!r} — the fixture has drifted"
+        line_number = entry["line"]
+        assert 1 <= line_number <= len(lines), entry
+        assert entry["evidence"] in lines[line_number - 1], (
+            f"{entry['path']}:{line_number} no longer contains "
+            f"{entry['evidence']!r} — the fixture has drifted"
         )
 
 

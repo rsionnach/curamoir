@@ -3,15 +3,20 @@
 # code is wrong and fails when it is merely refactored.
 #
 # This catches the obvious case only, which is all a pattern can: the
-# principle needs judgement in general (see its source note). Not matched:
-# `mock.assert_called_once_with(...)`, `assert mock.call_count == 1`. Write a
-# rule per form if your tests lean on them.
+# principle needs judgement in general (see the principle's source note in
+# templates/principles.md). Not matched: `mock.assert_called_once_with(...)`,
+# `assert mock.call_count == 1`. Write a rule per form if your tests lean on
+# them.
+#
+# Severity `warning`, so it reports without failing the lint at the default
+# `fail_on: error`: `$MOCK` matches any receiver, and a non-mock object with
+# its own `called` attribute is a known false positive.
 id: no-assert-mock-called
 principle: tests-assert-behaviour
 severity: warning
 matcher: ast-grep
 pattern: 'assert $MOCK.called'
 message: "{match} asserts that a call happened, not what the code returned or changed"
-fix: "assert on the return value or the state the call produced, e.g. assert load_rates(path) == \"0.2\""
+fix: "assert on what the call returned or the state it changed (assert result == expected), not on whether a mock was called"
 languages: [python]
 exclude: []

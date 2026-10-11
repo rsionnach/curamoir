@@ -1,10 +1,13 @@
 # structured-logging, for TypeScript. Here to prove the rule format is not
-# Python-specific (spec operating assumption 6), so it is deliberately the
-# smallest rule that does: the same fields as the Python ones, a different
-# `languages`, an ast-grep pattern in TypeScript syntax.
+# Python-specific, so it is deliberately the smallest rule that does: the same
+# fields as the Python ones, a different `languages`, an ast-grep pattern in
+# TypeScript syntax.
 #
 # Matches `console.log(...)` only; `console.error`, `console.warn` and
 # `console.debug` are the same principle and each wants its own rule.
+#
+# Severity `error`, as for Python's `no-print`: a stray `console.log` is
+# almost never intended, and the fix is mechanical.
 id: no-console-log
 principle: structured-logging
 severity: error

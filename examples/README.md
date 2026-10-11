@@ -3,7 +3,7 @@
 Working `curamoir-lint` rules written against the starter principles in
 `templates/principles.md` — the set `/curamoir:init` seeds a repository with.
 They exist for two reasons: so a new repository has something that runs on day
-one, and so the rule format is shown working rather than described (E2-R6).
+one, and so the rule format is shown working rather than described.
 For the format itself, see `docs/rules-authoring.md`.
 
 There is no `principles.md` in `examples/python/` or `examples/typescript/`, and
@@ -11,16 +11,16 @@ that is deliberate: both languages' rules cite the one shared, language-agnostic
 set in `templates/principles.md`, which is what your repository's
 `.curamoir/principles.md` starts as.
 
-| file | principle | pattern | finds |
-|---|---|---|---|
-| `python/no-print.yaml` | `structured-logging` | `print($$$ARGS)` | any call to `print`, outside `cli.py`, `__main__.py`, `conftest.py` |
-| `python/no-raise-runtime-error.yaml` | `typed-errors` | `raise RuntimeError($$$ARGS)` | `raise RuntimeError(...)` in application code |
-| `python/no-assert-mock-called.yaml` | `tests-assert-behaviour` | `assert $MOCK.called` | a test asserting that a mock was called |
-| `typescript/no-console-log.yaml` | `structured-logging` | `console.log($$$ARGS)` | any call `console.log(...)` in `.ts`/`.tsx` |
+| file | principle | severity | pattern | finds |
+|---|---|---|---|---|
+| `python/no-print.yaml` | `structured-logging` | `error` | `print($$$ARGS)` | any call to `print`, outside `cli.py`, `__main__.py`, `conftest.py` |
+| `python/no-raise-runtime-error.yaml` | `typed-errors` | `warning` | `raise RuntimeError($$$ARGS)` | `raise RuntimeError(...)`, outside `tests/`, `test_*.py`, `*_test.py`, `conftest.py` |
+| `python/no-assert-mock-called.yaml` | `tests-assert-behaviour` | `warning` | `assert $MOCK.called` | `assert <anything>.called`, usually a test asserting that a mock was called |
+| `typescript/no-console-log.yaml` | `structured-logging` | `error` | `console.log($$$ARGS)` | any call `console.log(...)` in `.ts`/`.tsx` |
 
-All four are `ast-grep` rules (DEC-3). Each is tested against a planted
-violation in `fixtures/sample-repo` and must find exactly what is planted
-there — no more — by `tests/test_bundled_rules.py`.
+All four are `ast-grep` rules, the default matcher. Each is tested against a
+planted violation in `fixtures/sample-repo` and must find exactly what is
+planted there — no more — by `tests/test_bundled_rules.py`.
 
 ## Installing them
 
@@ -35,10 +35,14 @@ Not the directories: the loader refuses a subdirectory in `.curamoir/rules/`,
 because a rule filed where it does not look would never run. The rule ids are
 unique across both languages, so both sets can be installed together.
 
-`/curamoir:init` does not copy them for you. A rule fails the lint, and a
-repository should choose which of its principles are worth failing a build
-over — the ladder's point is that a principle is promoted to a rule on
-evidence, not by default.
+`/curamoir:init` does not copy them for you. At the default threshold an
+`error` rule fails the lint (exit 1) and a `warning` rule is reported without
+failing it; lower the threshold with `rules: {fail_on: warning}` in
+`curamoir.yaml`, or `curamoir-lint --fail-on warning` for one run, and the
+warnings fail too. Either way a repository should choose which of its
+principles are worth reporting, let alone failing a build over — the ladder's
+point is that a principle is promoted to a rule on evidence, not by default.
+Each rule file's opening comment says why it has the severity it has.
 
 Each rule cites one principle, and the loader refuses a rule whose principle is
 not in your `principles.md`. If you deleted or renamed `typed-errors`, say,
@@ -62,14 +66,16 @@ mistakes a clean run for more than it is:
   `raise Exception(...)`; each would be another rule with the same principle
   (one pattern per rule).
 - `no-assert-mock-called` does not match `mock.assert_called_once_with(...)`,
-  `assert mock.call_count == 1`, `assert m.called is True`, `assert not m.called`
-  or `self.assertTrue(m.called)`. And `$MOCK` matches any receiver, not only a
-  mock: a domain object with its own `called` flag is reported too, which is a
-  false positive, so `exclude` that file. The principle needs judgement in
-  general; a pattern catches only its most obvious form.
+  `assert mock.call_count == 1`, `assert m.called is True`,
+  `assert not m.called` or `self.assertTrue(m.called)`. And `$MOCK` matches
+  any receiver, not only a mock: a domain object with its own `called` flag is
+  reported too, which is a false positive, so `exclude` that file. The
+  principle needs judgement in general; a pattern catches only its most
+  obvious form.
 - `no-console-log` does not match `console.error`, `console.warn`,
-  `console.debug` or optional chaining (`console?.log(...)`). It is the second-language proof (operating assumption 6),
-  kept deliberately minimal.
+  `console.debug` or optional chaining (`console?.log(...)`). It is here to
+  show the rule format is not Python-specific, so it is kept deliberately
+  minimal.
 - There is no bundled `errors-carry-context` rule. Its violation is a `raise`
   inside an `except` block *without* `from`, and a single ast-grep pattern
   cannot say "without": `raise $E($$$A)` also matches `raise E(...) from err`.

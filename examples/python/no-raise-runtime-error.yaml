@@ -8,6 +8,11 @@
 #
 # Tests are excluded: the principle is about application code, and a test
 # double raising RuntimeError to simulate a failure is not one.
+#
+# Severity `warning`, so it reports without failing the lint at the default
+# `fail_on: error`: path exclusions only approximate "application code" (a
+# script or fixture helper outside tests/ is still matched), and replacing a
+# base class with a domain error is a design change that wants judgement.
 id: no-raise-runtime-error
 principle: typed-errors
 severity: warning

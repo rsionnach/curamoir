@@ -52,6 +52,13 @@ def rule_files(language):
     return sorted(LANGUAGE_DIRECTORIES[language].glob("*.yaml"))
 
 
+def parse_bundled(path):
+    """A bundled rule file through the real parser, against the starter
+    principles it is written for."""
+    return parse_rule(path.read_text(encoding="utf-8"), source=path.name,
+                      known_principles=starter_ids())
+
+
 def starter_ids():
     return {p.id for p in parse_principles(STARTER.read_text(encoding="utf-8")).principles}
 
@@ -68,10 +75,12 @@ def install(repo, *languages):
     return repo
 
 
-def fixture_copy(tmp_path):
+def fixture_copy(tmp_path, *languages):
+    """A copy of the sample repo with `languages`' rules installed — both
+    bundled languages unless named."""
     repo = tmp_path / "sample"
     shutil.copytree(FIXTURE, repo, ignore=shutil.ignore_patterns(".pytest_cache", "__pycache__"))
-    return install(repo, "python", "typescript")
+    return install(repo, *(languages or sorted(LANGUAGE_DIRECTORIES)))
 
 
 def expected_findings():
@@ -81,6 +90,11 @@ def expected_findings():
     )
 
 
+def found_findings(result):
+    """`result`'s violations in the same shape as `expected_findings()`."""
+    return sorted((v.path, v.line, v.principle_id, v.rule_id) for v in result.violations)
+
+
 # --- the format: one loader, both languages ---------------------------------
 
 @pytest.mark.parametrize("language", sorted(LANGUAGE_DIRECTORIES))
@@ -88,8 +102,7 @@ def test_every_bundled_rule_loads_through_the_real_parser(language):
     files = rule_files(language)
     assert files, f"no bundled {language} rules"
     for path in files:
-        rule = parse_rule(path.read_text(encoding="utf-8"), source=path.name,
-                          known_principles=starter_ids())
+        rule = parse_bundled(path)
         # The file is named for its rule, so a copied directory cannot hold
         # two files that disagree about which rule they are.
         assert path.stem == rule.id
@@ -102,13 +115,11 @@ def test_the_spec_minimums_are_met_with_ast_grep_rules():
     """E2-R6's counts, and DEC-3's matcher. A regex rule (the escape hatch)
     would not count toward either."""
     def ast_grep_rules(language):
-        return [
-            parse_rule(p.read_text(encoding="utf-8"), p.name, starter_ids())
-            for p in rule_files(language)
-        ]
+        rules = (parse_bundled(p) for p in rule_files(language))
+        return [r for r in rules if r.matcher == "ast-grep"]
 
-    python = [r for r in ast_grep_rules("python") if r.matcher == "ast-grep"]
-    typescript = [r for r in ast_grep_rules("typescript") if r.matcher == "ast-grep"]
+    python = ast_grep_rules("python")
+    typescript = ast_grep_rules("typescript")
 
     assert len(python) >= 3, [r.id for r in python]
     assert len(typescript) >= 1, [r.id for r in typescript]
@@ -135,8 +146,7 @@ def test_every_bundled_rule_carries_a_fix():
     retrying the same thing; an example that omits it teaches omitting it."""
     for language in LANGUAGE_DIRECTORIES:
         for path in rule_files(language):
-            rule = parse_rule(path.read_text(encoding="utf-8"), path.name, starter_ids())
-            assert rule.fix.strip(), path.name
+            assert parse_bundled(path).fix.strip(), path.name
 
 
 def test_python_and_typescript_rules_install_together(tmp_path):
@@ -158,8 +168,8 @@ def test_the_manifest_names_only_bundled_rules():
 
 
 def test_the_typescript_plant_is_in_a_file_ast_grep_reads_as_typescript():
-    """cm-dpd: `languages: [typescript]` does not take in .mts/.cts, so the
-    plant must not rely on those suffixes."""
+    """`languages: [typescript]` does not take in .mts/.cts (bead cm-dpd), so
+    the plant must not rely on those suffixes."""
     typescript = [f for f in PLANTED["bundled_rule_findings"]
                   if f["rule_id"] in {p.stem for p in rule_files("typescript")}]
 
@@ -177,8 +187,7 @@ def test_the_bundled_rules_find_exactly_their_planted_violations(tmp_path):
     result = run_lint(repo, ast_grep=shutil.which("ast-grep"))
 
     assert result.skipped == ()
-    found = sorted((v.path, v.line, v.principle_id, v.rule_id) for v in result.violations)
-    assert found == expected_findings()
+    assert found_findings(result) == expected_findings()
 
 
 @needs_ast_grep
@@ -186,14 +195,12 @@ def test_the_bundled_rules_find_exactly_their_planted_violations(tmp_path):
 def test_each_language_alone_finds_its_own_plants(tmp_path, language):
     """Installed alone, a language's rules find their plants and nothing of the
     other's — the scoping is part of what makes the second language a proof."""
-    repo = tmp_path / "sample"
-    shutil.copytree(FIXTURE, repo, ignore=shutil.ignore_patterns(".pytest_cache", "__pycache__"))
-    install(repo, language)
+    repo = fixture_copy(tmp_path, language)
     own = {p.stem for p in rule_files(language)}
 
     result = run_lint(repo, ast_grep=shutil.which("ast-grep"))
 
-    found = sorted((v.path, v.line, v.principle_id, v.rule_id) for v in result.violations)
+    found = found_findings(result)
     assert found == [f for f in expected_findings() if f[3] in own]
     assert found, f"the {language} rules found nothing"
 

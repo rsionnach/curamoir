@@ -6,6 +6,10 @@
 # pattern cannot know which code is an entry point, so the exemption is by
 # file name: extend `exclude` with your own entry points rather than deleting
 # the rule.
+#
+# Severity `error`, so it fails the lint at the default `fail_on: error`: a
+# `print` outside an entry point is almost never intended, and the fix is
+# mechanical.
 id: no-print
 principle: structured-logging
 severity: error
