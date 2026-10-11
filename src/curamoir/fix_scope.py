@@ -20,13 +20,34 @@ Two layers, so the rules can be tested without git:
   changed file's before and after text and the violations, and returns a
   `ScopeVerdict`: every breach, each with a kind (the KINDS below), a path,
   a line where there is one, and a sentence saying what was seen.
-- `verify_fix(repo, base_ref, work_list, principles, git_state=...)`: the
-  git adapter. It first holds the repository's git internals to a snapshot
-  taken before the fix step (snapshot_git_state, which also pins `base_ref`
-  to a commit), then reads what changed between that commit and the working
-  tree (tracked changes with `git diff --raw`, hunks with `git diff -U0`,
-  untracked files with `git ls-files --others --exclude-standard`), and
-  what the repository already imports at that commit, then calls the core.
+- `verify_fix(sandbox, git_state=...)`: the git adapter. The fix step runs
+  in a sandbox, a disposable clone of the base commit (git_guard), never in
+  the user's checkout. verify_fix first holds the sandbox's git files and
+  work tree to the snapshot taken before the fix step (git_guard), then
+  reads what changed between the base commit and the work tree (tracked
+  changes with `git diff --raw`, hunks with `git diff -U0`, untracked files
+  with `git ls-files --others`, nothing excluded), the sandbox's work list
+  (lint_sandbox), the principles at the base commit, and what the
+  repository already imports there, and calls the core.
+
+**What the runner (cm-fkd.4) must do.**
+
+1. Make a sandbox: `git_guard.prepare_sandbox(repo, base_ref)`, and use it
+   as a context manager so it is removed whatever happens.
+2. Lint it before anything edits it: `lint_sandbox(sandbox)`, which records
+   the work list of the base on the sandbox; build the prompt from that and
+   from `base_principles(sandbox)`.
+3. Run the fix step in it: `fix_step.run_fix_step(sandbox, prompt)`, which
+   snapshots the sandbox (FixStepRun.git_state) before the agent starts.
+4. Review it: `verify_fix(sandbox, git_state=run.git_state)`. Same sandbox,
+   same snapshot, same base: there is nothing else to pass.
+5. Treat git_guard.GitGuardError (ScopeCheckError is one) as a refusal: no
+   verdict is not a verdict, and an unverified fix is not a fix.
+6. On an ok verdict with paths (not `nothing_changed`), take exactly
+   `verdict.paths` out: `sandbox.patch(verdict.paths)`, applied or pushed
+   by the runner. Never `git add -A`, never the whole tree.
+7. Never re-run the fix agent in the user's checkout, not even "to apply
+   the same fix": the sandbox is what the verdict is about.
 
 **The rules, and why each is drawn where it is.**
 
@@ -35,12 +56,14 @@ Two layers, so the rules can be tested without git:
   not exist there has no violation, and E3-R2 says "only files with
   violations". A deleted file is out of scope too, with one exception below.
   Renames are read with `--no-renames`, so a rename is a deletion and an
-  addition, and is refused as both.
+  addition, and is refused as both. Paths are compared in Unicode NFC on
+  both sides: a macOS file system hands names back in the form they were
+  written, and git reports NFC.
 - *Deleting a file.* Allowed only when the file carries a file-level
   violation: the lint reports a `target: path` rule's match (a name like
   `handlers_v2.py`) as the empty region at 1:1 (docs/curamoir-lint.md), and
   for such a violation the file's existence is the violation, so removing it
-  is the fix rather than a refactor.
+  is the fix rather than a refactor. The prompt states the same exception.
 - *Dependencies.* Any change to a dependency manifest or lockfile (by name:
   DEPENDENCY_FILES) is refused, whatever else is in it and even when the
   file is on the work list. A section-aware check — "pyproject.toml may
@@ -56,23 +79,20 @@ Two layers, so the rules can be tested without git:
 - *Refactors.* Every hunk (git's `-U0` hunks: the smallest changed regions)
   must touch, or lie within WINDOW lines of, a violation in the same file.
   The one other hunk allowed is an insertion into the module's header — the
-  stretch before its first function or class — that adds only imports and
-  module-level assignments of names the module does not already bind, to a
-  literal or a `logging.getLogger(...)` call (_header_value has the list):
-  the bundled no-print rule's own fix is "logger = logging.getLogger(__name__)
-  at module level", which lands far from the `print` it replaces, while an
-  inserted `TAX_RATE = 0.3` would change every later use of TAX_RATE, and an
-  inserted `_boot = __import__("os").system(...)` would run on every import.
+  stretch before its first function or class — of imports and of new
+  module-level names bound to a literal or a logger; _only_header_statements
+  and _header_value hold the exact rule and the reason for each part of it.
 - *Signatures.* For Python, both versions are parsed and every function's
   and class's signature (arguments, defaults, annotations, return
   annotation, async-ness, decorators; a class's bases, keywords and
   decorators) compared by qualified name: one changed, removed or added is a
-  signature change. It is allowed only where a principle says `permits:
-  signature_change` (E2-R1's format, src/curamoir/principles.py) and a
-  violation of that principle lies within the definition (± WINDOW). For
-  JavaScript and TypeScript there is no parser here, so any changed line that
-  looks like a declaration (DECLARATION) counts as one — conservative, and
-  blind to a parameter changed on a line of its own (see Limits).
+  signature change. It is allowed only where a principle at the base commit
+  says `permits: signature_change` (E2-R1's format, src/curamoir/
+  principles.py) and a violation of that principle lies within the
+  definition (± WINDOW). For JavaScript and TypeScript there is no parser
+  here, so any changed line that looks like a declaration (DECLARATION)
+  counts as one — conservative, and blind to a parameter changed on a line
+  of its own (see Limits).
 
 **WINDOW = 3.** A mechanical fix sometimes has to touch a line just above
 the violation: chaining a cause (`raise X(...) from error`) needs the
@@ -82,16 +102,10 @@ of a function to "fix" one line in it is refused.
 
 **Limits, stated rather than hidden.**
 
-- The verdict trusts that the work list was computed on `base_ref` with a
-  clean tree, so its line numbers are the base commit's. The runner must
-  lint the commit it branches from.
-- Files git ignores are not seen: a fix that writes only into an ignored path
-  passes. The PR step (cm-fkd.4) must commit exactly `ScopeVerdict.paths`,
-  never `git add -A`, so such a file cannot reach the PR either.
-- Every changed path is checked, including ones cúramóir's own hooks write
-  while the agent runs (a `Stop` hook's `.curamoir/handoff/latest.md`, a
-  guard's ledger line). They are not in any work list, so the verdict refuses
-  them; the runner must keep its own writes out of the fix step's tree.
+- Every path that changed in the sandbox is checked, whoever changed it. The
+  fix step runs with `--restricted`, which loads no user hooks or plugins
+  (fix_step), so cúramóir's own hooks do not write there; anything else
+  that does is refused like the agent's own edits (cm-sto).
 - JS/TS signatures are matched by line shape, not parsed: a parameter edited
   on its own line inside a multi-line parameter list is not seen.
 - New-import detection knows the standard library from the interpreter
@@ -105,19 +119,13 @@ of a function to "fix" one line in it is refused.
   a directory holding JS/TS source as a local package; a bare specifier
   that a tsconfig `paths`/`baseUrl` alias resolves locally, and a compiled
   extension module (`.so`, `.pyd`), are reported as new.
-- Git's own files. The fix agent is denied `.git` (fix_step.repo_deny_rules)
-  and verify_fix compares `.git`'s config, hooks, `info/`, `HEAD` and
-  `packed-refs`, and every `.gitattributes` in the work tree, with a
-  snapshot before it runs git, then runs git with fsmonitor and hooks off
-  and no external diff or textconv (_GIT_HARDENING). The base is the commit
-  the snapshot resolved the base ref to, and a ref moved since fails the
-  verdict. Not covered: a config file pulled in by `include.path` from
-  outside `.git` (it is read before the diff that would show it changed),
-  `.git/index` and `objects/`, which are not snapshotted, and loose refs
-  other than the base, which verify_fix does not read. A filter driver the
-  owner already configured is still run by `git diff` on a file that a
-  `.gitattributes` unchanged since the snapshot points it at: that is the
-  owner's own setup.
+- Git. The sandbox's git files are the clone's own, not the owner's, and
+  are held to the snapshot as files before any git command runs; git runs
+  hardened (git_guard). The base's own committed `.gitattributes` still
+  apply to the diff: `-diff` and `binary` are overridden with `--text`, and
+  no filter or external driver is configured to run, but an attribute that
+  changes how a file is read (`working-tree-encoding`) is the owner's own,
+  and a file it makes unreadable as UTF-8 is unverifiable, not passed.
 - Python's own semantics only: a change of behaviour inside a function body
   within the window is the violation's fix as far as this module can tell.
   Whether it is a correct fix is E3-R4's question (the tests).
@@ -129,15 +137,24 @@ Syntax that imports on 3.9, like sweep.py: the sweep reaches this through
 import ast
 import builtins
 import difflib
-import hashlib
 import json
 import os
 import re
-import subprocess
 import sys
+import unicodedata
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Optional
+
+from curamoir.git_guard import (
+    GitGuardError,
+    Sandbox,
+    git,
+    tree_changes,
+    verify_git_state,
+)
+from curamoir.principles import PrincipleError, PrinciplesFile, parse_principles
+from curamoir.sweep import work_list
 
 #: Lines either side of a violation's span that a fix may touch.
 WINDOW = 3
@@ -152,10 +169,19 @@ OUTSIDE_VIOLATION = "outside_violation"
 SIGNATURE_CHANGE = "signature_change"
 UNVERIFIABLE = "unverifiable"
 GIT_INTERNALS_CHANGED = "git_internals_changed"
+#: The sandbox's HEAD no longer names the base commit. The diff is always
+#: taken against the base SHA, so this hides nothing from it; it is its own
+#: kind because no fix step moves HEAD, and one that did has been doing
+#: something other than editing files.
+BASE_MOVED = "base_moved"
+#: A path changed on disk that git does not report (inside an uninitialised
+#: submodule, or hidden from git some other way): a change git cannot see
+#: cannot be reviewed, and cannot be carried to a PR either.
+HIDDEN_CHANGE = "hidden_change"
 
 KINDS = (FILE_NOT_IN_WORK_LIST, FILE_ADDED, FILE_DELETED, DEPENDENCY_CHANGE,
          NEW_DEPENDENCY, OUTSIDE_VIOLATION, SIGNATURE_CHANGE, UNVERIFIABLE,
-         GIT_INTERNALS_CHANGED)
+         GIT_INTERNALS_CHANGED, BASE_MOVED, HIDDEN_CHANGE)
 
 #: The principle permission that lifts SIGNATURE_CHANGE (principles.PERMISSIONS).
 SIGNATURE_PERMISSION = "signature_change"
@@ -265,7 +291,10 @@ class Breach:
 @dataclass(frozen=True)
 class ScopeVerdict:
     """The review step's answer. `paths` is every changed path, sorted: what a
-    PR made from an accepted fix commits, and nothing else."""
+    PR made from an accepted fix commits, and nothing else.
+
+    `ok` with no paths (`nothing_changed`) is a fix step that changed
+    nothing: in scope, and nothing to open a PR for or count as fixed."""
 
     breaches: tuple
     paths: tuple
@@ -274,12 +303,18 @@ class ScopeVerdict:
     def ok(self):
         return not self.breaches
 
+    @property
+    def nothing_changed(self):
+        return not self.paths
+
     def kinds(self):
         """The breach kinds present, each once, in KINDS order."""
         present = {breach.kind for breach in self.breaches}
         return tuple(kind for kind in KINDS if kind in present)
 
     def render(self):
+        if self.ok and self.nothing_changed:
+            return "in scope: nothing changed, so nothing was fixed"
         if self.ok:
             return f"in scope: {len(self.paths)} file(s) changed, all within E3-R2's limits"
         lines = [f"out of scope: {len(self.breaches)} breach(es) of E3-R2"]
@@ -298,6 +333,13 @@ class ScopeVerdict:
         }
 
 
+class ScopeCheckError(GitGuardError):
+    """No verdict can be given: the review was asked about something it
+    cannot check (no snapshot, not a sandbox, no work list, principles that
+    do not parse). A GitGuardError, so a runner that refuses on that refuses
+    on this too: an unverified fix is not a fix."""
+
+
 # --- the pure core ---------------------------------------------------------------
 
 def check_scope(changes, violations, permitting=frozenset(), known_modules=frozenset(),
@@ -306,13 +348,14 @@ def check_scope(changes, violations, permitting=frozenset(), known_modules=froze
     with path, line, col, end_line, end_col and principle_id: the work list's
     items). `permitting` is the ids of principles that permit signature
     changes; `known_modules` the top-level module and package names the
-    repository already uses or contains, which are not new dependencies."""
+    repository already uses or contains, which are not new dependencies.
+    Paths are matched in NFC (module docstring)."""
     by_path = {}
     for violation in violations:
-        by_path.setdefault(violation.path, []).append(violation)
+        by_path.setdefault(nfc(violation.path), []).append(violation)
     breaches = []
     for change in sorted(changes, key=lambda c: c.path):
-        breaches.extend(_check_file(change, by_path.get(change.path, ()), permitting,
+        breaches.extend(_check_file(change, by_path.get(nfc(change.path), ()), permitting,
                                     known_modules, window))
     return ScopeVerdict(breaches=tuple(breaches),
                         paths=tuple(sorted({c.path for c in changes})))
@@ -372,7 +415,7 @@ def _check_file(change, violations, permitting, known_modules, window):
             continue
         found.append(Breach(
             OUTSIDE_VIOLATION, path, max(hunk.old_start, 1),
-            f"{_describe(hunk, old_lines, added)} at base line {max(hunk.old_start, 1)}, "
+            f"{_describe(hunk)} at base line {max(hunk.old_start, 1)}, "
             f"more than {window} line(s) from every violation in this file"))
 
     permitted_spans = [_span(v, window) for v in violations if v.principle_id in permitting]
@@ -389,6 +432,11 @@ def _check_file(change, violations, permitting, known_modules, window):
                                           _script_imports(new_lines), known_modules,
                                           NODE_BUILTINS))
     return found
+
+
+def nfc(path):
+    """`path` in Unicode normalisation form C, the form git reports."""
+    return unicodedata.normalize("NFC", path)
 
 
 def is_dependency_file(path):
@@ -473,7 +521,7 @@ def _overlaps(first, second):
     return first[0] <= second[1] and second[0] <= first[1]
 
 
-def _describe(hunk, old_lines, added):
+def _describe(hunk):
     if hunk.old_count == 0:
         return f"{hunk.new_count} line(s) inserted"
     if hunk.new_count == 0:
@@ -933,270 +981,153 @@ def _new_import_breaches(path, before, after, known_modules, builtins):
 
 # --- the git adapter ---------------------------------------------------------------
 
-def verify_fix(repo, base_ref, work_list, principles, *, git_state, window=WINDOW):
+def lint_sandbox(sandbox, **lint_options):
+    """Run the lint (sweep.work_list, with `lint_options`) in `sandbox` while
+    its work tree is still exactly its base commit, record the result as
+    `sandbox.work_list` for verify_fix, and return it.
+
+    WHY here and not by the caller: the verdict's line numbers and its "only
+    files with violations" are the work list's, so the work list must be the
+    base's. A list computed in the user's checkout (another commit, or
+    uncommitted edits) would let a fix pass for violations the base never
+    had. ScopeCheckError if the tree is not the base (anything modified,
+    staged or untracked, ignored or not); sweep.LintUntrusted if the lint's
+    report cannot be acted on."""
+    _require_sandbox(sandbox)
+    _require_pristine(sandbox)
+    result = work_list(sandbox.path, **lint_options)
+    _require_pristine(sandbox)
+    sandbox.work_list = result
+    return result
+
+
+def _require_pristine(sandbox):
+    status = git(sandbox.path, "status", "--porcelain", "-z", "--ignored",
+                 "--untracked-files=all", "--ignore-submodules=all")
+    if status or sandbox.head() != sandbox.base:
+        raise ScopeCheckError(
+            f"the sandbox at {sandbox.path} is not the base commit {sandbox.base} as "
+            "checked out, so a work list computed in it would not be the base's")
+
+
+def base_principles(sandbox):
+    """The principles file at `sandbox`'s base commit (an empty one if it has
+    none), read from git's objects. WHY never the work tree: the fix agent
+    can edit `.curamoir/principles.md` in the sandbox, and a `permits:
+    signature_change` it wrote there would otherwise license its own
+    signature change. ScopeCheckError if the base's file does not parse."""
+    _require_sandbox(sandbox)
+    data = sandbox.show(".curamoir/principles.md")
+    if data is None:
+        return PrinciplesFile()
+    try:
+        return parse_principles(data.decode("utf-8"))
+    except (UnicodeDecodeError, PrincipleError) as error:
+        raise ScopeCheckError(
+            f"the principles at the base commit cannot be read, so which principles "
+            f"permit signature changes is unknown: {error}") from error
+
+
+def verify_fix(sandbox, *, git_state, window=WINDOW):
     """E3-R2's review step: the verdict on everything that changed between
-    `base_ref` and `repo`'s working tree (staged, unstaged and untracked),
-    against `work_list` (sweep.WorkList, computed on `base_ref`) and
-    `principles` (a principles.PrinciplesFile, for `permits`).
+    `sandbox`'s base commit and its work tree (staged, unstaged and
+    untracked, ignored or not), against the work list lint_sandbox recorded
+    and the principles at the base commit (base_principles). There is no
+    work-list or principles parameter: both are the base's, by construction.
 
-    `git_state` is snapshot_git_state(repo, base_ref) taken before the fix step ran
-    (fix_step.run_fix_step takes it: FixStepRun.git_state). It is compared
-    FIRST, by reading files, and a difference is the whole verdict: WHY —
-    `.git/config` and `.git/hooks` are invisible to `git diff`, and a planted
-    `core.fsmonitor` or filter driver would run on the very git command that
-    asked what changed. It is required and the check fails closed: no
-    snapshot, a snapshot of another path, or one that found no git directory
-    (no `.git`, or a `.git` that is a symlink) raises ScopeCheckError before
-    any git command runs.
+    `git_state` is git_guard.snapshot_git_state(sandbox), taken before the
+    fix step ran (fix_step.run_fix_step takes it: FixStepRun.git_state). It
+    is compared FIRST, by reading files, and a difference in the sandbox's
+    git files or any `.gitattributes` is the whole verdict: WHY — `.git` is
+    invisible to `git diff`, and a planted fsmonitor or filter driver would
+    run on the very git command that asked what changed. It is required and
+    the check fails closed: no snapshot, a snapshot of another sandbox or
+    base, `sandbox` not a git_guard.Sandbox, or no work list raises
+    ScopeCheckError before any git command runs.
 
-    `base_ref` must be the ref the snapshot was taken for (ScopeCheckError
-    otherwise), and the diff is taken against the commit the snapshot
-    resolved it to. WHY: refs are files the fix agent could rewrite, and
-    against a base moved to an older commit the fixed tree can look
-    unchanged. The ref is resolved again once the git state has passed, and
-    a ref that now names another commit fails the verdict.
-
-    `repo` must be the top of its work tree (git names paths from there, the
-    work list from `repo`)."""
+    Then: a HEAD that left the base is BASE_MOVED, and the whole verdict.
+    Every path the snapshot's work-tree manifest saw change but git does not
+    report is HIDDEN_CHANGE, alongside the core's breaches."""
     if git_state is None:
         raise ScopeCheckError("no git-state snapshot taken before the fix step; refusing "
                               "to run git on the edited tree")
-    if os.path.realpath(git_state.repo) != os.path.realpath(str(repo)):
-        raise ScopeCheckError(f"the git-state snapshot is of {git_state.repo}, not {repo}")
-    if git_state.base_ref != base_ref:
-        raise ScopeCheckError(f"the git-state snapshot was taken for base "
-                              f"{git_state.base_ref!r}, not {base_ref!r}")
-    if not git_state.git_dirs:
-        raise ScopeCheckError(
-            f"the git-state snapshot found no git directory in {repo} (no `.git`, or a "
-            "`.git` that is a symlink), so git's own files cannot be held to it; "
-            "refusing to run git on the edited tree")
+    _require_sandbox(sandbox)
+    if os.path.realpath(git_state.path) != os.path.realpath(str(sandbox.path)):
+        raise ScopeCheckError(f"the git-state snapshot is of {git_state.path}, not "
+                              f"{sandbox.path}")
+    if git_state.base != sandbox.base:
+        raise ScopeCheckError(f"the git-state snapshot was taken for base {git_state.base}, "
+                              f"not {sandbox.base}")
+    if sandbox.work_list is None:
+        raise ScopeCheckError("no work list was linted in this sandbox at its base "
+                              "(fix_scope.lint_sandbox), so there is nothing to hold the "
+                              "fix to")
     changed = verify_git_state(git_state)
     if changed:
-        return ScopeVerdict(breaches=tuple(changed), paths=())
-    _require_top_level(repo)
-    base = git_state.base
-    if resolve_base(repo, base_ref) != base:
+        return ScopeVerdict(breaches=tuple(
+            Breach(GIT_INTERNALS_CHANGED, c.label, None,
+                   f"{c.change} while the fix step ran; {c.reason}, so nothing more of "
+                   "this tree is read")
+            for c in changed), paths=())
+    base = sandbox.base
+    head = sandbox.head()
+    if head != base:
         return ScopeVerdict(breaches=(Breach(
-            GIT_INTERNALS_CHANGED, f"base ref {base_ref}", None,
-            f"named {base} when the fix step started and names another commit now; "
-            "a moved base can hide what the fix changed, so nothing more of this "
-            "tree is read"),), paths=())
-    permitting = frozenset(
-        p.id for p in principles.principles if SIGNATURE_PERMISSION in p.permits)
-    return check_scope(changes_since(repo, base), work_list.items,
-                       permitting=permitting,
-                       known_modules=known_modules(repo, base), window=window)
+            BASE_MOVED, "HEAD", None,
+            f"names {head}, not the base {base} the sandbox was checked out at; the fix "
+            "step edits files and never moves HEAD, so nothing more of this tree is "
+            "read"),), paths=())
+    changes = changes_since(sandbox.path, base)
+    seen = {nfc(change.path) for change in changes}
+    hidden = sorted(({nfc(path) for path in tree_changes(git_state)}
+                     | set(_missing_submodules(sandbox.path, base))) - seen)
+    permitting = frozenset(p.id for p in base_principles(sandbox).principles
+                           if SIGNATURE_PERMISSION in p.permits)
+    verdict = check_scope(changes, sandbox.work_list.items, permitting=permitting,
+                          known_modules=known_modules(sandbox.path, base), window=window)
+    if not hidden:
+        return verdict
+    return ScopeVerdict(
+        breaches=verdict.breaches + tuple(Breach(
+            HIDDEN_CHANGE, path, None,
+            "changed on disk while the fix step ran, but git does not report it (inside "
+            "an uninitialised submodule, or hidden another way); a change git cannot see "
+            "can be neither reviewed nor carried to a PR") for path in hidden),
+        paths=tuple(sorted(set(verdict.paths) | set(hidden))))
 
 
-#: Configuration every git command here runs with. WHY: the repository's own
-#: config can name programs git runs as a side effect — `core.fsmonitor` on
-#: every index refresh (`git diff` against the working tree is one), hooks via
-#: `core.hooksPath` — and the tree under review was just edited by a model.
-#: External diff drivers and textconv are turned off per command
-#: (`--no-ext-diff --no-textconv`). What cannot be turned off without
-#: knowing the driver names is `filter.<driver>.clean`, which `git diff`
-#: runs on a working-tree file whose attributes name it; a driver must be in
-#: the config to run, and the config and every `.gitattributes` are held to
-#: the snapshot (verify_fix), so the residual is a driver the repository's
-#: owner configured, run where the owner's own attributes point it. `core.sshCommand` and
-#: the pager need a remote or a terminal, and nothing here has either.
-#: `GIT_CONFIG_NOSYSTEM` is not set: the system and global configs are
-#: outside the fix agent's fence, so they say what they said before it ran.
-_GIT_HARDENING = ("-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null",
-                  "-c", "core.quotepath=off")
+def _missing_submodules(repo, base):
+    """The base's submodule paths (gitlinks) that are no longer an empty-or-
+    not directory in the work tree. WHY: git is told never to look inside a
+    submodule (git_guard), so `git diff` no longer reports one removed or
+    replaced by a file, and the work-tree manifest records files, not empty
+    directories. What is put inside one is the manifest's to see."""
+    missing = []
+    for entry in git(repo, "ls-tree", "-r", "-z", "--full-tree", base).split(b"\0"):
+        meta, _, name = entry.partition(b"\t")
+        if meta.startswith(b"160000 "):
+            path = name.decode("utf-8", "surrogateescape")
+            target = Path(repo) / path
+            if target.is_symlink() or not target.is_dir():
+                missing.append(nfc(path))
+    return missing
 
 
-def _git(repo, *args, ok=(0,)):
-    result = subprocess.run(["git", *_GIT_HARDENING, *args], cwd=repo,
-                            capture_output=True)
-    if result.returncode not in ok:
-        raise ScopeCheckError(
-            f"git {' '.join(args)} failed ({result.returncode}): "
-            f"{result.stderr.decode('utf-8', 'backslashreplace').strip()}")
-    return result.stdout
+def _require_sandbox(sandbox):
+    if not isinstance(sandbox, Sandbox):
+        raise ScopeCheckError(f"{sandbox} is not a sandbox (git_guard.prepare_sandbox); a "
+                              "sweep fix is made and reviewed in a sandbox, never in a "
+                              "checkout")
 
 
-def resolve_base(repo, base_ref):
-    """`base_ref` as a commit SHA, or ScopeCheckError. `--end-of-options` and
-    the leading-dash refusal keep it from being read as an option."""
-    if base_ref.startswith("-"):
-        raise ScopeCheckError(f"base ref {base_ref!r} looks like an option")
-    out = _git(repo, "rev-parse", "--verify", "--quiet", "--end-of-options",
-               f"{base_ref}^{{commit}}", ok=(0, 1, 128)).decode("ascii", "replace").strip()
-    if not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", out):
-        raise ScopeCheckError(f"base ref {base_ref!r} does not name a commit")
-    return out
-
-
-def _require_top_level(repo):
-    top = _git(repo, "rev-parse", "--show-toplevel").decode("utf-8", "surrogateescape").strip()
-    if os.path.realpath(top) != os.path.realpath(str(repo)):
-        raise ScopeCheckError(
-            f"{repo} is not the top of its git work tree ({top}); git names changed "
-            "paths from the top and the work list from the repo, so the two would "
-            "not match")
-
-
-# --- git internals --------------------------------------------------------------
-
-@dataclass(frozen=True)
-class GitState:
-    """What snapshot_git_state saw: `repo`, the git directories it read,
-    label -> digest for every file it hashed, and `base_ref` with the commit
-    it named then (`base`; None when no git directory was found)."""
-
-    repo: str
-    git_dirs: tuple
-    digests: tuple
-    base_ref: str = None
-    base: str = None
-
-
-#: Per git directory: files and trees that decide what git runs or sees.
-#: The index and objects are left out — git rewrites the index's stat data
-#: on its own, and objects are content-addressed, read here only by SHA.
-#: `HEAD` and `packed-refs` are single files and cheap to hash. The loose
-#: refs under `refs/` are not hashed: a repository can hold thousands, and
-#: the only ref verify_fix reads is the base, which the snapshot pins to a
-#: commit and verify_fix resolves again (a moved base fails the verdict).
-_GIT_STATE_FILES = ("config", "config.worktree", "commondir", "HEAD", "packed-refs")
-_GIT_STATE_TREES = ("hooks", "info")
-
-
-def snapshot_git_state(repo, base_ref):
-    """The digests of `repo`'s git configuration, hooks, `info/` (which holds
-    `attributes` and `exclude`), `HEAD` and `packed-refs`, of every
-    `.gitattributes` in the work tree, and of a `.git` file if the checkout
-    is a linked worktree or submodule: its `gitdir:` pointer is followed, and
-    the `commondir` beside it, where a worktree's shared config and hooks
-    live. Read as files, never through git, so the same reading after the
-    fix step runs nothing the fix step planted.
-
-    `base_ref` is resolved to a commit here, before the fix step runs, with
-    the hardened git and the option-shaped refusal of resolve_base
-    (ScopeCheckError if it names no commit); verify_fix diffs against that
-    commit. A path with no `.git`, or a `.git` that is a symlink (followed,
-    it could be swapped for another directory unseen), gets a state with no
-    git directories and no base, which verify_fix refuses; git is not run
-    there."""
+def changes_since(repo, base):
+    """Every path that differs between commit `base` and `repo`'s working
+    tree, as FileChanges with git's own `-U0` hunks. Untracked files are
+    listed with no exclude rules: in a sandbox, a fresh clone holds no
+    ignored file, so any untracked file, ignored or not, is new."""
     repo = Path(repo)
-    dirs = _git_dirs(repo)
-    base = resolve_base(repo, base_ref) if dirs else None
-    return GitState(str(repo), tuple(str(d) for d in dirs), _git_digests(repo, dirs),
-                    base_ref, base)
-
-
-def verify_git_state(state):
-    """GIT_INTERNALS_CHANGED breaches, one per file added, removed or changed
-    since `state` was taken."""
-    repo = Path(state.repo)
-    before = dict(state.digests)
-    after = dict(_git_digests(repo, [Path(d) for d in state.git_dirs]))
-    found = []
-    for label in sorted(set(before) | set(after)):
-        if before.get(label) == after.get(label):
-            continue
-        what = ("added" if label not in before else
-                "removed" if label not in after else "changed")
-        why = ("a `.gitattributes` can point a filter driver at a file, which the "
-               "next `git diff` would run" if _is_attributes(label) else
-               "git's own files can make the next git command run code, and "
-               "`git diff` never shows them")
-        found.append(Breach(
-            GIT_INTERNALS_CHANGED, label, None,
-            f"{what} while the fix step ran; {why}, so nothing more of this tree "
-            "is read"))
-    return found
-
-
-def _git_dirs(repo):
-    dot = repo / ".git"
-    if dot.is_dir() and not dot.is_symlink():
-        git_dir = dot
-    elif dot.is_file():
-        text = dot.read_text(encoding="utf-8", errors="replace").strip()
-        if not text.startswith("gitdir:"):
-            return ()
-        git_dir = (repo / text[len("gitdir:"):].strip()).resolve()
-    else:
-        return ()
-    dirs = [git_dir]
-    common = git_dir / "commondir"
-    if common.is_file():
-        dirs.append((git_dir / common.read_text(encoding="utf-8").strip()).resolve())
-    return tuple(dirs)
-
-
-def _git_digests(repo, dirs):
-    found = {}
-    dot = repo / ".git"
-    if dot.is_file() or dot.is_symlink():
-        found[".git"] = _digest(dot)
-    for git_dir in dirs:
-        for name in _GIT_STATE_FILES:
-            target = git_dir / name
-            if target.exists() or target.is_symlink():
-                found[_label(repo, target)] = _digest(target)
-        for name in _GIT_STATE_TREES:
-            for root, subdirs, files in os.walk(git_dir / name):
-                for entry in subdirs + files:
-                    target = Path(root) / entry
-                    if entry in files or target.is_symlink():
-                        found[_label(repo, target)] = _digest(target)
-    if dirs:
-        found.update(_attributes_digests(repo))
-    return tuple(sorted(found.items()))
-
-
-def _attributes_digests(repo):
-    """Every `.gitattributes` in the work tree, at any depth, tracked or not.
-    WHY: they are outside `.git`, so the fix agent may write them, and one
-    can name a filter driver the owner configured (`filter=lfs`, any
-    `filter.<x>.clean` or `process`) for a file `git diff` then filters.
-    Git directories are skipped (held above, or a nested repository's own),
-    and symlinked directories are not followed, as git does not follow them."""
-    found = {}
-    for root, subdirs, files in os.walk(repo):
-        subdirs[:] = [d for d in subdirs if d != ".git"]
-        if ".gitattributes" in files or ".gitattributes" in subdirs:
-            target = Path(root) / ".gitattributes"
-            found[_label(repo, target)] = _digest(target)
-    return found
-
-
-def _is_attributes(label):
-    return label == ".gitattributes" or label.endswith("/.gitattributes")
-
-
-def _label(repo, path):
-    try:
-        return path.relative_to(repo).as_posix()
-    except ValueError:
-        return str(path)
-
-
-def _digest(path):
-    try:
-        if path.is_symlink():
-            return "link:" + os.readlink(path)
-        return hashlib.sha256(path.read_bytes()).hexdigest()
-    except OSError as error:
-        return f"unreadable: {error.__class__.__name__}"
-
-
-class ScopeCheckError(Exception):
-    """git could not say what changed, so no verdict can be given. The runner
-    must treat this as a refusal: an unverified fix is not a fix."""
-
-
-def changes_since(repo, base_ref):
-    """Every path that differs between `base_ref` (a commit SHA: verify_fix
-    resolves it) and the working tree, as FileChanges with git's own `-U0`
-    hunks."""
-    repo = Path(repo)
-    raw = _git(repo, "diff", "--raw", "-z", "--no-renames", "--no-ext-diff",
-               "--ignore-submodules=none", base_ref, "--")
+    raw = git(repo, "diff", "--raw", "-z", "--no-renames", "--no-ext-diff",
+              "--ignore-submodules=all", base, "--")
     changes = []
     fields = raw.split(b"\0")
     index = 0
@@ -1204,8 +1135,8 @@ def changes_since(repo, base_ref):
         meta = fields[index][1:].decode("ascii").split()
         path = fields[index + 1].decode("utf-8", "surrogateescape")
         index += 2
-        changes.append(_tracked_change(repo, base_ref, path, meta))
-    untracked = _git(repo, "ls-files", "--others", "--exclude-standard", "-z")
+        changes.append(_tracked_change(repo, base, path, meta))
+    untracked = git(repo, "ls-files", "--others", "-z")
     for entry in untracked.split(b"\0"):
         if entry:
             path = entry.decode("utf-8", "surrogateescape")
@@ -1213,13 +1144,13 @@ def changes_since(repo, base_ref):
     return tuple(changes)
 
 
-def _tracked_change(repo, base_ref, path, meta):
+def _tracked_change(repo, base, path, meta):
     old_mode, new_mode, status = meta[0], meta[1], meta[4]
     kind = {"A": ADDED, "D": DELETED}.get(status[0], MODIFIED)
     if kind == ADDED:
         return FileChange(path, ADDED, None, _read_text(repo / path)[0])
     if kind == DELETED:
-        return FileChange(path, DELETED, _blob_text(repo, base_ref, path)[0], None)
+        return FileChange(path, DELETED, _blob_text(repo, base, path)[0], None)
     unusual = {"120000": "a symlink", "160000": "a submodule"}
     for mode in (old_mode, new_mode):
         if mode in unusual:
@@ -1228,12 +1159,15 @@ def _tracked_change(repo, base_ref, path, meta):
     if old_mode != new_mode:
         return FileChange(path, MODIFIED, unverifiable=(
             f"its mode changed ({old_mode} to {new_mode}); a fix edits text, not modes"))
-    old, old_problem = _blob_text(repo, base_ref, path)
+    old, old_problem = _blob_text(repo, base, path)
     new, new_problem = _read_text(repo / path)
     if old_problem or new_problem:
         return FileChange(path, MODIFIED, unverifiable=old_problem or new_problem)
-    diff = _git(repo, "diff", "-U0", "--no-color", "--no-ext-diff", "--no-textconv",
-                "--no-renames", base_ref, "--", f":(literal){path}")
+    # --text: a committed `-diff` or `binary` attribute would otherwise print
+    # "Binary files differ" and no hunks, and no hunks pass the window rule.
+    # The content is UTF-8 without NULs, checked just above.
+    diff = git(repo, "diff", "-U0", "--text", "--no-color", "--no-ext-diff", "--no-textconv",
+               "--no-renames", base, "--", f":(literal){path}")
     return FileChange(path, MODIFIED, old, new,
                       hunks=parse_hunks(diff.decode("utf-8", "surrogateescape")))
 
@@ -1247,8 +1181,8 @@ def _decode(data, where):
         return None, f"{where} is not UTF-8 ({error}); only text files can be checked"
 
 
-def _blob_text(repo, base_ref, path):
-    return _decode(_git(repo, "cat-file", "blob", f"{base_ref}:{path}"), "the base version")
+def _blob_text(repo, base, path):
+    return _decode(git(repo, "cat-file", "blob", f"{base}:{path}"), "the base version")
 
 
 def _read_text(path):
@@ -1261,12 +1195,12 @@ def _read_text(path):
 _PY_IMPORT_LINE = re.compile(r"^\s*(?:import\s+([\w., ]+)|from\s+(\w[\w.]*)\s+import\b)")
 
 
-def known_modules(repo, base_ref):
+def known_modules(repo, base):
     """Top-level module and package names that are not a new dependency at
-    `base_ref`: every Python file's module name and every directory holding
-    Python or JS/TS source (a local module or package, wherever it sits),
-    every module a Python file imports, every package a JS/TS file imports,
-    and package.json's declared packages.
+    commit `base`: every Python file's module name and every directory
+    holding Python or JS/TS source (a local module or package, wherever it
+    sits), every module a Python file imports, every package a JS/TS file
+    imports, and package.json's declared packages.
 
     Only source counts as local: WHY — `docs/pandas.md` is not a module named
     pandas, and counting every file stem let `import pandas` pass as local.
@@ -1274,7 +1208,7 @@ def known_modules(repo, base_ref):
     git 2.39 does not know `\\s` in `-E`, matched nothing, and every import
     in the repository looked new on macOS."""
     known = set()
-    listing = _git(repo, "ls-tree", "-r", "-z", "--name-only", base_ref)
+    listing = git(repo, "ls-tree", "-r", "-z", "--name-only", base)
     for entry in listing.split(b"\0"):
         parts = [p for p in entry.decode("utf-8", "surrogateescape").split("/") if p]
         if not parts or not parts[-1].endswith(PYTHON_SUFFIXES + SCRIPT_SUFFIXES):
@@ -1282,9 +1216,8 @@ def known_modules(repo, base_ref):
         if parts[-1].endswith(PYTHON_SUFFIXES):
             known.add(parts[-1].split(".", 1)[0])
         known.update(parts[:-1])
-    python = _git(repo, "grep", "-h", "-I", "-E", r"^[[:space:]]*(import|from)[[:space:]]",
-                  base_ref,
-                  "--", "*.py", "*.pyi", ok=(0, 1))
+    python = git(repo, "grep", "-h", "-I", "-E", r"^[[:space:]]*(import|from)[[:space:]]",
+                 base, "--", "*.py", "*.pyi", ok=(0, 1))
     for line in python.decode("utf-8", "surrogateescape").splitlines():
         match = _PY_IMPORT_LINE.match(line)
         if not match:
@@ -1294,20 +1227,20 @@ def known_modules(repo, base_ref):
             name = name.strip().split(" ", 1)[0]
             if name:
                 known.add(name.split(".", 1)[0])
-    scripts = _git(repo, "grep", "-h", "-I", "-E",
-                   r"(from|import|require)[[:space:]]*\(?[[:space:]]*['\"]",
-                   base_ref, "--", *(f"*{suffix}" for suffix in SCRIPT_SUFFIXES), ok=(0, 1))
+    scripts = git(repo, "grep", "-h", "-I", "-E",
+                  r"(from|import|require)[[:space:]]*\(?[[:space:]]*['\"]",
+                  base, "--", *(f"*{suffix}" for suffix in SCRIPT_SUFFIXES), ok=(0, 1))
     for line in scripts.decode("utf-8", "surrogateescape").splitlines():
         for specifier in _SCRIPT_IMPORT.findall(line):
             package = script_package(specifier)
             if package:
                 known.add(package)
-    known.update(_declared_packages(repo, base_ref))
+    known.update(_declared_packages(repo, base))
     return frozenset(known)
 
 
-def _declared_packages(repo, base_ref):
-    raw = _git(repo, "cat-file", "-p", f"{base_ref}:package.json", ok=(0, 128))
+def _declared_packages(repo, base):
+    raw = git(repo, "cat-file", "-p", f"{base}:package.json", ok=(0, 128))
     try:
         manifest = json.loads(raw.decode("utf-8")) if raw else {}
     except ValueError:

@@ -7,6 +7,12 @@ every deterministic step itself — the scope check (fix_scope.verify_fix),
 the tests (E3-R4), the PR (E3-R3), the ledger (E3-R5). This module is the
 hand-off: the limits the prompt states, the prompt, and the command line.
 
+**Where it runs.** In a sandbox (git_guard.prepare_sandbox): a disposable
+clone of the base commit, never the user's checkout. The agent's working
+directory and every permission rule below name the sandbox's path, so "the
+repo" in what follows is the sandbox. fix_scope's module docstring lists
+what the runner (cm-fkd.4) does around this step.
+
 **The limits are one text.** E3-R2 says "the skill prompt MUST state these
 limits". There are two prompts — this one, for the scheduled sweep, and
 skills/sweep/SKILL.md, for `/curamoir:sweep` — so SCOPE_LIMITS is the single
@@ -36,7 +42,7 @@ the result as if the prompt had said nothing.
   tools"), so anything not approved is refused rather than waited on. Named
   explicitly because a `-p` run otherwise "takes the built-in starting
   permission mode, which can be `auto`" (same section).
-- `--allowedTools` with repo-scoped rules only (repo_rules), never a bare
+- `--allowedTools` with sandbox-scoped rules only (repo_rules), never a bare
   tool name. WHY: a bare name "matches that rule at the tool level
   everywhere" (https://code.claude.com/docs/en/permissions, "Read and
   Edit"), so `--allowedTools Edit` under dontAsk approved an edit to
@@ -58,8 +64,9 @@ the result as if the prompt had said nothing.
   repo's `.git`. The allow rule above covers `.git/`, where an edit is code
   the next git command runs and `git diff` never shows it; "Rules are
   evaluated in order: deny, then ask, then allow" (same page), so the deny
-  holds inside the allowed tree. run_fix_step also snapshots `.git`
-  (fix_scope.snapshot_git_state) for the review step to hold it to.
+  holds inside the allowed tree. run_fix_step also snapshots `.git` and the
+  work tree (git_guard.snapshot_git_state) for the review step to hold
+  them to.
 - `--restricted`: it "confines the built-in file tools to the working
   directories, loads only managed settings and `--settings`"
   (https://code.claude.com/docs/en/cli-reference). WHY: without it the
@@ -67,7 +74,7 @@ the result as if the prompt had said nothing.
   `additionalDirectories` still load and could re-widen the fence above —
   and a project's settings are text in the very repository being swept.
   It also drops the user's hooks and plugins from this run, so cúramóir's
-  own Stop hook no longer writes into the fix step's tree. It "Requires
+  own Stop hook does not write into the sandbox. It "Requires
   Claude Code v2.1.248 or later"; an older CLI rejects the flag and the
   step fails loudly rather than running unfenced.
 - `--disable-slash-commands` ("Disable all skills and commands for this
@@ -88,20 +95,26 @@ the result as if the prompt had said nothing.
   Keychain entry is keyed to the config directory, with the same file as
   its fallback (https://code.claude.com/docs/en/authentication), so a fresh
   HOME is a logged-out `claude` on the subscription this mode exists for.
-
-**The residual risk, stated plainly.** The fence around the fix agent's
-reads and edits is Claude Code's own permission check, not the operating
-system: no sandbox, no separate user. The docs scope it the same way — rules
-"don't apply to … arbitrary subprocesses", which this toolset has none of,
-and Grep/Glob honour Read rules on a "best-effort" basis. fix_scope checks
-only the repository's diff, so an edit outside the repo that slipped this
-fence would go unseen by the review step; and a read is never visible to it.
-cm-fkd.4's runner should run the scheduled sweep in a disposable checkout
-for its own reasons, and an OS sandbox is the stronger fix if one is
-wanted.
 - NOT `--permission-prompts none`: it "requires Claude Code v2.1.259 or
   later. Earlier versions reject it", and "in a `-p` run with no host, these
   requests are denied either way".
+
+The process runs in a session of its own with the inherited `GIT_*`
+variables dropped, and at the timeout its whole process group is killed
+(git_guard.run_in_group), so nothing it started goes on editing the sandbox
+while the review reads it.
+
+**The residual risk, stated plainly.** The sandbox is a directory, not an
+operating-system sandbox: the fence around the fix agent's reads and edits
+outside it is Claude Code's own permission check, with no separate user.
+The docs scope that check the same way — rules "don't apply to … arbitrary
+subprocesses", which this toolset has none of, and Grep/Glob honour Read
+rules on a "best-effort" basis. fix_scope reads only the sandbox, so an
+edit outside it that slipped this fence (~/.bashrc) would go unseen by the
+review step, and a read is never visible to it. What the sandbox does
+remove is the user's checkout from reach: its config, hooks, ignored files
+and uncommitted work are not in the agent's tree. An OS sandbox is the
+stronger fix for the rest, if one is wanted.
 
 What these flags have not been shown to do is hold against a real model in
 this repository: nothing here calls one (tests use a stand-in `claude`), so
@@ -121,7 +134,14 @@ import subprocess
 from dataclasses import dataclass
 from typing import Optional
 
-from curamoir.fix_scope import SIGNATURE_PERMISSION, WINDOW, snapshot_git_state
+from curamoir.fix_scope import SIGNATURE_PERMISSION, WINDOW
+from curamoir.git_guard import (
+    GitGuardError,
+    Sandbox,
+    run_in_group,
+    scrubbed_environment,
+    snapshot_git_state,
+)
 from curamoir.repo_config import config_value
 from curamoir.sweep import work_list_document
 
@@ -136,8 +156,11 @@ without an explicit principle permitting it."
 After you finish, cúramóir checks every change against these limits in code
 and opens no PR from a fix that breaks any of them:
 
-- Edit only the files in the work list's `paths`. Do not create, rename or
-  delete a file, and do not touch any other file.
+- Edit only the files in the work list's `paths`, and touch no other file.
+  Do not create or rename a file. Delete a file only when one of its
+  violations is the file itself: reported at line 1, column 1 to line 1,
+  column 1 with an empty `match`, which is how a rule about a file's name is
+  reported.
 - Change only a violation's own lines and at most {WINDOW} lines either side
   of it. The one exception is adding, at the top of the module before its
   first function or class, an import, a logger (`logger =
@@ -148,7 +171,8 @@ and opens no PR from a fix that breaks any of them:
   a package the repository does not already use.
 - Do not add, remove or change the signature of any function, method or
   class (its parameters, defaults, annotations, return type, decorators or
-  bases) unless the violation's principle says `permits: {SIGNATURE_PERMISSION}`.
+  bases) unless the principle of a violation in that function or class
+  says `permits: {SIGNATURE_PERMISSION}`.
 - If a violation cannot be fixed within these limits, leave it as it is and
   say so. An unfixed violation is reported; an out-of-scope fix is discarded.
 """
@@ -283,8 +307,8 @@ class FixStepRun:
     """What the fix step did, as far as its process says. None of it is
     evidence that the fix is in scope or correct: fix_scope and the tests
     decide that. `exit_code` is None when it was killed at the timeout.
-    `git_state` is the repo's git internals as they were before the agent
-    ran (fix_scope.snapshot_git_state), for fix_scope.verify_fix."""
+    `git_state` is the sandbox's git files and work tree as they were before
+    the agent ran (git_guard.snapshot_git_state), for fix_scope.verify_fix."""
 
     argv: tuple
     exit_code: Optional[int]
@@ -303,27 +327,31 @@ class FixStepRun:
         return document if isinstance(document, dict) else None
 
 
-def run_fix_step(repo, prompt, model=None, timeout=DEFAULT_TIMEOUT,
-                 max_turns=DEFAULT_MAX_TURNS, claude="claude", runner=subprocess.run,
-                 base_ref="HEAD"):
-    """Run the fix step in `repo` and return a FixStepRun. `model` defaults to
-    the repository's `models.cheap`. `claude` and `runner` are seams for
-    tests, which pass a stand-in script: no test calls a model.
+def run_fix_step(sandbox, prompt, model=None, timeout=DEFAULT_TIMEOUT,
+                 max_turns=DEFAULT_MAX_TURNS, claude="claude"):
+    """Run the fix step in `sandbox` (a git_guard.Sandbox) and return a
+    FixStepRun. `model` defaults to `models.cheap` in the sandbox's config,
+    which is the base commit's. `claude` is a seam for tests, which pass a
+    stand-in script: no test calls a model.
 
-    `base_ref` is the base the review step will diff against (the work
-    list's commit; HEAD, which the fix edits on top of, by default). The
-    snapshot resolves it to a commit before the agent runs, so verify_fix
-    must be given the same `base_ref`. ScopeCheckError if it names no
-    commit: no agent is started for a fix that could not be reviewed."""
+    The sandbox is snapshotted (git_guard.snapshot_git_state) before the
+    agent starts; fix_scope.verify_fix needs that snapshot. GitGuardError,
+    and no agent started, if `sandbox` is not a Sandbox: the step never runs
+    in a checkout."""
+    if not isinstance(sandbox, Sandbox):
+        raise GitGuardError(f"{sandbox} is not a sandbox (git_guard.prepare_sandbox); the "
+                            "fix step never runs in a checkout")
+    path = str(sandbox.path)
     if model is None:
-        model = config_value(repo, "models", "cheap")
-    argv = fix_step_argv(prompt, model, repo, max_turns=max_turns, claude=claude)
-    git_state = snapshot_git_state(repo, base_ref)
+        model = config_value(path, "models", "cheap")
+    argv = fix_step_argv(prompt, model, path, max_turns=max_turns, claude=claude)
+    git_state = snapshot_git_state(sandbox)
+    environment = scrubbed_environment()
+    environment["PWD"] = path
     try:
-        result = runner(argv, cwd=str(repo), capture_output=True, timeout=timeout,
-                        stdin=subprocess.DEVNULL)
+        result = run_in_group(argv, cwd=path, env=environment, timeout=timeout)
     except subprocess.TimeoutExpired as expired:
-        return FixStepRun(tuple(argv), None, _text(expired.stdout), _text(expired.stderr),
+        return FixStepRun(tuple(argv), None, _text(expired.output), _text(expired.stderr),
                           timed_out=True, git_state=git_state)
     except OSError as error:
         return FixStepRun(tuple(argv), None, "", f"the fix step could not start: {error}",

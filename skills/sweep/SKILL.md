@@ -61,8 +61,11 @@ without an explicit principle permitting it."
 After you finish, cúramóir checks every change against these limits in code
 and opens no PR from a fix that breaks any of them:
 
-- Edit only the files in the work list's `paths`. Do not create, rename or
-  delete a file, and do not touch any other file.
+- Edit only the files in the work list's `paths`, and touch no other file.
+  Do not create or rename a file. Delete a file only when one of its
+  violations is the file itself: reported at line 1, column 1 to line 1,
+  column 1 with an empty `match`, which is how a rule about a file's name is
+  reported.
 - Change only a violation's own lines and at most 3 lines either side
   of it. The one exception is adding, at the top of the module before its
   first function or class, an import, a logger (`logger =
@@ -73,7 +76,8 @@ and opens no PR from a fix that breaks any of them:
   a package the repository does not already use.
 - Do not add, remove or change the signature of any function, method or
   class (its parameters, defaults, annotations, return type, decorators or
-  bases) unless the violation's principle says `permits: signature_change`.
+  bases) unless the principle of a violation in that function or class
+  says `permits: signature_change`.
 - If a violation cannot be fixed within these limits, leave it as it is and
   say so. An unfixed violation is reported; an out-of-scope fix is discarded.
 
@@ -82,9 +86,11 @@ The files with violations are the work list's `paths`, and a principle's
 
 These limits are checked in code, not taken on trust: `src/curamoir/fix_scope.py`
 compares the tree after a fix with the commit the lint ran on, and the
-scheduled sweep (`curamoir run sweep`) runs the fix step headless, with
-these same limits as its prompt (`src/curamoir/fix_step.py`), then refuses
-any change that breaks them. This text and that prompt are one text; a test
+scheduled sweep (`curamoir run sweep`) runs the fix step headless in a
+disposable clone of that commit, never in your checkout, with these same
+limits as its prompt (`src/curamoir/fix_step.py`), then refuses any change
+that breaks them. The principles it reads `permits` from are the ones
+committed at that commit. This text and that prompt are one text; a test
 fails if they differ.
 
 Until `curamoir run sweep` lands (cm-fkd.4), this skill stops after step 1:
