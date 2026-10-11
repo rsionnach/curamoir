@@ -39,8 +39,12 @@ from curamoir.lint import (
     EXIT_CLEAN,
     EXIT_ERROR,
     EXIT_VIOLATIONS,
+    NOTE_KINDS,
     RECORD_FIELDS,
+    SCHEMA_VERSION,
+    TOP_LEVEL_FIELDS,
     LintError,
+    fingerprint,
     main,
     run_lint,
 )
@@ -157,7 +161,7 @@ def lint(repo, *args, capsys):
 
 
 def fake_ast_grep(tmp_path, stdout="", stderr="", exit_code=0, log=None, summary=True,
-                  sleep=0, skipped=0):
+                  sleep=0, skipped=0, version="ast-grep 0.50.0\n"):
     """An executable standing in for ast-grep, for the paths the real binary
     cannot be made to take on demand (and for machines without it). With `log`,
     each call appends its argv and working directory there as a JSON line.
@@ -169,7 +173,12 @@ def fake_ast_grep(tmp_path, stdout="", stderr="", exit_code=0, log=None, summary
     scanned and `skipped` of them as skipped (the runner refuses output
     without it). So the runner's "other inspect lines are ignored" path is
     taken by default. The interpreter is this one, named absolutely, so a test
-    may give the runner a PATH holding nothing but the fake."""
+    may give the runner a PATH holding nothing but the fake.
+
+    `--version` is answered with `version` (by default what 0.50.0 prints) and
+    exit 0, before any sleep, and logged like any call: the runner asks once
+    per run for the JSON's `tools`, and a fake that answered it with match
+    JSON would test nothing."""
     script = tmp_path / "bin" / "ast-grep"
     script.parent.mkdir(parents=True, exist_ok=True)
     record = (
@@ -191,6 +200,9 @@ def fake_ast_grep(tmp_path, stdout="", stderr="", exit_code=0, log=None, summary
         f"#!{sys.executable}\n"
         "import json, os, sys, time\n"
         f"{record}"
+        "if sys.argv[1:] == ['--version']:\n"
+        f"    sys.stdout.write({version!r})\n"
+        "    sys.exit(0)\n"
         f"time.sleep({sleep})\n"
         f"sys.stdout.write({stdout!r})\n"
         f"sys.stderr.write({stderr!r})\n"
@@ -269,9 +281,13 @@ def test_the_record_carries_the_principle_so_the_agent_need_not_read_it(tmp_path
         "principle_id": "structured-logging",
         "principle_rule": principle.rule,
         "message": "print( writes to stdout with no level or logger name",
+        "end_line": 15,
+        "end_col": 11,
         "fix": "logger.info(...), or logger.debug(...) while debugging",
+        "fix_source": "rule",
         "why_link": ".curamoir/principles.md#structured-logging",
         "match": "print(",
+        "fingerprint": fingerprint("no-bare-print", "src/sample/core/billing.py", "print(", 0),
     }
 
 
@@ -300,6 +316,7 @@ def test_a_rule_with_no_fix_falls_back_to_the_principles_good_example(tmp_path, 
 
     record = next(r for r in json.loads(out)["violations"] if r["rule_id"] == "no-variant-module")
     assert record["fix"] == good
+    assert record["fix_source"] == "principle"
     assert record["location"] == "src/sample/web/handlers_v2.py:1:1"
     assert record["message"] == "src/sample/web/handlers_v2.py is a parallel variant of another module"
 
@@ -310,10 +327,11 @@ def test_the_json_document_has_a_stable_top_level_shape(tmp_path, capsys):
     _, out, _ = lint(repo, "--format", "json", capsys=capsys)
 
     document = json.loads(out)
-    assert tuple(document) == (
-        "version", "fail_on", "complete", "rules_checked", "rules_skipped", "violations",
-    )
-    assert document["version"] == 1
+    assert tuple(document) == TOP_LEVEL_FIELDS
+    assert document["schema_version"] == SCHEMA_VERSION == 1
+    # No ast-grep rule ran, so no ast-grep version is claimed.
+    assert document["tools"] == {"ast-grep": None}
+    assert document["notes"] == []
     assert document["fail_on"] == "error"
     assert document["complete"] is True
     assert document["rules_checked"] == ["no-bare-print", "no-unchained-raise", "no-variant-module"]
@@ -330,11 +348,13 @@ def test_the_documented_json_shape_is_the_one_emitted():
     table = re.findall(r"^\| `([a-z_]+)`(?:, `([a-z_]+)`)? \|", doc.split("### JSON")[1], re.M)
     documented = {name for pair in table for name in pair if name}
 
-    assert tuple(example) == (
-        "version", "fail_on", "complete", "rules_checked", "rules_skipped", "violations",
-    )
+    assert tuple(example) == TOP_LEVEL_FIELDS
     assert tuple(example["violations"][0]) == RECORD_FIELDS
     assert documented == set(RECORD_FIELDS)
+    assert example["schema_version"] == SCHEMA_VERSION
+    # Every note kind the runner can emit is in the doc's list of them.
+    kinds = set(re.findall(r"^- `([a-z_]+)`", doc.split("#### Notes")[1].split("###")[0], re.M))
+    assert kinds == set(NOTE_KINDS)
 
 
 def test_the_documented_human_output_is_the_one_emitted(tmp_path, capsys):
@@ -555,6 +575,10 @@ def test_ast_grep_matches_are_converted_to_one_based_locations(tmp_path):
         ("src/sample/core/billing.py", 15, 5, 'print("calculating line total")'),
         ("src/sample/web/handlers.py", 22, 5, 'print(f"request failed: {exception}")'),
     ]
+    # The end is 1-based and exclusive: the column just after the match's last
+    # character (ast-grep's 0-based exclusive end, plus one). Each match is 31
+    # and 37 characters long, starting at column 5.
+    assert [(v.end_line, v.end_col) for v in result.violations] == [(15, 36), (22, 42)]
 
 
 def test_ast_grep_finding_nothing_is_clean(tmp_path):
@@ -633,10 +657,15 @@ def test_ast_grep_never_runs_where_it_could_find_the_repos_sgconfig(tmp_path):
 
     root = repo.resolve()
     calls = [json.loads(line) for line in log.read_text().splitlines()]
-    assert calls
+    # The `--version` query (for the JSON's `tools`) runs from a neutral
+    # directory too, though it takes no config and names no files.
+    assert [call["argv"] for call in calls if call["argv"][0] != "run"] == [["--version"]]
+    assert any(call["argv"][0] == "run" for call in calls)
     for call in calls:
         cwd = Path(call["cwd"]).resolve()
         assert root != cwd and root not in cwd.parents
+        if call["argv"][0] != "run":
+            continue
         config = [arg.split("=", 1)[1] for arg in call["argv"] if arg.startswith("--config=")]
         assert len(config) == 1
         assert root not in Path(config[0]).resolve().parents
@@ -1079,6 +1108,8 @@ def test_ast_grep_columns_on_a_bom_file_are_corrected_to_the_editors(tmp_path):
     result = run_lint(repo, ast_grep=fake_ast_grep(tmp_path, stdout=recorded, exit_code=0))
 
     assert [(v.line, v.col) for v in result.violations] == [(1, 1), (2, 1)]
+    # The end of a line-1 match is shifted by the same BOM, and corrected the same.
+    assert [(v.end_line, v.end_col) for v in result.violations] == [(1, 9), (2, 9)]
 
 
 # --- an ast-grep rule never silently skips a file it was scoped to -----------
@@ -1151,6 +1182,8 @@ def test_a_file_named_only_a_suffix_does_not_make_an_ast_grep_rule_skip(tmp_path
     searched = []
     for line in log.read_text().splitlines():
         argv = json.loads(line)["argv"]
+        if argv[0] != "run":
+            continue
         searched += [Path(f).relative_to(repo.resolve()).as_posix()
                      for f in argv[argv.index("--") + 1:]]
     assert "src/sample/core/billing.py" in searched
@@ -1481,9 +1514,10 @@ def test_ast_grep_is_not_found_through_a_relative_path_entry(tmp_path, capsys, m
 
 def _violation(**overrides):
     from curamoir.lint import Violation
-    fields = dict(path="src/a.py", line=1, col=1, severity="error", rule_id="r",
-                  principle_id="p", principle_rule="Rule.", message="m", fix="f",
-                  why_link=".curamoir/principles.md#p", match="m")
+    fields = dict(path="src/a.py", line=1, col=1, end_line=1, end_col=2, severity="error",
+                  rule_id="r", principle_id="p", principle_rule="Rule.", message="m", fix="f",
+                  fix_source="rule", why_link=".curamoir/principles.md#p", match="m",
+                  fingerprint="0123456789abcdef")
     fields.update(overrides)
     return Violation(**fields)
 
@@ -1738,3 +1772,359 @@ def test_a_file_with_no_code_is_not_a_false_skip(tmp_path, content):
     result = run_lint(repo, ast_grep=shutil.which("ast-grep"))
 
     assert result.complete, result.skipped
+
+
+# --- the JSON contract settled before anything consumes it (cm-9jv) ----------
+#
+# The sweep (E3-R1) parses this output as its work list, and Epic 4 reads it
+# for "introduced, not merely found" (E4-R4). These tests pin the fields those
+# consumers need — a fingerprint, the end of each match, where the fix came
+# from, which ast-grep produced the result, and the facts that were only on
+# stderr — and the versioning promises around them.
+
+def _print_rule(rule_id="print-call", pattern="print\\(.*?\\)"):
+    """A regex rule quoting a whole single-line `print(...)` call, so its
+    match text is what an ast-grep `print($$$ARGS)` rule would quote."""
+    return NO_BARE_PRINT.replace("id: no-bare-print", f"id: {rule_id}").replace(
+        "'(?<![\\w.])print\\('", f"'{pattern}'")
+
+
+def _fingerprints(repo, path):
+    return [v.fingerprint for v in run_lint(repo).violations if v.path == path]
+
+
+def test_the_fingerprint_algorithm_is_pinned_to_one_exact_value():
+    """Golden. A consumer compares fingerprints across runs, possibly across
+    cúramóir versions, so the algorithm may not drift silently: changing it is
+    a schema_version bump, and this value is what says it changed. Computed
+    by hand from the documented recipe: sha256 over
+    `13:no-bare-print,8:src/a.py,10:print("x"),1:0,`, first 16 hex digits."""
+    assert fingerprint("no-bare-print", "src/a.py", 'print("x")', 0) == "08a4ac93b2a157d5"
+    # Whitespace is not part of the match's identity.
+    assert fingerprint("no-bare-print", "src/a.py", 'print( "x" )\n', 0) == "08a4ac93b2a157d5"
+
+
+def test_the_fingerprint_separates_what_it_should_and_nothing_else():
+    base = fingerprint("r", "src/a.py", "print(x)", 0)
+    assert len(base) == 16 and all(c in "0123456789abcdef" for c in base)
+    # Different rule, path, text or occurrence: different fingerprint.
+    assert fingerprint("s", "src/a.py", "print(x)", 0) != base
+    assert fingerprint("r", "src/b.py", "print(x)", 0) != base
+    assert fingerprint("r", "src/a.py", "print(y)", 0) != base
+    assert fingerprint("r", "src/a.py", "print(x)", 1) != base
+    # Length-prefixed fields: moving characters between fields is not the same.
+    assert fingerprint("ab", "c", "d", 0) != fingerprint("a", "bc", "d", 0)
+    # Every ASCII whitespace character is dropped, wherever it is.
+    assert fingerprint("r", "src/a.py", "print(\n    x,\t\r\f\v)", 0) == \
+        fingerprint("r", "src/a.py", "print(x,)", 0)
+
+
+def test_a_fingerprint_survives_a_line_move_and_a_whitespace_reformat(tmp_path):
+    """E4-R4 needs "the same violation" to survive edits that do not touch it,
+    or every unrelated change reads as violations introduced; E3-R7 needs a
+    second sweep to recognise what it already saw."""
+    repo = sample_repo(tmp_path, _print_rule())
+    target = repo / "src" / "moved.py"
+    target.write_text('def f():\n    print("x")\n', encoding="utf-8")
+    before = _fingerprints(repo, "src/moved.py")
+
+    target.write_text('import os\n\n\ndef f():\n        print( "x" )\n', encoding="utf-8")
+    after = _fingerprints(repo, "src/moved.py")
+
+    assert len(before) == 1
+    assert after == before
+
+
+def test_identical_matches_in_one_file_get_distinct_fingerprints(tmp_path):
+    """Two `print("x")` in one file are the same (rule, path, text), so the
+    occurrence index in file order tells them apart. Its stated limit: deleting
+    the first shifts the second onto the first's fingerprint."""
+    repo = sample_repo(tmp_path, _print_rule())
+    target = repo / "src" / "twice.py"
+    target.write_text('print("x")\nprint("y")\nprint("x")\n', encoding="utf-8")
+
+    first, other, second = _fingerprints(repo, "src/twice.py")
+
+    assert len({first, other, second}) == 3
+    assert first == fingerprint("print-call", "src/twice.py", 'print("x")', 0)
+    assert second == fingerprint("print-call", "src/twice.py", 'print("x")', 1)
+    target.write_text('print("y")\nprint("x")\n', encoding="utf-8")
+    assert _fingerprints(repo, "src/twice.py") == [other, first]
+
+
+def test_every_fingerprint_in_a_report_is_unique(tmp_path, capsys):
+    repo = sample_repo(tmp_path, *ALL_REGEX_RULES, _print_rule())
+
+    _, out, _ = lint(repo, "--format", "json", capsys=capsys)
+
+    prints = [r["fingerprint"] for r in json.loads(out)["violations"]]
+    assert len(prints) == len(set(prints)) > 1
+
+
+def test_the_fingerprint_is_computed_from_the_records_own_fields(tmp_path, capsys):
+    """So a consumer can recompute it from the JSON alone, the inputs are the
+    record's `rule_id`, `path` and `match` exactly as emitted."""
+    repo = sample_repo(tmp_path, *ALL_REGEX_RULES)
+
+    _, out, _ = lint(repo, "--format", "json", capsys=capsys)
+
+    seen = {}
+    for record in json.loads(out)["violations"]:
+        key = (record["rule_id"], record["path"], "".join(record["match"].split()))
+        occurrence = seen.get(key, 0)
+        seen[key] = occurrence + 1
+        assert record["fingerprint"] == fingerprint(
+            record["rule_id"], record["path"], record["match"], occurrence)
+
+
+def test_regex_ends_are_one_based_and_exclusive_on_the_same_line(tmp_path):
+    """A `target: line` regex sees one line without its newline (and a pattern
+    that needs a newline is refused at load), so its match never spans lines."""
+    repo = sample_repo(tmp_path, _print_rule())
+    (repo / "src" / "end.py").write_text('x = "é"; print("ab")\n', encoding="utf-8")
+
+    (violation,) = [v for v in run_lint(repo).violations if v.path == "src/end.py"]
+
+    assert (violation.line, violation.col, violation.end_line, violation.end_col) == (1, 10, 1, 21)
+    assert violation.end_col - violation.col == len(violation.match)
+
+
+def test_a_path_rule_ends_where_it_starts(tmp_path, capsys):
+    """A `target: path` match is in the filename, not the file: its region is
+    the empty one at 1:1, the file itself."""
+    repo = sample_repo(tmp_path, *ALL_REGEX_RULES)
+
+    _, out, _ = lint(repo, "--format", "json", capsys=capsys)
+
+    record = next(r for r in json.loads(out)["violations"] if r["rule_id"] == "no-variant-module")
+    assert (record["line"], record["col"], record["end_line"], record["end_col"]) == (1, 1, 1, 1)
+
+
+def test_a_multi_line_ast_grep_match_ends_on_its_last_line(tmp_path):
+    """Replayed from what 0.50.0 reports for a call spanning lines 3-5
+    (`print(\\n  1,\\n  2)`): end line 4, column 4, both 0-based."""
+    repo = sample_repo(tmp_path, AST_GREP_PRINT)
+    (repo / "src" / "multi.py").write_text("x = 1\n\nprint(\n  1,\n  2)\n", encoding="utf-8")
+    recorded = json.dumps([{
+        "text": "print(\n  1,\n  2)", "file": f"{repo.resolve()}/src/multi.py",
+        "range": {"start": {"line": 2, "column": 0}, "end": {"line": 4, "column": 4}},
+    }])
+
+    result = run_lint(repo, ast_grep=fake_ast_grep(tmp_path, stdout=recorded, exit_code=0))
+
+    assert [(v.line, v.col, v.end_line, v.end_col) for v in result.violations] == [(3, 1, 5, 5)]
+
+
+@needs_ast_grep
+@pytest.mark.parametrize("content", [
+    'x = "é"; print("ab")\n',
+    '﻿print("ab"); print(1)\nprint(2)\n',
+    'a = 1\r\n    print("tab\\there")\r\n',
+])
+def test_both_matchers_report_the_same_region_for_the_same_call(tmp_path, content):
+    """The real ast-grep's end is 0-based and exclusive, counted in characters
+    (checked against 0.50.0: `print("héllo")` at column 0 ends at column 14),
+    so plus one is the regex matcher's 1-based exclusive end. Start and end
+    must agree between the matchers, BOM file included."""
+    repo = sample_repo(tmp_path, _print_rule(), AST_GREP_PRINT)
+    (repo / "src" / "edge.py").write_bytes(content.encode("utf-8"))
+
+    result = run_lint(repo, ast_grep=shutil.which("ast-grep"))
+
+    by_rule = {
+        rule: [(v.line, v.col, v.end_line, v.end_col, v.match) for v in result.violations
+               if v.path == "src/edge.py" and v.rule_id == rule]
+        for rule in ("print-call", "no-bare-print-ast")
+    }
+    assert by_rule["print-call"]
+    assert by_rule["print-call"] == by_rule["no-bare-print-ast"]
+
+
+def test_fix_source_says_where_the_fix_came_from(tmp_path, capsys):
+    repo = sample_repo(tmp_path, *ALL_REGEX_RULES)
+
+    _, out, _ = lint(repo, "--format", "json", capsys=capsys)
+
+    sources = {r["rule_id"]: r["fix_source"] for r in json.loads(out)["violations"]}
+    assert sources == {"no-bare-print": "rule", "no-unchained-raise": "rule",
+                       "no-variant-module": "principle"}
+
+
+def test_the_ast_grep_version_is_reported_when_an_ast_grep_rule_ran(tmp_path, capsys,
+                                                                    monkeypatch):
+    repo = sample_repo(tmp_path, AST_GREP_PRINT)
+    fake = fake_ast_grep(tmp_path, stdout="[]", exit_code=1, version="ast-grep 0.50.0\n")
+    monkeypatch.setenv("PATH", str(Path(fake).parent))
+
+    code, out, _ = lint(repo, "--format", "json", capsys=capsys)
+
+    document = json.loads(out)
+    assert document["tools"] == {"ast-grep": "0.50.0"}
+    assert document["notes"] == []
+    assert code == EXIT_CLEAN
+
+
+def test_ast_grep_is_not_asked_its_version_when_no_ast_grep_rule_runs(tmp_path, capsys,
+                                                                      monkeypatch):
+    """Installed but unused, it produced nothing in this report, so no version
+    is claimed for it — and a run of regex rules does not depend on it."""
+    repo = sample_repo(tmp_path, NO_BARE_PRINT)
+    log = tmp_path / "ast-grep-calls.jsonl"
+    fake = fake_ast_grep(tmp_path, stdout="[]", exit_code=1, log=log)
+    monkeypatch.setenv("PATH", str(Path(fake).parent))
+
+    _, out, _ = lint(repo, "--format", "json", capsys=capsys)
+
+    assert json.loads(out)["tools"] == {"ast-grep": None}
+    assert not log.exists()
+
+
+@pytest.mark.parametrize("version", ["", "something else\n", "ast-grep\n"])
+def test_an_unreadable_ast_grep_version_is_a_note_not_a_failure(tmp_path, capsys,
+                                                                 monkeypatch, version):
+    """The version is provenance, not evidence: each ast-grep call's own output
+    is checked (its summary, its JSON) whatever the version says. So a version
+    that cannot be read leaves a clean run clean, reported as null with a note
+    saying why, rather than failing the gate over a label."""
+    repo = sample_repo(tmp_path, AST_GREP_PRINT)
+    fake = fake_ast_grep(tmp_path, stdout="[]", exit_code=1, version=version)
+    monkeypatch.setenv("PATH", str(Path(fake).parent))
+
+    code, out, err = lint(repo, "--format", "json", capsys=capsys)
+
+    document = json.loads(out)
+    assert code == EXIT_CLEAN
+    assert document["tools"] == {"ast-grep": None}
+    assert [note["kind"] for note in document["notes"]] == ["ast_grep_version_unknown"]
+    assert document["notes"][0]["reason"]
+    assert "version" in err
+
+
+def test_the_real_ast_grep_version_is_the_one_it_prints(tmp_path, capsys):
+    binary = shutil.which("ast-grep")
+    if binary is None:
+        pytest.skip("ast-grep is not installed")
+    printed = subprocess.run([binary, "--version"], capture_output=True, text=True,
+                             check=True).stdout.split()[-1]
+    repo = sample_repo(tmp_path, AST_GREP_PRINT)
+
+    _, out, _ = lint(repo, "--format", "json", capsys=capsys)
+
+    assert json.loads(out)["tools"] == {"ast-grep": printed}
+
+
+def test_symlinks_and_other_non_files_are_notes_in_the_json(tmp_path, capsys):
+    """Until now only stderr said so; a sweep reading the JSON could not tell
+    a part of the tree had not been read. Paths are exact, like `path`."""
+    repo = sample_repo(tmp_path, *ALL_REGEX_RULES)
+    (repo / "src" / "b.link").symlink_to(repo / "README.md")
+    (repo / "src" / "a.link").symlink_to(repo / "README.md")
+    os.mkfifo(repo / "src" / "pipe.py")
+
+    code, out, err = lint(repo, "--format", "json", capsys=capsys)
+
+    assert json.loads(out)["notes"] == [
+        {"kind": "symlink_not_followed", "path": "src/a.link"},
+        {"kind": "symlink_not_followed", "path": "src/b.link"},
+        {"kind": "not_regular_file", "path": "src/pipe.py"},
+    ]
+    # stderr is unchanged by this: the same two lines as before.
+    assert "did not follow 2 symlink(s): src/a.link, src/b.link" in err
+    assert "did not read 1 item(s) that are not regular files: src/pipe.py" in err
+    assert code == EXIT_VIOLATIONS
+
+
+def test_no_rules_is_a_note_in_the_json(tmp_path, capsys):
+    repo = sample_repo(tmp_path)
+
+    code, out, err = lint(repo, "--format", "json", capsys=capsys)
+
+    assert json.loads(out)["notes"] == [{"kind": "no_rules"}]
+    assert "nothing was checked" in err
+    assert code == EXIT_CLEAN
+
+
+def test_a_note_path_that_is_not_utf8_is_escaped_like_a_record_path():
+    from curamoir.lint import LintResult, format_json
+    result = LintResult(checked=("r",), symlinks=("bad\udcff.link",))
+
+    document = json.loads(format_json(result, "error"))
+
+    assert document["notes"] == [{"kind": "symlink_not_followed", "path": "bad\\xff.link"}]
+
+
+def test_the_version_flag_names_the_tool_and_the_schema(capsys):
+    from curamoir import __version__
+
+    with pytest.raises(SystemExit) as exited:
+        main(["--version"])
+
+    assert exited.value.code == 0
+    assert capsys.readouterr().out == f"curamoir-lint {__version__} (JSON schema {SCHEMA_VERSION})\n"
+
+
+def test_the_package_version_matches_the_project_and_plugin_versions():
+    """`--version` reads `curamoir.__version__` because the standalone runner
+    has no installed metadata to ask; this keeps it from going stale."""
+    import tomllib
+
+    from curamoir import __version__
+
+    project = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    plugin = json.loads((ROOT / ".claude-plugin" / "plugin.json").read_text(encoding="utf-8"))
+    assert __version__ == project["project"]["version"] == plugin["version"]
+
+
+def test_the_wrapper_prints_its_version(tmp_path):
+    from curamoir import __version__
+
+    result = subprocess.run([str(WRAPPER), "--version"], capture_output=True, text=True,
+                            timeout=60, cwd=tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == f"curamoir-lint {__version__} (JSON schema {SCHEMA_VERSION})\n"
+
+
+def test_the_help_explains_each_format(capsys):
+    with pytest.raises(SystemExit):
+        main(["--help"])
+
+    help_text = " ".join(capsys.readouterr().out.split())
+    assert "--format {human,json}" in help_text
+    assert "json: the machine-readable report" in help_text
+
+
+def test_the_ci_snippet_pins_curamoir_and_ast_grep():
+    """An unpinned clone or ast-grep can change the gate's verdict between two
+    CI runs of the same commit; the runner is verified against 0.50.0."""
+    doc = (ROOT / "docs" / "rules-authoring.md").read_text(encoding="utf-8")
+    snippet = doc.split("### In CI and pre-commit")[1].split("```")[1]
+
+    assert "'ast-grep-cli==0.50.*'" in snippet
+    assert "--branch v" in snippet
+
+
+def test_the_lint_modules_parse_as_python_3_9():
+    """The wrapper may fall back to a 3.9 interpreter (cm-bzb), where newer
+    syntax is an import error and Python's exit 1 would read as violations.
+    `feature_version` catches grammar, not newer library calls; the hand run
+    under 3.9 covers those."""
+    import ast
+
+    for name in ("__init__", "lint", "rules", "principles", "config"):
+        source = (ROOT / "src" / "curamoir" / f"{name}.py").read_text(encoding="utf-8")
+        ast.parse(source, filename=f"{name}.py", feature_version=(3, 9))
+
+
+@pytest.mark.parametrize("end", [None, {"line": 0, "column": 3}, {"line": 0, "column": -1}])
+def test_an_ast_grep_record_without_a_usable_end_is_a_runner_error(tmp_path, end):
+    """Missing, or before its start: the region would be invented, and E3-R2's
+    "fix only the violation" would edit the wrong span."""
+    repo = sample_repo(tmp_path, AST_GREP_PRINT)
+    span = {"start": {"line": 0, "column": 4}}
+    if end is not None:
+        span["end"] = end
+    record = {"text": "print(1)", "file": str(repo.resolve() / "src" / "x.py"), "range": span}
+
+    with pytest.raises(LintError, match="no-bare-print-ast"):
+        run_lint(repo, ast_grep=fake_ast_grep(tmp_path, stdout=json.dumps([record])))

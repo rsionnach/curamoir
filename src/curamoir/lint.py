@@ -5,7 +5,10 @@ has not read `principles.md` and should not have to. So every violation carries
 its own context: where (`path:line:col`), which rule and principle, the
 principle's one-sentence rule, a link to the principle's `why`, and the fix. An
 agent told only "no" retries the same thing or invents something worse; an
-agent told what to do instead does that.
+agent told what to do instead does that. The JSON form is a versioned contract
+(SCHEMA_VERSION, TOP_LEVEL_FIELDS, RECORD_FIELDS), settled before any consumer
+read it (cm-9jv), and its `fingerprint` lets a later epic tell a violation
+introduced from one found again.
 
 **What it is for.** A gate in CI and pre-commit, so its exit code is the real
 output and its worst failure is passing after checking nothing — which looks
@@ -59,6 +62,7 @@ the terminal (see `_note`).
 """
 
 import argparse
+import hashlib
 import json
 import math
 import os
@@ -74,6 +78,7 @@ from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from pathlib import Path
 
+from curamoir import __version__
 from curamoir.config import DEFAULTS, ConfigError, load_config_text, one_line, printable
 from curamoir.principles import PrincipleError, anchor, load_principles
 
@@ -94,17 +99,63 @@ EXIT_CLEAN = 0
 EXIT_VIOLATIONS = 1
 EXIT_ERROR = 2
 
-#: Bumped only for a change a parser would notice: a field removed, renamed or
-#: retyped. The sweep (E3-R1) parses this, so the shape is a contract.
+#: The JSON report's `schema_version`. The sweep (E3-R1) and the promotion
+#: ladder (E4-R4) parse the report, so its shape is a contract, and this number
+#: is how a consumer knows which contract it is reading. The policy, also in
+#: docs/rules-authoring.md:
+#:
+#: - Additive changes do NOT bump it: a new top-level field, record field,
+#:   `tools` entry or note `kind`. Consumers MUST ignore fields and note kinds
+#:   they do not know, so adding one never breaks a reader.
+#: - It IS bumped when a parser could misread an old report or a new one:
+#:   a field removed, renamed or retyped; a field whose meaning changes while
+#:   its type stays (how `col` is counted, whether `end_col` is exclusive, the
+#:   fingerprint recipe); and a new value in a closed vocabulary — `severity`
+#:   or `fix_source` — because a consumer ranking severities or branching on
+#:   the fix's origin cannot place a value it has never seen, and guessing
+#:   would loosen a gate.
+#:
+#: It is 1, not 2, although the field was called `version` before cm-9jv: no
+#: release or consumer ever read that shape, and a reader of `schema_version`
+#: cannot mistake the old document for a v1, since the old one has no
+#: `schema_version` key at all.
 SCHEMA_VERSION = 1
 
-#: Every violation record has exactly these fields, in this order. Location
-#: first because it is what an editor or agent opens; the principle's context
-#: after the message because it explains the message.
-RECORD_FIELDS = (
-    "location", "path", "line", "col", "severity", "rule_id", "principle_id",
-    "principle_rule", "message", "fix", "why_link", "match",
+#: The report's top-level fields, in this order: what kind of document it is
+#: and what produced it first, the verdict next, the work list last because it
+#: is the long part.
+TOP_LEVEL_FIELDS = (
+    "schema_version", "tools", "fail_on", "complete", "rules_checked", "rules_skipped",
+    "notes", "violations",
 )
+
+#: Every violation record has exactly these fields, in this order. Location
+#: first because it is what an editor or agent opens, the end of the match
+#: beside it; the principle's context after the message because it explains
+#: the message; the fingerprint last because it is derived from the rest.
+RECORD_FIELDS = (
+    "location", "path", "line", "col", "end_line", "end_col", "severity", "rule_id",
+    "principle_id", "principle_rule", "message", "fix", "fix_source", "why_link", "match",
+    "fingerprint",
+)
+
+#: The `kind` of each entry in the report's `notes`, in the order they are
+#: listed: facts about the run that are not a rule's result. An open
+#: vocabulary — a consumer ignores a kind it does not know.
+NOTE_KINDS = (
+    "no_rules", "ast_grep_version_unknown", "symlink_not_followed", "not_regular_file",
+)
+
+#: Hex digits of sha256 kept in a fingerprint: 64 bits, so two different
+#: violations in one repository's report collide with negligible probability
+#: (about one in 10^10 at a hundred thousand violations), while the value
+#: stays short enough to read in a diff or a PR body.
+FINGERPRINT_LENGTH = 16
+
+#: What a fingerprint ignores in the match: ASCII whitespace, every character
+#: of it. Spelled out rather than `str.split()`, which also splits on Unicode
+#: spaces and `\x1c`-`\x1f`, so the recipe can be reimplemented exactly.
+FINGERPRINT_IGNORED = re.compile(r"[ \t\n\r\f\v]+")
 
 #: Where the principles file is, relative to the repo, for `why_link`.
 PRINCIPLES_PATH = ".curamoir/principles.md"
@@ -147,6 +198,9 @@ AST_GREP_SUMMARY = re.compile(
     r"sg: summary\|file: scannedFileCount=(\d+),skippedFileCount=(\d+)"
 )
 
+#: What `ast-grep --version` prints, verbatim from 0.50.0: `ast-grep 0.50.0`.
+AST_GREP_VERSION = re.compile(r"ast-grep (\S+)")
+
 #: Above this size a file may be one ast-grep skips (0.50.0 searched a 3 MB
 #: file and skipped a 4 MB one), so it is named as a likely cause.
 AST_GREP_LIKELY_TOO_LARGE = 3_000_000
@@ -178,19 +232,28 @@ class RunTimedOut(BaseException):
 
 @dataclass(frozen=True)
 class Violation:
-    """One violation, with everything an agent needs to act on it."""
+    """One violation, with everything an agent needs to act on it.
+
+    `line`/`col` are 1-based; `end_line`/`end_col` are 1-based and exclusive,
+    the position just after the match's last character (SARIF's convention,
+    and ast-grep's 0-based exclusive end plus one). A `target: path` match is
+    in the filename, not the file, so it is the empty region at 1:1."""
 
     path: str
     line: int
     col: int
+    end_line: int
+    end_col: int
     severity: str
     rule_id: str
     principle_id: str
     principle_rule: str
     message: str
     fix: str
+    fix_source: str
     why_link: str
     match: str
+    fingerprint: str
 
     def record(self):
         """The JSON record: RECORD_FIELDS, in order."""
@@ -212,13 +275,18 @@ class LintResult:
     checked: tuple = ()
     skipped: tuple = ()
     #: Repo-relative paths of symlinks that were not followed. Reported on
-    #: stderr, not in the JSON: they are not a rule's result, and leaving them
-    #: out keeps the schema (and its version) unchanged.
+    #: stderr and as `notes` in the JSON, not as violations: they are not a
+    #: rule's result.
     symlinks: tuple = ()
     #: Repo-relative paths of entries that are neither files, directories nor
     #: symlinks (FIFOs, sockets, devices). Reported like symlinks, for the
     #: same reason: git cannot store them, so they are not repository content.
     not_regular: tuple = ()
+    #: The version of the ast-grep that ran this run's ast-grep rules, as it
+    #: prints it; None when none ran, or when it could not be read, in which
+    #: case `ast_grep_version_problem` says why.
+    ast_grep_version: object = None
+    ast_grep_version_problem: object = None
 
     @property
     def complete(self):
@@ -245,13 +313,20 @@ def run_lint(repo, ast_grep=None, ast_grep_timeout=DEFAULT_TIMEOUT):
         raise LintError(str(invalid)) from invalid
 
     files, symlinks, not_regular = _repository_files(repo)
-    violations, checked, skipped = [], [], []
+    found, checked, skipped = [], [], []
+    version, version_problem, asked = None, None, False
     for rule in sorted(rules, key=lambda r: r.id):
         scoped = _scoped(files, rule)
         reason = _why_rule_cannot_run(rule, scoped, ast_grep)
         if reason is not None:
             skipped.append(reason)
             continue
+        if rule.matcher == "ast-grep" and not asked:
+            # Asked only once an ast-grep rule is about to run: a report
+            # names the version that produced its results, and a run of regex
+            # rules neither uses ast-grep nor should depend on it answering.
+            version, version_problem = _ast_grep_version(ast_grep, ast_grep_timeout)
+            asked = True
         complete = True
         try:
             if rule.matcher == "ast-grep":
@@ -263,9 +338,9 @@ def run_lint(repo, ast_grep=None, ast_grep_timeout=DEFAULT_TIMEOUT):
             matches, complete = incomplete.matches, False
         # load_rules has already resolved the id, so this cannot be None.
         principle = principles.by_id(rule.principle)
-        for path, line, col, text in matches:
-            violations.append(Violation(
-                path=path, line=line, col=col,
+        for path, line, col, end_line, end_col, text in matches:
+            found.append(dict(
+                path=path, line=line, col=col, end_line=end_line, end_col=end_col,
                 severity=rule.severity,
                 rule_id=rule.id,
                 principle_id=rule.principle,
@@ -275,15 +350,102 @@ def run_lint(repo, ast_grep=None, ast_grep_timeout=DEFAULT_TIMEOUT):
                 # corrected form by definition, and an empty fix is the one
                 # thing guaranteed to send the agent round again.
                 fix=rule.fix or principle.good,
+                fix_source="rule" if rule.fix else "principle",
                 why_link=f"{PRINCIPLES_PATH}#{anchor(rule.principle)}",
                 match=text,
             ))
         if complete:
             checked.append(rule.id)
 
-    violations.sort(key=lambda v: (v.path, v.line, v.col, v.rule_id))
+    # Path, start and rule are the documented order; end and match only break
+    # the ties one rule can produce (two ast-grep matches starting at the same
+    # node), so the order — and the occurrence index below — never depends on
+    # the order a matcher happened to report in.
+    found.sort(key=lambda v: (v["path"], v["line"], v["col"], v["rule_id"],
+                              v["end_line"], v["end_col"], v["match"]))
+    violations, occurrences = [], {}
+    for fields in found:
+        # Keyed on the values as the record shows them, as the fingerprint is.
+        key = (printable(fields["rule_id"]), printable(fields["path"]),
+               _normalised(printable(fields["match"])))
+        occurrence = occurrences.get(key, 0)
+        occurrences[key] = occurrence + 1
+        violations.append(Violation(
+            **fields,
+            fingerprint=fingerprint(fields["rule_id"], fields["path"], fields["match"],
+                                    occurrence),
+        ))
     return LintResult(tuple(violations), tuple(checked), tuple(skipped), tuple(symlinks),
-                      tuple(not_regular))
+                      tuple(not_regular), version, version_problem)
+
+
+def fingerprint(rule_id, path, match, occurrence):
+    """A violation's identity across runs: the same violation in a later
+    report has the same value, so E4-R4 can tell a violation introduced from
+    one merely found again, and a second sweep (E3-R7) can tell it has seen
+    one before.
+
+    The recipe, which docs/rules-authoring.md states and a golden test pins:
+    the four fields `rule_id`, `path`, the match with every ASCII whitespace
+    character removed, and `occurrence` in decimal — each as it appears in the
+    JSON record, so a consumer can recompute it from the record — are each
+    written as `<UTF-8 byte length>:<UTF-8 bytes>,`, concatenated, hashed
+    with sha256, and the first FINGERPRINT_LENGTH hex digits kept. Length
+    prefixes, not a separator, so no field's content can shift into another.
+
+    What it survives: the violation moving to another line or column (code
+    inserted above it), and whitespace-only reformatting of the matched text
+    (re-indenting, re-wrapping, `f(a,b)` to `f(a, b)`). What changes it: a
+    different rule, path or non-whitespace match text — so renaming or moving
+    the file is a new fingerprint, as is any edit inside the match.
+
+    `occurrence` tells identical matches in one file apart: the 0-based
+    index of this one among the violations with the same rule, path and
+    normalised match, in file order. Its limit: deleting an earlier identical
+    match shifts every later one down, so the last of them reads as gone and
+    the others as unchanged, though it was the first that went. Location
+    cannot break the tie instead without losing the survival of line moves.
+    """
+    fields = (printable(rule_id), printable(path), _normalised(printable(match)),
+              str(occurrence))
+    canonical = b"".join(
+        b"%d:%s," % (len(encoded), encoded)
+        for encoded in (field.encode("utf-8") for field in fields)
+    )
+    return hashlib.sha256(canonical).hexdigest()[:FINGERPRINT_LENGTH]
+
+
+def _normalised(match):
+    return FINGERPRINT_IGNORED.sub("", match)
+
+
+def _ast_grep_version(binary, timeout):
+    """(version, problem): what `ast-grep --version` says, e.g. "0.50.0", or
+    None and why it could not be read.
+
+    Never a LintError. The version is provenance, not evidence: every ast-grep
+    call's own output is checked — its exit code, its `--inspect` summary, its
+    JSON — whatever version it claims, so a label that cannot be read does not
+    make the results less trustworthy, and turning a clean run into exit 2
+    over it would fail the gate on something that is not a finding. An
+    ast-grep that cannot run at all fails on the rule's own call just after.
+
+    Run like every other call (see `_ast_grep_batch`): from a scratch
+    directory outside the repository, in its own process group, bounded by
+    the same timeout. RunTimedOut is a BaseException and passes through.
+    """
+    try:
+        with tempfile.TemporaryDirectory(prefix="curamoir-lint-") as scratch:
+            returncode, stdout, stderr = _run_ast_grep([binary, "--version"], scratch, timeout)
+    except subprocess.TimeoutExpired:
+        return None, f"`ast-grep --version` did not finish within {timeout:g} seconds"
+    except OSError as failure:
+        return None, f"could not run `ast-grep --version` ({binary}): {failure}"
+    printed = AST_GREP_VERSION.fullmatch(stdout.strip())
+    if returncode != 0 or printed is None:
+        return None, (f"`ast-grep --version` exited {returncode} and printed "
+                      f"{(stdout.strip() or stderr.strip())[:200]!r}")
+    return printed.group(1), None
 
 
 def _why_rule_cannot_run(rule, scoped, ast_grep):
@@ -329,13 +491,21 @@ def exit_code(result, fail_on):
 
 
 def format_json(result, fail_on):
+    """The report, in TOP_LEVEL_FIELDS order. Strings pass through `printable`
+    and nothing else: exact, with control characters as JSON escapes, except
+    a filename that is not UTF-8, whose bad bytes are shown escaped."""
     document = {
-        "version": SCHEMA_VERSION,
+        "schema_version": SCHEMA_VERSION,
+        # The tools whose behaviour the results depend on. Only ast-grep's
+        # version varies by machine in a way that can change a result.
+        "tools": {"ast-grep": _optional(result.ast_grep_version)},
         "fail_on": fail_on,
         "complete": result.complete,
         "rules_checked": [printable(rule_id) for rule_id in result.checked],
         "rules_skipped": [{"rule_id": printable(s.rule_id), "reason": printable(s.reason)}
                           for s in result.skipped],
+        "notes": [{name: printable(value) for name, value in note.items()}
+                  for note in notes(result)],
         "violations": [
             {name: printable(value) if isinstance(value, str) else value
              for name, value in v.record().items()}
@@ -343,6 +513,25 @@ def format_json(result, fail_on):
         ],
     }
     return json.dumps(document, indent=2, ensure_ascii=False) + "\n"
+
+
+def notes(result):
+    """The run's notes, as the JSON lists them: facts that are not a rule's
+    result but that a reader of the report should know — the same facts the
+    stderr notes give, in NOTE_KINDS order and then path order."""
+    found = []
+    if not result.checked and not result.skipped:
+        found.append({"kind": "no_rules"})
+    if result.ast_grep_version_problem:
+        found.append({"kind": "ast_grep_version_unknown",
+                      "reason": result.ast_grep_version_problem})
+    found += [{"kind": "symlink_not_followed", "path": path} for path in result.symlinks]
+    found += [{"kind": "not_regular_file", "path": path} for path in result.not_regular]
+    return found
+
+
+def _optional(text):
+    return None if text is None else printable(text)
 
 
 def format_human(result, fail_on):
@@ -393,7 +582,12 @@ def main(argv=None):
         ),
     )
     parser.add_argument("--repo", default=".", help="repository root (default: .)")
-    parser.add_argument("--format", choices=("human", "json"), default="human")
+    parser.add_argument(
+        "--format", choices=("human", "json"), default="human",
+        help="human: one block per violation, for a person or an editor (the "
+             "default); json: the machine-readable report, a versioned contract "
+             "described in docs/rules-authoring.md",
+    )
     parser.add_argument(
         "--fail-on", choices=SEVERITIES, default=None,
         help="lowest severity that fails the run (default: rules.fail_on, else error)",
@@ -401,6 +595,11 @@ def main(argv=None):
     parser.add_argument(
         "--timeout", type=_seconds, default=DEFAULT_TIMEOUT, metavar="SECONDS",
         help=f"exit 2 if the run takes longer (default: {DEFAULT_TIMEOUT}; 0: no bound)",
+    )
+    parser.add_argument(
+        "--version", action="version",
+        version=f"%(prog)s {__version__} (JSON schema {SCHEMA_VERSION})",
+        help="print the tool version and the JSON schema_version, and exit 0",
     )
     args = parser.parse_args(argv)
     if args.repo == "":
@@ -458,6 +657,9 @@ def main(argv=None):
             "no rules in .curamoir/rules/, so nothing was checked. "
             "See docs/rules-authoring.md to write one."
         )
+    if result.ast_grep_version_problem:
+        _note(f"could not read ast-grep's version, so the report names none: "
+              f"{result.ast_grep_version_problem}")
     for skipped in result.skipped:
         _note(f"skipped {skipped.rule_id}: {skipped.reason}")
     if result.symlinks:
@@ -683,7 +885,8 @@ def _ast_grep_language(path):
 
 
 def _regex_matches(repo, rule, files):
-    """(path, line, col, text) for every regex match, 1-based."""
+    """(path, line, col, end_line, end_col, text) for every regex match,
+    1-based, the end exclusive."""
     compiled = rule.compiled()
     if rule.target == "path":
         # A filename has no line; 1:1 is the file itself, which is what an
@@ -692,7 +895,9 @@ def _regex_matches(repo, rule, files):
         for path in files:
             found = compiled.search(path)
             if found:
-                matches.append((path, 1, 1, found.group(0)))
+                # The empty region at 1:1: the match is in the name, not in
+                # any span of the file's text an editor could select.
+                matches.append((path, 1, 1, 1, 1, found.group(0)))
         return matches
     matches, unreadable = [], []
     for path in files:
@@ -703,7 +908,11 @@ def _regex_matches(repo, rule, files):
             continue
         for number, line in enumerate(lines, start=1):
             for found in compiled.finditer(line):
-                matches.append((path, number, found.start() + 1, found.group(0)))
+                # One line, without its newline, is all a match can see (and
+                # a pattern needing a newline is refused at load), so it ends
+                # on the line it starts on. `end() + 1`: 1-based, exclusive.
+                matches.append((path, number, found.start() + 1, number, found.end() + 1,
+                                found.group(0)))
     if unreadable:
         raise RuleIncomplete(
             f"it could not read {len(unreadable)} file(s) in its scope "
@@ -739,7 +948,8 @@ def _lines(repo, path):
 
 
 def _ast_grep_matches(repo, rule, files, binary, timeout):
-    """(path, line, col, text) from ast-grep's own JSON, converted to 1-based.
+    """(path, line, col, end_line, end_col, text) from ast-grep's own JSON,
+    converted to 1-based (the end stays exclusive).
 
     Exit 0 is matches and exit 1 is none — like grep — and anything else is a
     failure. But exit codes alone are not enough: ast-grep exits 1 for a path
@@ -797,8 +1007,8 @@ def _is_empty(path):
 
 def _ast_grep_batch(repo, rule, binary, language, batch, scratch, timeout):
     """(matches, unsearched) from one ast-grep run over files of one language:
-    (path, line, col, text) for each match, and why not every file was
-    searched, or None.
+    (path, line, col, end_line, end_col, text) for each match, and why not
+    every file was searched, or None.
 
     ast-grep must never read the repo's own configuration. It looks for
     `sgconfig.yml` in its working directory and every ancestor, and `run`
@@ -853,8 +1063,12 @@ def _ast_grep_batch(repo, rule, binary, language, batch, scratch, timeout):
     matches = []
     for record in _ast_grep_records(rule, stdout):
         path = _repo_relative(root, rule, record["file"])
-        line = record["range"]["start"]["line"] + 1
-        col = record["range"]["start"]["column"] + 1
+        start, end = record["range"]["start"], record["range"]["end"]
+        line, col = start["line"] + 1, start["column"] + 1
+        # ast-grep's end is 0-based and exclusive, in characters (verified,
+        # 0.50.0: `print("h\u00e9llo")` at column 0 ends at column 14), so plus
+        # one is the 1-based exclusive end the regex matcher reports.
+        end_line, end_col = end["line"] + 1, end["column"] + 1
         if line == 1 and col > 1 and _starts_with_bom(root / path):
             # ast-grep 0.50.0 counts a UTF-8 BOM as the first character of line
             # 1 (verified: `\ufeffprint(1)` is reported at column 1, 0-based),
@@ -862,8 +1076,11 @@ def _ast_grep_batch(repo, rule, binary, language, batch, scratch, timeout):
             # matchers, and the editor, agree. This assumes 0.50.0's behaviour;
             # a version that stopped counting the BOM would be over-corrected,
             # which the real-binary test of matching locations would catch.
+            # The end shares the shift when it is on line 1 too.
             col -= 1
-        matches.append((path, line, col, record["text"]))
+            if end_line == 1:
+                end_col -= 1
+        matches.append((path, line, col, end_line, end_col, record["text"]))
     return matches, unsearched
 
 
@@ -969,12 +1186,15 @@ def _ast_grep_records(rule, stdout):
 
 
 def _is_match_record(record):
+    """Whether `record` has the fields read from it, of the right types, with
+    an end that is not before its start."""
     try:
-        start = record["range"]["start"]
+        start, end = record["range"]["start"], record["range"]["end"]
         return (isinstance(record["file"], str) and isinstance(record["text"], str)
-                and all(isinstance(start[key], int) and not isinstance(start[key], bool)
-                        and start[key] >= 0
-                        for key in ("line", "column")))
+                and all(isinstance(point[key], int) and not isinstance(point[key], bool)
+                        and point[key] >= 0
+                        for point in (start, end) for key in ("line", "column"))
+                and (end["line"], end["column"]) >= (start["line"], start["column"]))
     except (KeyError, TypeError):
         return False
 

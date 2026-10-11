@@ -206,6 +206,7 @@ something you find when you ask, rather than during an unattended run.
 ```
 scripts/curamoir-lint [--repo PATH] [--format human|json] [--fail-on info|warning|error]
                       [--timeout SECONDS]
+scripts/curamoir-lint --version
 ```
 
 `--timeout` bounds the whole run (default 600 seconds; `0` for no bound; at
@@ -254,52 +255,142 @@ fresh repo is not a failing one.
 
 ### JSON (`--format json`)
 
-The sweep's work list (E3-R1), so the shape is a contract. `version` changes
-only when a field is removed, renamed or retyped.
+The sweep's work list (E3-R1), and what the promotion ladder (E4-R4) reads to
+tell a violation introduced from one merely found, so the shape is a contract.
+`--version` prints `curamoir-lint <version> (JSON schema <n>)`.
 
 ```json
 {
-  "version": 1,
+  "schema_version": 1,
+  "tools": {"ast-grep": null},
   "fail_on": "error",
   "complete": true,
   "rules_checked": ["no-bare-print"],
   "rules_skipped": [],
+  "notes": [],
   "violations": [
     {
       "location": "src/sample/core/billing.py:15:5",
       "path": "src/sample/core/billing.py",
       "line": 15,
       "col": 5,
+      "end_line": 15,
+      "end_col": 11,
       "severity": "error",
       "rule_id": "no-bare-print",
       "principle_id": "structured-logging",
       "principle_rule": "Emit diagnostics through the module logger, never through `print`.",
       "message": "print( writes to stdout with no level or logger name",
       "fix": "logger.info(...), or logger.debug(...) while debugging",
+      "fix_source": "rule",
       "why_link": ".curamoir/principles.md#structured-logging",
-      "match": "print("
+      "match": "print(",
+      "fingerprint": "66dc3a54eb3d313c"
     }
   ]
 }
 ```
 
+The top-level fields are always these, in this order:
+
+- `schema_version`: which contract this is (see *Versioning* below).
+- `tools`: the version of each external tool the results depend on, as that
+  tool prints it. Today only `"ast-grep"`: the version of the binary that ran
+  this run's `ast-grep` rules (`"0.50.0"`), or `null` when none ran (no
+  `ast-grep` rules, ast-grep not installed, or every one skipped before it
+  ran) or when its `--version` could not be read — the `notes` then say so.
+  An unreadable version does not change the exit code: each ast-grep call's
+  own output is checked whatever version it claims, so the version is
+  provenance, not evidence.
+- `fail_on`, `complete`, `rules_checked`, `rules_skipped`: the threshold and
+  the verdict. `rules_skipped` entries are `{"rule_id": ..., "reason": ...}`,
+  and `complete` is false exactly when there are any.
+- `notes`: facts about the run that are not a rule's result (see below).
+- `violations`: one record per violation.
+
+Each violation record has exactly these fields, in this order:
+
 | field | what it is |
 |---|---|
 | `location` | `path:line:col`, for anything that opens a location |
 | `path` | repo-relative, `/`-separated |
-| `line`, `col` | 1-based. A `target: path` rule reports `1:1`, the file itself |
+| `line`, `col` | where the match starts, 1-based. Columns count characters (code points), not bytes; a UTF-8 BOM is not one. A `target: path` rule reports `1:1`, the file itself |
+| `end_line`, `end_col` | where the match ends, 1-based and **exclusive**: the position just after its last character, as SARIF counts it, so a one-line match is `end_col - col` characters long. A `regex` match never spans lines (`end_line` is `line`); an `ast-grep` match can. A `target: path` rule reports `1:1`, the empty region: the match is in the name, not the text |
 | `severity` | the rule's |
 | `rule_id`, `principle_id` | the rule and the one principle it cites |
 | `principle_rule` | the principle's one-sentence `rule`, so the agent need not open `principles.md` |
 | `message` | the rule's `message`, rendered |
 | `fix` | the rule's `fix`; if it has none, the principle's `good` example, which is a corrected form by definition |
+| `fix_source` | `"rule"` when `fix` is the rule's own, `"principle"` when it is the principle's `good` example (a whole corrected example, not an edit to paste) |
 | `why_link` | `.curamoir/principles.md#<anchor>`: the principle's heading, where its `why` is |
 | `match` | the text that matched (for a path rule, the part of the path) |
+| `fingerprint` | the violation's identity across runs; see below |
 
-`violations` is sorted by path, line, column and rule id, so two runs over the
-same tree are byte-identical. `rules_skipped` entries are
-`{"rule_id": ..., "reason": ...}`, and `complete` is false exactly when there are
-any.
+`violations` is sorted by path, line, column and rule id (then end and match,
+which only one rule's overlapping `ast-grep` matches can need), so two runs
+over the same tree are byte-identical.
+
+Strings are exact, with control characters carried as JSON escapes, with one
+exception: a filename that is not valid UTF-8 has its bad bytes shown escaped
+(`bad\xff.py`), in `path`, `location` and a note's `path` alike.
+
+#### Fingerprint
+
+A violation found again in a later run has the same `fingerprint`, so a
+consumer can tell a violation it has seen (E3-R7: a second sweep with nothing
+changed opens no PR) from one introduced since (E4-R4). The recipe, which a
+test pins to one exact value so it cannot drift:
+
+1. Take the record's `rule_id`, `path` and `match`, exactly as the JSON shows
+   them, and remove every ASCII whitespace character (space, tab, `\n`, `\r`,
+   form feed, vertical tab) from the match.
+2. Take the occurrence index, in decimal: `0` for the first violation in the
+   file with that rule, path and whitespace-free match, in report order; `1`
+   for the next identical one; and so on.
+3. Write each of the four as `<length of its UTF-8 bytes>:<those bytes>,` and
+   concatenate them — e.g. `13:no-bare-print,8:src/a.py,10:print("x"),1:0,`.
+4. Hash with SHA-256 and keep the first 16 hex digits (64 bits).
+
+It survives code inserted above the violation (line and column are not in it)
+and whitespace-only reformatting of the matched text (re-indenting,
+re-wrapping, `f(a,b)` to `f(a, b)`). It changes when the rule, the file's path
+(a rename or move is a new fingerprint) or any non-whitespace character of the
+match changes. Its limit is the occurrence index: two identical matches in one
+file are told apart only by their order, so deleting the first shifts the
+second onto the first's fingerprint, and the change reads as the second one
+going. Within one report every fingerprint is unique.
+
+#### Notes
+
+Each entry is an object with a `kind`, listed in this order and then by path:
+
+- `no_rules`: there are no rules, so nothing was checked (exit 0).
+- `ast_grep_version_unknown`: an `ast-grep` rule ran but `ast-grep --version`
+  could not be read; `reason` says what it printed. `tools["ast-grep"]` is
+  `null`.
+- `symlink_not_followed`: a symlink at `path` was not linted (see *Limits*).
+- `not_regular_file`: a FIFO, socket or device at `path` was not read.
+
+These are the facts the stderr notes give; stderr is unchanged by them. None
+changes the exit code.
+
+#### Versioning
+
+`schema_version` is bumped only for a change a parser could misread:
+
+- Adding a top-level field, a record field, a `tools` entry or a note `kind`
+  does **not** bump it. Consumers **must** ignore fields and note kinds they
+  do not know.
+- Removing, renaming or retyping a field bumps it.
+- Changing what a field means while its type stays — how `col` is counted,
+  whether `end_col` is exclusive, the fingerprint recipe — bumps it.
+- A new value in a closed vocabulary — `severity`, `fix_source` — bumps it,
+  because a consumer that ranks severities or branches on a fix's origin
+  cannot place a value it has never seen, and guessing would loosen a gate.
+
+`schema_version` is 1. (Before any release the field was named `version`; no
+consumer read that shape, and it has no `schema_version` key to be mistaken
+for this one.)
 
 ### Human (the default)
 
@@ -331,10 +422,17 @@ filename that is not valid UTF-8 is shown with its bad bytes escaped
 CI needs a checkout of cúramóir, not an install:
 
 ```yaml
-- run: pip install pyyaml ast-grep-cli
-- run: git clone --depth 1 https://github.com/rsionnach/curamoir /tmp/curamoir
+- run: pip install pyyaml 'ast-grep-cli==0.50.*'
+- run: git clone --depth 1 --branch v0.1.0 https://github.com/rsionnach/curamoir /tmp/curamoir
 - run: /tmp/curamoir/scripts/curamoir-lint --format json > lint.json
 ```
+
+Pin both. An unpinned clone or ast-grep can change the gate's verdict between
+two runs of the same commit, and the runner's handling of ast-grep (its JSON,
+its skip counts, the BOM column) is verified against 0.50.0. `v0.1.0` stands
+for a release tag; to pin a commit instead, clone without `--branch` and
+`git -C /tmp/curamoir checkout <sha>` (a SHA cannot be shallow-cloned by
+name). The report's `tools` says which ast-grep actually ran.
 
 Pre-commit, as a `local` hook pointing at that checkout (`pass_filenames: false`:
 the runner lints the repository, not a list of files):
@@ -445,8 +543,9 @@ runner into CI or pre-commit.
 - Symlinks are not followed, file or directory. In CI the tree is often an
   unreviewed PR, and `match` quotes matched text, so a committed
   `leak.py -> ~/.ssh/id_rsa` would otherwise have the lint print part of the
-  target. A symlink's name (never its target or contents) is listed on stderr;
-  it does not change the exit code, and is absent from the JSON.
+  target. A symlink's name (never its target or contents) is listed on stderr
+  and as a `symlink_not_followed` note in the JSON; it does not change the
+  exit code.
 - The repository's own `sgconfig.yml` is never read. ast-grep looks for one in
   its working directory and every ancestor, and one in a PR could re-map file
   types so an `ast-grep` rule silently matches nothing, break the run, or (on
