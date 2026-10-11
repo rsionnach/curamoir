@@ -38,7 +38,7 @@ unique across both languages, so both sets can be installed together.
 `/curamoir:init` does not copy them for you. At the default threshold an
 `error` rule fails the lint (exit 1) and a `warning` rule is reported without
 failing it; lower the threshold with `rules: {fail_on: warning}` in
-`curamoir.yaml`, or `curamoir-lint --fail-on warning` for one run, and the
+`.curamoir/curamoir.yaml`, or `curamoir-lint --fail-on warning` for one run, and the
 warnings fail too. Either way a repository should choose which of its
 principles are worth reporting, let alone failing a build over — the ladder's
 point is that a principle is promoted to a rule on evidence, not by default.
