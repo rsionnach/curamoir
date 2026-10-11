@@ -201,6 +201,23 @@ naming the file and the field:
 `/curamoir:doctor` loads every rule for exactly this reason: so a broken rule is
 something you find when you ask, rather than during an unattended run.
 
+## Running it
+
+```
+scripts/curamoir-lint [--repo PATH] [--format human|json] [--fail-on info|warning|error]
+```
+
+Run it from the repository root, or point `--repo` at it. It loads every rule
+in `.curamoir/rules/`, prints one block per violation, and exits `0` when no
+violation is at or above the threshold (`--fail-on`, else `rules.fail_on` in
+`.curamoir/curamoir.yaml`, else `error`), `1` when one is, and `2` when the
+result cannot be trusted — a rule that did not load, say, or one that could
+not search every file in its scope. Everything else about running it — every
+option, the exit codes in full, the JSON report and its stability promise,
+wiring it into CI and pre-commit — is in
+[Running `curamoir-lint`](curamoir-lint.md), which is written for whoever wires
+the gate or parses its output rather than for rule authors.
+
 ## Limits, for rule authors
 
 What the runner does not do, or does differently from what you might assume,
@@ -218,10 +235,10 @@ into CI or pre-commit are in
   `.css` (each checked against ast-grep 0.50.0). Markdown, TOML and `.h` are
   not among them; use `regex` there. If a rule's `files:` scope takes in any
   other file, the rule is **skipped**, not narrowed: it is listed in
-  `rules_skipped` with the files named, the other rules' report is still
-  printed, and the run exits 2. Dropping the file instead would report the
-  rule as checked having searched nothing. Narrow `files:` or add the file to
-  `exclude:`.
+  [`rules_skipped`](curamoir-lint.md#json---format-json) with the files named,
+  the other rules' report is still printed, and the run exits 2. Dropping the
+  file instead would report the rule as checked having searched nothing.
+  Narrow `files:` or add the file to `exclude:`.
 - The one file an `ast-grep` rule leaves out of its scope is one whose whole
   name is a suffix, such as a file named `.py`: it matches `**/*.py`, but
   ast-grep does not search it under `--lang=python` either, and counting it
@@ -260,20 +277,3 @@ into CI or pre-commit are in
 - Settings a project put in its own `sgconfig.yml` (custom languages,
   `languageGlobs`) do not apply to `curamoir-lint`'s rules; see
   [why](curamoir-lint.md#limits-for-ci-and-pre-commit).
-
-## Running it
-
-```
-scripts/curamoir-lint [--repo PATH] [--format human|json] [--fail-on info|warning|error]
-```
-
-Run it from the repository root, or point `--repo` at it. It loads every rule
-in `.curamoir/rules/`, prints one block per violation, and exits `0` when no
-violation is at or above the threshold (`--fail-on`, else `rules.fail_on` in
-`.curamoir/curamoir.yaml`, else `error`), `1` when one is, and `2` when the
-result cannot be trusted — a rule that did not load, say, or one that could
-not search every file in its scope. Everything else about running it — every
-option, the exit codes in full, the JSON report and its stability promise,
-wiring it into CI and pre-commit — is in
-[Running `curamoir-lint`](curamoir-lint.md), which is written for whoever wires
-the gate or parses its output rather than for rule authors.

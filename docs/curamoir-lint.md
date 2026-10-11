@@ -7,6 +7,9 @@ command line, the exit codes, both output formats, the JSON contract and its
 versioning, wiring the runner into CI and pre-commit, and the limits that
 matter there.
 
+Wiring the gate into CI or pre-commit? Start at
+[In CI and pre-commit](#in-ci-and-pre-commit).
+
 Writing a rule — its fields, matchers, scoping, messages, what is refused at
 load time, and the limits that matter when writing one, such as which file
 suffixes an `ast-grep` rule can search — is in
@@ -21,14 +24,14 @@ scripts/curamoir-lint --version
 ```
 
 `--timeout` bounds the whole run (default 600 seconds; `0` for no bound; at
-most 1000000). Ten
-minutes is far above a healthy run and inside CI job limits, so reaching it
-means something is stuck, and the run exits 2 saying so rather than being
-killed with no reason or hanging a pre-commit. It is the only bound there is
-on a rule's regex that backtracks catastrophically on some line. Options must
-be spelled in full: `--re` is not `--repo`. `--version` takes precedence over
-every other argument, so `curamoir-lint --version --format json` prints the
-version and exits 0 having checked nothing.
+most 1000000). Ten minutes is far above a healthy run and inside CI job
+limits, so reaching it means something is stuck, and the run exits 2 saying so
+rather than being killed with no reason or hanging a pre-commit. It is the
+only bound there is on a rule's regex that backtracks catastrophically on some
+line. Options must be spelled in full: `--re` is not `--repo`. `--version`
+takes precedence over every other argument, so
+`curamoir-lint --version --format json` prints the version and exits 0 having
+checked nothing.
 
 It makes no model calls and no network calls, and needs no cúramóir install
 (E2-R5): only `scripts/curamoir-lint`, the `src/` directory beside it, a Python 3
@@ -65,14 +68,14 @@ as every wrapper) it takes the first that can import PyYAML.
 
 `2` outranks `1`. A run that skipped rules has not shown them clean, so it is
 reported as incomplete even if what did run found something. When rules were
-skipped — ast-grep missing, or a rule that could not search every file in
-its scope — the partial report is still printed, each skipped rule is in
+skipped — ast-grep missing, or a rule that could not search every file in its
+scope — the partial report is still printed, each skipped rule is in
 `rules_skipped` with the files named where they are known, and the other
-rules' findings are kept. So are a skipped rule's own findings in the files
-it did search: they are real violations, and are listed in `violations` like
-any other, while the rule stays in `rules_skipped` (not `rules_checked`) and
-the run exits 2, because what it could not search has not been shown clean. For every other `2`, stdout is empty and the reason
-is on stderr.
+rules' findings are kept. So are a skipped rule's own findings in the files it
+did search: they are real violations, and are listed in `violations` like any
+other, while the rule stays in `rules_skipped` (not `rules_checked`) and the
+run exits 2, because what it could not search has not been shown clean. For
+every other `2`, stdout is empty and the reason is on stderr.
 
 The threshold is `--fail-on`, else `rules.fail_on` in `.curamoir/curamoir.yaml`,
 else `error`. Every violation is reported whatever its severity; the threshold
@@ -222,7 +225,8 @@ Each entry is an object with a `kind`, listed in this order and then by path:
   `--timeout` is 10 seconds or less, a hanging probe can spend all of it and
   the run exits 2 as for any other hang.
 - `symlink_not_followed` (keys: `kind`, `path`): a symlink at `path` was not
-  linted (see *Limits* below).
+  linted (see
+  [*Limits, for CI and pre-commit*](#limits-for-ci-and-pre-commit)).
 - `not_regular_file` (keys: `kind`, `path`): a FIFO, socket or device at
   `path` was not read.
 

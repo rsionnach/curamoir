@@ -401,17 +401,28 @@ def test_the_authoring_and_runner_docs_point_at_each_other():
     import re
 
     def anchors(text):
-        return {re.sub(r"[^a-z0-9 -]", "", h.strip().lower()).replace(" ", "-")
-                for h in re.findall(r"^#+ (.*)$", text, re.M)}
+        """GitHub's heading slugs. A `#` line inside a fenced block (``` or
+        ~~~) is a code comment, not a heading; a repeated slug gets -1, -2."""
+        text = re.sub(r"^[ \t]*(`{3,}|~{3,})[^\n]*\n.*?^[ \t]*\1[ \t]*$", "", text,
+                      flags=re.M | re.S)
+        seen, slugs = {}, set()
+        for h in re.findall(r"^#{1,6} (.*)$", text, re.M):
+            slug = re.sub(r"[^a-z0-9_ -]", "", h.strip().lower()).replace(" ", "-")
+            n = seen.get(slug, 0)
+            seen[slug] = n + 1
+            slugs.add(f"{slug}-{n}" if n else slug)
+        return slugs
 
     docs = {name: (ROOT / "docs" / name).read_text(encoding="utf-8")
             for name in ("rules-authoring.md", "curamoir-lint.md")}
     for name, text in docs.items():
         other = next(n for n in docs if n != name)
-        links = re.findall(r"\]\((" + re.escape(other) + r")(?:#([a-z0-9-]+))?\)", text)
+        links = re.findall(r"\]\((" + re.escape(other) + r")(?:#([a-z0-9_-]+))?\)", text)
         assert links, f"{name} does not link to {other}"
         for _, anchor in links:
             assert not anchor or anchor in anchors(docs[other]), (name, anchor)
+        for anchor in re.findall(r"\]\(#([a-z0-9_-]+)\)", text):
+            assert anchor in anchors(text), (name, anchor)
 
 
 def test_every_doc_the_runner_names_exists():
