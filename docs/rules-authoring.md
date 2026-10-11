@@ -330,7 +330,11 @@ Each violation record has exactly these fields, in this order:
 
 `violations` is sorted by path, line, column and rule id (then end and match,
 which only one rule's overlapping `ast-grep` matches can need), so two runs
-over the same tree are byte-identical.
+over the same tree are byte-identical. For the same reason the report carries
+no timestamp and no run id, by design: the caller that needs them (the sweep's
+ledger record) supplies its own. Adding a `generated_at` would be additive
+under the versioning policy below and would still break that guarantee, so
+don't.
 
 Strings are exact, with control characters carried as JSON escapes, with one
 exception: a filename that is not valid UTF-8 has its bad bytes shown escaped
