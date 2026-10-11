@@ -6,6 +6,7 @@ is a thin wrapper that invokes this and reports what it said.
 """
 
 import argparse
+import json
 import sys
 from pathlib import Path
 
@@ -20,6 +21,7 @@ from curamoir.scaffold import (
     init_repo,
 )
 from curamoir.status import collect_status, render_status
+from curamoir.sweep import LintUntrusted, work_list
 
 
 def main(argv=None):
@@ -47,6 +49,10 @@ def main(argv=None):
     brief.add_argument("--repo", default=".", help="repository root (default: cwd)")
     brief.add_argument("--if-due", action="store_true",
                        help="only generate when the absence threshold has passed")
+
+    sweep = subcommands.add_parser(
+        "sweep-work-list", help="run curamoir-lint and print the sweep's work list (E3-R1)")
+    sweep.add_argument("--repo", default=".", help="repository root (default: cwd)")
 
     arguments = parser.parse_args(argv)
     try:
@@ -93,6 +99,8 @@ def _run(arguments):
         print(f"Wrote {path}")
         print(path.read_text(encoding="utf-8"))
         return 0
+    if arguments.command == "sweep-work-list":
+        return _sweep_work_list(arguments.repo)
     if arguments.command == "doctor":
         findings = diagnose(arguments.repo)
         print(render_report(findings))
@@ -100,6 +108,46 @@ def _run(arguments):
         # failing CI over one would make the distinction meaningless.
         return 1 if any(f.level == "error" for f in findings) else 0
     return 2
+
+
+def _sweep_work_list(repo):
+    """The work list as JSON on stdout, for the sweep skill to act on.
+
+    Exit 0 whether or not there is work (`outcome` says which); exit 2 with
+    nothing on stdout when the lint cannot be trusted, so an agent cannot
+    mistake a partial list for the work list. The shape is cúramóir-internal,
+    read only by skills/sweep/SKILL.md; the versioned contract is the lint's
+    own report.
+    """
+    try:
+        result = work_list(repo)
+    except LintUntrusted as untrusted:
+        print(f"{untrusted}\nThe sweep must stop here: do not edit anything.",
+              file=sys.stderr)
+        return 2
+    principles = []
+    for principle_id, items in result.by_principle().items():
+        principles.append({
+            "principle_id": principle_id,
+            "principle_rule": items[0].principle_rule,
+            "why_link": items[0].why_link,
+            "violations": [
+                {name: getattr(item, name) for name in (
+                    "path", "line", "col", "end_line", "end_col", "severity", "rule_id",
+                    "message", "fix", "fix_source", "match", "fingerprint")}
+                for item in items
+            ],
+        })
+    print(json.dumps({
+        "outcome": result.outcome,
+        "count": len(result.items),
+        "fail_on": result.report.fail_on,
+        "rules_checked": list(result.report.rules_checked),
+        "notes": [note.kind for note in result.report.notes],
+        "paths": list(result.paths),
+        "principles": principles,
+    }, indent=2, ensure_ascii=False))
+    return 0
 
 
 def _uninitialised(repo):
