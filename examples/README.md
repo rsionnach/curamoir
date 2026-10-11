@@ -6,6 +6,11 @@ They exist for two reasons: so a new repository has something that runs on day
 one, and so the rule format is shown working rather than described (E2-R6).
 For the format itself, see `docs/rules-authoring.md`.
 
+There is no `principles.md` in `examples/python/` or `examples/typescript/`, and
+that is deliberate: both languages' rules cite the one shared, language-agnostic
+set in `templates/principles.md`, which is what your repository's
+`.curamoir/principles.md` starts as.
+
 | file | principle | pattern | finds |
 |---|---|---|---|
 | `python/no-print.yaml` | `structured-logging` | `print($$$ARGS)` | any call to `print`, outside `cli.py`, `__main__.py`, `conftest.py` |
