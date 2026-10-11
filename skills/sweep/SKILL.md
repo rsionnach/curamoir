@@ -64,9 +64,10 @@ and opens no PR from a fix that breaks any of them:
 - Edit only the files in the work list's `paths`. Do not create, rename or
   delete a file, and do not touch any other file.
 - Change only a violation's own lines and at most 3 lines either side
-  of it. The one exception is adding an import, or a module-level
-  assignment such as a logger, to the top of the module, before its first
-  function or class.
+  of it. The one exception is adding, at the top of the module before its
+  first function or class, an import, a logger (`logger =
+  logging.getLogger(__name__)`) or a new constant set to a plain literal;
+  any other code there is held to the rule above.
 - Do not change a dependency manifest or lockfile (pyproject.toml,
   requirements files, package.json, uv.lock and the like), and do not import
   a package the repository does not already use.

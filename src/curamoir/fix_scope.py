@@ -55,10 +55,12 @@ Two layers, so the rules can be tested without git:
   must touch, or lie within WINDOW lines of, a violation in the same file.
   The one other hunk allowed is an insertion into the module's header — the
   stretch before its first function or class — that adds only imports and
-  module-level assignments of names the module does not already bind: the
-  bundled no-print rule's own fix is "logger = logging.getLogger(__name__) at
-  module level", which lands far from the `print` it replaces, while an
-  inserted `TAX_RATE = 0.3` would change every later use of TAX_RATE.
+  module-level assignments of names the module does not already bind, to a
+  literal or a `logging.getLogger(...)` call (_header_value has the list):
+  the bundled no-print rule's own fix is "logger = logging.getLogger(__name__)
+  at module level", which lands far from the `print` it replaces, while an
+  inserted `TAX_RATE = 0.3` would change every later use of TAX_RATE, and an
+  inserted `_boot = __import__("os").system(...)` would run on every import.
 - *Signatures.* For Python, both versions are parsed and every function's
   and class's signature (arguments, defaults, annotations, return
   annotation, async-ness, decorators; a class's bases, keywords and
@@ -469,19 +471,30 @@ def _header_end(tree, lines, python):
 
 
 def _only_header_statements(added, python, old_tree=None):
-    """True when the added lines are only imports and module-level assignments
-    (and blank lines or comments): what a fix may add to a module's header.
+    """True when the added lines are only imports and simple module-level
+    assignments (and blank lines or comments): what a fix may add to a
+    module's header.
 
     For Python, every name they bind must also be new to the module, unless
     the statement is an import the module already has, word for word: an
     inserted `TAX_RATE = 0.3` would otherwise pass as "an assignment in the
-    header" while changing what every later use of TAX_RATE means."""
+    header" while changing what every later use of TAX_RATE means.
+
+    And an assignment's value must be one of _header_value's shapes. WHY:
+    header code runs whenever the module is imported — the sweep's own test
+    step included — and the window rule exists to keep a fix next to its
+    violation. Without this, `_boot = __import__("os").system(...)` is "a
+    module-level assignment of a new name" and lands anywhere in the header.
+    Imports are not narrowed further here: what they may bring in is the
+    new-dependency check's job, and running an existing module's top level is
+    what importing it has always meant."""
     if python:
         try:
             tree = ast.parse("\n".join(added))
         except (SyntaxError, ValueError):
             return False
         bound, imports = _module_bindings(old_tree)
+        loggers = _logging_aliases(old_tree) | _logging_aliases(tree)
         for node in tree.body:
             if isinstance(node, (ast.Import, ast.ImportFrom)):
                 names = [(a.asname or a.name).split(".", 1)[0] for a in node.names]
@@ -491,14 +504,89 @@ def _only_header_statements(added, python, old_tree=None):
                 targets = node.targets if isinstance(node, ast.Assign) else [node.target]
                 if not all(isinstance(t, ast.Name) and t.id not in bound for t in targets):
                     return False
+                if node.value is not None and not _header_value(node.value, loggers):
+                    return False
+                # A module-level annotation is evaluated at import time too
+                # (absent `from __future__ import annotations`), so it is held
+                # to a type's spelling: `int`, `logging.Logger`.
+                if isinstance(node, ast.AnnAssign) and not _dotted_name(node.annotation):
+                    return False
             else:
                 return False
         return True
-    for line in added:
-        stripped = line.strip()
-        if stripped and not stripped.startswith(("//", "import ")) and "require(" not in stripped:
-            return False
-    return True
+    return all(not line.strip() or line.strip().startswith("//")
+               or _SCRIPT_HEADER_LINE.match(line.strip()) for line in added)
+
+
+#: A JS/TS header line a fix may add: a static `import` (with or without
+#: bindings) or `require` of a quoted specifier, with nothing chained after
+#: it. Text, not a parse: a multi-line `import {` falls to the window rule,
+#: which is the safe direction. The specifier is checked for new dependencies
+#: elsewhere (_SCRIPT_IMPORT).
+_SCRIPT_HEADER_LINE = re.compile(
+    r"""^(?:import\s+(?:type\s+)?(?:[\w$*{}\s,]+?\s+from\s*)?"""
+    r"""|(?:(?:const|let|var)\s+(?:[\w$]+|\{[\w$\s,:]*\})\s*=\s*)?require\s*\(\s*)"""
+    r"""(['"])[^'"]+\1\s*\)?\s*;?$""")
+
+#: The literal types a header constant may hold.
+_HEADER_LITERALS = (str, bytes, int, float, complex, bool, type(None))
+
+
+def _header_value(node, loggers):
+    """Whether `node`, the right-hand side of an assignment inserted into a
+    module header, is one of the shapes a header fix needs. The allowlist,
+    and the fix each entry exists for:
+
+    - a literal — str, bytes, number (optionally negated), bool, None — or a
+      tuple or list of them: a named constant (`TIMEOUT = 30`, `__all__ =
+      [...]`) is a header's other ordinary content, and a literal runs
+      nothing;
+    - `<logging>.getLogger()`, with no argument, `__name__` or one string
+      literal, where `<logging>` is a name the module (old or inserted) binds
+      to the standard `logging` module: the bundled no-print rule's own fix,
+      "logger = logging.getLogger(__name__) at module level"
+      (examples/python/no-print.yaml).
+
+    Everything else — any other call, attribute chains, lambdas,
+    comprehensions, f-strings, walrus, names — is refused here, so such a
+    line is held to the window rule like any other change."""
+    if isinstance(node, (ast.Tuple, ast.List)):
+        return all(_header_literal(element) for element in node.elts)
+    if _header_literal(node):
+        return True
+    if not (isinstance(node, ast.Call) and not node.keywords and len(node.args) <= 1
+            and isinstance(node.func, ast.Attribute) and node.func.attr == "getLogger"
+            and isinstance(node.func.value, ast.Name) and node.func.value.id in loggers):
+        return False
+    if not node.args:
+        return True
+    arg = node.args[0]
+    return ((isinstance(arg, ast.Name) and arg.id == "__name__")
+            or (isinstance(arg, ast.Constant) and isinstance(arg.value, str)))
+
+
+def _header_literal(node):
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.USub, ast.UAdd)):
+        node = node.operand
+        return isinstance(node, ast.Constant) and type(node.value) in (int, float, complex)
+    return isinstance(node, ast.Constant) and type(node.value) in _HEADER_LITERALS
+
+
+def _dotted_name(node):
+    """`int`, `logging.Logger`: a name or an attribute of a name, nothing else."""
+    if isinstance(node, ast.Attribute):
+        node = node.value
+    return isinstance(node, ast.Name)
+
+
+def _logging_aliases(tree):
+    """The names `tree`'s top-level `import logging [as x]` statements bind to
+    the standard logging module."""
+    if tree is None:
+        return set()
+    return {alias.asname or "logging"
+            for node in tree.body if isinstance(node, ast.Import)
+            for alias in node.names if alias.name == "logging"}
 
 
 def _module_bindings(tree):

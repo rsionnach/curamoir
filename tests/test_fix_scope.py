@@ -37,6 +37,7 @@ from curamoir.fix_scope import (
     WINDOW,
     FileChange,
     Hunk,
+    _only_header_statements,
     check_scope,
     compute_hunks,
     is_dependency_file,
@@ -301,6 +302,81 @@ def test_a_header_insertion_that_rebinds_an_existing_name_is_not(swept, inserted
     edit(repo, BILLING, "TAX_RATE = 0.2\n", "TAX_RATE = 0.2\n" + inserted)
 
     assert kinds_at(verdict(repo, work)) == {(OUTSIDE_VIOLATION, BILLING, 10)}
+
+
+@pytest.mark.parametrize("inserted", [
+    '_boot = __import__("os").system("true")\n',
+    "helper = lambda a: a * 2\n",
+    "squares = [n * n for n in range(3)]\n",
+    "env = __import__('os').environ\n",
+    "label = f\"{__import__('os').getcwd()}\"\n",
+    "level: __import__('os').getcwd() = 1\n",
+    "audit = logging.getLogger(__import__('os').getcwd())\n",
+    "audit = logging.getLogger(name=__name__)\n",
+    "audit = logging.root.manager.getLogger('x')\n",
+    "audit = TAX_RATE.getLogger('x')\n",
+])
+def test_a_header_insertion_that_runs_code_at_import_is_not(swept, inserted):
+    """S2: a header line runs when the module is imported — including by the
+    sweep's own test step — so it may bind a new name only to a literal or a
+    logger, never to an arbitrary expression. Each falls back to the window."""
+    repo, work = swept
+    edit(repo, BILLING, "TAX_RATE = 0.2\n", "TAX_RATE = 0.2\n" + inserted)
+
+    assert kinds_at(verdict(repo, work)) == {(OUTSIDE_VIOLATION, BILLING, 10)}
+
+
+@pytest.mark.parametrize("inserted", [
+    "RETRIES = 3\n",
+    "GREETING = 'hi'\n",
+    "TIMEOUT: float = -1.5\n",
+    "DEBUG = None\n",
+    "LEVELS = ('info', 'debug')\n",
+    "__all__ = ['line_total']\n",
+    "audit: logging.Logger = logging.getLogger('audit')\n",
+    "audit = logging.getLogger()\n",
+])
+def test_a_header_insertion_of_a_literal_or_a_logger_is_in_scope(swept, inserted):
+    repo, work = swept
+    edit(repo, BILLING, "TAX_RATE = 0.2\n", "TAX_RATE = 0.2\n" + inserted)
+
+    assert verdict(repo, work).ok
+
+
+def test_the_no_print_fix_in_a_module_without_a_logger_is_in_scope():
+    """examples/python/no-print.yaml's own fix, verbatim, into a module that
+    has neither the import nor the logger: both land in the header."""
+    old = '"""m."""\nimport os\n\n\n\n\n\n\n\n\ndef f():\n    print(os.sep)\n'
+    new = old.replace("import os\n", "import os\nimport logging\n\nlogger = logging.getLogger(__name__)\n")
+    new = new.replace("print(os.sep)", "logger.info(os.sep)")
+
+    assert check_scope([modified("m.py", old, new)], [V("m.py", 12)]).ok
+
+
+def test_a_logger_from_a_module_merely_named_like_logging_is_not():
+    """getLogger is trusted only on the standard `logging` module, under any
+    alias; `import os as log` then `log.getLogger(...)` is someone else's call."""
+    old = '"""m."""\nimport os as log\n'
+    assert not _only_header_statements(["audit = log.getLogger(__name__)"], True,
+                                       __import__("ast").parse(old))
+
+
+@pytest.mark.parametrize("line,ok", [
+    ('import { readFile } from "node:fs";', True),
+    ("import fs from 'fs'", True),
+    ('import "./polyfill.js";', True),
+    ('const fs = require("fs");', True),
+    ("const { join } = require('path')", True),
+    ("// a comment", True),
+    ('const run = require("child_process").execSync("touch /tmp/x");', False),
+    ('import("./boot.js").then(m => m.go());', False),
+    ("const logger = makeLogger();", False),
+    ('require("./polyfill.js");', True),
+])
+def test_a_script_header_insertion_is_only_a_plain_import(line, ok):
+    """The same rule for JS/TS, by line, without a parser: a static import or a
+    `const x = require("…")` and nothing chained after it."""
+    assert _only_header_statements([line], False) is ok
 
 
 def test_repeating_an_import_the_module_already_has_is_harmless(swept):

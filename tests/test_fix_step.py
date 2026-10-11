@@ -18,6 +18,8 @@ list from the real lint over it.
 """
 
 import json
+import os
+import re
 import subprocess
 import sys
 
@@ -31,6 +33,7 @@ from curamoir.fix_step import (
     FixStepRun,
     fix_prompt,
     fix_step_argv,
+    repo_rules,
     run_fix_step,
 )
 from curamoir.principles import load_principles, parse_principles
@@ -93,8 +96,8 @@ def test_the_prompt_names_the_principles_that_permit_signature_changes(swept):
 
 # --- the command line -------------------------------------------------------------------
 
-def test_the_fix_step_can_read_and_edit_and_nothing_else():
-    argv = fix_step_argv("the prompt", "claude-sonnet-5")
+def test_the_fix_step_can_read_and_edit_and_nothing_else(tmp_path):
+    argv = fix_step_argv("the prompt", "claude-sonnet-5", tmp_path)
 
     def value(flag):
         return argv[argv.index(flag) + 1]
@@ -102,7 +105,7 @@ def test_the_fix_step_can_read_and_edit_and_nothing_else():
     assert argv[:3] == ["claude", "-p", "the prompt"]
     assert value("--model") == "claude-sonnet-5"
     assert value("--tools").split(",") == list(FIX_TOOLS)
-    assert value("--allowedTools") == value("--tools")
+    assert value("--allowedTools") == ",".join(repo_rules(tmp_path))
     assert value("--disallowedTools") == "mcp__*"
     assert value("--permission-mode") == "dontAsk"
     assert value("--output-format") == "json"
@@ -111,6 +114,58 @@ def test_the_fix_step_can_read_and_edit_and_nothing_else():
     assert not {"Bash", "Write", "WebFetch", "WebSearch", "NotebookEdit"} & set(FIX_TOOLS)
     assert "--dangerously-skip-permissions" not in argv
     assert "--bare" not in argv
+    assert "--restricted" in argv
+    assert "--add-dir" not in argv
+
+
+def test_the_allow_rules_reach_only_the_repo(tmp_path):
+    """S1: an unscoped `Read` or `Edit` in --allowedTools approves that tool on
+    every path, so under dontAsk the agent could edit ~/.bashrc or read
+    ~/.ssh, and verify_fix (which reads only this repo's diff) would never
+    see it. Every allow rule names the repo, absolute (`//`), recursively."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    real = os.path.realpath(repo)
+    argv = fix_step_argv("the prompt", "m", repo)
+    rules = argv[argv.index("--allowedTools") + 1].split(",")
+
+    assert rules == [f"Read(/{real}/**)", f"Edit(/{real}/**)"]
+    assert not set(rules) & {"Read", "Edit", "Grep", "Glob", "Write", "Bash"}
+    assert all(re.fullmatch(r"(Read|Edit)\(//.+/\*\*\)", rule) for rule in rules)
+
+
+def test_a_repo_reached_through_a_symlink_is_named_both_ways(tmp_path):
+    """Allow rules "apply only when both the requested path and the file it
+    resolves to match", and the agent may name either spelling."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    link = tmp_path / "link"
+    link.symlink_to(repo)
+    real = os.path.realpath(repo)
+
+    assert repo_rules(link) == [f"Read(/{link}/**)", f"Read(/{real}/**)",
+                                f"Edit(/{link}/**)", f"Edit(/{real}/**)"]
+
+
+def test_glob_characters_in_the_repo_path_are_escaped_and_spaces_are_not(tmp_path):
+    """Rules are gitignore patterns and "Rules you write yourself aren't
+    escaped": an unescaped `*` or `[` in the repo's own path would widen the
+    rule to sibling directories. Spaces and parentheses need no escape."""
+    repo = tmp_path / "my repo (2024) [draft]*?"
+    repo.mkdir()
+    real = os.path.realpath(repo)
+    escaped = real.replace("[", "\\[").replace("]", "\\]").replace("*", "\\*").replace("?", "\\?")
+
+    assert repo_rules(repo)[0] == f"Read(/{escaped}/**)"
+    assert repo_rules(repo)[0].endswith("my repo (2024) \\[draft\\]\\*\\?/**)")
+
+
+@pytest.mark.parametrize("name", ["a,b", "a\nb"])
+def test_a_repo_path_the_rule_list_cannot_carry_is_refused(tmp_path, name):
+    """--allowedTools takes one comma-separated value; a comma in the path
+    would split a rule in two, so the step refuses rather than guess."""
+    with pytest.raises(ValueError):
+        repo_rules(tmp_path / name)
 
 
 def fake_claude(tmp_path, edit=None, sleep=0, exit_code=0):

@@ -29,14 +29,41 @@ the result as if the prompt had said nothing.
 - `--disallowedTools "mcp__*"`: `--tools` "doesn't affect MCP tools; to deny
   those too, use `--disallowedTools "mcp__*"`" (same page). Paired with
   `--strict-mcp-config` and no `--mcp-config`, so no MCP server is loaded.
-- `--permission-mode dontAsk` with `--allowedTools` naming the same four:
-  "Claude Code denies every call that would otherwise prompt … Actions that
-  need no approval in Manual mode still run … and so do actions your
-  `--allowedTools` entries or `permissions.allow` rules cover"
-  (https://code.claude.com/docs/en/headless, "Auto-approve tools"), so an
-  edit runs and anything else is refused rather than waited on. Named
+- `--permission-mode dontAsk`: "Claude Code denies every call that would
+  otherwise prompt … Actions that need no approval in Manual mode still run
+  … and so do actions your `--allowedTools` entries or `permissions.allow`
+  rules cover" (https://code.claude.com/docs/en/headless, "Auto-approve
+  tools"), so anything not approved is refused rather than waited on. Named
   explicitly because a `-p` run otherwise "takes the built-in starting
   permission mode, which can be `auto`" (same section).
+- `--allowedTools` with repo-scoped rules only (repo_rules), never a bare
+  tool name. WHY: a bare name "matches that rule at the tool level
+  everywhere" (https://code.claude.com/docs/en/permissions, "Read and
+  Edit"), so `--allowedTools Edit` under dontAsk approved an edit to
+  ~/.bashrc or ~/.claude/settings.json — which fix_scope, reading only this
+  repo's `git diff`, can never see — and `Read` approved reading ~/.ssh into
+  the agent's context. The rules are `Read(//<repo>/**)` and
+  `Edit(//<repo>/**)`: "Read and Edit rules both use gitignore pattern
+  syntax", and `//path` is "Absolute path from filesystem root" (same page).
+  Grep and Glob get no allow rule of their own: Claude Code "checks file
+  permissions against `Edit(path)` and `Read(path)` rules only" and "makes a
+  best-effort attempt to apply `Read` rules to all built-in tools that read
+  files like Grep and Glob"; and read-only tools need no approval "within
+  the working directory and additional directories" (same page), which here
+  is the repo, since no `--add-dir` is passed. Outside it they would prompt,
+  and dontAsk turns a prompt into a refusal — so no deny list of sensitive
+  paths is needed for the default case: the fence is the allow list, and
+  everything outside it is denied without being named.
+- `--restricted`: it "confines the built-in file tools to the working
+  directories, loads only managed settings and `--settings`"
+  (https://code.claude.com/docs/en/cli-reference). WHY: without it the
+  user's and the project's `permissions.allow` rules and
+  `additionalDirectories` still load and could re-widen the fence above —
+  and a project's settings are text in the very repository being swept.
+  It also drops the user's hooks and plugins from this run, so cúramóir's
+  own Stop hook no longer writes into the fix step's tree. It "Requires
+  Claude Code v2.1.248 or later"; an older CLI rejects the flag and the
+  step fails loudly rather than running unfenced.
 - `--disable-slash-commands` ("Disable all skills and commands for this
   session"): the fix agent is handed its instructions here, so no skill —
   including /curamoir:sweep, which would run the lint itself — can be
@@ -47,10 +74,25 @@ the result as if the prompt had said nothing.
 - NOT `--bare`, though the docs recommend it for scripts: "In bare mode,
   Claude Code never reads OAuth credentials or the system keychain", and the
   local scheduled mode runs on the developer's subscription (spec §6.2).
-  The cost is that the run loads the user's hooks and plugins — cúramóir's
-  own included, whose Stop hook writes `.curamoir/handoff/latest.md` — and
-  fix_scope reports any such write as out of scope. The runner (cm-fkd.4)
-  must keep its own writes out of the fix step's tree.
+  `--restricted` is not documented as touching credentials (it limits
+  settings, tools and file access); that is the docs' word, not a run's.
+- NOT a throwaway HOME around the run, though it would put ~/.ssh and
+  ~/.bashrc out of reach without trusting Claude Code at all: "On Linux,
+  credentials are stored in `~/.claude/.credentials.json`", and on macOS the
+  Keychain entry is keyed to the config directory, with the same file as
+  its fallback (https://code.claude.com/docs/en/authentication), so a fresh
+  HOME is a logged-out `claude` on the subscription this mode exists for.
+
+**The residual risk, stated plainly.** The fence around the fix agent's
+reads and edits is Claude Code's own permission check, not the operating
+system: no sandbox, no separate user. The docs scope it the same way — rules
+"don't apply to … arbitrary subprocesses", which this toolset has none of,
+and Grep/Glob honour Read rules on a "best-effort" basis. fix_scope checks
+only the repository's diff, so an edit outside the repo that slipped this
+fence would go unseen by the review step; and a read is never visible to it.
+cm-fkd.4's runner should run the scheduled sweep in a disposable checkout
+for its own reasons, and an OS sandbox is the stronger fix if one is
+wanted.
 - NOT `--permission-prompts none`: it "requires Claude Code v2.1.259 or
   later. Earlier versions reject it", and "in a `-p` run with no host, these
   requests are denied either way".
@@ -68,6 +110,7 @@ Syntax that imports on 3.9, like sweep.py.
 """
 
 import json
+import os
 import subprocess
 from dataclasses import dataclass
 from typing import Optional
@@ -90,9 +133,10 @@ and opens no PR from a fix that breaks any of them:
 - Edit only the files in the work list's `paths`. Do not create, rename or
   delete a file, and do not touch any other file.
 - Change only a violation's own lines and at most {WINDOW} lines either side
-  of it. The one exception is adding an import, or a module-level
-  assignment such as a logger, to the top of the module, before its first
-  function or class.
+  of it. The one exception is adding, at the top of the module before its
+  first function or class, an import, a logger (`logger =
+  logging.getLogger(__name__)`) or a new constant set to a plain literal;
+  any other code there is held to the rule above.
 - Do not change a dependency manifest or lockfile (pyproject.toml,
   requirements files, package.json, uv.lock and the like), and do not import
   a package the repository does not already use.
@@ -141,18 +185,57 @@ def fix_prompt(result, principles):
     )
 
 
-def fix_step_argv(prompt, model, max_turns=DEFAULT_MAX_TURNS, claude="claude"):
-    """The `claude -p` command line for the fix step. The prompt sits right
-    after `-p`, as in the CLI reference's examples, and each list-valued flag
-    takes one comma-separated value, so no flag can swallow the prompt."""
-    tools = ",".join(FIX_TOOLS)
+#: The gitignore metacharacters a repo path may contain that would make a rule
+#: match more than the repo. Spaces and parentheses are literal ("You don't
+#: need to escape parentheses in a path"), and `!` and `#` mean something
+#: only at a pattern's start, which is always `//` here.
+_GITIGNORE_SPECIAL = "\\*?["
+
+
+def repo_rules(repo):
+    """The fix step's allow rules: Read and Edit under `repo` and nothing
+    else, as `Read(//<abs path>/**)` and `Edit(//<abs path>/**)`.
+
+    Both spellings of the path are named when a symlink leads to it, since
+    allow rules "apply only when both the requested path and the file it
+    resolves to match" (https://code.claude.com/docs/en/permissions,
+    "Symlinks") and the agent may ask by either. Glob characters in the path
+    are backslash-escaped, gitignore's own escape and what Claude Code does
+    to "the literal path you approved"; if a CLI ever did not honour the
+    escape, the rule would match nothing and the edit would be refused — the
+    safe way round. `]` is escaped with `[` for symmetry.
+
+    Raises ValueError for a path that cannot be a rule: one with a comma
+    (--allowedTools takes one comma-separated value, and the comma would cut
+    the rule in two), a control character, or no absolute POSIX form."""
+    given = os.path.abspath(str(repo))
+    roots = [given]
+    real = os.path.realpath(given)
+    if real != given:
+        roots.append(real)
+    for root in roots:
+        if not root.startswith("/") or "," in root or any(ord(c) < 32 for c in root):
+            raise ValueError(f"cannot scope the fix step's permissions to {root!r}: "
+                             "it needs an absolute POSIX path with no comma or "
+                             "control character")
+    escaped = ["".join("\\" + c if c in _GITIGNORE_SPECIAL + "]" else c for c in root)
+               for root in roots]
+    return [f"{tool}(/{root}/**)" for tool in ("Read", "Edit") for root in escaped]
+
+
+def fix_step_argv(prompt, model, repo, max_turns=DEFAULT_MAX_TURNS, claude="claude"):
+    """The `claude -p` command line for the fix step in `repo`. The prompt
+    sits right after `-p`, as in the CLI reference's examples, and each
+    list-valued flag takes one comma-separated value, so no flag can swallow
+    the prompt. Raises ValueError as repo_rules does."""
     return [
         claude, "-p", prompt,
         "--model", model,
-        "--tools", tools,
-        "--allowedTools", tools,
+        "--tools", ",".join(FIX_TOOLS),
+        "--allowedTools", ",".join(repo_rules(repo)),
         "--disallowedTools", "mcp__*",
         "--strict-mcp-config",
+        "--restricted",
         "--permission-mode", "dontAsk",
         "--disable-slash-commands",
         "--no-session-persistence",
@@ -190,7 +273,7 @@ def run_fix_step(repo, prompt, model=None, timeout=DEFAULT_TIMEOUT,
     tests, which pass a stand-in script: no test calls a model."""
     if model is None:
         model = config_value(repo, "models", "cheap")
-    argv = fix_step_argv(prompt, model, max_turns=max_turns, claude=claude)
+    argv = fix_step_argv(prompt, model, repo, max_turns=max_turns, claude=claude)
     try:
         result = runner(argv, cwd=str(repo), capture_output=True, timeout=timeout,
                         stdin=subprocess.DEVNULL)
