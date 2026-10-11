@@ -145,9 +145,10 @@ def _sweep_work_list(repo):
         "count": len(result.items),
         "fail_on": result.report.fail_on,
         "rules_checked": list(result.report.rules_checked),
-        # Kinds only: the skill reports which notes there were (no_rules
-        # above all), not their paths or reasons.
-        "notes": [note.kind for note in result.report.notes],
+        # Kinds only, each once in first-seen order: the skill reports which
+        # notes there were (no_rules above all), not their paths or reasons,
+        # so 5000 symlinks are one entry, not 5000.
+        "notes": list(dict.fromkeys(note.kind for note in result.report.notes)),
         "paths": list(result.paths),
         "principles": principles,
     }, indent=2, ensure_ascii=False) + "\n"

@@ -267,6 +267,9 @@ def _tools(value):
         if version is not None and not isinstance(version, str):
             raise LintReportError(
                 f"tools[{name!r}] must be a version string or null, not {version!r}")
+        _encodable(name, f"tools key {name!r}")
+        if version is not None:
+            _encodable(version, f"tools[{name!r}]")
     return MappingProxyType(dict(value))
 
 
@@ -287,7 +290,23 @@ def _list(value, where):
 def _string(value, where):
     if not isinstance(value, str):
         raise LintReportError(f"{where} must be a string, not {value!r}")
+    _encodable(value, where)
     return value
+
+
+def _encodable(value, where):
+    """Refuse a string no UTF-8 encoder will write. JSON's `\\udcff` escape
+    decodes to a lone surrogate (how a non-UTF-8 Linux filename reads with
+    surrogate escapes); accepted, it would crash the first consumer that
+    writes it out, after the report had been trusted. The real runner never
+    emits one: every string it writes passes through `config.printable`,
+    which spells such a name as the bytes it holds (`bad\\xff.py`)."""
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError as error:
+        raise LintReportError(
+            f"{where} is not valid Unicode (a lone surrogate at index {error.start}), "
+            "so it cannot be written as UTF-8") from error
 
 
 def _is_int(value):

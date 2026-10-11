@@ -64,7 +64,9 @@ LINT = Path(__file__).resolve().parents[2] / "scripts" / "curamoir-lint"
 DEFAULT_TIMEOUT = 600
 
 #: Extra seconds before the sweep kills a runner that ignores its own
-#: `--timeout` (Python startup, writing the report).
+#: `--timeout` (Python startup, writing the report). A `timeout` of 0 is the
+#: lint's "no bound", and then there is no backstop either: the caller asked
+#: for the run not to be bounded, and `0 + grace` would bound it at `grace`.
 DEFAULT_GRACE = 30
 
 #: The work-list outcomes. NO_WORK is the string E3-R7's ledger line records.
@@ -131,7 +133,9 @@ class WorkList:
 
 def work_list(repo, lint=LINT, timeout=DEFAULT_TIMEOUT, grace=DEFAULT_GRACE):
     """Run the lint over `repo` and return its work list, or raise
-    LintUntrusted. `lint` is the runner to call (a test may pass a stand-in)."""
+    LintUntrusted. `lint` is the runner to call (a test may pass a stand-in).
+    `timeout` is passed as the lint's `--timeout`; the sweep kills the runner
+    `grace` seconds after it, unless it is 0 (no bound, so no backstop)."""
     if isinstance(repo, str) and repo == "":
         # curamoir-lint refuses `--repo ""`, but `_run` resolves first and
         # Path("").resolve() is the working directory, which would lint
@@ -197,13 +201,14 @@ def _run(repo, lint, timeout, grace):
     # until it finishes; the sweep has stopped either way, so nothing acts on
     # its output. Killing it too would mean a process group per run here, which
     # a weekly job that already gave up does not need.
+    backstop = None if timeout == 0 else timeout + grace
     try:
         result = subprocess.run(
-            command, capture_output=True, env=environment, timeout=timeout + grace,
+            command, capture_output=True, env=environment, timeout=backstop,
         )
     except subprocess.TimeoutExpired as error:
         raise LintUntrusted(
-            f"curamoir-lint did not finish within {timeout + grace} seconds") from error
+            f"curamoir-lint did not finish within {backstop} seconds") from error
     except OSError as error:
         raise LintUntrusted(f"curamoir-lint could not be started ({lint}): {error}") from error
     return (result.returncode, result.stdout,

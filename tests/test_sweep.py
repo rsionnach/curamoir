@@ -397,3 +397,100 @@ def test_the_skill_calls_the_helper_and_states_the_scope_limits():
             "dependencies; no signature changes without an explicit principle "
             "permitting it.") in " ".join(text.split())
     assert NO_WORK in text
+
+
+# --- edge cases (cm-fkd.1 review) ---------------------------------------------
+
+def test_a_timeout_of_0_means_no_backstop_either(tmp_path):
+    """`--timeout 0` is the lint's "no bound"; a backstop of `0 + grace` would
+    kill a run the caller asked not to bound once `grace` had passed."""
+    lint_ = fake_lint(tmp_path, stdout=report(), exit_code=1, sleep=2)
+
+    result = work_list(tmp_path, lint=lint_, timeout=0, grace=0.5)
+
+    assert result.outcome == WORK
+
+
+def test_a_runner_that_is_not_executable_stops_the_sweep(tmp_path):
+    lint_ = tmp_path / "curamoir-lint"
+    lint_.write_text("#!/bin/sh\n", encoding="utf-8")
+    lint_.chmod(0o644)
+
+    with pytest.raises(LintUntrusted, match="could not be started"):
+        work_list(tmp_path, lint=lint_)
+
+
+def test_a_missing_runner_stops_the_sweep_with_a_reason(tmp_path):
+    with pytest.raises(LintUntrusted, match="could not be started"):
+        work_list(tmp_path, lint=tmp_path / "no-such-lint")
+
+
+def cli_with(monkeypatch, lint_, repo):
+    """The CLI in-process against a stand-in lint, its stdout a UTF-8 byte
+    stream as a real one is."""
+    stream = io.TextIOWrapper(io.BytesIO(), encoding="utf-8")
+    monkeypatch.setattr(cli, "work_list", lambda repo: work_list(repo, lint=lint_))
+    monkeypatch.setattr(sys, "stdout", stream)
+    code = cli.main(["sweep-work-list", "--repo", str(repo)])
+    stream.flush()
+    return code, stream.buffer.getvalue()
+
+
+def test_the_cli_exits_2_when_the_runner_cannot_be_started(tmp_path, monkeypatch, capsys):
+    code, stdout = cli_with(monkeypatch, tmp_path / "no-such-lint", tmp_path)
+
+    assert code == lint.EXIT_ERROR
+    assert stdout == b""
+    assert "could not be started" in capsys.readouterr().err
+
+
+def test_the_cli_exits_2_on_a_path_that_cannot_be_written_as_utf8(tmp_path, monkeypatch,
+                                                                    capsys):
+    """A lone surrogate is valid JSON but cannot be encoded; the reader
+    refuses it, so the CLI stops before writing rather than crashing mid-write."""
+    lint_ = fake_lint(tmp_path, stdout=report(violations=[
+        dict(RECORD, path="src/\udcff.py")]), exit_code=1)
+
+    code, stdout = cli_with(monkeypatch, lint_, tmp_path)
+
+    assert code == lint.EXIT_ERROR
+    assert stdout == b""
+    assert "do not edit anything" in capsys.readouterr().err
+
+
+def test_the_cli_lists_each_note_kind_once_in_first_seen_order(tmp_path, monkeypatch):
+    notes = [{"kind": "symlink_not_followed", "path": f"link{i}"} for i in range(5000)]
+    notes.insert(1, {"kind": "not_regular_file", "path": "fifo"})
+    lint_ = fake_lint(tmp_path, stdout=report(notes=notes), exit_code=1)
+
+    code, stdout = cli_with(monkeypatch, lint_, tmp_path)
+
+    assert code == 0
+    assert json.loads(stdout)["notes"] == ["symlink_not_followed", "not_regular_file"]
+
+
+def test_a_reader_that_closes_early_is_exit_2_with_no_traceback(tmp_path):
+    """A real broken pipe: the work list is far larger than a pipe buffer and
+    the reader stops after one byte."""
+    violations = [dict(RECORD, fingerprint=f"{i:016x}", line=i + 1, end_line=i + 1)
+                  for i in range(3000)]
+    lint_ = fake_lint(tmp_path, stdout=report(violations=violations), exit_code=1)
+    program = ("import sys\n"
+               "from curamoir import cli, sweep\n"
+               "cli.work_list = lambda repo: sweep.work_list(repo, lint=sys.argv[1])\n"
+               "sys.exit(cli.main(['sweep-work-list', '--repo', sys.argv[2]]))\n")
+    environment = {**os.environ, "PYTHONPATH": str(ROOT / "src")}
+
+    process = subprocess.Popen(
+        [sys.executable, "-c", program, str(lint_), str(tmp_path)],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=environment,
+    )
+    assert process.stdout.read(1) == b"{"
+    process.stdout.close()
+    with process.stderr:
+        stderr = process.stderr.read().decode("utf-8", "backslashreplace")
+    code = process.wait(timeout=120)
+
+    assert code == lint.EXIT_ERROR, stderr
+    assert "Traceback" not in stderr and "Exception ignored" not in stderr, stderr
+    assert "could not be written" in stderr

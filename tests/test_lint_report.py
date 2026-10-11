@@ -336,3 +336,27 @@ def test_a_real_lint_run_round_trips_field_for_field(tmp_path):
     for typed, record in zip(report.violations, raw["violations"], strict=True):
         for field in dataclasses.fields(typed):
             assert getattr(typed, field.name) == record[field.name], field.name
+
+
+def test_a_string_that_cannot_be_written_as_utf8_is_refused():
+    """A lone surrogate (`"src/\\udcff.py"`, the JSON-escaped form of a
+    non-UTF-8 Linux filename read with surrogate escapes) is valid JSON but no
+    UTF-8 encoder will write it, so a consumer that echoes the path would crash
+    on it. The real runner never emits one: every string passes through
+    `printable`, which spells such a name as the bytes it holds."""
+    text = json.dumps(document(violations=[dict(RECORD, path="src/\udcff.py")]))
+    assert "\\udcff" in text
+
+    with pytest.raises(LintReportError, match=r"violations\[0\]\.path"):
+        parse_report(text)
+
+
+def test_the_runner_spells_a_non_utf8_name_as_its_bytes_not_as_a_surrogate():
+    """The other half of the refusal above: what the real runner writes for
+    such a name reads, so refusing surrogates refuses nothing it produces."""
+    from curamoir.config import printable
+
+    spelled = printable("src/bad\udcff.py")
+    assert spelled == "src/bad\\xff.py"
+    report = parse_report(json.dumps(document(violations=[dict(RECORD, path=spelled)])))
+    assert report.violations[0].path == "src/bad\\xff.py"
