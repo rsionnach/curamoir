@@ -1133,6 +1133,49 @@ def test_ast_grep_columns_on_a_bom_file_are_corrected_to_the_editors(tmp_path):
     assert [(v.end_line, v.end_col) for v in result.violations] == [(1, 9), (2, 9)]
 
 
+# Verbatim from ast-grep 0.50.0 (`ast-grep run --pattern 'print($$$A)' --lang
+# python --json=compact`) on BOM_MULTILINE_PRINT: a match that starts on line 1
+# of a BOM file but ends on line 2. The BOM shifts only the start; the end, on
+# a line with no BOM, is already an editor's column.
+BOM_MULTILINE_PRINT = "\ufeffx = 1; print(\n  1)\n"
+BOM_MULTILINE_RECORD = (
+    '{"text":"print(\\n  1)","range":{"byteOffset":{"start":10,"end":21},'
+    '"start":{"line":0,"column":8},"end":{"line":1,"column":4}},"file":"FILE",'
+    '"lines":"\ufeffx = 1; print(\\n  1)","charCount":{"leading":8,"trailing":0},'
+    '"language":"Python","metaVariables":{"single":{},"multi":{"A":[{"text":"1",'
+    '"range":{"byteOffset":{"start":19,"end":20},"start":{"line":1,"column":2},'
+    '"end":{"line":1,"column":3}}}]},"transformed":{}}}'
+)
+
+
+def test_a_bom_file_match_ending_on_a_later_line_keeps_its_end_column(tmp_path):
+    """Only a line-1 end shares the BOM's shift: an end on line 2 must not be
+    pulled back a column too. Replayed from the recorded real output."""
+    repo = sample_repo(tmp_path, AST_GREP_PRINT)
+    (repo / "src" / "bom.py").write_text(BOM_MULTILINE_PRINT, encoding="utf-8")
+    record = BOM_MULTILINE_RECORD.replace("FILE", f"{repo.resolve()}/src/bom.py")
+
+    result = run_lint(repo, ast_grep=fake_ast_grep(tmp_path, stdout=f"[{record}]",
+                                                   exit_code=0))
+
+    assert [(v.line, v.col, v.end_line, v.end_col) for v in result.violations] == [
+        (1, 8, 2, 5)]
+
+
+@needs_ast_grep
+def test_the_real_ast_grep_on_a_multiline_bom_match_agrees_with_the_editor(tmp_path):
+    """The same file through the real binary: start column corrected for the
+    BOM, end column on line 2 left alone."""
+    repo = sample_repo(tmp_path, AST_GREP_PRINT)
+    (repo / "src" / "bom.py").write_text(BOM_MULTILINE_PRINT, encoding="utf-8")
+
+    result = run_lint(repo, ast_grep=shutil.which("ast-grep"))
+
+    assert [(v.line, v.col, v.end_line, v.end_col) for v in result.violations
+            if v.path == "src/bom.py" and v.rule_id == "no-bare-print-ast"] == [
+        (1, 8, 2, 5)]
+
+
 # --- an ast-grep rule never silently skips a file it was scoped to -----------
 
 def _ast_grep_rule(scope):
@@ -2109,20 +2152,31 @@ def test_a_hanging_version_probe_is_a_note_not_a_timed_out_run(tmp_path, capsys,
     }]
 
 
+@pytest.mark.parametrize("violating, expected_code, expected_paths", [
+    (False, EXIT_CLEAN, []),
+    (True, EXIT_VIOLATIONS, ["src/sample/core/billing.py", "src/sample/web/handlers.py"]),
+], ids=["clean", "violation"])
 @pytest.mark.parametrize("stream", ["stdout", "stderr"])
 def test_a_version_probe_printing_non_utf8_is_a_note_not_exit_2(tmp_path, capsys,
-                                                                monkeypatch, stream):
+                                                                monkeypatch, stream,
+                                                                violating, expected_code,
+                                                                expected_paths):
     """The version is provenance: output that cannot be decoded, on either
-    stream, is a null version and a note, never an internal error."""
+    stream, is a null version and a note, never an internal error — on a clean
+    run, and on one whose violations must still be reported and still fail it."""
     repo = sample_repo(tmp_path, AST_GREP_PRINT)
-    fake = fake_ast_grep(tmp_path, stdout="[]", exit_code=1, version_stream=stream,
+    matches, match_exit = (recorded_output_for(repo), 0) if violating else ("[]", 1)
+    fake = fake_ast_grep(tmp_path, stdout=matches, exit_code=match_exit,
+                         version_stream=stream,
                          version_bytes=b"ast-grep \xff\xfe 0.50.0\n")
     monkeypatch.setenv("PATH", str(Path(fake).parent))
 
     code, out, _ = lint(repo, "--format", "json", capsys=capsys)
 
     document = json.loads(out)
-    assert code == EXIT_CLEAN
+    assert code == expected_code
+    assert [v["path"] for v in document["violations"]
+            if v["rule_id"] == "no-bare-print-ast"] == expected_paths
     assert document["tools"] == {"ast-grep": None}
     (note,) = document["notes"]
     assert note["kind"] == "ast_grep_version_unknown"
