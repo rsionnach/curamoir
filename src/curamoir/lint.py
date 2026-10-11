@@ -104,7 +104,7 @@ EXIT_ERROR = 2
 #: ladder (E4-R4) parse the report, so its shape is a contract, and this number
 #: is how a consumer knows which contract it is reading. Bump it for any change
 #: a parser could misread, never for an additive one; the full policy is
-#: docs/rules-authoring.md, "Versioning" under "JSON".
+#: docs/curamoir-lint.md, "Versioning" under "JSON".
 #:
 #: It is 1, not 2, although the field was called `version` before cm-9jv: no
 #: release or consumer ever read that shape, and a reader of `schema_version`
@@ -400,7 +400,7 @@ def fingerprint(rule_id, path, match, occurrence):
     one merely found again, and a second sweep (E3-R7) can tell it has seen
     one before.
 
-    The recipe, which docs/rules-authoring.md states and a golden test pins:
+    The recipe, which docs/curamoir-lint.md states and a golden test pins:
     the four fields `rule_id`, `path`, the match with every ASCII whitespace
     character removed, and `occurrence` in decimal — each as it appears in the
     JSON record, so a consumer can recompute it from the record — are each
@@ -635,7 +635,7 @@ def main(argv=None):
         "--format", choices=("human", "json"), default="human",
         help="human: one block per violation, for a person or an editor (the "
              "default); json: the machine-readable report, a versioned contract "
-             "described in docs/rules-authoring.md",
+             "described in docs/curamoir-lint.md",
     )
     parser.add_argument(
         "--fail-on", choices=SEVERITIES, default=None,

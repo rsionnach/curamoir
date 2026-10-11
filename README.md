@@ -83,7 +83,8 @@ cúramóir enforces *your project's own* principles. It is not a general linter.
 > **Pre-release, under construction.** These work today: the guardrails, the
 > plugin skeleton, session handoffs, the away-brief, the principles file with
 > its rule format, and `curamoir-lint`, which runs your rules standalone in CI
-> or pre-commit (see [Writing a rule](docs/rules-authoring.md)). So
+> or pre-commit (see [Writing a rule](docs/rules-authoring.md) and
+> [Running `curamoir-lint`](docs/curamoir-lint.md)). So
 > `/curamoir:init`, `/curamoir:status`, `/curamoir:doctor`, `/curamoir:handoff`
 > and `/curamoir:brief` all do something real, and so does the lint gate. Still
 > to come are the bundled rules, the sweep, the r5 review, grades, the

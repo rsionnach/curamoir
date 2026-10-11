@@ -348,13 +348,13 @@ def test_the_json_document_has_a_stable_top_level_shape(tmp_path, capsys):
 
 
 def test_the_documented_json_shape_is_the_one_emitted():
-    """docs/rules-authoring.md is where a sweep author learns the contract, so
+    """docs/curamoir-lint.md is where a sweep author learns the contract, so
     its example and its field table must be the fields the runner emits."""
     import re
 
-    doc = (ROOT / "docs" / "rules-authoring.md").read_text(encoding="utf-8")
+    doc = (ROOT / "docs" / "curamoir-lint.md").read_text(encoding="utf-8")
     example = json.loads(re.search(r"```json\n(.*?)```", doc, re.DOTALL).group(1))
-    table = re.findall(r"^\| `([a-z_]+)`(?:, `([a-z_]+)`)? \|", doc.split("### JSON")[1], re.M)
+    table = re.findall(r"^\| `([a-z_]+)`(?:, `([a-z_]+)`)? \|", doc.split("\n## JSON")[1], re.M)
     documented = {name for pair in table for name in pair if name}
 
     assert tuple(example) == TOP_LEVEL_FIELDS
@@ -362,15 +362,15 @@ def test_the_documented_json_shape_is_the_one_emitted():
     assert documented == set(RECORD_FIELDS)
     assert example["schema_version"] == SCHEMA_VERSION
     # Every note kind the runner can emit is in the doc's list of them.
-    kinds = set(re.findall(r"^- `([a-z_]+)`", doc.split("#### Notes")[1].split("###")[0], re.M))
+    kinds = set(re.findall(r"^- `([a-z_]+)`", doc.split("\n### Notes")[1].split("\n#")[0], re.M))
     assert kinds == set(NOTE_KINDS)
 
 
 def test_the_documented_human_output_is_the_one_emitted(tmp_path, capsys):
     """The doc's example is the fixture's real output, abbreviated at `...`:
     the lines before it open the report and the line after it ends it."""
-    doc = (ROOT / "docs" / "rules-authoring.md").read_text(encoding="utf-8")
-    example = doc.split("### Human (the default)")[1].split("```")[1].strip("\n").splitlines()
+    doc = (ROOT / "docs" / "curamoir-lint.md").read_text(encoding="utf-8")
+    example = doc.split("\n## Human (the default)")[1].split("```")[1].strip("\n").splitlines()
     head, tail = example[:example.index("...")], example[example.index("...") + 1:]
     repo = sample_repo(tmp_path, *ALL_REGEX_RULES)
 
@@ -390,6 +390,41 @@ def test_the_documented_ast_grep_suffixes_are_the_mapped_ones():
     passage = doc.split("searches only suffixes with a mapped grammar:")[1].split("(each checked")[0]
 
     assert set(re.findall(r"`(\.[a-z]+)`", passage)) == set(AST_GREP_LANGUAGES)
+
+
+def test_the_authoring_and_runner_docs_point_at_each_other():
+    """The runner half of the old rules-authoring.md moved to curamoir-lint.md
+    (cm-tez). Each reader lands on one and needs the other's link: a rule
+    author to wire the gate, an integrator to write a rule. The anchors are
+    the headings the cross-links name, so renaming one breaks this test
+    rather than the link."""
+    import re
+
+    def anchors(text):
+        return {re.sub(r"[^a-z0-9 -]", "", h.strip().lower()).replace(" ", "-")
+                for h in re.findall(r"^#+ (.*)$", text, re.M)}
+
+    docs = {name: (ROOT / "docs" / name).read_text(encoding="utf-8")
+            for name in ("rules-authoring.md", "curamoir-lint.md")}
+    for name, text in docs.items():
+        other = next(n for n in docs if n != name)
+        links = re.findall(r"\]\((" + re.escape(other) + r")(?:#([a-z0-9-]+))?\)", text)
+        assert links, f"{name} does not link to {other}"
+        for _, anchor in links:
+            assert not anchor or anchor in anchors(docs[other]), (name, anchor)
+
+
+def test_every_doc_the_runner_names_exists():
+    """lint.py sends readers to docs by path (--help, its notes, its comments);
+    a moved doc must not leave one of them pointing at nothing."""
+    import re
+
+    source = (ROOT / "src" / "curamoir" / "lint.py").read_text(encoding="utf-8")
+    named = set(re.findall(r"docs/[a-z-]+\.md", source))
+
+    assert {"docs/curamoir-lint.md", "docs/rules-authoring.md"} <= named
+    for path in named:
+        assert (ROOT / path).is_file(), path
 
 
 def test_violations_are_ordered_by_location_so_runs_diff_cleanly(tmp_path, capsys):
@@ -1443,7 +1478,9 @@ def test_the_run_timeout_bounds_a_backtracking_regex(tmp_path, capsys):
 def test_the_default_run_timeout_is_ten_minutes():
     from curamoir.lint import DEFAULT_TIMEOUT
     assert DEFAULT_TIMEOUT == 600
-    assert "--timeout" in (ROOT / "docs" / "rules-authoring.md").read_text(encoding="utf-8")
+    usage = (ROOT / "docs" / "curamoir-lint.md").read_text(encoding="utf-8").split("\n## Usage")[1]
+    usage = " ".join(usage.split("\n## ")[0].split())
+    assert f"--timeout bounds the whole run (default {DEFAULT_TIMEOUT} seconds;" in usage.replace("`", "")
 
 
 def test_a_fifo_is_not_read_and_is_reported(tmp_path):
@@ -2307,8 +2344,8 @@ def test_the_doc_states_the_version_probe_bound_the_runner_uses():
     """The doc hard-codes the probe's bound in words; changing the constant
     without the doc would leave a reader trusting the wrong number."""
     from curamoir.lint import AST_GREP_VERSION_TIMEOUT
-    doc = (ROOT / "docs" / "rules-authoring.md").read_text(encoding="utf-8")
-    notes = doc.split("#### Notes")[1].split("####")[0]
+    doc = (ROOT / "docs" / "curamoir-lint.md").read_text(encoding="utf-8")
+    notes = doc.split("\n### Notes")[1].split("\n#")[0]
 
     assert f"within {AST_GREP_VERSION_TIMEOUT} seconds" in " ".join(notes.split())
     assert f"is {AST_GREP_VERSION_TIMEOUT} seconds or less" in " ".join(notes.split())
@@ -2317,8 +2354,8 @@ def test_the_doc_states_the_version_probe_bound_the_runner_uses():
 def test_the_ci_snippet_pins_curamoir_and_ast_grep():
     """An unpinned clone or ast-grep can change the gate's verdict between two
     CI runs of the same commit; the runner is verified against 0.50.0."""
-    doc = (ROOT / "docs" / "rules-authoring.md").read_text(encoding="utf-8")
-    snippet = doc.split("### In CI and pre-commit")[1].split("```")[1]
+    doc = (ROOT / "docs" / "curamoir-lint.md").read_text(encoding="utf-8")
+    snippet = doc.split("\n## In CI and pre-commit")[1].split("```")[1]
 
     assert "'ast-grep-cli==0.50.*'" in snippet
     assert "--branch v" in snippet
