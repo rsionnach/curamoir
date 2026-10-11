@@ -456,6 +456,13 @@ def _ast_grep_version(binary, timeout):
         return None, f"`ast-grep --version` did not finish within {timeout:g} seconds"
     except OSError as failure:
         return None, f"could not run `ast-grep --version` ({binary}): {failure}"
+    except UnicodeDecodeError as undecodable:
+        # Raised by the text-mode decode of either stream, after the process
+        # has exited; which stream is not said, so neither is named here. Only
+        # this probe degrades: a match call's undecodable output is evidence
+        # that cannot be read, and stays a runner error.
+        return None, (f"`ast-grep --version` printed output that is not "
+                      f"{undecodable.encoding}")
     printed = AST_GREP_VERSION.fullmatch(stdout.strip())
     if returncode == 0 and printed is not None:
         return printed.group(1), None
@@ -471,9 +478,10 @@ def _ast_grep_version(binary, timeout):
 def _version_probe_timeout(ast_grep_timeout):
     """AST_GREP_VERSION_TIMEOUT, or `ast_grep_timeout` when that is shorter.
 
-    Its limit: the run's whole budget is not tracked here, so with
-    `--timeout` at or under AST_GREP_VERSION_TIMEOUT a hanging probe can
-    still use all of it, and the run ends in exit 2 as for any other hang.
+    Its limit: the run's whole budget is not tracked here, so a hanging probe
+    always spends up to min(AST_GREP_VERSION_TIMEOUT, `--timeout`) of it;
+    with `--timeout` at or under AST_GREP_VERSION_TIMEOUT that is all of it,
+    and the run ends in exit 2 as for any other hang.
     """
     if ast_grep_timeout is None:
         return AST_GREP_VERSION_TIMEOUT

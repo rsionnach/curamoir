@@ -162,7 +162,8 @@ def lint(repo, *args, capsys):
 
 def fake_ast_grep(tmp_path, stdout="", stderr="", exit_code=0, log=None, summary=True,
                   sleep=0, skipped=0, version="ast-grep 0.50.0\n",
-                  version_stream="stdout", version_sleep=0):
+                  version_stream="stdout", version_sleep=0, version_bytes=None,
+                  stdout_bytes=None):
     """An executable standing in for ast-grep, for the paths the real binary
     cannot be made to take on demand (and for machines without it). With `log`,
     each call appends its argv and working directory there as a JSON line.
@@ -180,7 +181,9 @@ def fake_ast_grep(tmp_path, stdout="", stderr="", exit_code=0, log=None, summary
     exit 0, before any sleep, and logged like any call: the runner asks once
     per run for the JSON's `tools`, and a fake that answered it with match
     JSON would test nothing. `version_stream` is where that answer goes and
-    `version_sleep` how long it takes, for a probe that misbehaves."""
+    `version_sleep` how long it takes, for a probe that misbehaves.
+    `version_bytes` and `stdout_bytes`, when given, are written raw in place
+    of `version` and `stdout`, for output that is not UTF-8."""
     script = tmp_path / "bin" / "ast-grep"
     script.parent.mkdir(parents=True, exist_ok=True)
     record = (
@@ -204,10 +207,13 @@ def fake_ast_grep(tmp_path, stdout="", stderr="", exit_code=0, log=None, summary
         f"{record}"
         "if sys.argv[1:] == ['--version']:\n"
         f"    time.sleep({version_sleep})\n"
-        f"    sys.{version_stream}.write({version!r})\n"
+        + (f"    sys.{version_stream}.buffer.write({version_bytes!r})\n"
+           if version_bytes is not None else
+           f"    sys.{version_stream}.write({version!r})\n") +
         "    sys.exit(0)\n"
         f"time.sleep({sleep})\n"
-        f"sys.stdout.write({stdout!r})\n"
+        + (f"sys.stdout.buffer.write({stdout_bytes!r})\n"
+           if stdout_bytes is not None else f"sys.stdout.write({stdout!r})\n") +
         f"sys.stderr.write({stderr!r})\n"
         f"{inspect}"
         f"sys.exit({exit_code})\n",
@@ -1883,6 +1889,20 @@ def test_identical_matches_in_one_file_get_distinct_fingerprints(tmp_path):
     assert _fingerprints(repo, "src/twice.py") == [other, first]
 
 
+def test_whitespace_only_matches_differ_only_by_occurrence(tmp_path):
+    """A match that is only whitespace normalises to "", so its identity is
+    its occurrence index in the file: the count is right, which one is which
+    is not (the documented limit)."""
+    repo = sample_repo(tmp_path, _print_rule("trailing-space", "[ \\t]+$"))
+    target = repo / "src" / "blank.py"
+    target.write_text("a = 1 \nb = 2\t\t\nc = 3  \t\n", encoding="utf-8")
+
+    found = _fingerprints(repo, "src/blank.py")
+
+    assert found == [fingerprint("trailing-space", "src/blank.py", "", n) for n in range(3)]
+    assert len(set(found)) == 3
+
+
 def test_every_fingerprint_in_a_report_is_unique(tmp_path, capsys):
     repo = sample_repo(tmp_path, *ALL_REGEX_RULES, _print_rule())
 
@@ -2089,6 +2109,40 @@ def test_a_hanging_version_probe_is_a_note_not_a_timed_out_run(tmp_path, capsys,
     }]
 
 
+@pytest.mark.parametrize("stream", ["stdout", "stderr"])
+def test_a_version_probe_printing_non_utf8_is_a_note_not_exit_2(tmp_path, capsys,
+                                                                monkeypatch, stream):
+    """The version is provenance: output that cannot be decoded, on either
+    stream, is a null version and a note, never an internal error."""
+    repo = sample_repo(tmp_path, AST_GREP_PRINT)
+    fake = fake_ast_grep(tmp_path, stdout="[]", exit_code=1, version_stream=stream,
+                         version_bytes=b"ast-grep \xff\xfe 0.50.0\n")
+    monkeypatch.setenv("PATH", str(Path(fake).parent))
+
+    code, out, _ = lint(repo, "--format", "json", capsys=capsys)
+
+    document = json.loads(out)
+    assert code == EXIT_CLEAN
+    assert document["tools"] == {"ast-grep": None}
+    (note,) = document["notes"]
+    assert note["kind"] == "ast_grep_version_unknown"
+    assert note["reason"].startswith("`ast-grep --version` printed output that is not ")
+    assert "utf-8" in note["reason"].lower()
+
+
+def test_non_utf8_from_a_rules_own_ast_grep_call_stays_a_runner_error(tmp_path, capsys,
+                                                                      monkeypatch):
+    """Only the version probe degrades: a match call's output is evidence, and
+    evidence that cannot be read must not pass as a clean run."""
+    repo = sample_repo(tmp_path, AST_GREP_PRINT)
+    fake = fake_ast_grep(tmp_path, stdout_bytes=b"[\xff]", exit_code=1)
+    monkeypatch.setenv("PATH", str(Path(fake).parent))
+
+    code, _, _ = lint(repo, "--format", "json", capsys=capsys)
+
+    assert code == EXIT_ERROR
+
+
 # --- cm-9jv: notes -----------------------------------------------------------
 
 def test_notes_are_emitted_in_note_kinds_order_and_only_those_kinds():
@@ -2193,6 +2247,17 @@ def test_the_help_explains_each_format(capsys):
     help_text = " ".join(capsys.readouterr().out.split())
     assert "--format {human,json}" in help_text
     assert "json: the machine-readable report" in help_text
+
+
+def test_the_doc_states_the_version_probe_bound_the_runner_uses():
+    """The doc hard-codes the probe's bound in words; changing the constant
+    without the doc would leave a reader trusting the wrong number."""
+    from curamoir.lint import AST_GREP_VERSION_TIMEOUT
+    doc = (ROOT / "docs" / "rules-authoring.md").read_text(encoding="utf-8")
+    notes = doc.split("#### Notes")[1].split("####")[0]
+
+    assert f"within {AST_GREP_VERSION_TIMEOUT} seconds" in " ".join(notes.split())
+    assert f"is {AST_GREP_VERSION_TIMEOUT} seconds or less" in " ".join(notes.split())
 
 
 def test_the_ci_snippet_pins_curamoir_and_ast_grep():

@@ -215,7 +215,9 @@ minutes is far above a healthy run and inside CI job limits, so reaching it
 means something is stuck, and the run exits 2 saying so rather than being
 killed with no reason or hanging a pre-commit. It is the only bound there is
 on a rule's regex that backtracks catastrophically on some line. Options must
-be spelled in full: `--re` is not `--repo`.
+be spelled in full: `--re` is not `--repo`. `--version` takes precedence over
+every other argument, so `curamoir-lint --version --format json` prints the
+version and exits 0 having checked nothing.
 
 It makes no model calls and no network calls, and needs no cúramóir install
 (E2-R5): only `scripts/curamoir-lint`, the `src/` directory beside it, a Python 3
@@ -342,8 +344,11 @@ changed opens no PR) from one introduced since (E4-R4). The recipe, which a
 test pins to one exact value so it cannot drift:
 
 1. Take the record's `rule_id`, `path` and `match`, exactly as the JSON shows
-   them, and remove every ASCII whitespace character (space, tab, `\n`, `\r`,
-   form feed, vertical tab) from the match.
+   them — the decoded string values after parsing, not the escaped text in
+   the file (the report writes control characters as JSON escapes, `\n` or
+   `\u001b`, and other non-ASCII characters as raw UTF-8) — and remove every
+   ASCII whitespace character (space, tab, `\n`, `\r`, form feed, vertical
+   tab) from the match.
 2. Take the occurrence index, in decimal: `0` for the first violation in the
    file with that rule, path and whitespace-free match, in report order; `1`
    for the next identical one; and so on.
@@ -360,6 +365,16 @@ file are told apart only by their order, so deleting the first shifts the
 second onto the first's fingerprint, and the change reads as the second one
 going. Within one report every fingerprint is unique.
 
+A match that is empty or only whitespace normalises to the empty string, so
+its identity is just its occurrence index in that file: the count of such
+violations stays right across runs, which one is which does not. A wide
+pattern (a whole function body, say) puts the whole match into `match` and the
+fingerprint, so any edit inside it is a new fingerprint, and the JSON grows
+with it. `path` is the printable form of the raw path, which is one-way: two
+distinct raw paths can print the same (a file literally named `bad\xff.py`
+and one whose name holds byte 0xFF), so they stay unique within a report by
+the occurrence index, but their identities can swap between runs.
+
 #### Notes
 
 Each entry is an object with a `kind`, listed in this order and then by path:
@@ -368,9 +383,12 @@ Each entry is an object with a `kind`, listed in this order and then by path:
   (exit 0).
 - `ast_grep_version_unknown` (keys: `kind`, `reason`): an `ast-grep` rule ran
   but `ast-grep --version` could not be read — it failed, printed something
-  else, or did not answer within 10 seconds (or `--timeout`, if shorter);
-  `reason` says which, naming the stream it quotes. `tools["ast-grep"]` is
-  `null`.
+  else, printed output that is not UTF-8, or did not answer within 10 seconds
+  (or `--timeout`, if shorter); `reason` says which, naming the stream it
+  quotes. `tools["ast-grep"]` is `null`. The probe always spends up to the
+  shorter of those two bounds of the run's `--timeout` budget; when
+  `--timeout` is 10 seconds or less, a hanging probe can spend all of it and
+  the run exits 2 as for any other hang.
 - `symlink_not_followed` (keys: `kind`, `path`): a symlink at `path` was not
   linted (see *Limits*).
 - `not_regular_file` (keys: `kind`, `path`): a FIFO, socket or device at
