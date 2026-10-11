@@ -22,11 +22,11 @@ Two layers, so the rules can be tested without git:
   a line where there is one, and a sentence saying what was seen.
 - `verify_fix(repo, base_ref, work_list, principles, git_state=...)`: the
   git adapter. It first holds the repository's git internals to a snapshot
-  taken before the fix step (snapshot_git_state), then
-  reads what changed between `base_ref` and the working tree (tracked changes
-  with `git diff --raw`, hunks with `git diff -U0`, untracked files with
-  `git ls-files --others --exclude-standard`), and what the repository
-  already imports at `base_ref`, then calls the core.
+  taken before the fix step (snapshot_git_state, which also pins `base_ref`
+  to a commit), then reads what changed between that commit and the working
+  tree (tracked changes with `git diff --raw`, hunks with `git diff -U0`,
+  untracked files with `git ls-files --others --exclude-standard`), and
+  what the repository already imports at that commit, then calls the core.
 
 **The rules, and why each is drawn where it is.**
 
@@ -106,13 +106,18 @@ of a function to "fix" one line in it is refused.
   that a tsconfig `paths`/`baseUrl` alias resolves locally, and a compiled
   extension module (`.so`, `.pyd`), are reported as new.
 - Git's own files. The fix agent is denied `.git` (fix_step.repo_deny_rules)
-  and verify_fix compares `.git`'s config, hooks and `info/` with a snapshot
-  before it runs git, then runs git with fsmonitor and hooks off and no
-  external diff or textconv (_GIT_HARDENING). Not covered: a config file
-  pulled in by `include.path` from outside `.git` (it is read before the
-  diff that would show it changed), a filter driver the owner already
-  configured being pointed at a file by an edited `.gitattributes`, and
-  `.git/index` and `objects/`, which are not snapshotted.
+  and verify_fix compares `.git`'s config, hooks, `info/`, `HEAD` and
+  `packed-refs`, and every `.gitattributes` in the work tree, with a
+  snapshot before it runs git, then runs git with fsmonitor and hooks off
+  and no external diff or textconv (_GIT_HARDENING). The base is the commit
+  the snapshot resolved the base ref to, and a ref moved since fails the
+  verdict. Not covered: a config file pulled in by `include.path` from
+  outside `.git` (it is read before the diff that would show it changed),
+  `.git/index` and `objects/`, which are not snapshotted, and loose refs
+  other than the base, which verify_fix does not read. A filter driver the
+  owner already configured is still run by `git diff` on a file that a
+  `.gitattributes` unchanged since the snapshot points it at: that is the
+  owner's own setup.
 - Python's own semantics only: a change of behaviour inside a function body
   within the window is the violation's fix as far as this module can tell.
   Whether it is a correct fix is E3-R4's question (the tests).
@@ -791,7 +796,7 @@ def _python_signature_breaches(path, old_tree, new_tree, permitted_spans, hunks=
     # are carried through the hunks before the two are compared. WHY: ten
     # inserted header lines otherwise let a definition added ten lines away
     # from a permitting violation pass, and refused one added right at it.
-    shifted = [(_to_new_line(start, hunks), _to_new_line(end, hunks))
+    shifted = [(_to_new_line(start, hunks), _to_new_line(end, hunks, end=True))
                for start, end in permitted_spans]
     found = []
     for name in sorted(set(before) | set(after)):
@@ -814,9 +819,13 @@ def _python_signature_breaches(path, old_tree, new_tree, permitted_spans, hunks=
     return found
 
 
-def _to_new_line(line, hunks):
+def _to_new_line(line, hunks, end=False):
     """Base line `line`'s number in the fixed file, through `hunks`. A line
-    inside a replaced region maps to that region's start in the fixed file."""
+    inside a replaced region maps to that region's first line in the fixed
+    file, or with `end` to its last. WHY: a span's end is mapped with `end`,
+    so a span that reaches into a replaced region covers all of what replaced
+    it; mapped to the first line, a six-line replacement of a span's last
+    three lines would shrink the span to the replacement's first line."""
     delta = 0
     for hunk in sorted(hunks, key=lambda h: h.old_start):
         if hunk.old_count == 0:
@@ -825,7 +834,7 @@ def _to_new_line(line, hunks):
         elif line > hunk.old_start + hunk.old_count - 1:
             delta += hunk.new_count - hunk.old_count
         elif line >= hunk.old_start:
-            return hunk.new_start
+            return hunk.new_start + (max(hunk.new_count, 1) - 1 if end else 0)
     return line + delta
 
 
@@ -930,7 +939,7 @@ def verify_fix(repo, base_ref, work_list, principles, *, git_state, window=WINDO
     against `work_list` (sweep.WorkList, computed on `base_ref`) and
     `principles` (a principles.PrinciplesFile, for `permits`).
 
-    `git_state` is snapshot_git_state(repo) taken before the fix step ran
+    `git_state` is snapshot_git_state(repo, base_ref) taken before the fix step ran
     (fix_step.run_fix_step takes it: FixStepRun.git_state). It is compared
     FIRST, by reading files, and a difference is the whole verdict: WHY —
     `.git/config` and `.git/hooks` are invisible to `git diff`, and a planted
@@ -940,14 +949,23 @@ def verify_fix(repo, base_ref, work_list, principles, *, git_state, window=WINDO
     (no `.git`, or a `.git` that is a symlink) raises ScopeCheckError before
     any git command runs.
 
+    `base_ref` must be the ref the snapshot was taken for (ScopeCheckError
+    otherwise), and the diff is taken against the commit the snapshot
+    resolved it to. WHY: refs are files the fix agent could rewrite, and
+    against a base moved to an older commit the fixed tree can look
+    unchanged. The ref is resolved again once the git state has passed, and
+    a ref that now names another commit fails the verdict.
+
     `repo` must be the top of its work tree (git names paths from there, the
-    work list from `repo`), and `base_ref` is resolved to a commit before git
-    is given it, so a ref spelled like an option (`--output=…`) is refused."""
+    work list from `repo`)."""
     if git_state is None:
         raise ScopeCheckError("no git-state snapshot taken before the fix step; refusing "
                               "to run git on the edited tree")
     if os.path.realpath(git_state.repo) != os.path.realpath(str(repo)):
         raise ScopeCheckError(f"the git-state snapshot is of {git_state.repo}, not {repo}")
+    if git_state.base_ref != base_ref:
+        raise ScopeCheckError(f"the git-state snapshot was taken for base "
+                              f"{git_state.base_ref!r}, not {base_ref!r}")
     if not git_state.git_dirs:
         raise ScopeCheckError(
             f"the git-state snapshot found no git directory in {repo} (no `.git`, or a "
@@ -957,7 +975,13 @@ def verify_fix(repo, base_ref, work_list, principles, *, git_state, window=WINDO
     if changed:
         return ScopeVerdict(breaches=tuple(changed), paths=())
     _require_top_level(repo)
-    base = resolve_base(repo, base_ref)
+    base = git_state.base
+    if resolve_base(repo, base_ref) != base:
+        return ScopeVerdict(breaches=(Breach(
+            GIT_INTERNALS_CHANGED, f"base ref {base_ref}", None,
+            f"named {base} when the fix step started and names another commit now; "
+            "a moved base can hide what the fix changed, so nothing more of this "
+            "tree is read"),), paths=())
     permitting = frozenset(
         p.id for p in principles.principles if SIGNATURE_PERMISSION in p.permits)
     return check_scope(changes_since(repo, base), work_list.items,
@@ -973,9 +997,9 @@ def verify_fix(repo, base_ref, work_list, principles, *, git_state, window=WINDO
 #: (`--no-ext-diff --no-textconv`). What cannot be turned off without
 #: knowing the driver names is `filter.<driver>.clean`, which `git diff`
 #: runs on a working-tree file whose attributes name it; a driver must be in
-#: the config to run, and the config is held to the snapshot (verify_fix), so
-#: the residual is a driver the repository's owner already configured, run
-#: on a file an edited `.gitattributes` points it at. `core.sshCommand` and
+#: the config to run, and the config and every `.gitattributes` are held to
+#: the snapshot (verify_fix), so the residual is a driver the repository's
+#: owner configured, run where the owner's own attributes point it. `core.sshCommand` and
 #: the pager need a remote or a terminal, and nothing here has either.
 #: `GIT_CONFIG_NOSYSTEM` is not set: the system and global configs are
 #: outside the fix agent's fence, so they say what they said before it ran.
@@ -1018,33 +1042,49 @@ def _require_top_level(repo):
 
 @dataclass(frozen=True)
 class GitState:
-    """What snapshot_git_state saw: `repo`, the git directories it read, and
-    label -> digest for every file it hashed."""
+    """What snapshot_git_state saw: `repo`, the git directories it read,
+    label -> digest for every file it hashed, and `base_ref` with the commit
+    it named then (`base`; None when no git directory was found)."""
 
     repo: str
     git_dirs: tuple
     digests: tuple
+    base_ref: str = None
+    base: str = None
 
 
 #: Per git directory: files and trees that decide what git runs or sees.
 #: The index and objects are left out — git rewrites the index's stat data
 #: on its own, and objects are content-addressed, read here only by SHA.
-_GIT_STATE_FILES = ("config", "config.worktree", "commondir")
+#: `HEAD` and `packed-refs` are single files and cheap to hash. The loose
+#: refs under `refs/` are not hashed: a repository can hold thousands, and
+#: the only ref verify_fix reads is the base, which the snapshot pins to a
+#: commit and verify_fix resolves again (a moved base fails the verdict).
+_GIT_STATE_FILES = ("config", "config.worktree", "commondir", "HEAD", "packed-refs")
 _GIT_STATE_TREES = ("hooks", "info")
 
 
-def snapshot_git_state(repo):
-    """The digests of `repo`'s git configuration, hooks and `info/` (which
-    holds `attributes` and `exclude`), and of a `.git` file if the checkout is
-    a linked worktree or submodule: its `gitdir:` pointer is followed, and the
-    `commondir` beside it, where a worktree's shared config and hooks live.
-    Read as files, never through git, so the same reading after the fix step
-    runs nothing the fix step planted. A path with no `.git`, or a `.git`
-    that is a symlink (followed, it could be swapped for another directory
-    unseen), gets a state with no git directories, which verify_fix refuses."""
+def snapshot_git_state(repo, base_ref):
+    """The digests of `repo`'s git configuration, hooks, `info/` (which holds
+    `attributes` and `exclude`), `HEAD` and `packed-refs`, of every
+    `.gitattributes` in the work tree, and of a `.git` file if the checkout
+    is a linked worktree or submodule: its `gitdir:` pointer is followed, and
+    the `commondir` beside it, where a worktree's shared config and hooks
+    live. Read as files, never through git, so the same reading after the
+    fix step runs nothing the fix step planted.
+
+    `base_ref` is resolved to a commit here, before the fix step runs, with
+    the hardened git and the option-shaped refusal of resolve_base
+    (ScopeCheckError if it names no commit); verify_fix diffs against that
+    commit. A path with no `.git`, or a `.git` that is a symlink (followed,
+    it could be swapped for another directory unseen), gets a state with no
+    git directories and no base, which verify_fix refuses; git is not run
+    there."""
     repo = Path(repo)
     dirs = _git_dirs(repo)
-    return GitState(str(repo), tuple(str(d) for d in dirs), _git_digests(repo, dirs))
+    base = resolve_base(repo, base_ref) if dirs else None
+    return GitState(str(repo), tuple(str(d) for d in dirs), _git_digests(repo, dirs),
+                    base_ref, base)
 
 
 def verify_git_state(state):
@@ -1059,11 +1099,14 @@ def verify_git_state(state):
             continue
         what = ("added" if label not in before else
                 "removed" if label not in after else "changed")
+        why = ("a `.gitattributes` can point a filter driver at a file, which the "
+               "next `git diff` would run" if _is_attributes(label) else
+               "git's own files can make the next git command run code, and "
+               "`git diff` never shows them")
         found.append(Breach(
             GIT_INTERNALS_CHANGED, label, None,
-            f"{what} while the fix step ran; git's own files can make the next git "
-            "command run code, and `git diff` never shows them, so nothing more of "
-            "this tree is read"))
+            f"{what} while the fix step ran; {why}, so nothing more of this tree "
+            "is read"))
     return found
 
 
@@ -1101,7 +1144,29 @@ def _git_digests(repo, dirs):
                     target = Path(root) / entry
                     if entry in files or target.is_symlink():
                         found[_label(repo, target)] = _digest(target)
+    if dirs:
+        found.update(_attributes_digests(repo))
     return tuple(sorted(found.items()))
+
+
+def _attributes_digests(repo):
+    """Every `.gitattributes` in the work tree, at any depth, tracked or not.
+    WHY: they are outside `.git`, so the fix agent may write them, and one
+    can name a filter driver the owner configured (`filter=lfs`, any
+    `filter.<x>.clean` or `process`) for a file `git diff` then filters.
+    Git directories are skipped (held above, or a nested repository's own),
+    and symlinked directories are not followed, as git does not follow them."""
+    found = {}
+    for root, subdirs, files in os.walk(repo):
+        subdirs[:] = [d for d in subdirs if d != ".git"]
+        if ".gitattributes" in files or ".gitattributes" in subdirs:
+            target = Path(root) / ".gitattributes"
+            found[_label(repo, target)] = _digest(target)
+    return found
+
+
+def _is_attributes(label):
+    return label == ".gitattributes" or label.endswith("/.gitattributes")
 
 
 def _label(repo, path):

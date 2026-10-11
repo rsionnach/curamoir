@@ -17,6 +17,7 @@ not a lint violation), handlers.py 22 and 31, and handlers_v2.py's name.
 The pure-core tests build their own small inputs inline.
 """
 
+import re
 import subprocess
 from dataclasses import dataclass
 from types import SimpleNamespace
@@ -80,7 +81,7 @@ def verdict(repo, work):
     only the work tree, so .git is as it was before them (the git-internals
     tests take theirs first)."""
     return verify_fix(repo, "HEAD", work, load_principles(repo),
-                      git_state=snapshot_git_state(repo))
+                      git_state=snapshot_git_state(repo, "HEAD"))
 
 
 def kinds_at(result):
@@ -649,7 +650,8 @@ def work(*violations):
 
 
 def review(repo, ref, items):
-    return verify_fix(repo, ref, items, NO_PRINCIPLES, git_state=snapshot_git_state(repo))
+    return verify_fix(repo, ref, items, NO_PRINCIPLES,
+                      git_state=snapshot_git_state(repo, ref))
 
 
 def planted_hook(tmp_path):
@@ -685,7 +687,7 @@ def test_a_change_to_git_internals_fails_the_verdict(tmp_path, where, change):
     with the snapshot taken before the fix step."""
     repo = git_repo(tmp_path, {"m.py": "x = 1\n"})
     (repo / ".git" / "info").mkdir(exist_ok=True)
-    state = snapshot_git_state(repo)
+    state = snapshot_git_state(repo, "HEAD")
     change(repo / ".git")
 
     result = verify_fix(repo, "HEAD", work(V("m.py", 1)), NO_PRINCIPLES, git_state=state)
@@ -696,7 +698,7 @@ def test_a_change_to_git_internals_fails_the_verdict(tmp_path, where, change):
 
 def test_unchanged_git_internals_pass(tmp_path):
     repo = git_repo(tmp_path, {"m.py": "x = 1\n"})
-    state = snapshot_git_state(repo)
+    state = snapshot_git_state(repo, "HEAD")
     (repo / "m.py").write_text("x = 2\n", encoding="utf-8")
 
     assert verify_fix(repo, "HEAD", work(V("m.py", 1)), NO_PRINCIPLES, git_state=state).ok
@@ -745,7 +747,7 @@ def test_a_snapshot_that_found_no_git_directory_refuses(tmp_path):
     (linked / ".git").symlink_to(repo / ".git")
 
     for path in (plain, linked):
-        state = snapshot_git_state(path)
+        state = snapshot_git_state(path, "HEAD")
         assert state.git_dirs == ()
         with pytest.raises(ScopeCheckError, match="no git directory"):
             verify_fix(path, "HEAD", work(V("m.py", 1)), NO_PRINCIPLES, git_state=state)
@@ -757,7 +759,7 @@ def test_a_snapshot_of_another_repo_refuses(tmp_path):
     other.mkdir()
     with pytest.raises(ScopeCheckError, match="snapshot is of"):
         verify_fix(other, "HEAD", work(V("m.py", 1)), NO_PRINCIPLES,
-                   git_state=snapshot_git_state(repo))
+                   git_state=snapshot_git_state(repo, "HEAD"))
 
 
 def test_a_linked_worktree_snapshots_its_own_and_the_shared_git_directory(tmp_path):
@@ -768,7 +770,7 @@ def test_a_linked_worktree_snapshots_its_own_and_the_shared_git_directory(tmp_pa
     git(repo, "worktree", "add", "--detach", str(worktree))
     assert (worktree / ".git").is_file()
 
-    state = snapshot_git_state(worktree)
+    state = snapshot_git_state(worktree, "HEAD")
     assert len(state.git_dirs) == 2
     assert review(worktree, "HEAD", work(V("m.py", 1))).ok
     config = repo / ".git" / "config"
@@ -918,3 +920,97 @@ def test_a_dynamic_import_of_a_literal_name_is_an_import(call):
     result = check_scope([modified("m.py", old, new)], [V("m.py", 6)])
 
     assert kinds_at(result) == {(NEW_DEPENDENCY, "m.py", 6)}
+
+
+# --- review findings: the snapshot pins the base, and holds .gitattributes ---------
+
+def test_a_base_ref_moved_during_the_fix_step_is_refused(tmp_path):
+    """The fix removes `g` (a signature change) and rewrites the branch the
+    base ref names to an older commit that never had `g`: against the moved
+    ref the tree looks unchanged. The snapshot resolved `main` to a commit
+    before the fix step ran, so the move is seen and the verdict refused."""
+    repo = git_repo(tmp_path, {"m.py": "def f():\n    return 1\n"})
+    older = git(repo, "rev-parse", "HEAD").strip()
+    (repo / "m.py").write_text("def f():\n    return 1\n\n\ndef g():\n    return 2\n",
+                               encoding="utf-8")
+    git(repo, "commit", "-qam", "add g")
+    state = snapshot_git_state(repo, "main")
+    (repo / "m.py").write_text("def f():\n    return 1\n", encoding="utf-8")
+    git(repo, "update-ref", "refs/heads/main", older)
+
+    result = verify_fix(repo, "main", work(V("m.py", 1)), NO_PRINCIPLES, git_state=state)
+
+    assert not result.ok
+    assert result.kinds() == (GIT_INTERNALS_CHANGED,)
+    assert "main" in result.render()
+
+
+def test_the_snapshot_pins_the_base_ref_it_was_taken_for(tmp_path):
+    """A verify_fix asked about another base than the snapshot's is a caller
+    error, not a verdict."""
+    repo = git_repo(tmp_path, {"m.py": "x = 1\n"})
+    state = snapshot_git_state(repo, "HEAD")
+    assert re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", state.base)
+
+    with pytest.raises(ScopeCheckError, match="snapshot was taken for base"):
+        verify_fix(repo, "main", work(V("m.py", 1)), NO_PRINCIPLES, git_state=state)
+    with pytest.raises(ScopeCheckError, match="looks like an option"):
+        snapshot_git_state(repo, "--output=x")
+
+
+@pytest.mark.parametrize("name", ["HEAD", "packed-refs"])
+def test_head_and_packed_refs_are_held_to_the_snapshot(tmp_path, name):
+    repo = git_repo(tmp_path, {"m.py": "x = 1\n"})
+    git(repo, "pack-refs", "--all")
+    state = snapshot_git_state(repo, "HEAD")
+    target = repo / ".git" / name
+    target.write_text(target.read_text() + "\n", encoding="utf-8")
+
+    result = verify_fix(repo, "HEAD", work(V("m.py", 1)), NO_PRINCIPLES, git_state=state)
+
+    assert result.kinds() == (GIT_INTERNALS_CHANGED,)
+    assert f".git/{name}" in result.render()
+
+
+def test_a_gitattributes_added_in_the_work_tree_fails_before_git_runs(tmp_path):
+    """A `.gitattributes` anywhere in the work tree can point a filter driver
+    the owner configured at a file, and `git diff` would run its clean
+    command. A new one fails the verdict before any git command, so the
+    driver never runs."""
+    repo = git_repo(tmp_path, {"m.py": "x = 1\n", "sub/n.py": "y = 1\n"})
+    marker = tmp_path / "filtered"
+    git(repo, "config", "filter.mark.clean", f"touch {marker}; cat")
+    state = snapshot_git_state(repo, "HEAD")
+    (repo / "sub" / ".gitattributes").write_text("* filter=mark\n", encoding="utf-8")
+    (repo / "sub" / "n.py").write_text("y = 2\n", encoding="utf-8")
+
+    result = verify_fix(repo, "HEAD", work(V("sub/n.py", 1)), NO_PRINCIPLES,
+                        git_state=state)
+
+    assert result.kinds() == (GIT_INTERNALS_CHANGED,)
+    assert "sub/.gitattributes" in result.render()
+    assert not marker.exists()
+
+
+def test_an_unchanged_gitattributes_passes(tmp_path):
+    repo = git_repo(tmp_path, {"m.py": "x = 1\n", "sub/.gitattributes": "*.py text\n"})
+    state = snapshot_git_state(repo, "HEAD")
+    (repo / "m.py").write_text("x = 2\n", encoding="utf-8")
+
+    assert verify_fix(repo, "HEAD", work(V("m.py", 1)), NO_PRINCIPLES, git_state=state).ok
+
+
+def test_a_permitted_span_ending_inside_a_replaced_hunk_reaches_the_hunks_end():
+    """The violation at line 5 permits base lines 2-8; the fix replaces base
+    6-8 with six lines whose last two are a nested `helper` (fixed line 10).
+    The span's end is inside the hunk, so it maps to the hunk's last fixed
+    line, 11, not its first."""
+    old = "def f():\n" + "".join(f"    x{n} = {n}\n" for n in range(2, 16))
+    new = old.replace("    x6 = 6\n    x7 = 7\n    x8 = 8\n",
+                      "    y1 = 1\n    y2 = 2\n    y3 = 3\n    y4 = 4\n"
+                      "    def helper():\n        return 1\n")
+    assert new.splitlines()[9] == "    def helper():"
+
+    result = check_scope([modified("m.py", old, new)], [V("m.py", 5)], permitting={"p"})
+
+    assert result.ok, result.render()

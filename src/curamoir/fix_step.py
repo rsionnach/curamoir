@@ -304,14 +304,21 @@ class FixStepRun:
 
 
 def run_fix_step(repo, prompt, model=None, timeout=DEFAULT_TIMEOUT,
-                 max_turns=DEFAULT_MAX_TURNS, claude="claude", runner=subprocess.run):
+                 max_turns=DEFAULT_MAX_TURNS, claude="claude", runner=subprocess.run,
+                 base_ref="HEAD"):
     """Run the fix step in `repo` and return a FixStepRun. `model` defaults to
     the repository's `models.cheap`. `claude` and `runner` are seams for
-    tests, which pass a stand-in script: no test calls a model."""
+    tests, which pass a stand-in script: no test calls a model.
+
+    `base_ref` is the base the review step will diff against (the work
+    list's commit; HEAD, which the fix edits on top of, by default). The
+    snapshot resolves it to a commit before the agent runs, so verify_fix
+    must be given the same `base_ref`. ScopeCheckError if it names no
+    commit: no agent is started for a fix that could not be reviewed."""
     if model is None:
         model = config_value(repo, "models", "cheap")
     argv = fix_step_argv(prompt, model, repo, max_turns=max_turns, claude=claude)
-    git_state = snapshot_git_state(repo)
+    git_state = snapshot_git_state(repo, base_ref)
     try:
         result = runner(argv, cwd=str(repo), capture_output=True, timeout=timeout,
                         stdin=subprocess.DEVNULL)
