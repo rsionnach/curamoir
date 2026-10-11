@@ -20,7 +20,9 @@ Two layers, so the rules can be tested without git:
   changed file's before and after text and the violations, and returns a
   `ScopeVerdict`: every breach, each with a kind (the KINDS below), a path,
   a line where there is one, and a sentence saying what was seen.
-- `verify_fix(repo, base_ref, work_list, principles)`: the git adapter. It
+- `verify_fix(repo, base_ref, work_list, principles, git_state=...)`: the
+  git adapter. It first holds the repository's git internals to a snapshot
+  taken before the fix step (snapshot_git_state), then
   reads what changed between `base_ref` and the working tree (tracked changes
   with `git diff --raw`, hunks with `git diff -U0`, untracked files with
   `git ls-files --others --exclude-standard`), and what the repository
@@ -97,6 +99,20 @@ of a function to "fix" one line in it is refused.
   import not already in the repository is reported) and Node's built-ins
   from a list. A package that is declared in a manifest but imported nowhere
   yet is reported as new.
+- A dynamic import is seen only when its module is a string literal
+  (`__import__("x")`, `import_module("x")`); `import_module(name)` with a
+  computed name is not. Only Python source counts as a local module, and
+  a directory holding JS/TS source as a local package; a bare specifier
+  that a tsconfig `paths`/`baseUrl` alias resolves locally, and a compiled
+  extension module (`.so`, `.pyd`), are reported as new.
+- Git's own files. The fix agent is denied `.git` (fix_step.repo_deny_rules)
+  and verify_fix compares `.git`'s config, hooks and `info/` with a snapshot
+  before it runs git, then runs git with fsmonitor and hooks off and no
+  external diff or textconv (_GIT_HARDENING). Not covered: a config file
+  pulled in by `include.path` from outside `.git` (it is read before the
+  diff that would show it changed), a filter driver the owner already
+  configured being pointed at a file by an edited `.gitattributes`, and
+  `.git/index` and `objects/`, which are not snapshotted.
 - Python's own semantics only: a change of behaviour inside a function body
   within the window is the violation's fix as far as this module can tell.
   Whether it is a correct fix is E3-R4's question (the tests).
@@ -106,8 +122,11 @@ Syntax that imports on 3.9, like sweep.py: the sweep reaches this through
 """
 
 import ast
+import builtins
 import difflib
+import hashlib
 import json
+import os
 import re
 import subprocess
 import sys
@@ -127,9 +146,11 @@ NEW_DEPENDENCY = "new_dependency"
 OUTSIDE_VIOLATION = "outside_violation"
 SIGNATURE_CHANGE = "signature_change"
 UNVERIFIABLE = "unverifiable"
+GIT_INTERNALS_CHANGED = "git_internals_changed"
 
 KINDS = (FILE_NOT_IN_WORK_LIST, FILE_ADDED, FILE_DELETED, DEPENDENCY_CHANGE,
-         NEW_DEPENDENCY, OUTSIDE_VIOLATION, SIGNATURE_CHANGE, UNVERIFIABLE)
+         NEW_DEPENDENCY, OUTSIDE_VIOLATION, SIGNATURE_CHANGE, UNVERIFIABLE,
+         GIT_INTERNALS_CHANGED)
 
 #: The principle permission that lifts SIGNATURE_CHANGE (principles.PERMISSIONS).
 SIGNATURE_PERMISSION = "signature_change"
@@ -323,7 +344,7 @@ def _check_file(change, violations, permitting, known_modules, window):
 
     old, new = change.old_text, change.new_text
     hunks = change.hunks if change.hunks is not None else compute_hunks(old, new)
-    old_lines, new_lines = old.splitlines(), new.splitlines()
+    old_lines, new_lines = git_lines(old), git_lines(new)
     spans = [_span(v, window) for v in violations]
     python = path.endswith(PYTHON_SUFFIXES)
     script = path.endswith(SCRIPT_SUFFIXES)
@@ -341,7 +362,8 @@ def _check_file(change, violations, permitting, known_modules, window):
             continue
         added = new_lines[hunk.new_start - 1:hunk.new_start - 1 + hunk.new_count]
         if (hunk.old_count == 0 and hunk.old_start < header_end
-                and _only_header_statements(added, python, old_tree)):
+                and _only_header_statements(added, python, old_tree, new_tree,
+                                            hunk.new_start)):
             continue
         found.append(Breach(
             OUTSIDE_VIOLATION, path, max(hunk.old_start, 1),
@@ -350,7 +372,8 @@ def _check_file(change, violations, permitting, known_modules, window):
 
     permitted_spans = [_span(v, window) for v in violations if v.principle_id in permitting]
     if python:
-        found.extend(_python_signature_breaches(path, old_tree, new_tree, permitted_spans))
+        found.extend(_python_signature_breaches(path, old_tree, new_tree, permitted_spans,
+                                                hunks))
         found.extend(_new_import_breaches(path, _python_imports(old_tree),
                                           _python_imports(new_tree), known_modules,
                                           _STDLIB))
@@ -371,10 +394,26 @@ def is_dependency_file(path):
         PurePosixPath(path).parent.name == "requirements" and name.endswith((".txt", ".in")))
 
 
+def git_lines(text):
+    """`text`'s lines as git numbers them: split at "\\n" only, without the
+    empty string after a final newline, and with a CRLF line's "\\r" dropped.
+
+    WHY not str.splitlines: it also splits at \\f, \\v, \\x1c-\\x1e, \\x85,
+    U+2028/U+2029 and a lone \\r, none of which git counts, so one form feed
+    above a hunk shifted every slice below it by a line and the check read
+    the line above the one inserted. A lone \\r is the one character Python
+    *does* count as a line break where git does not; _parse_both refuses
+    such a file rather than match parse lines to the wrong hunk lines."""
+    parts = text.split("\n")
+    if parts and parts[-1] == "":
+        parts.pop()
+    return [part[:-1] if part.endswith("\r") else part for part in parts]
+
+
 def compute_hunks(old_text, new_text):
     """`-U0`-style hunks from difflib, for callers without git's. Not always
     git's minimal diff, so the adapter passes git's own."""
-    matcher = difflib.SequenceMatcher(None, old_text.splitlines(), new_text.splitlines(),
+    matcher = difflib.SequenceMatcher(None, git_lines(old_text), git_lines(new_text),
                                       autojunk=False)
     hunks = []
     for tag, i1, i2, j1, j2 in matcher.get_opcodes():
@@ -392,7 +431,9 @@ _HUNK_HEADER = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
 def parse_hunks(diff_text):
     """The hunks of one file's `git diff -U0` output."""
     hunks = []
-    for line in diff_text.splitlines():
+    # "\n" only, like git_lines: splitlines would also break an added line at
+    # a \f or \x85, and the text after it could pass for a hunk header.
+    for line in diff_text.split("\n"):
         match = _HUNK_HEADER.match(line)
         if match:
             old_start, old_count, new_start, new_count = match.groups()
@@ -435,8 +476,16 @@ def _describe(hunk, old_lines, added):
     return f"{hunk.old_count} line(s) replaced by {hunk.new_count}"
 
 
+_LONE_CR = re.compile(r"\r(?!\n)")
+
+
 def _parse_both(old, new):
     """(old tree, new tree, None), or (None, None, why it cannot be checked)."""
+    for side, text in (("base", old), ("fixed", new)):
+        if _LONE_CR.search(text):
+            return None, None, (f"the {side} version has a carriage return that does not "
+                                "end a CRLF line; Python counts it as a line break and git "
+                                "does not, so the parse cannot be matched to git's hunks")
     try:
         old_tree = ast.parse(old)
     except (SyntaxError, ValueError) as error:
@@ -470,7 +519,7 @@ def _header_end(tree, lines, python):
     return len(lines) + 1
 
 
-def _only_header_statements(added, python, old_tree=None):
+def _only_header_statements(added, python, old_tree=None, new_tree=None, first=None):
     """True when the added lines are only imports and simple module-level
     assignments (and blank lines or comments): what a fix may add to a
     module's header.
@@ -487,22 +536,46 @@ def _only_header_statements(added, python, old_tree=None):
     module-level assignment of a new name" and lands anywhere in the header.
     Imports are not narrowed further here: what they may bring in is the
     new-dependency check's job, and running an existing module's top level is
-    what importing it has always meant."""
+    what importing it has always meant.
+
+    The statements are read from `new_tree`, the fixed module, as the whole
+    top-level statements that exactly cover its lines `first` onwards (the
+    hunk's new side): WHY not a parse of the added lines alone — `Y = True,`
+    inserted into a multi-line `make(\\n a,\\n)` is a keyword argument in the
+    module and an assignment on its own, and `import os` inside a triple-
+    quoted string is text. Without `new_tree` (a caller holding only the
+    lines) the lines are parsed on their own, as the whole module.
+
+    A new name must also not be one whose meaning it would change for code
+    already there (_shadows): a builtin (`print = None`), a dunder other than
+    `__all__` (`__getattr__`, `__builtins__`), a name the module already reads
+    anywhere, or any name at all after a `from x import *`, whose names this
+    module cannot list."""
     if python:
-        try:
-            tree = ast.parse("\n".join(added))
-        except (SyntaxError, ValueError):
+        if new_tree is None:
+            try:
+                new_tree = ast.parse("\n".join(added))
+            except (SyntaxError, ValueError):
+                return False
+            first = 1
+        nodes = _statements_covering(new_tree, first, first + len(added) - 1, added)
+        if nodes is None:
             return False
         bound, imports = _module_bindings(old_tree)
-        loggers = _logging_aliases(old_tree) | _logging_aliases(tree)
-        for node in tree.body:
+        referenced, star = _module_references(old_tree)
+        loggers = (_logging_aliases(old_tree.body if old_tree else ())
+                   | _logging_aliases(nodes))
+        for node in nodes:
             if isinstance(node, (ast.Import, ast.ImportFrom)):
+                if ast.dump(node) in imports:
+                    continue
                 names = [(a.asname or a.name).split(".", 1)[0] for a in node.names]
-                if ast.dump(node) not in imports and any(n in bound for n in names):
+                if any(n in bound or _shadows(n, referenced, star) for n in names):
                     return False
             elif isinstance(node, (ast.Assign, ast.AnnAssign)):
                 targets = node.targets if isinstance(node, ast.Assign) else [node.target]
-                if not all(isinstance(t, ast.Name) and t.id not in bound for t in targets):
+                if not all(isinstance(t, ast.Name) and t.id not in bound
+                           and not _shadows(t.id, referenced, star) for t in targets):
                     return False
                 if node.value is not None and not _header_value(node.value, loggers):
                     return False
@@ -516,6 +589,56 @@ def _only_header_statements(added, python, old_tree=None):
         return True
     return all(not line.strip() or line.strip().startswith("//")
                or _SCRIPT_HEADER_LINE.match(line.strip()) for line in added)
+
+
+def _statements_covering(tree, first, last, lines):
+    """The top-level statements of `tree` that lie wholly within lines
+    `first`..`last` (`lines` being those lines' text), or None when a
+    statement crosses either edge — the lines are then part of something
+    larger — or a line in the range is neither in a statement nor blank or a
+    comment."""
+    nodes, covered = [], set()
+    for node in tree.body:
+        start = min([node.lineno] + [d.lineno for d in getattr(node, "decorator_list", ())])
+        end = getattr(node, "end_lineno", None) or node.lineno
+        if end < first or start > last:
+            continue
+        if start < first or end > last:
+            return None
+        nodes.append(node)
+        covered.update(range(start, end + 1))
+    for number in range(first, last + 1):
+        text = lines[number - first].strip() if number - first < len(lines) else ""
+        if number not in covered and text and not text.startswith("#"):
+            return None
+    return nodes
+
+
+_BUILTIN_NAMES = frozenset(vars(builtins))
+
+
+def _shadows(name, referenced, star):
+    """Whether binding `name` at module level could change what existing code
+    means (see _only_header_statements)."""
+    if star or name in _BUILTIN_NAMES or name in referenced:
+        return True
+    return name.startswith("__") and name.endswith("__") and name != "__all__"
+
+
+def _module_references(tree):
+    """(every name `tree` mentions as a Name or in a `global`/`nonlocal`,
+    whether it has a `from x import *` anywhere)."""
+    if tree is None:
+        return set(), False
+    names, star = set(), False
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name):
+            names.add(node.id)
+        elif isinstance(node, (ast.Global, ast.Nonlocal)):
+            names.update(node.names)
+        elif isinstance(node, ast.ImportFrom) and any(a.name == "*" for a in node.names):
+            star = True
+    return names, star
 
 
 #: A JS/TS header line a fix may add: a static `import` (with or without
@@ -579,13 +702,11 @@ def _dotted_name(node):
     return isinstance(node, ast.Name)
 
 
-def _logging_aliases(tree):
-    """The names `tree`'s top-level `import logging [as x]` statements bind to
-    the standard logging module."""
-    if tree is None:
-        return set()
+def _logging_aliases(statements):
+    """The names the `import logging [as x]` among `statements` (a module's
+    top-level statements) bind to the standard logging module."""
     return {alias.asname or "logging"
-            for node in tree.body if isinstance(node, ast.Import)
+            for node in statements if isinstance(node, ast.Import)
             for alias in node.names if alias.name == "logging"}
 
 
@@ -663,15 +784,22 @@ def _add(found, name, signature, node):
     found[name] = ((*signatures, signature), (min(span[0], start), max(span[1], end)))
 
 
-def _python_signature_breaches(path, old_tree, new_tree, permitted_spans):
+def _python_signature_breaches(path, old_tree, new_tree, permitted_spans, hunks=()):
     before, after = _python_definitions(old_tree), _python_definitions(new_tree)
+    # An added definition exists only in the fixed file, so its span is in
+    # the fixed file's lines; the permitted spans are the base commit's, and
+    # are carried through the hunks before the two are compared. WHY: ten
+    # inserted header lines otherwise let a definition added ten lines away
+    # from a permitting violation pass, and refused one added right at it.
+    shifted = [(_to_new_line(start, hunks), _to_new_line(end, hunks))
+               for start, end in permitted_spans]
     found = []
     for name in sorted(set(before) | set(after)):
         old, new = before.get(name), after.get(name)
         if old is not None and new is not None and old[0] == new[0]:
             continue
-        span = (old or new)[1]
-        if any(_overlaps(span, allowed) for allowed in permitted_spans):
+        span, allowed_spans = (old[1], permitted_spans) if old else (new[1], shifted)
+        if any(_overlaps(span, allowed) for allowed in allowed_spans):
             continue
         if new is None:
             what, line, side = "removed", old[1][0], "base"
@@ -684,6 +812,21 @@ def _python_signature_breaches(path, old_tree, new_tree, permitted_spans):
             f"`{name}` {what} ({side} line {line}); no principle with a violation "
             f"there permits signature changes"))
     return found
+
+
+def _to_new_line(line, hunks):
+    """Base line `line`'s number in the fixed file, through `hunks`. A line
+    inside a replaced region maps to that region's start in the fixed file."""
+    delta = 0
+    for hunk in sorted(hunks, key=lambda h: h.old_start):
+        if hunk.old_count == 0:
+            if line > hunk.old_start:
+                delta += hunk.new_count
+        elif line > hunk.old_start + hunk.old_count - 1:
+            delta += hunk.new_count - hunk.old_count
+        elif line >= hunk.old_start:
+            return hunk.new_start
+    return line + delta
 
 
 def _script_signature_breaches(path, hunks, old_lines, new_lines, permitted_spans):
@@ -707,13 +850,18 @@ def _script_signature_breaches(path, hunks, old_lines, new_lines, permitted_span
 
 def _python_imports(tree):
     """Top-level module name -> first line importing it, for absolute imports
-    anywhere in the module (function-local ones too)."""
+    anywhere in the module (function-local ones too), and for the dynamic
+    forms whose module is a string literal: `__import__("x")`,
+    `importlib.import_module("x")` and a bare `import_module("x")`. A
+    dynamic import of a computed name is not seen (Limits)."""
     found = {}
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             names = [alias.name for alias in node.names]
         elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
             names = [node.module]
+        elif _dynamic_import(node):
+            names = [node.args[0].value]
         else:
             continue
         for name in names:
@@ -721,6 +869,21 @@ def _python_imports(tree):
             if top not in found or node.lineno < found[top]:
                 found[top] = node.lineno
     return found
+
+
+def _dynamic_import(node):
+    """Whether `node` is `__import__`/`import_module` called on an absolute
+    module name spelled as a string literal. Any `x.import_module` counts:
+    over-matching a look-alike only reports a module the repo does not use."""
+    if not (isinstance(node, ast.Call) and node.args):
+        return False
+    func = node.func
+    name = func.id if isinstance(func, ast.Name) else (
+        func.attr if isinstance(func, ast.Attribute) else None)
+    arg = node.args[0]
+    return (name in ("__import__", "import_module") and isinstance(arg, ast.Constant)
+            and isinstance(arg.value, str) and bool(arg.value)
+            and not arg.value.startswith("."))
 
 
 def script_package(specifier):
@@ -761,20 +924,67 @@ def _new_import_breaches(path, before, after, known_modules, builtins):
 
 # --- the git adapter ---------------------------------------------------------------
 
-def verify_fix(repo, base_ref, work_list, principles, window=WINDOW):
+def verify_fix(repo, base_ref, work_list, principles, *, git_state, window=WINDOW):
     """E3-R2's review step: the verdict on everything that changed between
     `base_ref` and `repo`'s working tree (staged, unstaged and untracked),
     against `work_list` (sweep.WorkList, computed on `base_ref`) and
-    `principles` (a principles.PrinciplesFile, for `permits`)."""
+    `principles` (a principles.PrinciplesFile, for `permits`).
+
+    `git_state` is snapshot_git_state(repo) taken before the fix step ran
+    (fix_step.run_fix_step takes it: FixStepRun.git_state). It is compared
+    FIRST, by reading files, and a difference is the whole verdict: WHY —
+    `.git/config` and `.git/hooks` are invisible to `git diff`, and a planted
+    `core.fsmonitor` or filter driver would run on the very git command that
+    asked what changed. It is required and the check fails closed: no
+    snapshot, a snapshot of another path, or one that found no git directory
+    (no `.git`, or a `.git` that is a symlink) raises ScopeCheckError before
+    any git command runs.
+
+    `repo` must be the top of its work tree (git names paths from there, the
+    work list from `repo`), and `base_ref` is resolved to a commit before git
+    is given it, so a ref spelled like an option (`--output=…`) is refused."""
+    if git_state is None:
+        raise ScopeCheckError("no git-state snapshot taken before the fix step; refusing "
+                              "to run git on the edited tree")
+    if os.path.realpath(git_state.repo) != os.path.realpath(str(repo)):
+        raise ScopeCheckError(f"the git-state snapshot is of {git_state.repo}, not {repo}")
+    if not git_state.git_dirs:
+        raise ScopeCheckError(
+            f"the git-state snapshot found no git directory in {repo} (no `.git`, or a "
+            "`.git` that is a symlink), so git's own files cannot be held to it; "
+            "refusing to run git on the edited tree")
+    changed = verify_git_state(git_state)
+    if changed:
+        return ScopeVerdict(breaches=tuple(changed), paths=())
+    _require_top_level(repo)
+    base = resolve_base(repo, base_ref)
     permitting = frozenset(
         p.id for p in principles.principles if SIGNATURE_PERMISSION in p.permits)
-    return check_scope(changes_since(repo, base_ref), work_list.items,
+    return check_scope(changes_since(repo, base), work_list.items,
                        permitting=permitting,
-                       known_modules=known_modules(repo, base_ref), window=window)
+                       known_modules=known_modules(repo, base), window=window)
+
+
+#: Configuration every git command here runs with. WHY: the repository's own
+#: config can name programs git runs as a side effect — `core.fsmonitor` on
+#: every index refresh (`git diff` against the working tree is one), hooks via
+#: `core.hooksPath` — and the tree under review was just edited by a model.
+#: External diff drivers and textconv are turned off per command
+#: (`--no-ext-diff --no-textconv`). What cannot be turned off without
+#: knowing the driver names is `filter.<driver>.clean`, which `git diff`
+#: runs on a working-tree file whose attributes name it; a driver must be in
+#: the config to run, and the config is held to the snapshot (verify_fix), so
+#: the residual is a driver the repository's owner already configured, run
+#: on a file an edited `.gitattributes` points it at. `core.sshCommand` and
+#: the pager need a remote or a terminal, and nothing here has either.
+#: `GIT_CONFIG_NOSYSTEM` is not set: the system and global configs are
+#: outside the fix agent's fence, so they say what they said before it ran.
+_GIT_HARDENING = ("-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null",
+                  "-c", "core.quotepath=off")
 
 
 def _git(repo, *args, ok=(0,)):
-    result = subprocess.run(["git", "-c", "core.quotepath=off", *args], cwd=repo,
+    result = subprocess.run(["git", *_GIT_HARDENING, *args], cwd=repo,
                             capture_output=True)
     if result.returncode not in ok:
         raise ScopeCheckError(
@@ -783,14 +993,142 @@ def _git(repo, *args, ok=(0,)):
     return result.stdout
 
 
+def resolve_base(repo, base_ref):
+    """`base_ref` as a commit SHA, or ScopeCheckError. `--end-of-options` and
+    the leading-dash refusal keep it from being read as an option."""
+    if base_ref.startswith("-"):
+        raise ScopeCheckError(f"base ref {base_ref!r} looks like an option")
+    out = _git(repo, "rev-parse", "--verify", "--quiet", "--end-of-options",
+               f"{base_ref}^{{commit}}", ok=(0, 1, 128)).decode("ascii", "replace").strip()
+    if not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", out):
+        raise ScopeCheckError(f"base ref {base_ref!r} does not name a commit")
+    return out
+
+
+def _require_top_level(repo):
+    top = _git(repo, "rev-parse", "--show-toplevel").decode("utf-8", "surrogateescape").strip()
+    if os.path.realpath(top) != os.path.realpath(str(repo)):
+        raise ScopeCheckError(
+            f"{repo} is not the top of its git work tree ({top}); git names changed "
+            "paths from the top and the work list from the repo, so the two would "
+            "not match")
+
+
+# --- git internals --------------------------------------------------------------
+
+@dataclass(frozen=True)
+class GitState:
+    """What snapshot_git_state saw: `repo`, the git directories it read, and
+    label -> digest for every file it hashed."""
+
+    repo: str
+    git_dirs: tuple
+    digests: tuple
+
+
+#: Per git directory: files and trees that decide what git runs or sees.
+#: The index and objects are left out — git rewrites the index's stat data
+#: on its own, and objects are content-addressed, read here only by SHA.
+_GIT_STATE_FILES = ("config", "config.worktree", "commondir")
+_GIT_STATE_TREES = ("hooks", "info")
+
+
+def snapshot_git_state(repo):
+    """The digests of `repo`'s git configuration, hooks and `info/` (which
+    holds `attributes` and `exclude`), and of a `.git` file if the checkout is
+    a linked worktree or submodule: its `gitdir:` pointer is followed, and the
+    `commondir` beside it, where a worktree's shared config and hooks live.
+    Read as files, never through git, so the same reading after the fix step
+    runs nothing the fix step planted. A path with no `.git`, or a `.git`
+    that is a symlink (followed, it could be swapped for another directory
+    unseen), gets a state with no git directories, which verify_fix refuses."""
+    repo = Path(repo)
+    dirs = _git_dirs(repo)
+    return GitState(str(repo), tuple(str(d) for d in dirs), _git_digests(repo, dirs))
+
+
+def verify_git_state(state):
+    """GIT_INTERNALS_CHANGED breaches, one per file added, removed or changed
+    since `state` was taken."""
+    repo = Path(state.repo)
+    before = dict(state.digests)
+    after = dict(_git_digests(repo, [Path(d) for d in state.git_dirs]))
+    found = []
+    for label in sorted(set(before) | set(after)):
+        if before.get(label) == after.get(label):
+            continue
+        what = ("added" if label not in before else
+                "removed" if label not in after else "changed")
+        found.append(Breach(
+            GIT_INTERNALS_CHANGED, label, None,
+            f"{what} while the fix step ran; git's own files can make the next git "
+            "command run code, and `git diff` never shows them, so nothing more of "
+            "this tree is read"))
+    return found
+
+
+def _git_dirs(repo):
+    dot = repo / ".git"
+    if dot.is_dir() and not dot.is_symlink():
+        git_dir = dot
+    elif dot.is_file():
+        text = dot.read_text(encoding="utf-8", errors="replace").strip()
+        if not text.startswith("gitdir:"):
+            return ()
+        git_dir = (repo / text[len("gitdir:"):].strip()).resolve()
+    else:
+        return ()
+    dirs = [git_dir]
+    common = git_dir / "commondir"
+    if common.is_file():
+        dirs.append((git_dir / common.read_text(encoding="utf-8").strip()).resolve())
+    return tuple(dirs)
+
+
+def _git_digests(repo, dirs):
+    found = {}
+    dot = repo / ".git"
+    if dot.is_file() or dot.is_symlink():
+        found[".git"] = _digest(dot)
+    for git_dir in dirs:
+        for name in _GIT_STATE_FILES:
+            target = git_dir / name
+            if target.exists() or target.is_symlink():
+                found[_label(repo, target)] = _digest(target)
+        for name in _GIT_STATE_TREES:
+            for root, subdirs, files in os.walk(git_dir / name):
+                for entry in subdirs + files:
+                    target = Path(root) / entry
+                    if entry in files or target.is_symlink():
+                        found[_label(repo, target)] = _digest(target)
+    return tuple(sorted(found.items()))
+
+
+def _label(repo, path):
+    try:
+        return path.relative_to(repo).as_posix()
+    except ValueError:
+        return str(path)
+
+
+def _digest(path):
+    try:
+        if path.is_symlink():
+            return "link:" + os.readlink(path)
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+    except OSError as error:
+        return f"unreadable: {error.__class__.__name__}"
+
+
 class ScopeCheckError(Exception):
     """git could not say what changed, so no verdict can be given. The runner
     must treat this as a refusal: an unverified fix is not a fix."""
 
 
 def changes_since(repo, base_ref):
-    """Every path that differs between `base_ref` and the working tree, as
-    FileChanges with git's own `-U0` hunks."""
+    """Every path that differs between `base_ref` (a commit SHA: verify_fix
+    resolves it) and the working tree, as FileChanges with git's own `-U0`
+    hunks."""
     repo = Path(repo)
     raw = _git(repo, "diff", "--raw", "-z", "--no-renames", "--no-ext-diff",
                "--ignore-submodules=none", base_ref, "--")
@@ -860,16 +1198,27 @@ _PY_IMPORT_LINE = re.compile(r"^\s*(?:import\s+([\w., ]+)|from\s+(\w[\w.]*)\s+im
 
 def known_modules(repo, base_ref):
     """Top-level module and package names that are not a new dependency at
-    `base_ref`: every file and directory name in the tree (a local module or
-    package, wherever it sits), every module a Python file imports, every
-    package a JS/TS file imports, and package.json's declared packages."""
+    `base_ref`: every Python file's module name and every directory holding
+    Python or JS/TS source (a local module or package, wherever it sits),
+    every module a Python file imports, every package a JS/TS file imports,
+    and package.json's declared packages.
+
+    Only source counts as local: WHY — `docs/pandas.md` is not a module named
+    pandas, and counting every file stem let `import pandas` pass as local.
+    The grep patterns use POSIX classes (`[[:space:]]`), not `\\s`: Apple's
+    git 2.39 does not know `\\s` in `-E`, matched nothing, and every import
+    in the repository looked new on macOS."""
     known = set()
     listing = _git(repo, "ls-tree", "-r", "-z", "--name-only", base_ref)
     for entry in listing.split(b"\0"):
-        for part in entry.decode("utf-8", "surrogateescape").split("/"):
-            if part:
-                known.add(part.split(".", 1)[0] if "." in part[1:] else part)
-    python = _git(repo, "grep", "-h", "-I", "-E", r"^\s*(import|from)\s", base_ref,
+        parts = [p for p in entry.decode("utf-8", "surrogateescape").split("/") if p]
+        if not parts or not parts[-1].endswith(PYTHON_SUFFIXES + SCRIPT_SUFFIXES):
+            continue
+        if parts[-1].endswith(PYTHON_SUFFIXES):
+            known.add(parts[-1].split(".", 1)[0])
+        known.update(parts[:-1])
+    python = _git(repo, "grep", "-h", "-I", "-E", r"^[[:space:]]*(import|from)[[:space:]]",
+                  base_ref,
                   "--", "*.py", "*.pyi", ok=(0, 1))
     for line in python.decode("utf-8", "surrogateescape").splitlines():
         match = _PY_IMPORT_LINE.match(line)
@@ -880,7 +1229,8 @@ def known_modules(repo, base_ref):
             name = name.strip().split(" ", 1)[0]
             if name:
                 known.add(name.split(".", 1)[0])
-    scripts = _git(repo, "grep", "-h", "-I", "-E", r"(from|import|require)\s*\(?\s*['\"]",
+    scripts = _git(repo, "grep", "-h", "-I", "-E",
+                   r"(from|import|require)[[:space:]]*\(?[[:space:]]*['\"]",
                    base_ref, "--", *(f"*{suffix}" for suffix in SCRIPT_SUFFIXES), ok=(0, 1))
     for line in scripts.decode("utf-8", "surrogateescape").splitlines():
         for specifier in _SCRIPT_IMPORT.findall(line):

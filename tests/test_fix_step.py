@@ -26,13 +26,14 @@ import sys
 import pytest
 
 from curamoir import cli
-from curamoir.fix_scope import OUTSIDE_VIOLATION, WINDOW, verify_fix
+from curamoir.fix_scope import GIT_INTERNALS_CHANGED, OUTSIDE_VIOLATION, WINDOW, verify_fix
 from curamoir.fix_step import (
     FIX_TOOLS,
     SCOPE_LIMITS,
     FixStepRun,
     fix_prompt,
     fix_step_argv,
+    repo_deny_rules,
     repo_rules,
     run_fix_step,
 )
@@ -106,7 +107,7 @@ def test_the_fix_step_can_read_and_edit_and_nothing_else(tmp_path):
     assert value("--model") == "claude-sonnet-5"
     assert value("--tools").split(",") == list(FIX_TOOLS)
     assert value("--allowedTools") == ",".join(repo_rules(tmp_path))
-    assert value("--disallowedTools") == "mcp__*"
+    assert value("--disallowedTools").split(",") == ["mcp__*", *repo_deny_rules(tmp_path)]
     assert value("--permission-mode") == "dontAsk"
     assert value("--output-format") == "json"
     for flag in ("--strict-mcp-config", "--disable-slash-commands", "--no-session-persistence"):
@@ -145,6 +146,58 @@ def test_a_repo_reached_through_a_symlink_is_named_both_ways(tmp_path):
 
     assert repo_rules(link) == [f"Read(/{link}/**)", f"Read(/{real}/**)",
                                 f"Edit(/{link}/**)", f"Edit(/{real}/**)"]
+
+
+def test_the_repos_git_directory_is_denied_by_both_spellings(tmp_path):
+    """S3: `Edit(//<repo>/**)` covers `.git/`, where a hook or a config key
+    (core.fsmonitor runs on `git diff`) is code the next git command runs,
+    and which `git diff` never shows. Deny rules win over allow rules ("deny,
+    then ask, then allow") and match when either spelling of a symlinked path
+    does."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    link = tmp_path / "link"
+    link.symlink_to(repo)
+    real = os.path.realpath(repo)
+
+    rules = repo_deny_rules(link)
+
+    for tool in ("Read", "Edit"):
+        for root in (link, real):
+            assert f"{tool}(/{root}/.git)" in rules
+            assert f"{tool}(/{root}/.git/**)" in rules
+    assert len(rules) == 8
+
+
+def test_the_git_deny_rules_reach_the_command_line_exactly(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    real = os.path.realpath(repo)
+    assert real == str(repo)
+
+    argv = fix_step_argv("p", "m", repo)
+
+    assert argv[argv.index("--disallowedTools") + 1] == (
+        f"mcp__*,Read(/{real}/.git),Read(/{real}/.git/**),"
+        f"Edit(/{real}/.git),Edit(/{real}/.git/**)")
+
+
+def test_an_agent_that_edits_git_config_is_caught_before_git_runs_again(swept, tmp_path):
+    """S3(c): the fix step snapshots the repository's git internals; an edit
+    to .git/config fails the verdict, and the planted fsmonitor never runs."""
+    repo, work = swept
+    marker = tmp_path / "pwned"
+    hook = tmp_path / "fsmonitor.sh"
+    hook.write_text(f"#!/bin/sh\ntouch {marker}\n", encoding="utf-8")
+    hook.chmod(0o755)
+    claude, _ = fake_claude(tmp_path, edit=(".git/config", "[core]",
+                                            f"[core]\n\tfsmonitor = {hook}"))
+
+    run = run_fix_step(repo, "p", model="m", claude=str(claude))
+    result = verify_fix(repo, "HEAD", work, load_principles(repo), git_state=run.git_state)
+
+    assert result.kinds() == (GIT_INTERNALS_CHANGED,)
+    assert not marker.exists()
 
 
 def test_glob_characters_in_the_repo_path_are_escaped_and_spaces_are_not(tmp_path):
@@ -215,9 +268,10 @@ def test_a_scoped_fix_from_the_fix_step_passes_review(swept, tmp_path):
     claude, _ = fake_claude(tmp_path, edit=(BILLING, 'print("calculating line total")',
                                             'logger.info("calculating line total")'))
 
-    run_fix_step(repo, fix_prompt(work, load_principles(repo)), model="m", claude=str(claude))
+    run = run_fix_step(repo, fix_prompt(work, load_principles(repo)), model="m",
+                       claude=str(claude))
 
-    assert verify_fix(repo, "HEAD", work, load_principles(repo)).ok
+    assert verify_fix(repo, "HEAD", work, load_principles(repo), git_state=run.git_state).ok
 
 
 def test_an_agent_that_ignores_the_prompt_is_caught_by_review_anyway(swept, tmp_path):
@@ -227,9 +281,10 @@ def test_an_agent_that_ignores_the_prompt_is_caught_by_review_anyway(swept, tmp_
     claude, _ = fake_claude(tmp_path, edit=(BILLING, "return total * (1 - percent)",
                                             "return total * (1 - percent / 100)"))
 
-    run_fix_step(repo, fix_prompt(work, load_principles(repo)), model="m", claude=str(claude))
+    run = run_fix_step(repo, fix_prompt(work, load_principles(repo)), model="m",
+                       claude=str(claude))
 
-    result = verify_fix(repo, "HEAD", work, load_principles(repo))
+    result = verify_fix(repo, "HEAD", work, load_principles(repo), git_state=run.git_state)
     assert [(b.kind, b.line) for b in result.breaches] == [(OUTSIDE_VIOLATION, 22)]
 
 

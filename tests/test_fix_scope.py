@@ -19,6 +19,7 @@ The pure-core tests build their own small inputs inline.
 
 import subprocess
 from dataclasses import dataclass
+from types import SimpleNamespace
 
 import pytest
 
@@ -29,6 +30,7 @@ from curamoir.fix_scope import (
     FILE_ADDED,
     FILE_DELETED,
     FILE_NOT_IN_WORK_LIST,
+    GIT_INTERNALS_CHANGED,
     MODIFIED,
     NEW_DEPENDENCY,
     OUTSIDE_VIOLATION,
@@ -37,12 +39,16 @@ from curamoir.fix_scope import (
     WINDOW,
     FileChange,
     Hunk,
+    ScopeCheckError,
     _only_header_statements,
+    _require_top_level,
     check_scope,
     compute_hunks,
     is_dependency_file,
+    known_modules,
     parse_hunks,
     script_package,
+    snapshot_git_state,
     verify_fix,
 )
 from curamoir.principles import load_principles
@@ -70,7 +76,11 @@ def edit(repo, path, old, new):
 
 
 def verdict(repo, work):
-    return verify_fix(repo, "HEAD", work, load_principles(repo))
+    """The snapshot is taken here, after the test's edit: these tests edit
+    only the work tree, so .git is as it was before them (the git-internals
+    tests take theirs first)."""
+    return verify_fix(repo, "HEAD", work, load_principles(repo),
+                      git_state=snapshot_git_state(repo))
 
 
 def kinds_at(result):
@@ -613,3 +623,298 @@ def test_compute_hunks_agrees_with_git_on_the_simple_cases():
     assert compute_hunks(old, "a\nB\nc\nd\n") == (Hunk(2, 1, 2, 1),)
     assert compute_hunks(old, "a\nb\nx\nc\nd\n") == (Hunk(2, 0, 3, 1),)
     assert compute_hunks(old, "a\nd\n") == (Hunk(2, 2, 1, 0),)
+
+
+# --- review findings: git hardening, scoping and line numbering --------------------
+
+def git_repo(tmp_path, files):
+    """A one-commit repository holding `files` (path -> text, written as bytes
+    so no newline is translated)."""
+    repo = tmp_path / "plain"
+    for path, text in files.items():
+        (repo / path).parent.mkdir(parents=True, exist_ok=True)
+        (repo / path).write_bytes(text.encode("utf-8"))
+    for command in (["init", "--initial-branch=main"],
+                    ["config", "user.email", "test@example.invalid"],
+                    ["config", "user.name", "test"], ["add", "-A"], ["commit", "-m", "base"]):
+        subprocess.run(["git", *command], cwd=repo, check=True, capture_output=True)
+    return repo
+
+
+NO_PRINCIPLES = SimpleNamespace(principles=[])
+
+
+def work(*violations):
+    return SimpleNamespace(items=list(violations))
+
+
+def review(repo, ref, items):
+    return verify_fix(repo, ref, items, NO_PRINCIPLES, git_state=snapshot_git_state(repo))
+
+
+def planted_hook(tmp_path):
+    marker = tmp_path / "ran"
+    hook = tmp_path / "hook.sh"
+    hook.write_text(f"#!/bin/sh\ntouch {marker}\n", encoding="utf-8")
+    hook.chmod(0o755)
+    return hook, marker
+
+
+def test_the_review_step_runs_git_without_the_repos_fsmonitor(tmp_path):
+    """S3(b): core.fsmonitor names a program git runs to refresh the index,
+    which `git diff` against the working tree does; the review step turns it
+    off, and hooks with it."""
+    repo = git_repo(tmp_path, {"m.py": "x = 1\n"})
+    hook, marker = planted_hook(tmp_path)
+    git(repo, "config", "core.fsmonitor", str(hook))
+    (repo / "m.py").write_text("x = 2\n", encoding="utf-8")
+
+    review(repo, "HEAD", work(V("m.py", 1)))
+
+    assert not marker.exists()
+
+
+@pytest.mark.parametrize("where,change", [
+    ("config", lambda g: g.joinpath("config").write_text(
+        g.joinpath("config").read_text() + "[core]\n\tfsmonitor = /bin/true\n")),
+    ("hooks", lambda g: g.joinpath("hooks", "pre-commit").write_text("#!/bin/sh\n")),
+    ("info/attributes", lambda g: g.joinpath("info", "attributes").write_text("* diff=x\n")),
+])
+def test_a_change_to_git_internals_fails_the_verdict(tmp_path, where, change):
+    """S3(c): .git is invisible to `git diff`, so it is compared byte for byte
+    with the snapshot taken before the fix step."""
+    repo = git_repo(tmp_path, {"m.py": "x = 1\n"})
+    (repo / ".git" / "info").mkdir(exist_ok=True)
+    state = snapshot_git_state(repo)
+    change(repo / ".git")
+
+    result = verify_fix(repo, "HEAD", work(V("m.py", 1)), NO_PRINCIPLES, git_state=state)
+
+    assert result.kinds() == (GIT_INTERNALS_CHANGED,)
+    assert where in result.render()
+
+
+def test_unchanged_git_internals_pass(tmp_path):
+    repo = git_repo(tmp_path, {"m.py": "x = 1\n"})
+    state = snapshot_git_state(repo)
+    (repo / "m.py").write_text("x = 2\n", encoding="utf-8")
+
+    assert verify_fix(repo, "HEAD", work(V("m.py", 1)), NO_PRINCIPLES, git_state=state).ok
+
+
+def test_a_base_ref_that_looks_like_an_option_is_refused(tmp_path):
+    """C6: `--output=<file>` as a revision made `git diff` write a file."""
+    repo = git_repo(tmp_path, {"m.py": "x = 1\n"})
+    target = tmp_path / "zz"
+
+    with pytest.raises(ScopeCheckError):
+        review(repo, f"--output={target}", work(V("m.py", 1)))
+    assert not target.exists()
+
+
+def test_a_repo_below_the_top_of_the_work_tree_is_refused(tmp_path):
+    """C7: git prints top-level-relative paths; the work list is repo-relative."""
+    repo = git_repo(tmp_path, {"sub/m.py": "x = 1\n"})
+
+    with pytest.raises(ScopeCheckError, match="top of its git work tree"):
+        _require_top_level(repo / "sub")
+    with pytest.raises(ScopeCheckError):
+        review(repo / "sub", "HEAD", work(V("m.py", 1)))
+
+
+def test_verify_fix_without_a_snapshot_refuses_before_git_runs(tmp_path):
+    """Fails closed: a caller that forgot the snapshot gets no verdict, and the
+    planted fsmonitor does not run."""
+    repo = git_repo(tmp_path, {"m.py": "x = 1\n"})
+    hook, marker = planted_hook(tmp_path)
+    git(repo, "config", "core.fsmonitor", str(hook))
+
+    with pytest.raises(ScopeCheckError, match="no git-state snapshot"):
+        verify_fix(repo, "HEAD", work(V("m.py", 1)), NO_PRINCIPLES, git_state=None)
+    with pytest.raises(TypeError):
+        verify_fix(repo, "HEAD", work(V("m.py", 1)), NO_PRINCIPLES)
+    assert not marker.exists()
+
+
+def test_a_snapshot_that_found_no_git_directory_refuses(tmp_path):
+    plain = tmp_path / "not-a-repo"
+    plain.mkdir()
+    repo = git_repo(tmp_path, {"m.py": "x = 1\n"})
+    linked = tmp_path / "linked"
+    linked.mkdir()
+    (linked / ".git").symlink_to(repo / ".git")
+
+    for path in (plain, linked):
+        state = snapshot_git_state(path)
+        assert state.git_dirs == ()
+        with pytest.raises(ScopeCheckError, match="no git directory"):
+            verify_fix(path, "HEAD", work(V("m.py", 1)), NO_PRINCIPLES, git_state=state)
+
+
+def test_a_snapshot_of_another_repo_refuses(tmp_path):
+    repo = git_repo(tmp_path, {"m.py": "x = 1\n"})
+    other = tmp_path / "other"
+    other.mkdir()
+    with pytest.raises(ScopeCheckError, match="snapshot is of"):
+        verify_fix(other, "HEAD", work(V("m.py", 1)), NO_PRINCIPLES,
+                   git_state=snapshot_git_state(repo))
+
+
+def test_a_linked_worktree_snapshots_its_own_and_the_shared_git_directory(tmp_path):
+    """A worktree's `.git` is a `gitdir:` file; its config and hooks live in
+    the main repository's git directory (commondir), and are held too."""
+    repo = git_repo(tmp_path, {"m.py": "x = 1\n"})
+    worktree = tmp_path / "wt"
+    git(repo, "worktree", "add", "--detach", str(worktree))
+    assert (worktree / ".git").is_file()
+
+    state = snapshot_git_state(worktree)
+    assert len(state.git_dirs) == 2
+    assert review(worktree, "HEAD", work(V("m.py", 1))).ok
+    config = repo / ".git" / "config"
+    config.write_text(config.read_text() + "[core]\n\tfsmonitor = /bin/true\n")
+
+    result = verify_fix(worktree, "HEAD", work(V("m.py", 1)), NO_PRINCIPLES, git_state=state)
+
+    assert result.kinds() == (GIT_INTERNALS_CHANGED,)
+    assert any(b.path.endswith("/.git/config") for b in result.breaches)
+
+
+def test_known_modules_reads_imports_with_git_on_this_platform(tmp_path):
+    """C3: Apple git's `grep -E` has no `\\s`; an import used elsewhere is known."""
+    repo = git_repo(tmp_path, {"a.py": "import requests\nfrom yaml import safe_load\n",
+                               "b.js": "const x = require( 'left-pad' )\n"})
+
+    known = known_modules(repo, "HEAD")
+
+    assert {"requests", "yaml", "left-pad"} <= known
+
+
+def test_only_python_files_and_packages_are_local_modules(tmp_path):
+    """C4: docs/pandas.md is not a module called pandas."""
+    repo = git_repo(tmp_path, {"docs/pandas.md": "x\n", "pkg/__init__.py": "",
+                               "src/tool/run.py": "", "stub.pyi": "",
+                               "m.py": "import os\n\n\n\n\ndef f():\n    return os.sep\n"})
+
+    known = known_modules(repo, "HEAD")
+
+    assert {"pkg", "tool", "run", "stub", "m"} <= known
+    assert "pandas" not in known and "docs" not in known
+    (repo / "m.py").write_text("import os\n\n\n\n\ndef f():\n    import pandas\n"
+                               "    return os.sep\n", encoding="utf-8")
+    result = review(repo, "HEAD", work(V("m.py", 7)))
+    assert result.kinds() == (NEW_DEPENDENCY,)
+
+
+def test_a_form_feed_above_an_insertion_does_not_shift_the_lines_read(tmp_path):
+    """C2: git counts lines by \\n only; str.splitlines also splits at \\f, so
+    the inserted line was read as the `import sys` above it."""
+    base = ("import os\n\x0c\nimport sys\n" + "\n" * 10
+            + "def f():\n    return os.sep, sys.argv\n")
+    repo = git_repo(tmp_path, {"m.py": base})
+    (repo / "m.py").write_bytes(base.replace(
+        "import sys\n", "import sys\nX = os.system('rm -rf ~')\n").encode())
+
+    result = review(repo, "HEAD", work(V("m.py", 15)))
+
+    assert kinds_at(result) == {(OUTSIDE_VIOLATION, "m.py", 3)}
+
+
+def test_a_lone_carriage_return_makes_a_python_file_unverifiable():
+    """Python numbers lines at a lone \\r and git does not, so no line of the
+    parse can be matched to a hunk."""
+    old = "x = 1\n"
+    new = "x = 1\ry = 2\n"
+
+    result = check_scope([modified("m.py", old, new)], [V("m.py", 1)])
+
+    assert result.kinds() == (UNVERIFIABLE,)
+
+
+HEADER_MODULE = ('"""m."""\nimport os\n' + "\n" * 10
+                 + "def f():\n    return os.sep, helper_name\n")
+
+
+@pytest.mark.parametrize("inserted", [
+    "print = None", "open = 'x'", "__name__ = 'x'", "__getattr__ = None",
+    "__builtins__ = None", "from os import open", "helper_name = 1", "sep = 1",
+    "import json as print",
+])
+def test_a_header_insertion_may_not_shadow_a_builtin_dunder_or_used_name(inserted):
+    """S4: a new module-level name changes what a builtin, a dunder, or a name
+    the module already reads (`helper_name`, `os.sep`'s `sep` is not one, but
+    the attribute base `os` is) means everywhere below it."""
+    new = HEADER_MODULE.replace("import os\n", f"import os\n{inserted}\n")
+    violation = V("m.py", 14)
+
+    result = check_scope([modified("m.py", HEADER_MODULE, new)], [violation])
+
+    if inserted == "sep = 1":
+        assert result.ok, result.render()
+    else:
+        assert kinds_at(result) == {(OUTSIDE_VIOLATION, "m.py", 2)}, inserted
+
+
+def test_any_new_header_name_is_refused_after_a_star_import():
+    old = HEADER_MODULE.replace("import os\n", "import os\nfrom os.path import *\n")
+    new = old.replace("from os.path import *\n", "from os.path import *\nRETRIES = 3\n")
+
+    result = check_scope([modified("m.py", old, new)], [V("m.py", 15)])
+
+    assert OUTSIDE_VIOLATION in result.kinds()
+
+
+@pytest.mark.parametrize("old,new", [
+    ('"""m."""\nX = make(\n    a,\n)\n' + "\n" * 10 + "def f():\n    return 1\n",
+     '"""m."""\nX = make(\n    a,\nY = True,\n)\n' + "\n" * 10 + "def f():\n    return 1\n"),
+    ('"""m."""\nDOC = """\nline\n"""\n' + "\n" * 10 + "def f():\n    return 1\n",
+     '"""m."""\nDOC = """\nline\nimport os\n"""\n' + "\n" * 10 + "def f():\n    return 1\n"),
+])
+def test_a_header_insertion_inside_a_statement_is_not_a_header_statement(old, new):
+    """C1: parsed on their own, `Y = True,` is an assignment and `import os` an
+    import; in the module they are a keyword argument and string text."""
+    violation = V("m.py", 17)
+
+    result = check_scope([modified("m.py", old, new)], [violation])
+
+    assert kinds_at(result) == {(OUTSIDE_VIOLATION, "m.py", 3)}, result.render()
+
+
+SHIFTED = ('"""m."""\nimport os\n\ndef a():\n'
+           + "".join(f"    x{n} = {n}\n" for n in range(5, 41)))
+CONSTANTS = "".join(f"C{n} = {n}\n" for n in range(10))
+INNER = "    def inner():\n        return 1\n"
+
+
+def test_an_added_definition_is_measured_in_the_fixed_files_lines():
+    """C8: ten header lines push base line 20 to fixed line 30. A definition
+    added there is ten lines from the permitted violation at base 30, though
+    its fixed line number coincides with it."""
+    new = SHIFTED.replace("import os\n", "import os\n" + CONSTANTS)
+    new = new.replace("    x20 = 20\n", "    x20 = 20\n" + INNER)
+    violation = V("m.py", 30)
+
+    result = check_scope([modified("m.py", SHIFTED, new)], [violation], permitting={"p"})
+
+    assert SIGNATURE_CHANGE in result.kinds()
+
+
+def test_an_added_definition_at_a_permitted_violation_after_a_shift_is_allowed():
+    new = SHIFTED.replace("import os\n", "import os\n" + CONSTANTS)
+    new = new.replace("    x30 = 30\n", "    x30 = 30\n" + INNER)
+
+    result = check_scope([modified("m.py", SHIFTED, new)], [V("m.py", 30)], permitting={"p"})
+
+    assert result.ok, result.render()
+
+
+@pytest.mark.parametrize("call", ["importlib.import_module('pandas')", "__import__('pandas')",
+                                  "import_module('pandas.io')"])
+def test_a_dynamic_import_of_a_literal_name_is_an_import(call):
+    """C9: the string-literal forms are imports for the new-dependency check."""
+    old = "import importlib\nfrom importlib import import_module\n\n\ndef f():\n    return 1\n"
+    new = old.replace("return 1", f"return {call}")
+
+    result = check_scope([modified("m.py", old, new)], [V("m.py", 6)])
+
+    assert kinds_at(result) == {(NEW_DEPENDENCY, "m.py", 6)}

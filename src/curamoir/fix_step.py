@@ -54,6 +54,12 @@ the result as if the prompt had said nothing.
   and dontAsk turns a prompt into a refusal — so no deny list of sensitive
   paths is needed for the default case: the fence is the allow list, and
   everything outside it is denied without being named.
+- `--disallowedTools` also carries repo_deny_rules: Read and Edit of the
+  repo's `.git`. The allow rule above covers `.git/`, where an edit is code
+  the next git command runs and `git diff` never shows it; "Rules are
+  evaluated in order: deny, then ask, then allow" (same page), so the deny
+  holds inside the allowed tree. run_fix_step also snapshots `.git`
+  (fix_scope.snapshot_git_state) for the review step to hold it to.
 - `--restricted`: it "confines the built-in file tools to the working
   directories, loads only managed settings and `--settings`"
   (https://code.claude.com/docs/en/cli-reference). WHY: without it the
@@ -115,7 +121,7 @@ import subprocess
 from dataclasses import dataclass
 from typing import Optional
 
-from curamoir.fix_scope import SIGNATURE_PERMISSION, WINDOW
+from curamoir.fix_scope import SIGNATURE_PERMISSION, WINDOW, snapshot_git_state
 from curamoir.repo_config import config_value
 from curamoir.sweep import work_list_document
 
@@ -208,6 +214,35 @@ def repo_rules(repo):
     Raises ValueError for a path that cannot be a rule: one with a comma
     (--allowedTools takes one comma-separated value, and the comma would cut
     the rule in two), a control character, or no absolute POSIX form."""
+    return [f"{tool}(/{root}/**)" for tool in ("Read", "Edit") for root in _rule_roots(repo)]
+
+
+def repo_deny_rules(repo):
+    """The fix step's deny rules: Read and Edit of the repo's `.git`, as both
+    `.git` and `.git/**`, under both spellings of a symlinked path.
+
+    WHY: `Edit(//<repo>/**)` covers `.git/`, and an edit there — a
+    `core.fsmonitor` or `core.hooksPath` in `.git/config`, a file in
+    `.git/hooks/` — is invisible to `git diff` and is code the next git
+    command runs. Deny wins over the allow rule: "Rules are evaluated in
+    order: deny, then ask, then allow. The first match in that order
+    determines the outcome, and rule specificity doesn't change the order"
+    and "An allow rule can't carve an exception out of a deny rule"
+    (https://code.claude.com/docs/en/permissions, "Manage permissions"). Deny
+    rules "apply when either the requested path or the file it resolves to
+    matches" (same page, "Symlinks"), so naming both spellings is belt and
+    braces. `.git` alone is named as well as `.git/**` because the latter is
+    the directory's contents, and a linked worktree's `.git` is a file.
+    Claude Code also lists `.git` among its protected paths (same page,
+    "bypassPermissions"); these rules do not lean on that. fix_scope's
+    snapshot (snapshot_git_state) is the check in code behind them."""
+    return [f"{tool}(/{root}/{tail})" for tool in ("Read", "Edit")
+            for root in _rule_roots(repo) for tail in (".git", ".git/**")]
+
+
+def _rule_roots(repo):
+    """The repo's absolute path, and its real path if a symlink leads to it,
+    each escaped for a gitignore-syntax rule (repo_rules has the reasons)."""
     given = os.path.abspath(str(repo))
     roots = [given]
     real = os.path.realpath(given)
@@ -218,9 +253,8 @@ def repo_rules(repo):
             raise ValueError(f"cannot scope the fix step's permissions to {root!r}: "
                              "it needs an absolute POSIX path with no comma or "
                              "control character")
-    escaped = ["".join("\\" + c if c in _GITIGNORE_SPECIAL + "]" else c for c in root)
-               for root in roots]
-    return [f"{tool}(/{root}/**)" for tool in ("Read", "Edit") for root in escaped]
+    return ["".join("\\" + c if c in _GITIGNORE_SPECIAL + "]" else c for c in root)
+            for root in roots]
 
 
 def fix_step_argv(prompt, model, repo, max_turns=DEFAULT_MAX_TURNS, claude="claude"):
@@ -233,7 +267,7 @@ def fix_step_argv(prompt, model, repo, max_turns=DEFAULT_MAX_TURNS, claude="clau
         "--model", model,
         "--tools", ",".join(FIX_TOOLS),
         "--allowedTools", ",".join(repo_rules(repo)),
-        "--disallowedTools", "mcp__*",
+        "--disallowedTools", ",".join(["mcp__*", *repo_deny_rules(repo)]),
         "--strict-mcp-config",
         "--restricted",
         "--permission-mode", "dontAsk",
@@ -248,13 +282,16 @@ def fix_step_argv(prompt, model, repo, max_turns=DEFAULT_MAX_TURNS, claude="clau
 class FixStepRun:
     """What the fix step did, as far as its process says. None of it is
     evidence that the fix is in scope or correct: fix_scope and the tests
-    decide that. `exit_code` is None when it was killed at the timeout."""
+    decide that. `exit_code` is None when it was killed at the timeout.
+    `git_state` is the repo's git internals as they were before the agent
+    ran (fix_scope.snapshot_git_state), for fix_scope.verify_fix."""
 
     argv: tuple
     exit_code: Optional[int]
     stdout: str
     stderr: str
     timed_out: bool = False
+    git_state: Optional[object] = None
 
     def payload(self):
         """The `--output-format json` result object, or None if stdout is not
@@ -274,16 +311,18 @@ def run_fix_step(repo, prompt, model=None, timeout=DEFAULT_TIMEOUT,
     if model is None:
         model = config_value(repo, "models", "cheap")
     argv = fix_step_argv(prompt, model, repo, max_turns=max_turns, claude=claude)
+    git_state = snapshot_git_state(repo)
     try:
         result = runner(argv, cwd=str(repo), capture_output=True, timeout=timeout,
                         stdin=subprocess.DEVNULL)
     except subprocess.TimeoutExpired as expired:
         return FixStepRun(tuple(argv), None, _text(expired.stdout), _text(expired.stderr),
-                          timed_out=True)
+                          timed_out=True, git_state=git_state)
     except OSError as error:
-        return FixStepRun(tuple(argv), None, "", f"the fix step could not start: {error}")
+        return FixStepRun(tuple(argv), None, "", f"the fix step could not start: {error}",
+                          git_state=git_state)
     return FixStepRun(tuple(argv), result.returncode, _text(result.stdout),
-                      _text(result.stderr))
+                      _text(result.stderr), git_state=git_state)
 
 
 def _text(data):
