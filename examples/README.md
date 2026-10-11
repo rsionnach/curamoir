@@ -27,9 +27,14 @@ planted there — no more — by `tests/test_bundled_rules.py`.
 Copy the files you want into your repository's `.curamoir/rules/`, **flat**:
 
 ```
-cp -f examples/python/*.yaml     /path/to/repo/.curamoir/rules/
-cp -f examples/typescript/*.yaml /path/to/repo/.curamoir/rules/
+cp -n examples/python/*.yaml     /path/to/repo/.curamoir/rules/
+cp -n examples/typescript/*.yaml /path/to/repo/.curamoir/rules/
 ```
+
+`-n` (no-clobber) because an installed rule is yours to edit — `no-print`'s
+`exclude` is meant to grow your entry points — and a plain re-copy would
+silently undo that. So re-running skips files already installed; to update one,
+diff it against the example first so your `exclude` edits survive.
 
 Not the directories: the loader refuses a subdirectory in `.curamoir/rules/`,
 because a rule filed where it does not look would never run. The rule ids are
@@ -76,6 +81,14 @@ mistakes a clean run for more than it is:
   `console.debug` or optional chaining (`console?.log(...)`). It is here to
   show the rule format is not Python-specific, so it is kept deliberately
   minimal.
+- `languages: [typescript]` covers `.ts` and `.tsx` only. Plain JavaScript
+  (`.js`, `.jsx`, `.mjs`) is another language to the loader, so it needs a
+  copy of `no-console-log` with its own `id` and `languages: [javascript]`.
+  `.mts`, `.cts` and `.cjs` are covered by neither yet (bead cm-dpd), so a
+  `console.log` in one of those is not reported.
+- A rule with no files in its scope — the TypeScript rule in a Python-only
+  repo, say — is still listed under `rules_checked`, so "checked" can mean
+  zero files were searched. It is not evidence that the language is clean.
 - There is no bundled `errors-carry-context` rule. Its violation is a `raise`
   inside an `except` block *without* `from`, and a single ast-grep pattern
   cannot say "without": `raise $E($$$A)` also matches `raise E(...) from err`.

@@ -31,7 +31,7 @@ from pathlib import Path
 
 import pytest
 
-from curamoir.lint import EXIT_VIOLATIONS, main, run_lint
+from curamoir.lint import EXIT_ERROR, EXIT_VIOLATIONS, main, run_lint
 from curamoir.principles import parse_principles
 from curamoir.rules import AST_GREP_LANGUAGES, load_rules, parse_rule
 
@@ -250,3 +250,47 @@ def test_what_the_bundled_rules_find_in_curamoirs_own_src(tmp_path):
 
     assert result.skipped == ()
     assert Counter((v.path, v.rule_id) for v in result.violations) == OWN_SRC_FINDINGS
+
+
+# --- what ships in examples/ -------------------------------------------------
+
+def test_examples_holds_only_the_tested_language_directories():
+    """Every test above walks LANGUAGE_DIRECTORIES and globs `*.yaml`, so a new
+    language directory, or a rule saved as `.yml` or `.YAML`, would ship
+    without any of them looking at it. Pin the layout so that cannot happen
+    quietly: a new directory or suffix has to be added here, and so tested."""
+    def shipped(paths):
+        # Finder's .DS_Store is never committed and never a rule; anything
+        # else unexpected is.
+        return [p for p in paths if p.name != ".DS_Store"]
+
+    assert {p.name for p in shipped(EXAMPLES.iterdir())} == {*LANGUAGE_DIRECTORIES, "README.md"}
+    for directory in LANGUAGE_DIRECTORIES.values():
+        assert directory.is_dir(), directory
+        # Exact-case `.yaml` only: on a case-insensitive filesystem `*.yaml`
+        # would also glob `.YAML`, so compare the suffix itself.
+        strays = [p.name for p in shipped(directory.rglob("*")) if p.suffix != ".yaml"]
+        assert strays == [], f"{directory.name}: {strays}"
+
+
+def test_install_is_refused_where_a_cited_principle_is_missing(tmp_path, capsys):
+    """The README's promise: delete `typed-errors` from your principles and
+    `no-raise-runtime-error.yaml` is refused, rather than linting while
+    counting its fixes towards nothing. The whole `## typed-errors` section
+    goes, as a user deleting the principle would, so the rest still parses —
+    the refusal must be about the missing id, not a broken file."""
+    repo = install(tmp_path, "python")
+    principles = repo / ".curamoir" / "principles.md"
+    text = principles.read_text(encoding="utf-8")
+    start = text.index("## typed-errors\n")
+    end = text.index("\n## ", start + 1) + 1
+    principles.write_text(text[:start] + text[end:], encoding="utf-8")
+    remaining = {p.id for p in parse_principles(principles.read_text(encoding="utf-8")).principles}
+    assert remaining == starter_ids() - {"typed-errors"}
+
+    code = main(["--repo", str(repo), "--format", "json"])
+    err = capsys.readouterr().err
+
+    assert code == EXIT_ERROR
+    assert "no-raise-runtime-error.yaml" in err
+    assert "typed-errors" in err
