@@ -61,10 +61,14 @@ def test_five_violations_across_three_principles_are_planted(manifest):
     assert len({v["principle_id"] for v in violations}) == 3
 
 
-@pytest.mark.parametrize("key", ["violations", "bundled_rule_findings"])
+@pytest.mark.parametrize(
+    "key", ["violations", "bundled_rule_findings", "bundled_rule_non_findings"]
+)
 def test_every_planted_finding_is_present_at_its_recorded_line(manifest, key):
     """The anti-drift check, for E3's `violations` and for the plants the
-    bundled example rules in `examples/` must find. If this fails, the fixture
+    bundled example rules in `examples/` must find, and for the code they
+    must NOT find (a non-finding that moved would test nothing). If this
+    fails, the fixture
     moved and every epic that trusts these line numbers is about to fail for
     the wrong reason."""
     entries = manifest[key]
@@ -98,9 +102,18 @@ def test_bundled_rule_findings_cite_starter_principles(manifest):
         assert finding["principle_id"] in defined, finding
 
 
+def test_every_bundled_rule_non_finding_says_why(manifest):
+    """A non-finding is code that may look like a violation; without the
+    reason, a later reader would 'fix' the fixture or widen the rule."""
+    for item in manifest["bundled_rule_non_findings"]:
+        assert item["why"], item
+        assert item["rule_id"], item
+
+
 def test_every_planted_item_names_the_criterion_that_needs_it(manifest):
     """So a later reader can tell why a plant exists before changing it."""
-    for group in ("violations", "bugs", "bundled_rule_findings"):
+    for group in ("violations", "bugs", "bundled_rule_findings",
+                  "bundled_rule_non_findings"):
         for item in manifest[group]:
             assert item["needed_by"], item
 

@@ -1,5 +1,5 @@
 {
-  "_comment": "Every flaw in this fixture is deliberate and recorded here with the line it lives on and the acceptance criterion that needs it. Line numbers are generated from the files, not hand-counted. If tests/test_fixture_repo.py fails, the fixture has drifted: re-generate this file rather than editing the line numbers by hand.",
+  "_comment": "Every flaw in this fixture is deliberate and recorded here with the line it lives on and the acceptance criterion that needs it. There is no generator: each line number is the one the `evidence` string sits on, read off the file, and tests/test_fixture_repo.py checks every entry's evidence against its line. If that test fails, the fixture has drifted: find the evidence string's new line in the file and update `line` to it, rather than changing the evidence to fit.",
   "test_command": "PYTHONPATH=src python3 -m pytest -q",
   "violations": [
     {
@@ -38,7 +38,7 @@
       "needed_by": "E2-R3 regex matcher (DEC-3 escape hatch: no AST pattern matches a filename)"
     }
   ],
-  "_bundled_rule_findings_comment": "What the bundled example rules in examples/ must find here, exactly (E2-R6). Kept out of `violations` because E3's criterion is exactly 5 violations across 3 principles, and two of these principles are not in this fixture's principles.md: the examples are checked against a copy seeded with templates/principles.md, as /curamoir:init seeds a repo. Line numbers are generated, as above.",
+  "_bundled_rule_findings_comment": "What the bundled example rules in examples/ must find here, exactly (E2-R6). Kept out of `violations` because E3's criterion is exactly 5 violations across 3 principles, and two of these principles are not in this fixture's principles.md: the examples are checked against a copy seeded with templates/principles.md, as /curamoir:init seeds a repo. Line numbers are kept in step with the files the same way as above, and checked by the same test.",
   "bundled_rule_findings": [
     {
       "rule_id": "no-print",
@@ -79,6 +79,17 @@
       "line": 5,
       "evidence": "console.log(`notify: ${message}`);",
       "needed_by": "E2-R6: the bundled TypeScript rule, the proof that the format is not Python-specific"
+    }
+  ],
+  "_bundled_rule_non_findings_comment": "Code a bundled rule must NOT match, kept so an over-broad pattern fails tests/test_bundled_rules.py instead of passing unnoticed. These are not violations of the fixture's principles (its structured-logging is about `print`) and are not counted by E3, but in spirit they may be the same lapse as a plant: each entry says why it is a deliberate non-finding for its rule. Line numbers are kept and checked as above.",
+  "bundled_rule_non_findings": [
+    {
+      "rule_id": "no-console-log",
+      "path": "src/sample/web/notify.ts",
+      "line": 15,
+      "evidence": "console.error(`notify failed: ${message}`);",
+      "why": "no-console-log matches console.log only; its rule file says console.error, console.warn and console.debug each want their own rule. A pattern widened to console.$M(...) would report this line.",
+      "needed_by": "E2-R6: proves the bundled TypeScript rule's pattern is exactly console.log"
     }
   ],
   "bugs": [

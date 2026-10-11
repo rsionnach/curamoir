@@ -11,8 +11,9 @@ principle and rule. "At least one match" would pass a pattern that also fires
 on half the file.
 
 **Fixture provenance.** The expected findings are `bundled_rule_findings` in
-`fixtures/sample-repo/PLANTED.json`, whose line numbers are generated from the
-files and checked against them by tests/test_fixture_repo.py. They are kept
+`fixtures/sample-repo/PLANTED.json`, whose line numbers are checked against
+the files by tests/test_fixture_repo.py. Beside them, `bundled_rule_non_findings`
+records code a rule must NOT match, so an over-broad pattern fails too. They are kept
 out of the manifest's `violations` list on purpose: E3's acceptance criterion
 is exactly "5 planted violations across 3 principles", and that list is E3's.
 
@@ -25,6 +26,7 @@ copy is set up the way `/curamoir:init` sets up a repo: with
 """
 
 import json
+import re
 import shutil
 from collections import Counter
 from pathlib import Path
@@ -88,6 +90,13 @@ def expected_findings():
         (f["path"], f["line"], f["principle_id"], f["rule_id"])
         for f in PLANTED["bundled_rule_findings"]
     )
+
+
+def non_findings():
+    """`bundled_rule_non_findings`, as (path, line, rule) — no principle,
+    because a non-finding is not a violation of one."""
+    return sorted((f["path"], f["line"], f["rule_id"])
+                  for f in PLANTED["bundled_rule_non_findings"])
 
 
 def found_findings(result):
@@ -165,6 +174,42 @@ def test_the_manifest_names_only_bundled_rules():
     bundled = {p.stem for language in LANGUAGE_DIRECTORIES for p in rule_files(language)}
 
     assert {f["rule_id"] for f in PLANTED["bundled_rule_findings"]} == bundled
+    assert {f["rule_id"] for f in PLANTED["bundled_rule_non_findings"]} <= bundled
+
+
+def readme_severities():
+    """The severity column of examples/README.md's table, by rule id (the
+    file stem in the first column)."""
+    rows = re.findall(r"^\| `(?:python|typescript)/([\w-]+)\.yaml` \|[^|]*\| `(\w+)` \|",
+                      (EXAMPLES / "README.md").read_text(encoding="utf-8"), re.MULTILINE)
+    return dict(rows)
+
+
+#: The severity split each rule file's opening comment argues for: the two
+#: mechanical, almost-never-intended output calls fail the lint; the two that
+#: want judgement (a design change, or an approximate path exclusion) only
+#: report. Literal here so that a rule and the README drifting together, in
+#: the same wrong direction, still fails.
+DOCUMENTED_SEVERITIES = {
+    "no-print": "error",
+    "no-console-log": "error",
+    "no-raise-runtime-error": "warning",
+    "no-assert-mock-called": "warning",
+}
+
+
+def test_each_bundled_rule_has_its_documented_severity():
+    """The README's table and each rule's comment say which rules fail the
+    lint at the default `fail_on: error`; a rule whose `severity` disagreed
+    would fail (or stop failing) a user's lint without the docs saying so."""
+    shipped = {
+        rule.id: rule.severity
+        for language in LANGUAGE_DIRECTORIES
+        for rule in (parse_bundled(p) for p in rule_files(language))
+    }
+
+    assert readme_severities() == DOCUMENTED_SEVERITIES
+    assert shipped == DOCUMENTED_SEVERITIES
 
 
 def test_the_typescript_plant_is_in_a_file_ast_grep_reads_as_typescript():
@@ -188,6 +233,35 @@ def test_the_bundled_rules_find_exactly_their_planted_violations(tmp_path):
 
     assert result.skipped == ()
     assert found_findings(result) == expected_findings()
+    # Implied by the equality, but said outright: an over-broad pattern (say
+    # `console.$M(...)` for `console.log`) fails on a named line.
+    found = {(path, line, rule) for path, line, _, rule in found_findings(result)}
+    assert non_findings()
+    assert found.isdisjoint(non_findings())
+
+
+@needs_ast_grep
+def test_no_print_matches_every_argument_layout(tmp_path):
+    """The fixture's `print` plants each take one argument, and the fixture
+    cannot gain plants without changing E3's count, so the layouts the rule
+    file promises are checked here on a snippet: no arguments, several, and
+    the `file=sys.stderr` keyword."""
+    repo = install(tmp_path / "snippet", "python")
+    (repo / "app.py").write_text(
+        "import sys\n"
+        "print()\n"
+        "print(\"a\", \"b\", file=sys.stderr)\n"
+        "logger.print(\"not the builtin\")\n",
+        encoding="utf-8",
+    )
+
+    result = run_lint(repo, ast_grep=shutil.which("ast-grep"))
+
+    assert result.skipped == ()
+    assert sorted((v.path, v.line, v.rule_id) for v in result.violations) == [
+        ("app.py", 2, "no-print"),
+        ("app.py", 3, "no-print"),
+    ]
 
 
 @needs_ast_grep
@@ -219,9 +293,16 @@ def test_the_cli_exits_1_on_the_planted_violations(tmp_path, capsys):
 
 # --- the examples against cúramóir's own code --------------------------------
 
-#: What the bundled rules find in cúramóir's own `src/`, pinned by file and
+#: What the bundled rules find in cúramóir's own `src/` and `tests/`, pinned
+#: by file and
 #: rule (not line, so an unrelated edit does not break this) so that a NEW
 #: finding fails here and is looked at rather than silently accepted.
+#:
+#: `tests/` contributes nothing, and that is the point of copying it: it
+#: raises RuntimeError on purpose in many files (test doubles simulating a
+#: failure), so `no-raise-runtime-error`'s `exclude` list is what keeps it at
+#: zero. Neither of the other Python rules fires there either: cúramóir's tests
+#: assert on behaviour, not `.called`, and do not print.
 #:
 #: All four are `print(..., file=sys.stderr)` from code that runs as a process
 #: entry point: the guardrail gateway's and the job runner's last-resort
@@ -241,10 +322,16 @@ OWN_SRC_FINDINGS = Counter({
 
 
 @needs_ast_grep
-def test_what_the_bundled_rules_find_in_curamoirs_own_src(tmp_path):
+def test_what_the_bundled_rules_find_in_curamoirs_own_code(tmp_path):
     repo = tmp_path / "curamoir"
-    shutil.copytree(ROOT / "src", repo / "src", ignore=shutil.ignore_patterns("__pycache__"))
+    ignore = shutil.ignore_patterns("__pycache__", ".pytest_cache")
+    for directory in ("src", "tests"):
+        shutil.copytree(ROOT / directory, repo / directory, ignore=ignore)
     install(repo, "python", "typescript")
+    # The zero for tests/ below means something only while tests/ has
+    # RuntimeErrors for the exclusions to keep out.
+    assert any("raise RuntimeError(" in p.read_text(encoding="utf-8")
+               for p in (repo / "tests").rglob("test_*.py"))
 
     result = run_lint(repo, ast_grep=shutil.which("ast-grep"))
 
