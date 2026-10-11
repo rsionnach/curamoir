@@ -123,6 +123,19 @@ def test_the_prompt_names_the_principles_that_permit_signature_changes(swept):
     assert "Principles that permit signature changes: structured-logging." in prompt
 
 
+@pytest.mark.parametrize("stdout", ["", "not json", "[1, 2]"])
+def test_a_payload_that_is_not_a_result_object_is_none(stdout):
+    assert FixStepRun((), 1, stdout, "").payload() is None
+
+
+def test_the_work_list_document_is_what_the_cli_prints(swept, capsys):
+    """One shape for the interactive skill and the headless prompt."""
+    repo, _ = swept
+    assert cli.main(["sweep-work-list", "--repo", str(repo)]) == 0
+
+    assert json.loads(capsys.readouterr().out) == work_list_document(work_list(repo))
+
+
 # --- the command line -------------------------------------------------------------------
 
 def test_the_fix_step_can_read_and_edit_and_nothing_else(tmp_path):
@@ -452,16 +465,3 @@ def test_a_permission_the_agent_writes_into_principles_grants_nothing(sandboxed,
     assert "permits" in (sandboxed.path / PRINCIPLES).read_text(encoding="utf-8")
     assert {(b.kind, b.path) for b in result.breaches} == {
         (SIGNATURE_CHANGE, BILLING), (FILE_NOT_IN_WORK_LIST, PRINCIPLES)}
-
-
-@pytest.mark.parametrize("stdout", ["", "not json", "[1, 2]"])
-def test_a_payload_that_is_not_a_result_object_is_none(stdout):
-    assert FixStepRun((), 1, stdout, "").payload() is None
-
-
-def test_the_work_list_document_is_what_the_cli_prints(swept, capsys):
-    """One shape for the interactive skill and the headless prompt."""
-    repo, _ = swept
-    assert cli.main(["sweep-work-list", "--repo", str(repo)]) == 0
-
-    assert json.loads(capsys.readouterr().out) == work_list_document(work_list(repo))

@@ -38,6 +38,7 @@ from curamoir.fix_scope import (
     BASE_MOVED,
     DELETED,
     DEPENDENCY_CHANGE,
+    ENCODING_DECLARATION,
     FILE_ADDED,
     FILE_DELETED,
     FILE_NOT_IN_WORK_LIST,
@@ -53,11 +54,11 @@ from curamoir.fix_scope import (
     Hunk,
     ScopeCheckError,
     _only_header_statements,
+    base_known_modules,
     base_principles,
     check_scope,
     compute_hunks,
     is_dependency_file,
-    known_modules,
     lint_sandbox,
     parse_hunks,
     script_package,
@@ -427,6 +428,51 @@ def test_an_nfd_named_work_list_path_matches_gits_nfc_one(tmp_path):
 
     assert result.ok, result.render()
     assert check_scope([modified(nfc, "x = 1\n", "x = 2\n")], [V(nfd, 1)]).ok
+
+
+# Nested repositories and submodules: git must never open one.
+
+def submodule_repo(tmp_path):
+    sub = git_repo(tmp_path, {"s.txt": "s\n"}, name="sub")
+    repo = git_repo(tmp_path, {"m.py": "x = 1\n"})
+    git(repo, "-c", "protocol.file.allow=always", "submodule", "add", "-q", str(sub), "vendor")
+    git(repo, "commit", "-qm", "submodule")
+    return repo
+
+
+@pytest.mark.parametrize("where", ["sub", "vendor"])
+def test_a_nested_repository_the_agent_makes_fails_before_git_runs(tmp_path, where):
+    """In a fresh directory and at a real (uninitialised) submodule path: the
+    planted repository's fsmonitor would run if git opened it, and it never
+    does, because the verdict is given before any git command."""
+    marker = tmp_path / "ran"
+    sandbox = sandbox_of(submodule_repo(tmp_path), V("m.py", 1))
+    state = snapshot_git_state(sandbox)
+    nested = sandbox.path / where / ".git"
+    for name in ("objects", "refs"):
+        (nested / name).mkdir(parents=True, exist_ok=True)
+    (nested / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+    (nested / "config").write_text(
+        f"[core]\n\trepositoryformatversion = 0\n\tfsmonitor = touch {marker}\n",
+        encoding="utf-8")
+    (sandbox.path / where / "f.py").write_text("x = 1\n", encoding="utf-8")
+    (sandbox.path / "m.py").write_text("x = 2\n", encoding="utf-8")
+
+    result = verify_fix(sandbox, git_state=state)
+
+    assert result.kinds() == (GIT_INTERNALS_CHANGED,)
+    assert f"{where}/.git/config" in result.render()
+    assert not marker.exists()
+
+
+def test_a_removed_submodule_is_seen_though_git_is_told_to_ignore_submodules(tmp_path):
+    sandbox = sandbox_of(submodule_repo(tmp_path), V("m.py", 1))
+    state = snapshot_git_state(sandbox)
+    (sandbox.path / "vendor").rmdir()
+
+    result = verify_fix(sandbox, git_state=state)
+
+    assert kinds_at(result) == {(HIDDEN_CHANGE, "vendor", None)}
 
 
 # --- files and dependencies ----------------------------------------------------------
@@ -916,7 +962,7 @@ def test_known_modules_reads_imports_with_git_on_this_platform(tmp_path):
     repo = git_repo(tmp_path, {"a.py": "import requests\nfrom yaml import safe_load\n",
                                "b.js": "const x = require( 'left-pad' )\n"})
 
-    known = known_modules(repo, resolve_base(repo, "HEAD"))
+    known = base_known_modules(repo, resolve_base(repo, "HEAD"))
 
     assert {"requests", "yaml", "left-pad"} <= known
 
@@ -927,7 +973,7 @@ def test_only_python_files_and_packages_are_local_modules(tmp_path):
                                "src/tool/run.py": "", "stub.pyi": "",
                                "m.py": "import os\n\n\n\n\ndef f():\n    return os.sep\n"})
 
-    known = known_modules(repo, resolve_base(repo, "HEAD"))
+    known = base_known_modules(repo, resolve_base(repo, "HEAD"))
 
     assert {"pkg", "tool", "run", "stub", "m"} <= known
     assert "pandas" not in known and "docs" not in known
@@ -947,6 +993,47 @@ def test_a_dynamic_import_of_a_literal_name_is_an_import(call):
     result = check_scope([modified("m.py", old, new)], [V("m.py", 6)])
 
     assert kinds_at(result) == {(NEW_DEPENDENCY, "m.py", 6)}
+
+
+_JS_TODO = "const a = 1;\nfunction f(x) {\n  return x; // TODO\n}\n"
+
+
+def _js_fix(line, old=_JS_TODO):
+    return old.replace("  return x; // TODO", "  " + line + "\n  return x;")
+
+
+@pytest.mark.parametrize("line", [
+    "const l = require(`lodash`);",
+    "const l = await import(`lodash`);",
+    "const l = require('lod' + 'ash');",
+    "const l = await import(`lod${x}`);",
+    "const l = require(name);",
+    "const l = require(",
+])
+def test_a_js_require_or_import_of_a_template_or_a_computed_name_is_a_new_dependency(line):
+    """A template literal without `${` is a literal like a quoted one. Any
+    other argument (a concatenation, a template with a substitution, a
+    variable, one on the next line) names a module the review cannot know,
+    so it counts as new."""
+    result = check_scope([modified("m.js", _JS_TODO, _js_fix(line))], [V("m.js", 3)])
+
+    assert result.kinds() == (NEW_DEPENDENCY,)
+
+
+def test_a_template_import_of_a_relative_or_known_module_and_an_old_computed_one_pass():
+    old = "const m = require(name);\n" + _JS_TODO
+    unchanged = old.replace(" // TODO", "")
+
+    for line in ("const l = require(`./log`);", "const p = await import(`pino`);"):
+        assert check_scope([modified("m.js", _JS_TODO, _js_fix(line))], [V("m.js", 3)],
+                           known_modules=frozenset({"pino"})).ok, line
+    assert check_scope([modified("m.js", old, unchanged)], [V("m.js", 4)]).ok
+
+
+def test_known_modules_reads_a_template_literal_require(tmp_path):
+    repo = git_repo(tmp_path, {"m.js": "const l = require(`lodash`);\n"})
+
+    assert "lodash" in base_known_modules(repo, resolve_base(repo, "HEAD"))
 
 
 # --- line numbering ------------------------------------------------------------------
@@ -1003,46 +1090,49 @@ def test_a_lone_carriage_return_makes_a_python_file_unverifiable():
     assert result.kinds() == (UNVERIFIABLE,)
 
 
-# Nested repositories and submodules: git must never open one.
-
-def submodule_repo(tmp_path):
-    sub = git_repo(tmp_path, {"s.txt": "s\n"}, name="sub")
-    repo = git_repo(tmp_path, {"m.py": "x = 1\n"})
-    git(repo, "-c", "protocol.file.allow=always", "submodule", "add", "-q", str(sub), "vendor")
-    git(repo, "commit", "-qm", "submodule")
-    return repo
+#: A module whose one violation is the TODO on line 5.
+_PY_TODO = "x = 1\n\n\ndef f(a):\n    return a  # TODO\n"
 
 
-@pytest.mark.parametrize("where", ["sub", "vendor"])
-def test_a_nested_repository_the_agent_makes_fails_before_git_runs(tmp_path, where):
-    """In a fresh directory and at a real (uninitialised) submodule path: the
-    planted repository's fsmonitor would run if git opened it, and it never
-    does, because the verdict is given before any git command."""
-    marker = tmp_path / "ran"
-    sandbox = sandbox_of(submodule_repo(tmp_path), V("m.py", 1))
-    state = snapshot_git_state(sandbox)
-    nested = sandbox.path / where / ".git"
-    for name in ("objects", "refs"):
-        (nested / name).mkdir(parents=True, exist_ok=True)
-    (nested / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
-    (nested / "config").write_text(
-        f"[core]\n\trepositoryformatversion = 0\n\tfsmonitor = touch {marker}\n",
-        encoding="utf-8")
-    (sandbox.path / where / "f.py").write_text("x = 1\n", encoding="utf-8")
-    (sandbox.path / "m.py").write_text("x = 2\n", encoding="utf-8")
+def test_a_utf7_coding_cookie_cannot_smuggle_code_past_the_parse():
+    """The reviewers' repro: read as UTF-8, the inserted lines are comments;
+    CPython honours the cookie and decodes them as an import and a new `f`."""
+    planted = "# coding: utf-7\n#+AAo-import requests+AAo-def f(a, b+AD0-1):+AAo-    return 42\n"
+    new = planted + _PY_TODO.replace("  # TODO", "")
+    assert "requests" in compile(new.encode("ascii"), "m.py", "exec").co_names
 
-    result = verify_fix(sandbox, git_state=state)
+    result = check_scope([modified("m.py", _PY_TODO, new)], [V("m.py", 5)])
 
-    assert result.kinds() == (GIT_INTERNALS_CHANGED,)
-    assert f"{where}/.git/config" in result.render()
-    assert not marker.exists()
+    assert result.kinds() == (UNVERIFIABLE,)
+    assert "utf-7" in result.render()
 
 
-def test_a_removed_submodule_is_seen_though_git_is_told_to_ignore_submodules(tmp_path):
-    sandbox = sandbox_of(submodule_repo(tmp_path), V("m.py", 1))
-    state = snapshot_git_state(sandbox)
-    (sandbox.path / "vendor").rmdir()
+@pytest.mark.parametrize("old,new", [
+    (_PY_TODO, "# coding: utf-8\n" + _PY_TODO.replace("  # TODO", "")),
+    (_PY_TODO, "#!/usr/bin/env python\n# -*- coding: utf-8 -*-\n"
+               + _PY_TODO.replace("  # TODO", "")),
+    ("# coding: utf-8\n" + _PY_TODO, _PY_TODO.replace("  # TODO", "")),
+])
+def test_a_fix_may_not_touch_an_encoding_declaration_even_a_utf8_one(old, new):
+    line = old.count("\n") - _PY_TODO.count("\n") + 5
+    result = check_scope([modified("m.py", old, new)], [V("m.py", line)])
 
-    result = verify_fix(sandbox, git_state=state)
+    assert result.kinds() == (ENCODING_DECLARATION,)
 
-    assert kinds_at(result) == {(HIDDEN_CHANGE, "vendor", None)}
+
+def test_a_base_whose_source_encoding_is_not_utf8_is_unverifiable():
+    """Even with ASCII content and an in-window fix: the review reads text as
+    UTF-8, so a file CPython decodes otherwise is refused, not reasoned
+    about (fix_scope module docstring)."""
+    old = "# -*- coding: latin-1 -*-\n" + _PY_TODO
+
+    result = check_scope([modified("m.py", old, old.replace("  # TODO", ""))], [V("m.py", 6)])
+
+    assert result.kinds() == (UNVERIFIABLE,)
+    assert "iso-8859-1" in result.render()
+
+
+def test_a_utf8_byte_order_mark_is_utf8():
+    old = "﻿" + _PY_TODO
+
+    assert check_scope([modified("m.py", old, old.replace("  # TODO", ""))], [V("m.py", 5)]).ok

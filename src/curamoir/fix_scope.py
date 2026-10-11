@@ -93,6 +93,19 @@ Two layers, so the rules can be tested without git:
   here, so any changed line that looks like a declaration (DECLARATION)
   counts as one — conservative, and blind to a parameter changed on a line
   of its own (see Limits).
+- *Encoding.* A Python file is reviewed only if CPython decodes it as UTF-8
+  on both sides (tokenize.detect_encoding over its bytes, as the
+  interpreter does), and it is parsed from those bytes: the review reads
+  text as UTF-8, and `ast.parse` of a str ignores a coding cookie, so a
+  `# coding: utf-7` line turns comments the review sees into an import and
+  a new definition at run time. Any other source encoding is UNVERIFIABLE,
+  the base's included. WHY the base too: a latin-1 base with ASCII content
+  reads the same either way, but proving that per file is more code than
+  refusing a rare file costs, and refusing loses one fix where guessing
+  wrong admits one. And the fix may not add, remove or change a coding
+  cookie on line 1 or 2 at all, a UTF-8 one included (ENCODING_DECLARATION):
+  no lint fix needs to, and with the declaration held fixed the review and
+  CPython cannot come to read different text.
 
 **WINDOW = 3.** A mechanical fix sometimes has to touch a line just above
 the violation: chaining a cause (`raise X(...) from error`) needs the
@@ -115,7 +128,11 @@ of a function to "fix" one line in it is refused.
   yet is reported as new.
 - A dynamic import is seen only when its module is a string literal
   (`__import__("x")`, `import_module("x")`); `import_module(name)` with a
-  computed name is not. Only Python source counts as a local module, and
+  computed name is not. In JS/TS a `require(` or `import(` whose argument
+  is not one literal (quoted, or a template with no `${`), or is on
+  another line, is NEW_DEPENDENCY: what it loads cannot be known. Lines are
+  matched as text, so one in a comment or string counts too (the safe
+  direction). Only Python source counts as a local module, and
   a directory holding JS/TS source as a local package; a bare specifier
   that a tsconfig `paths`/`baseUrl` alias resolves locally, and a compiled
   extension module (`.so`, `.pyd`), are reported as new.
@@ -137,10 +154,12 @@ Syntax that imports on 3.9, like sweep.py: the sweep reaches this through
 import ast
 import builtins
 import difflib
+import io
 import json
 import os
 import re
 import sys
+import tokenize
 import unicodedata
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
@@ -148,8 +167,8 @@ from typing import Optional
 
 from curamoir.git_guard import (
     GitGuardError,
-    Sandbox,
     git,
+    require_sandbox,
     tree_changes,
     verify_git_state,
 )
@@ -178,10 +197,14 @@ BASE_MOVED = "base_moved"
 #: submodule, or hidden from git some other way): a change git cannot see
 #: cannot be reviewed, and cannot be carried to a PR either.
 HIDDEN_CHANGE = "hidden_change"
+#: A Python file's coding cookie (PEP 263, line 1 or 2) was added, removed
+#: or changed. Its own kind because it changes how CPython decodes every
+#: line the review read (module docstring, *Encoding*).
+ENCODING_DECLARATION = "encoding_declaration"
 
 KINDS = (FILE_NOT_IN_WORK_LIST, FILE_ADDED, FILE_DELETED, DEPENDENCY_CHANGE,
          NEW_DEPENDENCY, OUTSIDE_VIOLATION, SIGNATURE_CHANGE, UNVERIFIABLE,
-         GIT_INTERNALS_CHANGED, BASE_MOVED, HIDDEN_CHANGE)
+         GIT_INTERNALS_CHANGED, BASE_MOVED, HIDDEN_CHANGE, ENCODING_DECLARATION)
 
 #: The principle permission that lifts SIGNATURE_CHANGE (principles.PERMISSIONS).
 SIGNATURE_PERMISSION = "signature_change"
@@ -226,8 +249,16 @@ DECLARATION = re.compile(
     r"\s*\([^)]*\)\s*(?::\s*[^{;]+)?\{?\s*$"
 )
 
+#: A JS/TS import specifier written as a literal: quoted, or a template
+#: literal with no `$` (so no `${...}` substitution). Two groups, one empty.
 _SCRIPT_IMPORT = re.compile(
-    r"""(?:\bfrom\s*|\bimport\s*\(?\s*|\brequire\s*\(\s*|^\s*import\s+)['"]([^'"]+)['"]""")
+    r"""(?:\bfrom\s*|\bimport\s*\(?\s*|\brequire\s*\(\s*|^\s*import\s+)"""
+    r"""(?:['"]([^'"]+)['"]|`([^`$]+)`)""")
+
+#: A `require(` or `import(` call (not a method of that name), and the one
+#: literal argument it must have for _SCRIPT_IMPORT to know what it loads.
+_SCRIPT_LOADER_CALL = re.compile(r"(?<![\w$.])(?:require|import)\s*\(")
+_SCRIPT_LITERAL_ARGUMENT = re.compile(r"""\s*(?:'[^'\n]*'|"[^"\n]*"|`[^`$\n]*`)\s*[,)]""")
 
 #: Node's built-in modules; `node:`-prefixed specifiers are built-ins too.
 NODE_BUILTINS = frozenset({
@@ -399,6 +430,10 @@ def _check_file(change, violations, permitting, known_modules, window):
 
     old_tree = new_tree = None
     if python:
+        breach = _encoding_breach(path, old, new)
+        if breach:
+            found.append(breach)
+            return found
         old_tree, new_tree, problem = _parse_both(old, new)
         if problem:
             found.append(Breach(UNVERIFIABLE, path, None, problem))
@@ -431,6 +466,7 @@ def _check_file(change, violations, permitting, known_modules, window):
         found.extend(_new_import_breaches(path, _script_imports(old_lines),
                                           _script_imports(new_lines), known_modules,
                                           NODE_BUILTINS))
+        found.extend(_computed_load_breaches(path, old_lines, new_lines))
     return found
 
 
@@ -531,21 +567,52 @@ def _describe(hunk):
 
 _LONE_CR = re.compile(r"\r(?!\n)")
 
+#: PEP 263's coding cookie, as CPython's tokenizer matches it.
+_CODING_COOKIE = re.compile(r"^[ \t\f]*#.*?coding[:=][ \t]*([-\w.]+)")
+
+
+def _encoding_breach(path, old, new):
+    """A Breach if CPython would not decode `old` or `new` as the UTF-8 the
+    review read them as, or if the fix touched a coding cookie; else None
+    (module docstring, *Encoding*)."""
+    for side, text in (("base", old), ("fixed", new)):
+        try:
+            encoding, _ = tokenize.detect_encoding(io.BytesIO(text.encode("utf-8")).readline)
+        except (SyntaxError, UnicodeError) as error:
+            return Breach(UNVERIFIABLE, path, None,
+                          f"the {side} version's source encoding cannot be read ({error})")
+        if encoding not in ("utf-8", "utf-8-sig"):
+            return Breach(UNVERIFIABLE, path, None, (
+                f"CPython decodes the {side} version as {encoding} (its coding cookie) "
+                "and the review reads UTF-8, so what was checked would not be what runs"))
+    if _coding_cookies(old) != _coding_cookies(new):
+        return Breach(ENCODING_DECLARATION, path, 1, (
+            "a coding cookie on line 1 or 2 was added, removed or changed; it decides how "
+            "CPython reads every line, and a sweep fix does not touch it"))
+    return None
+
+
+def _coding_cookies(text):
+    return [line for line in text.split("\n", 2)[:2] if _CODING_COOKIE.match(line)]
+
 
 def _parse_both(old, new):
-    """(old tree, new tree, None), or (None, None, why it cannot be checked)."""
+    """(old tree, new tree, None), or (None, None, why it cannot be checked).
+    Parsed from the UTF-8 bytes, as CPython reads the file (a BOM included),
+    not from the str, whose parse ignores a coding cookie
+    (_encoding_breach has already held both sides to UTF-8)."""
     for side, text in (("base", old), ("fixed", new)):
         if _LONE_CR.search(text):
             return None, None, (f"the {side} version has a carriage return that does not "
                                 "end a CRLF line; Python counts it as a line break and git "
                                 "does not, so the parse cannot be matched to git's hunks")
     try:
-        old_tree = ast.parse(old)
+        old_tree = ast.parse(old.encode("utf-8"))
     except (SyntaxError, ValueError) as error:
         return None, None, (f"the base version does not parse ({error.__class__.__name__}: "
                             f"{error}), so its signatures cannot be compared")
     try:
-        new_tree = ast.parse(new)
+        new_tree = ast.parse(new.encode("utf-8"))
     except (SyntaxError, ValueError) as error:
         return None, None, (f"the fixed version does not parse ({error.__class__.__name__}: "
                             f"{error})")
@@ -956,14 +1023,39 @@ def script_package(specifier):
     return parts[0]
 
 
+def _script_specifiers(line):
+    return [quoted or template for quoted, template in _SCRIPT_IMPORT.findall(line)]
+
+
 def _script_imports(lines):
     found = {}
     for number, line in enumerate(lines, start=1):
-        for specifier in _SCRIPT_IMPORT.findall(line):
+        for specifier in _script_specifiers(line):
             package = script_package(specifier)
             if package and package not in found:
                 found[package] = number
     return found
+
+
+def _computed_loads(lines):
+    """Stripped line -> first line number, for each line with a `require(`
+    or `import(` whose argument is not one literal."""
+    found = {}
+    for number, line in enumerate(lines, start=1):
+        for call in _SCRIPT_LOADER_CALL.finditer(line):
+            if not _SCRIPT_LITERAL_ARGUMENT.match(line, call.end()):
+                found.setdefault(line.strip(), number)
+    return found
+
+
+def _computed_load_breaches(path, old_lines, new_lines):
+    before = _computed_loads(old_lines)
+    return [Breach(NEW_DEPENDENCY, path, number,
+                   f"loads a module named by something other than one literal (fixed line "
+                   f"{number}), so whether it is a new dependency cannot be checked")
+            for text, number in sorted(_computed_loads(new_lines).items(),
+                                       key=lambda item: item[1])
+            if text not in before]
 
 
 def _new_import_breaches(path, before, after, known_modules, builtins):
@@ -980,6 +1072,9 @@ def _new_import_breaches(path, before, after, known_modules, builtins):
 
 
 # --- the git adapter ---------------------------------------------------------------
+# Every `repo` parameter in this section is a sandbox's path (Sandbox.path),
+# never the user's checkout: lint_sandbox and verify_fix, the entry points,
+# require a Sandbox and pass its path down.
 
 def lint_sandbox(sandbox, **lint_options):
     """Run the lint (sweep.work_list, with `lint_options`) in `sandbox` while
@@ -993,7 +1088,7 @@ def lint_sandbox(sandbox, **lint_options):
     had. ScopeCheckError if the tree is not the base (anything modified,
     staged or untracked, ignored or not); sweep.LintUntrusted if the lint's
     report cannot be acted on."""
-    _require_sandbox(sandbox)
+    require_sandbox(sandbox, ScopeCheckError)
     _require_pristine(sandbox)
     result = work_list(sandbox.path, **lint_options)
     _require_pristine(sandbox)
@@ -1016,7 +1111,7 @@ def base_principles(sandbox):
     can edit `.curamoir/principles.md` in the sandbox, and a `permits:
     signature_change` it wrote there would otherwise license its own
     signature change. ScopeCheckError if the base's file does not parse."""
-    _require_sandbox(sandbox)
+    require_sandbox(sandbox, ScopeCheckError)
     data = sandbox.show(".curamoir/principles.md")
     if data is None:
         return PrinciplesFile()
@@ -1051,7 +1146,7 @@ def verify_fix(sandbox, *, git_state, window=WINDOW):
     if git_state is None:
         raise ScopeCheckError("no git-state snapshot taken before the fix step; refusing "
                               "to run git on the edited tree")
-    _require_sandbox(sandbox)
+    require_sandbox(sandbox, ScopeCheckError)
     if os.path.realpath(git_state.path) != os.path.realpath(str(sandbox.path)):
         raise ScopeCheckError(f"the git-state snapshot is of {git_state.path}, not "
                               f"{sandbox.path}")
@@ -1084,7 +1179,7 @@ def verify_fix(sandbox, *, git_state, window=WINDOW):
     permitting = frozenset(p.id for p in base_principles(sandbox).principles
                            if SIGNATURE_PERMISSION in p.permits)
     verdict = check_scope(changes, sandbox.work_list.items, permitting=permitting,
-                          known_modules=known_modules(sandbox.path, base), window=window)
+                          known_modules=base_known_modules(sandbox.path, base), window=window)
     if not hidden:
         return verdict
     return ScopeVerdict(
@@ -1111,13 +1206,6 @@ def _missing_submodules(repo, base):
             if target.is_symlink() or not target.is_dir():
                 missing.append(nfc(path))
     return missing
-
-
-def _require_sandbox(sandbox):
-    if not isinstance(sandbox, Sandbox):
-        raise ScopeCheckError(f"{sandbox} is not a sandbox (git_guard.prepare_sandbox); a "
-                              "sweep fix is made and reviewed in a sandbox, never in a "
-                              "checkout")
 
 
 def changes_since(repo, base):
@@ -1195,7 +1283,7 @@ def _read_text(path):
 _PY_IMPORT_LINE = re.compile(r"^\s*(?:import\s+([\w., ]+)|from\s+(\w[\w.]*)\s+import\b)")
 
 
-def known_modules(repo, base):
+def base_known_modules(repo, base):
     """Top-level module and package names that are not a new dependency at
     commit `base`: every Python file's module name and every directory
     holding Python or JS/TS source (a local module or package, wherever it
@@ -1228,10 +1316,10 @@ def known_modules(repo, base):
             if name:
                 known.add(name.split(".", 1)[0])
     scripts = git(repo, "grep", "-h", "-I", "-E",
-                  r"(from|import|require)[[:space:]]*\(?[[:space:]]*['\"]",
+                  r"(from|import|require)[[:space:]]*\(?[[:space:]]*['\"`]",
                   base, "--", *(f"*{suffix}" for suffix in SCRIPT_SUFFIXES), ok=(0, 1))
     for line in scripts.decode("utf-8", "surrogateescape").splitlines():
-        for specifier in _SCRIPT_IMPORT.findall(line):
+        for specifier in _script_specifiers(line):
             package = script_package(specifier)
             if package:
                 known.add(package)

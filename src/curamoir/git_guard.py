@@ -2,7 +2,9 @@
 
 fix_scope decides whether a sweep fix is in scope; this module makes sure
 that asking git what the fix changed cannot run anything the fix planted,
-and that the tree being asked about is not the user's.
+and that the tree being asked about is not the user's. The order the runner
+calls things in is fix_scope's module docstring, "What the runner (cm-fkd.4)
+must do".
 
 **The sandbox.** The fix step never runs in the user's checkout. It runs in
 a disposable clone of the pinned base commit (prepare_sandbox), made with
@@ -51,8 +53,9 @@ agent starts, records digests of the sandbox's git files (config, HEAD,
 index, packed-refs, shallow, and the hooks, info, refs and objects/info
 trees) and of every file in the work tree. verify_git_state compares the
 git files and every `.gitattributes`, and refuses any nested `.git`, by
-reading files and before any git command runs; tree_changes lists every work-tree path that differs, which
-fix_scope holds git's own account of the change to. In the sandbox this is
+reading files and before any git command runs; tree_changes lists every
+work-tree path that differs, which fix_scope holds git's own account of the
+change to. In the sandbox this is
 defence in depth: the agent is denied `.git` and nothing else writes there.
 
 **Limits, stated rather than hidden.**
@@ -62,7 +65,11 @@ defence in depth: the agent is denied `.git` and nothing else writes there.
   including any `include.path` it names. That happens before the fix agent
   exists, on files it never reaches, so it is the owner's own setup; this
   module runs no git in the source after the sandbox is made.
-
+- The sandbox follows the base commit, not the source's checkout: it is
+  checked out by a clone whose config is git's defaults, so a source with
+  `core.symlinks=false` (its symlinks are plain files on disk) has real
+  symlinks in the sandbox, and `core.autocrlf` or `core.eol` there do not
+  apply. What the lint and the review read is the commit's content.
 - Submodules are not initialised: a submodule is an empty directory in the
   sandbox, so a violation inside one cannot be fixed there.
 - Git LFS and every other smudge filter are not run (no filter is
@@ -87,10 +94,11 @@ import shutil
 import signal
 import stat
 import subprocess
+import sys
 import tempfile
+import warnings
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
 
 #: The git executable. A module attribute so a test can stand in a slow one.
 GIT = "git"
@@ -254,10 +262,11 @@ class Sandbox:
     """A disposable clone of `source` at commit `base`, at `path`, made by
     prepare_sandbox. A context manager: leaving it removes the clone.
 
-    `work_list` is the sweep.WorkList the lint gave for this sandbox at its
-    base, set by fix_scope.lint_sandbox and read by fix_scope.verify_fix,
-    so the review can only ever compare a fix with the work list of the
-    commit the fix was made on."""
+    `work_list` is fix_scope's slot, not this module's: the sweep.WorkList
+    the lint gave for this sandbox at its base, set by
+    fix_scope.lint_sandbox and read by fix_scope.verify_fix, so the review
+    can only ever compare a fix with the work list of the commit the fix was
+    made on. Nothing here reads it."""
 
     def __init__(self, source, path, base, root):
         self.source = source
@@ -269,16 +278,20 @@ class Sandbox:
     def __enter__(self):
         return self
 
-    def __exit__(self, *exc_info):
-        self.cleanup()
+    def __exit__(self, exc_type, exc, traceback):
+        if exc_type is None:
+            self.cleanup()
+        else:
+            _remove_or_warn(self._root)
         return False
 
     def __repr__(self):
         return f"Sandbox(source={self.source!r}, path={str(self.path)!r}, base={self.base!r})"
 
     def cleanup(self):
-        """Remove the clone. Safe to call more than once."""
-        shutil.rmtree(self._root, ignore_errors=True)
+        """Remove the clone. Safe to call more than once. GitGuardError if
+        any of it is left (remove_tree)."""
+        remove_tree(self._root)
 
     def show(self, path):
         """The bytes of `path` at the base commit, or None if it has no such
@@ -317,6 +330,18 @@ class Sandbox:
             environment = {"GIT_INDEX_FILE": index}
             git(self.path, "read-tree", self.base, extra_env=environment)
             git(self.path, "add", "--all", "--force", "--", *specs, extra_env=environment)
+            # WHY check: git add skips, without failing, what it will not
+            # stage (a FIFO; a file in a directory it cannot read), and a
+            # patch that silently drops an accepted path is not that fix.
+            staged = git(self.path, "diff", "--cached", "--name-only", "-z", "--no-renames",
+                         self.base, "--", *specs, extra_env=environment)
+            names = {name.decode("utf-8", "surrogateescape")
+                     for name in staged.split(b"\0") if name}
+            left_out = sorted(set(paths) - names)
+            if left_out:
+                raise GitGuardError(
+                    f"git would not stage {', '.join(left_out)} (a FIFO, an unreadable "
+                    "file or directory, or no change), so a patch would leave it out")
             return git(self.path, "diff", "--cached", "--binary", "--full-index",
                        "--no-renames", "--no-ext-diff", "--no-textconv", self.base, "--",
                        *specs, extra_env=environment)
@@ -335,7 +360,11 @@ def prepare_sandbox(repo, base_ref, parent=None, timeout=CLONE_TIMEOUT):
     source = os.path.abspath(str(repo))
     _require_top_level(source)
     base = resolve_base(source, base_ref)
-    root = Path(tempfile.mkdtemp(prefix="curamoir-sweep-", dir=parent))
+    try:
+        root = Path(tempfile.mkdtemp(prefix="curamoir-sweep-", dir=parent))
+    except OSError as error:
+        raise GitGuardError(f"cannot make a sandbox in {parent or tempfile.gettempdir()}: "
+                            f"{error}") from error
     try:
         template = root / "template"
         template.mkdir()
@@ -345,12 +374,65 @@ def prepare_sandbox(repo, base_ref, parent=None, timeout=CLONE_TIMEOUT):
         if _run_git(path, ["cat-file", "-e", f"{base}^{{commit}}"],
                     DEFAULT_GIT_TIMEOUT).returncode != 0:
             git(path, "fetch", "--quiet", "--no-tags", "origin", base, timeout=timeout)
-        git(path, "checkout", "--quiet", "--detach", base)
+        git(path, "checkout", "--quiet", "--detach", base, timeout=timeout)
         _check_clone(path)
         return Sandbox(source, path, base, root)
     except BaseException:
-        shutil.rmtree(root, ignore_errors=True)
+        _remove_or_warn(root)
         raise
+
+
+def remove_tree(root):
+    """Remove `root` and everything under it; GitGuardError if any of it is
+    left. WHY not rmtree(ignore_errors=True): the fix agent can make a
+    directory unlistable (mode 000) or read-only (555), and rmtree then
+    silently leaves the whole clone. Every directory is made u+rwx first,
+    and the error handler does the same to a path and its parent and
+    retries. A symlink is never chmodded: chmod follows it, to whatever it
+    names outside the sandbox."""
+    if not os.path.lexists(root):
+        return
+    _make_removable(root)
+    for directory, subdirs, _ in os.walk(root):
+        for name in subdirs:
+            _make_removable(os.path.join(directory, name))
+    # 3.12 deprecates onerror (a warning, an error under the tests' -W
+    # error) and 3.9, which scripts/curamoir may run this on, lacks onexc.
+    if sys.version_info >= (3, 12):  # noqa: UP036
+        shutil.rmtree(root, onexc=_retry_removal)
+    else:
+        shutil.rmtree(root, onerror=_retry_removal)
+    if os.path.lexists(root):
+        raise GitGuardError(f"the sandbox at {root} could not be removed; delete it by hand")
+
+
+def _remove_or_warn(root):
+    """remove_tree while another exception is on its way out. WHY a warning,
+    not a raise: that exception says why the run failed, and one raised
+    here would replace it (kept only as __context__, which a runner that
+    catches GitGuardError never reads)."""
+    try:
+        remove_tree(root)
+    except GitGuardError as error:
+        warnings.warn(str(error), RuntimeWarning, stacklevel=3)
+
+
+def _make_removable(path):
+    try:
+        mode = os.lstat(path).st_mode
+        if stat.S_ISDIR(mode):
+            os.chmod(path, stat.S_IMODE(mode) | stat.S_IRWXU)
+    except OSError:
+        pass  # what is still in the way, remove_tree's last check reports
+
+
+def _retry_removal(function, path, _error):
+    if function not in (os.rmdir, os.unlink, os.remove):
+        return  # a failed open or listing: retrying it would remove nothing
+    _make_removable(os.path.dirname(path))
+    _make_removable(path)
+    with contextlib.suppress(OSError):  # reported by remove_tree's last check
+        function(path)
 
 
 def _check_clone(path):
@@ -375,10 +457,10 @@ class GitState:
     work tree (`tree`), and the `base` commit it was taken for."""
 
     path: str
-    git_dir: Optional[str]
+    git_dir: str
     digests: tuple
     tree: tuple
-    base: Optional[str]
+    base: str
 
 
 @dataclass(frozen=True)
@@ -400,15 +482,22 @@ _GIT_STATE_FILES = ("config", "config.worktree", "commondir", "HEAD", "index",
 _GIT_STATE_TREES = ("hooks", "info", "refs", "objects/info")
 
 
+def require_sandbox(sandbox, error=GitGuardError):
+    """Raise `error` (a GitGuardError class) unless `sandbox` is a Sandbox.
+    One check for the fix step, the snapshot and the review, so all three
+    refuse a checkout the same way."""
+    if not isinstance(sandbox, Sandbox):
+        raise error(f"{sandbox} is not a sandbox (git_guard.prepare_sandbox); the fix step "
+                    "and its review run in a sandbox, never in a checkout")
+
+
 def snapshot_git_state(sandbox):
     """The digests of `sandbox`'s git files and work tree (module docstring),
     read as files, never through git, so the same reading after the fix step
     runs nothing the fix step planted. GitGuardError if `sandbox` is not a
     Sandbox or its `.git` is not a real directory (a symlinked `.git` could
     be swapped for another directory unseen)."""
-    if not isinstance(sandbox, Sandbox):
-        raise GitGuardError(f"{sandbox} is not a sandbox (git_guard.prepare_sandbox); the "
-                            "fix step and its review run in a sandbox, never a checkout")
+    require_sandbox(sandbox)
     path = Path(sandbox.path)
     git_dir = path / ".git"
     if git_dir.is_symlink() or not git_dir.is_dir():
@@ -486,7 +575,16 @@ def _tree_digests(root):
     depth, ignored or not. Symlinked directories are recorded as links and
     not followed."""
     found = {}
-    for directory, subdirs, files in os.walk(root):
+
+    def unreadable(error):
+        # WHY: os.walk skips a directory it cannot list unless told, and
+        # the agent can lock one to hide what it wrote in it. Recorded, the
+        # directory is a change (fix_scope: HIDDEN_CHANGE).
+        if error.filename:
+            found[_label(root, Path(error.filename))] = (
+                f"unreadable-dir: {error.__class__.__name__}")
+
+    for directory, subdirs, files in os.walk(root, onerror=unreadable):
         if Path(directory) == root:
             subdirs[:] = [d for d in subdirs if d != ".git"]
         for entry in files + [d for d in subdirs if (Path(directory) / d).is_symlink()]:

@@ -1,10 +1,10 @@
 """The git-safety layer under the sweep's review step (cm-fkd.3, E3-R2).
 
-Two subjects. The hardened `git()` every git command here runs through, and
-the snapshot that holds a sandbox's `.git` and work tree to what they were
-before the fix step. And the sandbox itself: the disposable clone of the
-pinned base commit that the fix step runs in instead of the user's checkout
-(the decision recorded on cm-fkd.3).
+Three subjects: the hardened `git()` every git command here runs through;
+the sandbox, the disposable clone of the pinned base commit that the fix
+step runs in instead of the user's checkout (the decision recorded on
+cm-fkd.3); and the snapshot that holds a sandbox's `.git` and work tree to
+what they were before the fix step.
 
 Every test runs real git on repositories made in `tmp_path`; the planted
 programs (fsmonitor, filter drivers, a slow `git`) write a marker file, and
@@ -13,6 +13,7 @@ the assertion is that the marker never appears.
 
 import os
 import re
+import stat
 import subprocess
 import sys
 import time
@@ -116,6 +117,16 @@ def test_git_reads_no_global_or_system_config(tmp_path, monkeypatch):
     listing = git(repo, "config", "--list", "--show-origin").decode()
 
     assert "sweep.marker" not in listing
+
+
+def test_git_never_descends_into_a_submodule(tmp_path):
+    """diff.ignoreSubmodules=all is part of the hardening: a nested repository
+    is never opened by a git command run here."""
+    repo = git_repo(tmp_path, {"m.py": "x = 1\n"})
+
+    listing = git(repo, "config", "--get", "diff.ignoreSubmodules").decode().strip()
+
+    assert listing == "all"
 
 
 def test_git_names_a_failure(tmp_path):
@@ -355,6 +366,105 @@ def test_the_patch_carries_exactly_the_paths_asked_for_binary_safe(tmp_path, san
     assert (target / "d.py").read_text() == "d = 1\n"
 
 
+#: Root ignores permission bits, so a locked directory locks nothing for it.
+needs_permissions = pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0,
+                                       reason="root ignores permission bits")
+
+
+@needs_permissions
+@pytest.mark.parametrize("mode", [0o000, 0o555])
+def test_cleanup_removes_a_clone_holding_a_directory_the_agent_locked(tmp_path, sandboxes,
+                                                                      mode):
+    """And never changes the mode of anything a symlink in it points at."""
+    repo = git_repo(tmp_path, {"m.py": "x = 1\n"})
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    outside.chmod(0o500)
+    sandbox = prepare_sandbox(repo, "HEAD", parent=sandboxes)
+    (sandbox.path / "link").symlink_to(outside)
+    locked = sandbox.path / "locked"
+    (locked / "deeper").mkdir(parents=True)
+    (locked / "deeper" / "f.py").write_text("x\n", encoding="utf-8")
+    (locked / "deeper").chmod(mode)
+    locked.chmod(mode)
+    try:
+        sandbox.cleanup()
+
+        assert list(sandboxes.iterdir()) == []
+        assert stat.S_IMODE(outside.stat().st_mode) == 0o500
+    finally:
+        for path in (locked, locked / "deeper", outside):
+            if os.path.lexists(path):
+                path.chmod(0o755)
+
+
+def test_a_clone_cleanup_cannot_remove_is_an_error_that_never_masks_another(
+        tmp_path, sandboxes, monkeypatch):
+    repo = git_repo(tmp_path, {"m.py": "x = 1\n"})
+    sandbox = prepare_sandbox(repo, "HEAD", parent=sandboxes)
+    monkeypatch.setattr(git_guard.shutil, "rmtree", lambda *args, **kwargs: None)
+
+    with pytest.raises(GitGuardError, match="could not be removed"):
+        sandbox.cleanup()
+    with pytest.warns(RuntimeWarning, match="could not be removed"), \
+            pytest.raises(KeyError, match="the runner failed"), sandbox:
+        raise KeyError("the runner failed")
+
+    monkeypatch.undo()
+    sandbox.cleanup()
+    assert list(sandboxes.iterdir()) == []
+
+
+@needs_permissions
+def test_a_parent_that_is_missing_or_unwritable_is_a_git_guard_error(tmp_path, sandboxes):
+    repo = git_repo(tmp_path, {"m.py": "x = 1\n"})
+
+    with pytest.raises(GitGuardError, match="cannot make a sandbox"):
+        prepare_sandbox(repo, "HEAD", parent=tmp_path / "missing")
+    sandboxes.chmod(0o555)
+    try:
+        with pytest.raises(GitGuardError, match="cannot make a sandbox"):
+            prepare_sandbox(repo, "HEAD", parent=sandboxes)
+    finally:
+        sandboxes.chmod(0o755)
+
+
+def test_the_checkout_is_bounded_by_the_clone_timeout(tmp_path, sandboxes, monkeypatch):
+    repo = git_repo(tmp_path, {"m.py": "x = 1\n"})
+    timeouts = {}
+    real = git_guard.git
+
+    def spy(repo, *args, **kwargs):
+        timeouts.setdefault(args[0], kwargs.get("timeout"))
+        return real(repo, *args, **kwargs)
+
+    monkeypatch.setattr(git_guard, "git", spy)
+    prepare_sandbox(repo, "HEAD", parent=sandboxes, timeout=77).cleanup()
+
+    assert timeouts["clone"] == timeouts["checkout"] == 77
+
+
+@needs_permissions
+def test_a_patch_that_cannot_carry_every_path_asked_for_is_refused(tmp_path, sandboxes):
+    """git add skips a FIFO and a file it cannot read without failing; the
+    patch is checked against the paths asked for, not trusted."""
+    repo = git_repo(tmp_path, {"m.py": "x = 1\n"})
+    with prepare_sandbox(repo, "HEAD", parent=sandboxes) as sandbox:
+        (sandbox.path / "m.py").write_text("x = 2\n", encoding="utf-8")
+        os.mkfifo(str(sandbox.path / "pipe"))
+        with pytest.raises(GitGuardError, match="pipe"):
+            sandbox.patch(("m.py", "pipe"))
+        locked = sandbox.path / "locked"
+        locked.mkdir()
+        (locked / "f.py").write_text("x\n", encoding="utf-8")
+        locked.chmod(0)
+        try:
+            with pytest.raises(GitGuardError, match=r"locked/f\.py"):
+                sandbox.patch(("m.py", "locked/f.py"))
+        finally:
+            locked.chmod(0o755)
+
+
 # --- the snapshot ------------------------------------------------------------------------
 
 @pytest.fixture
@@ -452,11 +562,16 @@ def test_a_nested_git_directory_or_file_is_refused_before_git_runs(sandbox, wher
     assert "nested git" in found[0].reason
 
 
-def test_git_never_descends_into_a_submodule(tmp_path):
-    """diff.ignoreSubmodules=all is part of the hardening: a nested repository
-    is never opened by a git command run here."""
-    repo = git_repo(tmp_path, {"m.py": "x = 1\n"})
-
-    listing = git(repo, "config", "--get", "diff.ignoreSubmodules").decode().strip()
-
-    assert listing == "all"
+@needs_permissions
+def test_a_directory_the_agent_makes_unreadable_is_a_change(sandbox):
+    """os.walk skips a directory it cannot list unless told otherwise; one the
+    agent locked is recorded, so what it hides shows as a change."""
+    state = snapshot_git_state(sandbox)
+    hidden = sandbox.path / "hidden"
+    hidden.mkdir()
+    (hidden / "new.py").write_text("x = 1\n", encoding="utf-8")
+    hidden.chmod(0)
+    try:
+        assert tree_changes(state) == ("hidden",)
+    finally:
+        hidden.chmod(0o755)

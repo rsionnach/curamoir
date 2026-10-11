@@ -1,7 +1,7 @@
 """E3-R2's first half, and the sweep's one model call: the fix step.
 
 The sweep is driven by Python (the decision recorded on cm-80h): the runner
-lints in-process (sweep.work_list), hands the work list to a headless
+lints in-process in the sandbox (fix_scope.lint_sandbox), hands the work list to a headless
 `claude -p` on `models.cheap` whose only job is to edit files, and then does
 every deterministic step itself — the scope check (fix_scope.verify_fix),
 the tests (E3-R4), the PR (E3-R3), the ledger (E3-R5). This module is the
@@ -122,8 +122,9 @@ the first scheduled sweep is the first end-to-end evidence.
 
 **Not run through the agent.** The lint is not one of the agent's tasks: a
 Bash tool call is bounded at ten minutes and the lint's own bound is 600s
-plus sweep's 30s grace, so the runner runs it (sweep.work_list) and passes
-the result in.
+plus sweep's 30s grace, so the runner runs it (fix_scope.lint_sandbox(sandbox),
+which also records it as sandbox.work_list, without which verify_fix
+refuses) and passes the result in.
 
 Syntax that imports on 3.9, like sweep.py.
 """
@@ -136,8 +137,8 @@ from typing import Optional
 
 from curamoir.fix_scope import SIGNATURE_PERMISSION, WINDOW
 from curamoir.git_guard import (
-    GitGuardError,
-    Sandbox,
+    GitState,
+    require_sandbox,
     run_in_group,
     scrubbed_environment,
     snapshot_git_state,
@@ -256,9 +257,10 @@ def repo_deny_rules(repo):
     rules "apply when either the requested path or the file it resolves to
     matches" (same page, "Symlinks"), so naming both spellings is belt and
     braces. `.git` alone is named as well as `.git/**` because the latter is
-    the directory's contents, and a linked worktree's `.git` is a file.
-    Claude Code also lists `.git` among its protected paths (same page,
-    "bypassPermissions"); these rules do not lean on that. fix_scope's
+    the directory's contents, and a `.git` file (as a linked worktree has;
+    the sandbox's is a directory) is covered too, belt and braces. Claude
+    Code also lists `.git` among its protected paths (same page,
+    "bypassPermissions"); these rules do not lean on that. git_guard's
     snapshot (snapshot_git_state) is the check in code behind them."""
     return [f"{tool}(/{root}/{tail})" for tool in ("Read", "Edit")
             for root in _rule_roots(repo) for tail in (".git", ".git/**")]
@@ -315,7 +317,7 @@ class FixStepRun:
     stdout: str
     stderr: str
     timed_out: bool = False
-    git_state: Optional[object] = None
+    git_state: Optional[GitState] = None
 
     def payload(self):
         """The `--output-format json` result object, or None if stdout is not
@@ -338,9 +340,7 @@ def run_fix_step(sandbox, prompt, model=None, timeout=DEFAULT_TIMEOUT,
     agent starts; fix_scope.verify_fix needs that snapshot. GitGuardError,
     and no agent started, if `sandbox` is not a Sandbox: the step never runs
     in a checkout."""
-    if not isinstance(sandbox, Sandbox):
-        raise GitGuardError(f"{sandbox} is not a sandbox (git_guard.prepare_sandbox); the "
-                            "fix step never runs in a checkout")
+    require_sandbox(sandbox)
     path = str(sandbox.path)
     if model is None:
         model = config_value(path, "models", "cheap")
