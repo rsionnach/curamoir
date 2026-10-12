@@ -17,6 +17,7 @@ import stat
 import subprocess
 import sys
 import time
+import unicodedata
 
 import pytest
 
@@ -398,6 +399,77 @@ def test_cleanup_removes_a_clone_holding_a_directory_the_agent_locked(tmp_path, 
                 path.chmod(0o755)
 
 
+@needs_permissions
+@pytest.mark.parametrize("mode", [0o755, 0o000])
+def test_cleanup_never_follows_a_directory_swapped_for_a_symlink(tmp_path, sandboxes,
+                                                                 monkeypatch, mode):
+    """A process left in the sandbox can swap a directory for a symlink
+    between cleanup's look at it and its chmod. The swap is made to win:
+    at cleanup's first stat or open of `victim`. Whatever the symlink
+    names keeps its mode."""
+    repo = git_repo(tmp_path, {"m.py": "x = 1\n"})
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    outside.chmod(0o500)
+    sandbox = prepare_sandbox(repo, "HEAD", parent=sandboxes)
+    victim = sandbox.path / "victim"
+    victim.mkdir()
+    victim.chmod(mode)
+    real_lstat, real_open = os.lstat, os.open
+    swapped = []
+
+    def swap_first(path):
+        if not swapped and os.path.basename(os.fsdecode(path)) == "victim":
+            swapped.append(path)
+            os.rename(str(victim), str(sandbox.path / "victim-real"))
+            os.symlink(str(outside), str(victim))
+
+    def lstat(path, *args, **kwargs):
+        result = real_lstat(path, *args, **kwargs)
+        swap_first(path)  # after the look: the race cleanup must not lose
+        return result
+
+    def opener(path, *args, **kwargs):
+        swap_first(path)
+        return real_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "lstat", lstat)
+    monkeypatch.setattr(os, "open", opener)
+    try:
+        try:
+            sandbox.cleanup()
+        finally:
+            monkeypatch.undo()
+
+        assert swapped
+        assert stat.S_IMODE(outside.stat().st_mode) == 0o500
+        assert list(sandboxes.iterdir()) == []
+    finally:
+        outside.chmod(0o755)
+        real = sandbox.path / "victim-real"
+        if os.path.lexists(real):
+            real.chmod(0o755)
+            sandbox.cleanup()
+
+
+@needs_permissions
+def test_cleanup_never_loosens_the_directory_the_sandbox_is_in(tmp_path, sandboxes):
+    """The caller's directory is not the sandbox's to change: made
+    read-only, it keeps the clone's root in place, and cleanup says so
+    rather than chmod its way out."""
+    repo = git_repo(tmp_path, {"m.py": "x = 1\n"})
+    sandbox = prepare_sandbox(repo, "HEAD", parent=sandboxes)
+    sandboxes.chmod(0o555)
+    try:
+        with pytest.raises(GitGuardError, match="could not be removed"):
+            sandbox.cleanup()
+
+        assert stat.S_IMODE(sandboxes.stat().st_mode) == 0o555
+    finally:
+        sandboxes.chmod(0o755)
+        sandbox.cleanup()
+
+
 def test_a_clone_cleanup_cannot_remove_is_an_error_that_never_masks_another(
         tmp_path, sandboxes, monkeypatch):
     repo = git_repo(tmp_path, {"m.py": "x = 1\n"})
@@ -463,6 +535,19 @@ def test_a_patch_that_cannot_carry_every_path_asked_for_is_refused(tmp_path, san
                 sandbox.patch(("m.py", "locked/f.py"))
         finally:
             locked.chmod(0o755)
+
+
+def test_a_patch_refuses_an_nfd_spelling_of_a_non_ascii_path(tmp_path, sandboxes):
+    """Deliberate: the verdict's paths are NFC (fix_scope), as git reports
+    them, so an NFD spelling is not quietly taken to mean the same file."""
+    nfc = unicodedata.normalize("NFC", "café.py")
+    repo = git_repo(tmp_path, {nfc: "x = 1\n"})
+    with prepare_sandbox(repo, "HEAD", parent=sandboxes) as sandbox:
+        (sandbox.path / nfc).write_text("x = 2\n", encoding="utf-8")
+        assert sandbox.patch((nfc,))
+
+        with pytest.raises(GitGuardError):
+            sandbox.patch((unicodedata.normalize("NFD", nfc),))
 
 
 # --- the snapshot ------------------------------------------------------------------------

@@ -55,8 +55,8 @@ trees) and of every file in the work tree. verify_git_state compares the
 git files and every `.gitattributes`, and refuses any nested `.git`, by
 reading files and before any git command runs; tree_changes lists every
 work-tree path that differs, which fix_scope holds git's own account of the
-change to. In the sandbox this is
-defence in depth: the agent is denied `.git` and nothing else writes there.
+change to. In the sandbox this is defence in depth: the agent is denied
+`.git` and nothing else writes there.
 
 **Limits, stated rather than hidden.**
 
@@ -87,6 +87,7 @@ Syntax that imports on 3.9: the sweep reaches this through
 """
 
 import contextlib
+import functools
 import hashlib
 import os
 import re
@@ -260,7 +261,10 @@ def _require_top_level(repo):
 
 class Sandbox:
     """A disposable clone of `source` at commit `base`, at `path`, made by
-    prepare_sandbox. A context manager: leaving it removes the clone.
+    prepare_sandbox. A context manager: leaving it removes the clone, and
+    raises GitGuardError if it cannot; leaving on an exception only warns
+    (_remove_or_warn), so the exception that ended the block is the one
+    that propagates.
 
     `work_list` is fix_scope's slot, not this module's: the sweep.WorkList
     the lint gave for this sandbox at its base, set by
@@ -279,6 +283,7 @@ class Sandbox:
         return self
 
     def __exit__(self, exc_type, exc, traceback):
+        # A cleanup failure raises only when nothing else is on its way out.
         if exc_type is None:
             self.cleanup()
         else:
@@ -387,21 +392,27 @@ def remove_tree(root):
     left. WHY not rmtree(ignore_errors=True): the fix agent can make a
     directory unlistable (mode 000) or read-only (555), and rmtree then
     silently leaves the whole clone. Every directory is made u+rwx first,
-    and the error handler does the same to a path and its parent and
-    retries. A symlink is never chmodded: chmod follows it, to whatever it
-    names outside the sandbox."""
+    and the error handler does the same to a path and its parent (never to
+    anything above `root`: the directory the sandbox was made in is the
+    caller's) and retries.
+
+    Nothing is chmodded by path (_make_removable): chmod follows a symlink,
+    and a process still running in the sandbox could swap a directory for
+    one between a check and the chmod."""
     if not os.path.lexists(root):
         return
-    _make_removable(root)
+    root = os.path.abspath(str(root))
+    _make_removable(root, root)
     for directory, subdirs, _ in os.walk(root):
         for name in subdirs:
-            _make_removable(os.path.join(directory, name))
+            _make_removable(root, os.path.join(directory, name))
+    retry = functools.partial(_retry_removal, root)
     # 3.12 deprecates onerror (a warning, an error under the tests' -W
     # error) and 3.9, which scripts/curamoir may run this on, lacks onexc.
     if sys.version_info >= (3, 12):  # noqa: UP036
-        shutil.rmtree(root, onexc=_retry_removal)
+        shutil.rmtree(root, onexc=retry)
     else:
-        shutil.rmtree(root, onerror=_retry_removal)
+        shutil.rmtree(root, onerror=retry)
     if os.path.lexists(root):
         raise GitGuardError(f"the sandbox at {root} could not be removed; delete it by hand")
 
@@ -417,20 +428,66 @@ def _remove_or_warn(root):
         warnings.warn(str(error), RuntimeWarning, stacklevel=3)
 
 
-def _make_removable(path):
+_NO_FOLLOW_DIRECTORY = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+
+
+def _make_removable(root, path):
+    """Make the directory `path`, inside `root` or `root` itself, u+rwx,
+    without following a symlink anywhere below the directory `root` is in.
+
+    WHY by file descriptor: from root's parent (the caller's, never
+    changed) each component is opened with O_NOFOLLOW relative to the one
+    before, so a component swapped for a symlink fails to open (ELOOP or
+    ENOTDIR) and is skipped rather than followed; the last one is fchmodded
+    through the descriptor that was checked to be a directory. A directory
+    that cannot be opened for reading (mode 000) gets fchmodat with
+    AT_SYMLINK_NOFOLLOW relative to its opened parent instead; where the
+    platform has no such call (Linux with glibc before 2.32) it is left as
+    it is, and remove_tree's last check reports it. Anything else in the
+    way is left to that check too."""
+    parts = [os.path.basename(root)]
+    if path != root:
+        parts.extend(os.path.relpath(path, root).split(os.sep))
     try:
-        mode = os.lstat(path).st_mode
-        if stat.S_ISDIR(mode):
-            os.chmod(path, stat.S_IMODE(mode) | stat.S_IRWXU)
+        parent = os.open(os.path.dirname(root), os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    except OSError:
+        return
+    try:
+        for part in parts[:-1]:
+            child = os.open(part, _NO_FOLLOW_DIRECTORY, dir_fd=parent)
+            os.close(parent)
+            parent = child
+        _loosen(parent, parts[-1])
     except OSError:
         pass  # what is still in the way, remove_tree's last check reports
+    finally:
+        os.close(parent)
 
 
-def _retry_removal(function, path, _error):
+def _loosen(parent, name):
+    try:
+        handle = os.open(name, _NO_FOLLOW_DIRECTORY, dir_fd=parent)
+    except PermissionError:
+        with contextlib.suppress(OSError, NotImplementedError, ValueError):
+            mode = os.stat(name, dir_fd=parent, follow_symlinks=False).st_mode
+            if stat.S_ISDIR(mode):
+                os.chmod(name, stat.S_IMODE(mode) | stat.S_IRWXU, dir_fd=parent,
+                         follow_symlinks=False)
+        return
+    try:
+        mode = os.fstat(handle).st_mode
+        if stat.S_ISDIR(mode):
+            os.fchmod(handle, stat.S_IMODE(mode) | stat.S_IRWXU)
+    finally:
+        os.close(handle)
+
+
+def _retry_removal(root, function, path, _error):
     if function not in (os.rmdir, os.unlink, os.remove):
         return  # a failed open or listing: retrying it would remove nothing
-    _make_removable(os.path.dirname(path))
-    _make_removable(path)
+    if path != root:  # root's parent is the caller's directory, not ours
+        _make_removable(root, os.path.dirname(path))
+    _make_removable(root, path)
     with contextlib.suppress(OSError):  # reported by remove_tree's last check
         function(path)
 

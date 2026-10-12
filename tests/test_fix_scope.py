@@ -957,7 +957,7 @@ def test_script_package_names(specifier, package):
     assert script_package(specifier) == package
 
 
-def test_known_modules_reads_imports_with_git_on_this_platform(tmp_path):
+def test_base_known_modules_reads_imports_with_git_on_this_platform(tmp_path):
     """C3: Apple git's `grep -E` has no `\\s`; an import used elsewhere is known."""
     repo = git_repo(tmp_path, {"a.py": "import requests\nfrom yaml import safe_load\n",
                                "b.js": "const x = require( 'left-pad' )\n"})
@@ -1030,7 +1030,20 @@ def test_a_template_import_of_a_relative_or_known_module_and_an_old_computed_one
     assert check_scope([modified("m.js", old, unchanged)], [V("m.js", 4)]).ok
 
 
-def test_known_modules_reads_a_template_literal_require(tmp_path):
+def test_a_second_copy_of_an_old_computed_require_is_a_new_dependency():
+    """The base's computed loads are counted, not just looked up: pasting
+    an existing `require(name)` line elsewhere, with `name` rebound, loads
+    whatever the new binding names."""
+    old = "const m = require(name);\n" + _JS_TODO
+    new = _js_fix("name = 'left-pad';\n  const m = require(name);", old)
+
+    result = check_scope([modified("m.js", old, new)], [V("m.js", 4)])
+
+    assert result.kinds() == (NEW_DEPENDENCY,)
+    assert [breach.line for breach in result.breaches] == [5]
+
+
+def test_base_known_modules_reads_a_template_literal_require(tmp_path):
     repo = git_repo(tmp_path, {"m.js": "const l = require(`lodash`);\n"})
 
     assert "lodash" in base_known_modules(repo, resolve_base(repo, "HEAD"))
@@ -1090,6 +1103,8 @@ def test_a_lone_carriage_return_makes_a_python_file_unverifiable():
     assert result.kinds() == (UNVERIFIABLE,)
 
 
+# --- encoding ----------------------------------------------------------------------
+
 #: A module whose one violation is the TODO on line 5.
 _PY_TODO = "x = 1\n\n\ndef f(a):\n    return a  # TODO\n"
 
@@ -1107,17 +1122,19 @@ def test_a_utf7_coding_cookie_cannot_smuggle_code_past_the_parse():
     assert "utf-7" in result.render()
 
 
-@pytest.mark.parametrize("old,new", [
-    (_PY_TODO, "# coding: utf-8\n" + _PY_TODO.replace("  # TODO", "")),
+@pytest.mark.parametrize("old,new,cookie_line", [
+    (_PY_TODO, "# coding: utf-8\n" + _PY_TODO.replace("  # TODO", ""), 1),
     (_PY_TODO, "#!/usr/bin/env python\n# -*- coding: utf-8 -*-\n"
-               + _PY_TODO.replace("  # TODO", "")),
-    ("# coding: utf-8\n" + _PY_TODO, _PY_TODO.replace("  # TODO", "")),
+               + _PY_TODO.replace("  # TODO", ""), 2),
+    ("# coding: utf-8\n" + _PY_TODO, _PY_TODO.replace("  # TODO", ""), 1),
 ])
-def test_a_fix_may_not_touch_an_encoding_declaration_even_a_utf8_one(old, new):
+def test_a_fix_may_not_touch_an_encoding_declaration_even_a_utf8_one(old, new, cookie_line):
+    """The breach names the line the cookie is on, not always line 1."""
     line = old.count("\n") - _PY_TODO.count("\n") + 5
     result = check_scope([modified("m.py", old, new)], [V("m.py", line)])
 
     assert result.kinds() == (ENCODING_DECLARATION,)
+    assert [breach.line for breach in result.breaches] == [cookie_line]
 
 
 def test_a_base_whose_source_encoding_is_not_utf8_is_unverifiable():

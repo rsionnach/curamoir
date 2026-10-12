@@ -1,11 +1,12 @@
 """E3-R2's first half, and the sweep's one model call: the fix step.
 
 The sweep is driven by Python (the decision recorded on cm-80h): the runner
-lints in-process in the sandbox (fix_scope.lint_sandbox), hands the work list to a headless
-`claude -p` on `models.cheap` whose only job is to edit files, and then does
-every deterministic step itself — the scope check (fix_scope.verify_fix),
-the tests (E3-R4), the PR (E3-R3), the ledger (E3-R5). This module is the
-hand-off: the limits the prompt states, the prompt, and the command line.
+lints in-process in the sandbox (fix_scope.lint_sandbox), hands the work
+list to a headless `claude -p` on `models.cheap` whose only job is to edit
+files, and then does every deterministic step itself — the scope check
+(fix_scope.verify_fix), the tests (E3-R4), the PR (E3-R3), the ledger
+(E3-R5). This module is the hand-off: the limits the prompt states, the
+prompt, and the command line.
 
 **Where it runs.** In a sandbox (git_guard.prepare_sandbox): a disposable
 clone of the base commit, never the user's checkout. The agent's working

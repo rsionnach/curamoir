@@ -153,6 +153,7 @@ Syntax that imports on 3.9, like sweep.py: the sweep reaches this through
 
 import ast
 import builtins
+import collections
 import difflib
 import io
 import json
@@ -585,15 +586,19 @@ def _encoding_breach(path, old, new):
             return Breach(UNVERIFIABLE, path, None, (
                 f"CPython decodes the {side} version as {encoding} (its coding cookie) "
                 "and the review reads UTF-8, so what was checked would not be what runs"))
-    if _coding_cookies(old) != _coding_cookies(new):
-        return Breach(ENCODING_DECLARATION, path, 1, (
-            "a coding cookie on line 1 or 2 was added, removed or changed; it decides how "
-            "CPython reads every line, and a sweep fix does not touch it"))
+    old_cookies, new_cookies = _coding_cookies(old), _coding_cookies(new)
+    for number in (1, 2):
+        if old_cookies.get(number) != new_cookies.get(number):
+            return Breach(ENCODING_DECLARATION, path, number, (
+                f"a coding cookie on line {number} was added, removed or changed; it "
+                "decides how CPython reads every line, and a sweep fix does not touch it"))
     return None
 
 
 def _coding_cookies(text):
-    return [line for line in text.split("\n", 2)[:2] if _CODING_COOKIE.match(line)]
+    """Line number (1 or 2) -> the coding cookie line there."""
+    return {number: line for number, line in enumerate(text.split("\n", 2)[:2], start=1)
+            if _CODING_COOKIE.match(line)}
 
 
 def _parse_both(old, new):
@@ -1038,24 +1043,36 @@ def _script_imports(lines):
 
 
 def _computed_loads(lines):
-    """Stripped line -> first line number, for each line with a `require(`
-    or `import(` whose argument is not one literal."""
-    found = {}
-    for number, line in enumerate(lines, start=1):
-        for call in _SCRIPT_LOADER_CALL.finditer(line):
-            if not _SCRIPT_LITERAL_ARGUMENT.match(line, call.end()):
-                found.setdefault(line.strip(), number)
-    return found
+    """(line number, stripped line) for each line with a `require(` or
+    `import(` whose argument is not one literal, in file order."""
+    return [(number, line.strip()) for number, line in enumerate(lines, start=1)
+            if any(not _SCRIPT_LITERAL_ARGUMENT.match(line, call.end())
+                   for call in _SCRIPT_LOADER_CALL.finditer(line))]
 
 
 def _computed_load_breaches(path, old_lines, new_lines):
-    before = _computed_loads(old_lines)
-    return [Breach(NEW_DEPENDENCY, path, number,
-                   f"loads a module named by something other than one literal (fixed line "
-                   f"{number}), so whether it is a new dependency cannot be checked")
-            for text, number in sorted(_computed_loads(new_lines).items(),
-                                       key=lambda item: item[1])
-            if text not in before]
+    """A NEW_DEPENDENCY Breach for each computed load the fix added.
+
+    WHY the stripped text is the key: what a computed load names cannot be
+    known, so the only safe answer is "this exact line was already in the
+    base" — moved or re-indented, not written. WHY counted, not looked up:
+    a second copy of an old `require(name)` pasted elsewhere, with `name`
+    rebound above it, loads something new while matching an old line. So
+    the fixed file may hold each text as often as the base does; each
+    occurrence beyond that, in file order, is reported. Editing a line that
+    holds a computed load changes its text and is refused too: that fails
+    closed, at the cost of a fix that only touched the rest of that line."""
+    allowed = collections.Counter(text for _, text in _computed_loads(old_lines))
+    found = []
+    for number, text in _computed_loads(new_lines):
+        if allowed[text]:
+            allowed[text] -= 1
+            continue
+        found.append(Breach(
+            NEW_DEPENDENCY, path, number,
+            f"loads a module named by something other than one literal (fixed line "
+            f"{number}), so whether it is a new dependency cannot be checked"))
+    return found
 
 
 def _new_import_breaches(path, before, after, known_modules, builtins):
