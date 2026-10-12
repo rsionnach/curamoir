@@ -1024,7 +1024,7 @@ def test_a_fixture_sweep_whose_one_fix_breaks_the_tests_opens_a_pr_without_it(tm
         assert verdict.paths == (BILLING, HANDLERS, VARIANT)
 
         result = run_test_gate(sandbox, verdict)
-        # The runner's own path (fix_scope step 8): the gate's patch of what it tested.
+        # The runner's own path (fix_scope step 9): the gate's patch of what it tested.
         patch = result.patch(sandbox)
     with JobRun(ledger, "sweep") as run:
         run.succeeded("opened one PR", **result.ledger_fields())

@@ -113,8 +113,9 @@ sweep:
 
 promotion:
   # A principle fixed this many times inside window_days becomes a candidate to
-  # be promoted into a mechanical rule.
+  # be promoted into a mechanical rule. 1 to 1000.
   fix_threshold: 3
+  # Days of sweep history counted, 1 to 3650.
   window_days: 90
 
 filing:

@@ -56,13 +56,26 @@ Two layers, so the rules can be tested without git:
    PR's: `gate = green_gate.run_test_gate(sandbox, verdict, paths=trimmed)`,
    which runs the base's test command in the sandbox and, on red, drops
    fixed paths until the rest is green. Then, by outcome:
-   - strategy `green` or `reduced`: go on to step 8 and record
-     `run.succeeded(..., **gate.ledger_fields())`;
+   - strategy `green` or `reduced`: go on to steps 8 and 9, and record
+     `run.succeeded(..., **gate.ledger_fields(), **fix_fields)` (step 8);
    - strategy `abandoned`: no PR; `run.failed(gate.render(),
-     **gate.ledger_fields())` (render() carries the why);
+     **gate.ledger_fields(), **fix_counts.found_fields(sandbox.work_list,
+     sandbox.base))` (render() carries the why; `found` is what E4-R4
+     compares, so every line whose base was linted carries it, no_work
+     included);
    - GateError raised: a refusal, as in step 6, `run.refused(...)` with no
      `test_gate` field, since there is no GateResult to record.
-8. Take exactly `gate.paths_for_pr` out: `gate.patch(sandbox)`, the
+8. Record the fixes (E3-R5), still in the sandbox and before the patch:
+   `records = fix_counts.record_fixes(sandbox, gate, remedies_result)`,
+   which lints the PR's tree again with the base's rules and keeps only
+   the violations in `gate.paths_for_pr` it no longer reports; then
+   `fix_fields = fix_counts.ledger_fields(sandbox.work_list, records,
+   sandbox.base)`. They are written with the sweep's success line, once
+   the PR is opened, so a sweep whose PR failed to open records no fixes
+   (its failure line carries `found_fields` only). Its ScopeCheckError,
+   GateError or sweep.LintUntrusted is a refusal, as in step 6: a PR whose
+   fixes cannot be counted would starve the promotion ladder silently.
+9. Take exactly `gate.paths_for_pr` out: `gate.patch(sandbox)`, the
    patch of those paths built from the bytes the green run tested (what
    `sandbox.patch(gate.paths_for_pr)` gives when nothing changed since),
    refused with GateError if a kept path no longer holds them (a refusal
@@ -71,8 +84,8 @@ Two layers, so the rules can be tested without git:
    it is empty (strategy `abandoned`, with any cause in
    green_gate.CAUSES), open no PR at all. Never `verdict.paths` once
    the gate has run, never `git add -A`, never the whole tree.
-9. Never re-run the fix agent in the user's checkout, not even "to apply
-   the same fix": the sandbox is what the verdict is about.
+10. Never re-run the fix agent in the user's checkout, not even "to apply
+    the same fix": the sandbox is what the verdict is about.
 
 **The rules, and why each is drawn where it is.**
 

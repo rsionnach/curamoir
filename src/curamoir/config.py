@@ -60,6 +60,14 @@ class WholeRange:
 #: A test run's timeout: at least a second, at most a day.
 TIMEOUT_SECONDS = WholeRange(1, 86400)
 
+#: The promotion ladder's window and threshold (E4-R1). WHY not COUNT: a
+#: threshold of 0 makes every principle a candidate whether or not it was
+#: ever fixed, and a window of 0 days counts nothing, so promotion silently
+#: never happens. The upper bounds only refuse a typo's size (ten years; a
+#: thousand fixes).
+PROMOTION_WINDOW_DAYS = WholeRange(1, 3650)
+PROMOTION_FIX_THRESHOLD = WholeRange(1, 1000)
+
 DEFAULTS = {
     "version": 1,
     "modules": {
@@ -184,7 +192,8 @@ SCHEMA = {
         "max_open_prs": COUNT, "max_files_per_pr": COUNT,
         "test_command": STRING, "test_timeout_seconds": TIMEOUT_SECONDS, "max_test_runs": COUNT,
     },
-    "promotion": {"fix_threshold": COUNT, "window_days": COUNT},
+    "promotion": {"fix_threshold": PROMOTION_FIX_THRESHOLD,
+                  "window_days": PROMOTION_WINDOW_DAYS},
     "filing": {
         "beads": ("auto", "on", "off"),
         "github": BOOLEAN,

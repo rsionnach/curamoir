@@ -416,8 +416,8 @@ class GateResult:
     def ledger_fields(self):
         """Keyword fields for the sweep's one ledger line (job_run.JobRun's
         succeeded and failed take them; a refusal has no GateResult):
-        `test_gate` and nothing else, so cm-fkd.6's per-principle counts sit
-        beside it, not inside it. Its keys: strategy (str), cause (str or
+        `test_gate` and nothing else, so cm-fkd.6's fix records and counts
+        (fix_counts.ledger_fields) sit beside it, not inside it. Its keys: strategy (str), cause (str or
         None), why (str, "" unless abandoned; render() carries it into the
         message too), command and command_source (str or None), kept (list
         of paths), dropped (list of {path, reason}), runs (list of
