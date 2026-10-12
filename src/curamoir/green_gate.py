@@ -7,12 +7,13 @@ detected) before opening the PR. On failure it MUST revert to the last green
 state or reduce scope, and MUST NOT open a red PR."
 
 The runner calls run_test_gate(sandbox, verdict) after fix_scope.verify_fix
-has accepted the fix and before sandbox.patch (fix_scope's module docstring,
-"What the runner (cm-fkd.4) must do", step 7, gives the order). It returns
-a GateResult whose `paths_for_pr` is the only thing the runner may patch
-(through GateResult.patch, which first checks the sandbox still holds
-what was tested), and whose `strategy` the ledger records (ledger_fields), because the
-acceptance criterion asks which strategy was used.
+has accepted the fix and before GateResult.patch (fix_scope's module
+docstring, "What the runner (cm-fkd.4) must do", step 7, gives the order).
+It returns a GateResult whose `paths_for_pr` is the only thing the runner
+may patch (through GateResult.patch, which builds the patch from the bytes
+that were tested), and whose `strategy` the ledger records
+(ledger_fields), because the acceptance criterion asks which strategy was
+used.
 
 **Outcomes.** `strategy` is `green` (every fix kept), `reduced` (some
 dropped) or `abandoned` (no PR), and `cause` is set exactly when it is
@@ -28,8 +29,10 @@ abandoned, one of:
   missing runner's message (`No module named pytest`, `command not found`);
 - `test_timeout`: the full and the base runs both timed out, so the
   timeout, not the code, decided;
-- `base_red`: the base itself is red (a timeout of one of the two runs
-  counts as red);
+- `output_cap`: the full and the base runs were both killed for writing
+  more than _OUTPUT_CAP bytes of output, so the cap, not the code, decided;
+- `base_red`: the base itself is red (a timeout or an output cap of one of
+  the two runs counts as red);
 - `no_green_subset`: every fixed file was tested on the green base and each
   one alone is red;
 - `run_cap`: `sweep.max_test_runs` was reached before the fix and the base
@@ -207,7 +210,7 @@ import stat
 import subprocess
 import tempfile
 import time
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import PurePosixPath
 from typing import Optional
 
@@ -236,11 +239,12 @@ CONFIG_INVALID = "config_invalid"
 IMPORTS_THE_CHECKOUT = "imports_the_checkout"
 COMMAND_NOT_RUNNABLE = "command_not_runnable"
 TEST_TIMEOUT = "test_timeout"
+OUTPUT_CAP = "output_cap"
 BASE_RED = "base_red"
 NO_GREEN_SUBSET = "no_green_subset"
 RUN_CAP = "run_cap"
 CAUSES = (NO_TEST_COMMAND, CONFIG_INVALID, IMPORTS_THE_CHECKOUT, COMMAND_NOT_RUNNABLE,
-          TEST_TIMEOUT, BASE_RED, NO_GREEN_SUBSET, RUN_CAP)
+          TEST_TIMEOUT, OUTPUT_CAP, BASE_RED, NO_GREEN_SUBSET, RUN_CAP)
 
 PASSED = "passed"
 FAILED = "failed"
@@ -294,8 +298,9 @@ class GateCommand:
 class GateRun:
     """One run of the test command: the fixed `paths` applied (every other
     changed path at its base), its `outcome` (passed, failed, timed_out),
-    exit `code` (None on timeout), `seconds`, and the last _TAIL characters
-    of its stdout and of its stderr, kept apart."""
+    exit `code` (None on timeout or cap), `seconds`, the last _TAIL
+    characters of its stdout and of its stderr, kept apart, and `capped`:
+    killed for passing _OUTPUT_CAP (outcome failed)."""
 
     paths: tuple
     outcome: str
@@ -303,6 +308,7 @@ class GateRun:
     seconds: float
     stdout_tail: str
     stderr_tail: str
+    capped: bool = False
 
     @property
     def passed(self):
@@ -338,7 +344,9 @@ class GateResult:
 
     `tested` is, per kept path, (path, executable, sha256 hex) of the
     content the final green run tested, (path, None, None) for a path that
-    run had absent: what patch() holds the sandbox to."""
+    run had absent: what verify_kept holds the sandbox to. `held` is, per
+    kept path, (path, executable, bytes or None): that content itself, what
+    patch() is built from."""
 
     strategy: str
     cause: Optional[str]
@@ -350,21 +358,31 @@ class GateResult:
     why: str = ""
     canary: str = ""
     tested: tuple = ()
+    held: tuple = field(default=(), repr=False)
 
     @property
     def paths_for_pr(self):
         return self.kept if self.strategy in (GREEN, REDUCED) else ()
 
     def patch(self, sandbox):
-        """The PR's patch, sandbox.patch(paths_for_pr), refused (GateError)
-        unless every kept path holds exactly what the green run tested, both
-        before and after git builds it. WHY: a process a test started with
-        setsid() outlives the run and can rewrite a kept file after the gate
-        returned; the patch would then carry code no run tested. The window
-        left is the instant git reads a file, and a writer that changes it
-        and puts it back inside that instant."""
+        """The PR's patch of paths_for_pr, `git apply`-able on the base and
+        byte-identical to sandbox.patch(paths_for_pr) when the work tree
+        holds what was tested, but built from the HELD bytes (`held`), never
+        from the work tree: each is written into git's object store and
+        staged by mode and id in a throwaway index, an absent path removed
+        from it, and the index diffed against the base. WHY: a process a test
+        started with setsid() outlives the run and can rewrite a kept file
+        after the gate returned, even only while git reads it; built from
+        the work tree, the patch could carry code no run tested.
+
+        Refused (GateError) unless the work tree still matches what was
+        tested before and after: the patch would be right, but a mismatch
+        means something is still writing the sandbox the runner is about to
+        push from. The limit: blobs are hashed without filters (`--no-filters`),
+        so the patch is git's own only for a repository with no clean filter
+        or eol conversion on these paths (the held bytes are what ran)."""
         self.verify_kept(sandbox)
-        built = sandbox.patch(self.paths_for_pr)
+        built = _patch_of(sandbox, self.held)
         self.verify_kept(sandbox)
         return built
 
@@ -487,30 +505,51 @@ def _npm_test_script(data):
 
 #: Inherited as they are: who the user is and how text and time are read.
 _INHERITED = ("USER", "LOGNAME", "LANG", "TZ")
-#: Version managers' roots, each a directory and never a secret: a shim on
-#: PATH (pyenv's `python3`, asdf's, volta's `node`) finds its installs
-#: through it, and defaults it to a path under HOME, which the fresh HOME
-#: would break. -> the default under the user's real HOME, taken when unset
-#: and that directory exists (None: inherited only; nvm puts the node bin on
-#: PATH itself, and ASDF_DIR is where asdf's own code is, if moved).
+#: Version managers' roots: a shim on PATH (pyenv's `python3`, asdf's,
+#: volta's `node`) finds its installs through it, and defaults it to a path
+#: under HOME, which the fresh HOME would break. Maps each name to its
+#: default directory under the real HOME, used when the variable is unset
+#: and that directory exists; None means inherit only (nvm puts the node bin
+#: on PATH itself, and ASDF_DIR is where asdf's own code is, if moved). An
+#: inherited value is kept only if it is an absolute directory (_directory).
 _VERSION_MANAGER_ROOTS = {"PYENV_ROOT": ".pyenv", "ASDF_DATA_DIR": ".asdf", "ASDF_DIR": None,
                           "VOLTA_HOME": ".volta", "NVM_DIR": None}
 _USER_BASE = "import site, sys; sys.stdout.write(site.getuserbase())"
 
 
-def _user_base(path):
+def _directory(value):
+    """`value` if it is an absolute path to a directory, else None. WHY: the
+    variables that name directories (VIRTUAL_ENV, the version managers'
+    roots, PYTHONUSERBASE) are allowlisted for being directories, so a value
+    that is not one (a token under a misleading name, a relative path the
+    sandbox's cwd would reinterpret) is not passed on. The limit: a secret
+    that happens to be an existing absolute directory's path would pass,
+    and a directory's name says nothing a listing of the disk does not."""
+    if value and os.path.isabs(value) and os.path.isdir(value):
+        return value
+    return None
+
+
+def _user_base(env):
     """The user base (`pip install --user`'s prefix) of the `python3` the
-    tests will find on `path`, asked in the sweep's own environment, or None.
-    WHY asked, not derived: it depends on the interpreter (a macOS framework
-    build's is ~/Library/Python/X.Y, others' ~/.local) and on
-    PYTHONUSERBASE, and the fresh HOME would move it."""
+    tests will find on env's PATH, or None. Asked in `env` (the allowlist
+    built so far) plus the real HOME and an inherited PYTHONUSERBASE that is
+    a directory, which are all it depends on: the probe is a program off
+    PATH run before any run's sandboxing, so it gets no inherited secret
+    either. WHY asked, not derived: it depends on the interpreter (a macOS
+    framework build's is ~/Library/Python/X.Y, others' ~/.local) and on
+    PYTHONUSERBASE, and the fresh HOME would move it. Kept only if it is an
+    absolute directory: one that does not exist holds no install."""
+    probe = dict(env, HOME=os.path.expanduser("~"))
+    inherited = _directory(os.environ.get("PYTHONUSERBASE"))
+    if inherited:
+        probe["PYTHONUSERBASE"] = inherited
     try:
-        done = subprocess.run(["python3", "-c", _USER_BASE], env=dict(os.environ, PATH=path),
+        done = subprocess.run(["python3", "-c", _USER_BASE], env=probe,
                               stdin=subprocess.DEVNULL, capture_output=True, timeout=30)
     except (OSError, subprocess.SubprocessError):
         return None
-    base = done.stdout.decode("utf-8", "replace")
-    return base if done.returncode == 0 and os.path.isabs(base) else None
+    return _directory(done.stdout.decode("utf-8", "replace")) if done.returncode == 0 else None
 
 
 def sandbox_environment(source, root=None, src=False):
@@ -522,7 +561,8 @@ def sandbox_environment(source, root=None, src=False):
     `venv`: a directory holding `pyvenv.cfg` and `bin/`) bin and its
     `node_modules/.bin` first; VIRTUAL_ENV names that venv (the inherited
     one when the source has none: the environment the sweep was started
-    in); NODE_PATH is the source's `node_modules`. With `root` (the
+    in, if it is an absolute directory); NODE_PATH is the source's
+    `node_modules`. With `root` (the
     sandbox), PYTHONPATH is the sandbox's `src` (when `src`: the base tracks
     a top-level `src/`) then `root`, so an editable install of the
     checkout in the reused venv cannot shadow the fixed code. Plus
@@ -544,7 +584,7 @@ def sandbox_environment(source, root=None, src=False):
             prefix.append(os.path.join(venv, "bin"))
             break
     else:
-        if os.environ.get("VIRTUAL_ENV"):
+        if _directory(os.environ.get("VIRTUAL_ENV")):
             env["VIRTUAL_ENV"] = os.environ["VIRTUAL_ENV"]
     modules = os.path.join(str(source), "node_modules")
     if os.path.isdir(modules):
@@ -555,10 +595,11 @@ def sandbox_environment(source, root=None, src=False):
     home = os.path.expanduser("~")
     for name, default in _VERSION_MANAGER_ROOTS.items():
         if os.environ.get(name):
-            env[name] = os.environ[name]
+            if _directory(os.environ[name]):
+                env[name] = os.environ[name]
         elif default and os.path.isdir(os.path.join(home, default)):
             env[name] = os.path.join(home, default)
-    user_base = _user_base(env["PATH"])
+    user_base = _user_base(env)
     if user_base:
         env["PYTHONUSERBASE"] = user_base
     if root is not None:
@@ -588,7 +629,7 @@ def _run_command(sandbox, argv, env, timeout, paths=()):
             return GateRun(paths, FAILED, None, time.monotonic() - started,
                            _tail(capped.output),
                            _tail(capped.stderr) + f"\n[killed with its process group: its "
-                           f"output passed {_OUTPUT_CAP >> 20} MiB, so it counts as red]")
+                           f"output passed {_OUTPUT_CAP >> 20} MiB, so it counts as red]", capped=True)
         except subprocess.TimeoutExpired as expired:
             return GateRun(paths, TIMED_OUT, None, time.monotonic() - started,
                            _tail(expired.output),
@@ -825,6 +866,10 @@ def run_test_gate(sandbox, verdict, paths=None):
                 f"the tests timed out both with the fix and at the base, after "
                 f"sweep.test_timeout_seconds ({chosen.timeout}s), so nothing was judged; "
                 "raise it"))
+        elif not green_base and all(run.capped for run in runs):
+            result = abandoned(OUTPUT_CAP, (
+                f"the tests wrote more than {_OUTPUT_CAP >> 20} MiB of output both with the "
+                "fix and at the base, and were killed, so nothing was judged"))
         elif not green_base and _not_runnable(runs):
             result = abandoned(COMMAND_NOT_RUNNABLE, (
                 f"the test command `{chosen.command}` could not be run (exit "
@@ -850,18 +895,13 @@ def run_test_gate(sandbox, verdict, paths=None):
 
 
 def _not_runnable(runs):
-    """The full and the base run both say the runner is missing: the shell's
-    126 or 127, or exit 1 with a missing runner's message (_MISSING_RUNNER).
-    Both, so a real failure that merely prints "command not found" once is
-    still red."""
+    """The full and the base run both say the runner is missing: both exited
+    126 or 127 (the shell's), or both exited 1 with a missing runner's
+    message (_MISSING_RUNNER). A mix (one 127, the other 1 with the message)
+    does not count, and neither does one run alone, so a real failure that
+    merely prints "command not found" once is still red."""
     return all(run.code in _NOT_RUNNABLE for run in runs) or all(
         run.code == 1 and _MISSING_RUNNER.search(run.tail) for run in runs)
-
-
-def _fingerprint(state):
-    if state.data is None:
-        return None, None
-    return state.executable, hashlib.sha256(state.data).hexdigest()
 
 
 def _finish(sandbox, git_state, every, fixed, base, kept, result):
@@ -874,7 +914,51 @@ def _finish(sandbox, git_state, every, fixed, base, kept, result):
                         + ", ".join(f"{c.label} {c.change}" for c in changed)
                         + "), and the patch would be built by git in that sandbox")
     _write_states(sandbox.path, {p: fixed[p] if p in kept else base[p] for p in every})
-    return replace(result, tested=tuple((path, *_fingerprint(fixed[path])) for path in kept))
+    return replace(result, tested=tuple((path, *_fingerprint(fixed[path])) for path in kept),
+                   held=tuple((path, fixed[path].executable, fixed[path].data)
+                              for path in kept))
+
+
+def _patch_of(sandbox, held):
+    """The binary patch, on the base, that sets each (path, executable,
+    data) of `held`, built in a throwaway index (GIT_INDEX_FILE, as
+    Sandbox.patch) with index-only git commands: the work tree is never
+    read, and the sandbox's own index and HEAD are untouched. GateError if
+    a path would be left out (no change from the base)."""
+    if not held:
+        return b""
+    scratch = tempfile.mkdtemp(prefix="curamoir-patch-")
+    try:
+        index = {"GIT_INDEX_FILE": os.path.join(scratch, "index")}
+        git(sandbox.path, "read-tree", sandbox.base, extra_env=index)
+        for number, (path, executable, data) in enumerate(held):
+            _checked(path)
+            if data is None:
+                git(sandbox.path, "update-index", "--force-remove", "--", path,
+                    extra_env=index)
+                continue
+            blob = os.path.join(scratch, str(number))
+            with open(blob, "xb") as handle:
+                handle.write(data)
+            digest = git(sandbox.path, "hash-object", "-w", "--no-filters", "--", blob)
+            # One "mode,id,path" argument: never read as an option, whatever the path.
+            git(sandbox.path, "update-index", "--add", "--cacheinfo",
+                f"{'100755' if executable else '100644'},"
+                f"{digest.decode('ascii').strip()},{path}", extra_env=index)
+        specs = [f":(literal){path}" for path, _, _ in held]
+        staged = git(sandbox.path, "diff", "--cached", "--name-only", "-z", "--no-renames",
+                     sandbox.base, "--", *specs, extra_env=index)
+        left_out = sorted({path for path, _, _ in held}
+                          - {name.decode("utf-8", "surrogateescape")
+                             for name in staged.split(b"\0") if name})
+        if left_out:
+            raise GateError(f"{', '.join(left_out)} would be no change from the base, so a "
+                            "patch would leave it out")
+        return git(sandbox.path, "diff", "--cached", "--binary", "--full-index",
+                   "--no-renames", "--no-ext-diff", "--no-textconv", sandbox.base, "--",
+                   *specs, extra_env=index)
+    finally:
+        remove_tree(scratch, what="the patch's scratch directory")
 
 
 # --- the tree outside the verdict ----------------------------------------------------
@@ -948,9 +1032,9 @@ def _entry(target, held, previous):
 def _settle(root, manifest, held):
     """After a run: remove every entry it added outside `held` (a cache, a
     new snapshot, a leftover file), then refuse if it changed or removed one
-    that was there before the first run. One walk serves both (removing an
-    added entry changes no entry of the manifest's but a directory's, whose
-    digest is "dir"). WHY refuse rather than restore: the content to
+    that was there before the first run. One walk is enough: removing an
+    added entry can change only a directory's stat, and directories are
+    compared as "dir", not by stat. WHY refuse rather than restore: the content to
     restore would have to be read up front for every tracked file
     (unbounded memory) or asked of git between runs (which a run could have
     planted for); a test suite that rewrites its own tracked files is rare,
@@ -1007,6 +1091,13 @@ def _work_tree_state(root, path):
                         "cannot be held and restored")
     with open(target, "rb") as handle:
         return _State(handle.read(), bool(mode & stat.S_IXUSR))
+
+
+def _fingerprint(state):
+    """(executable, sha256 hex) of a state, (None, None) for absent."""
+    if state.data is None:
+        return None, None
+    return state.executable, hashlib.sha256(state.data).hexdigest()
 
 
 def _base_state(sandbox, path):

@@ -62,10 +62,11 @@ Two layers, so the rules can be tested without git:
      **gate.ledger_fields())` (render() carries the why);
    - GateError raised: a refusal, as in step 6, `run.refused(...)` with no
      `test_gate` field, since there is no GateResult to record.
-8. Take exactly `gate.paths_for_pr` out: `gate.patch(sandbox)`, which is
-   `sandbox.patch(gate.paths_for_pr)` once every kept path is checked to
-   hold what the green run tested (GateError otherwise, a refusal as in
-   step 6: a process the tests left running rewrote one), applied or
+8. Take exactly `gate.paths_for_pr` out: `gate.patch(sandbox)`, the
+   patch of those paths built from the bytes the green run tested (what
+   `sandbox.patch(gate.paths_for_pr)` gives when nothing changed since),
+   refused with GateError if a kept path no longer holds them (a refusal
+   as in step 6: a process the tests left running rewrote one), applied or
    pushed by the runner; list only those paths' fixes in the PR body. When
    it is empty (strategy `abandoned`, with any cause in
    green_gate.CAUSES), open no PR at all. Never `verdict.paths` once
