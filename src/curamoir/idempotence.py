@@ -40,10 +40,13 @@ docstring, "The ledger line".
    returns something outside the listing contract, guards.pr_cap's
    docstring): UNKNOWN, refuse; the message says the next sweep will try
    again, because a `gh` outage passes.
-3. Each open sweep PR (branch under SWEEP_BRANCH_PREFIX) is known by its
-   ledger `pr` record when there is one (primary: it is what the sweep that
-   opened it wrote), else by the listing's `base` and `paths` when both are
-   present and valid (GitHub's own account, "Open PRs on GitHub" below).
+3. Each open sweep PR (branch under SWEEP_BRANCH_PREFIX, in this
+   repository: a fork's PR was already dropped, "The trust boundary"
+   below) is known by its ledger `pr` record when there is one (primary:
+   it is what the sweep that opened it wrote), paired by PR NUMBER, else
+   by the listing's `base` and `paths` when both are present and valid and
+   the PR is known to be same-repository (GitHub's own account, "Open PRs
+   on GitHub" below).
 4. An open sweep PR was made from this very base, by whichever base is
    known (ledger, else listing; the base alone is enough here, no paths
    needed): DUPLICATE_OPEN_PR, whatever it left out. WHY even for leftovers
@@ -118,7 +121,28 @@ are GitHub's own list of the PR's files. cm-fkd.4's callable runs `gh pr
 list --state open --json headRefName,number,url,body,files` (bounded by
 its own timeout: nothing here can interrupt it) and returns
 `[sweep_pr_listing(item) for item in ...]`, the listing contract's
-records. `gh` returns at most GH_FILES_CAP files per PR, so a list that
+records. `isCrossRepository` is part of that query and MUST stay in it
+(next paragraph): without it every listed record is of unknown provenance,
+and CI mode refuses until the state PR merges.
+
+**The trust boundary** (guards.pr_cap's docstring holds the rule, for
+every reader). A fork's PR has a head branch named by the fork's owner, so
+a `curamoir/sweep-` name proves nothing; its record (`cross_repository`
+True, gh's `isCrossRepository`) is dropped before grouping by branch and
+holds nothing, refuses nothing, and cannot displace cúramóir's own PR
+(cúramóir never opens a cross-repository PR, so it holds none of its
+fixes). Same repository (`False`) is trusted: pushing that branch needs
+write access, which can already PAUSE cúramóir, and the same is true of
+editing the body's marker. Missing or not a bool (including a plain
+branch name, the old contract) is unknown provenance: the PR still stands
+as open and the ledger still knows its own PR by number, but its listed
+`base` and `paths` are never the fallback, so with no ledger record it
+refuses (step 5) rather than trust what anyone could have written.
+Pairing with the ledger: the listed record on that branch with the ledger
+record's number (else, for a listing without numbers, the one numberless
+record) is the ledger's PR; any other record on the branch is a PR of its
+own. Two or more records on one branch, none of them the ledger's, cannot
+be told apart and refuse (step 5). `gh` returns at most GH_FILES_CAP files per PR, so a list that
 long may be cut short; sweep_pr_listing then gives `paths` None, which
 refuses unless the ledger knows (a cut list would free files the PR
 changes).
@@ -129,13 +153,17 @@ changes).
   fixes again. Remembering a rejection is not E3-R7's (it is "no second PR
   with no intervening changes", and a close is a change); it is a separate
   question of whether a rejected fix should be retried.
-- A branch name is the identity, checked against the listed PR number
-  when the listing has one: a PR closed and another opened on the same
-  branch name is matched to the latest `pr` record of that branch only if
-  the numbers agree. Two open PRs from one branch name (to different base
-  branches) are seen as the first listed.
+- A branch name and a PR number are the identity: a PR closed and
+  another opened on the same branch name is matched to the latest `pr`
+  record of that branch only if the numbers agree. Two open PRs from one
+  branch name (to different base branches) are each judged on their own
+  once one is the ledger's; with no ledger match they refuse.
+- Only the repository is checked, not the author: anyone with push access
+  can open a same-repository `curamoir/sweep-` PR, or edit a sweep PR's
+  marker, and be believed. Acceptable: they can PAUSE cúramóir anyway.
 - An open sweep PR that neither the ledger nor GitHub accounts for (no
-  line, and no marker or more than GH_FILES_CAP files) refuses every sweep
+  line, and no marker, more than GH_FILES_CAP files, or no
+  `cross_repository: false`) refuses every sweep
   with work until it is merged or closed: safe, and the message says which
   branch.
 - The `curamoir/sweep-` branch prefix is reserved for cúramóir: a
@@ -274,11 +302,13 @@ def parse_sweep_marker(body):
 
 
 def sweep_pr_listing(item):
-    """One `gh pr list --json headRefName,number,url,body,files` item as a
-    record of the open-PR listing contract (guards.pr_cap): `base` from the
-    body's marker, `paths` from `files`, None when there are GH_FILES_CAP or
-    more (possibly cut short), none, or any is malformed. Pure: cm-fkd.4
-    runs `gh` and maps its items through this."""
+    """One `gh pr list --json headRefName,number,url,body,files,
+    isCrossRepository` item as a record of the open-PR listing contract
+    (guards.pr_cap): `base` from the body's marker, `paths` from `files`,
+    None when there are GH_FILES_CAP or more (possibly cut short), none, or
+    any is malformed; `cross_repository` is `isCrossRepository` as given
+    (missing is None: unknown provenance, module docstring, "The trust
+    boundary"). Pure: cm-fkd.4 runs `gh` and maps its items through this."""
     files = item.get("files")
     paths = None
     if isinstance(files, list) and 0 < len(files) < GH_FILES_CAP:
@@ -287,7 +317,7 @@ def sweep_pr_listing(item):
             paths = sorted(set(names))
     return {"branch": item.get("headRefName"), "number": item.get("number"),
             "url": item.get("url"), "base": parse_sweep_marker(item.get("body")),
-            "paths": paths}
+            "paths": paths, "cross_repository": item.get("isCrossRepository")}
 
 
 @dataclass(frozen=True)
@@ -381,23 +411,19 @@ def sweep_decision(work, base, entries, open_sweep_prs,
         # are unknown.
         return Decision(UNKNOWN, _unknown(f"could not list open pull requests ("
                                           f"{_clip(str(error))})"), base)
+    # Cross-repository records are already gone (open_pr_records): grouping
+    # sees only this repository's PRs and those of unknown provenance.
     listed = {}
     for record in records:
         if record["branch"].startswith(branch_prefix):
-            listed.setdefault(record["branch"], _listed(record))
+            listed.setdefault(record["branch"], []).append(
+                (_listed(record), record.get("cross_repository") is False))
     ledger = sweep_prs(entries)
     known, unaccounted = [], []
     for branch in sorted(listed):
-        on_github = listed[branch]
-        record = ledger.get(branch)
-        if record is not None and on_github["number"] not in (None, record["number"]):
-            record = None  # an older PR's line on a reused branch name
-        if record is None and on_github["base"] and on_github["paths"]:
-            record = on_github
-        if record is None:
-            unaccounted.append(on_github)  # its listed base may still be known
-        else:
-            known.append(record)
+        found, unknown = _account(listed[branch], ledger.get(branch))
+        known += found
+        unaccounted += unknown
     open_prs = tuple(sorted(known + unaccounted, key=_by_number))
     same_base = [pr for pr in open_prs if pr["base"] == base]
     if same_base:
@@ -408,7 +434,9 @@ def sweep_decision(work, base, entries, open_sweep_prs,
         branches = [pr["branch"] for pr in unaccounted]
         return Decision(UNKNOWN, (
             "neither the ledger nor GitHub says which files the open sweep PR(s) on "
-            + ", ".join(branches) + " change, so a new sweep PR might duplicate one (E3-R7); "
+            + ", ".join(branches) + " change (GitHub's account is used only for a PR known "
+            "to be from this repository and alone on its branch), so a new sweep PR might "
+            "duplicate one (E3-R7); "
             "nothing was fixed, and this clears once "
             + ("it is" if len(branches) == 1 else "they are") + " merged or closed"), base)
     held_paths = {path for pr in open_prs for path in pr["paths"]}
@@ -427,6 +455,34 @@ def _unknown(why):
     # Only for a listing that failed, which passes: "try again" is true here.
     return (f"{why}, so a new sweep PR might duplicate an open one (E3-R7); "
             "nothing was fixed, and the next sweep will try again")
+
+
+def _account(group, record):
+    """(known, unaccounted) for the open PRs listed on one branch, `group`
+    a list of (listed record, same-repository?) in listing order, paired
+    with the branch's ledger `record` (or None) by number (module
+    docstring, "The trust boundary"). An unaccounted PR keeps its listed
+    base only when it is trusted and the sole unpaired PR on its branch."""
+    rest = list(group)
+    known = []
+    if record is not None:
+        # WHY by number and not first listed: gh lists newest first, so a
+        # later PR on the same branch name would otherwise displace ours.
+        at = next((i for i, (pr, _) in enumerate(rest) if pr["number"] == record["number"]),
+                  None)
+        if at is None:  # a listing without numbers (plain names): as before
+            at = next((i for i, (pr, _) in enumerate(rest) if pr["number"] is None), None)
+        if at is not None:
+            del rest[at]
+            known.append(record)  # else: an older PR's line on a reused branch name
+    ambiguous = not known and len(rest) > 1
+    unaccounted = []
+    for pr, trusted in rest:
+        if trusted and not ambiguous and pr["base"] and pr["paths"]:
+            known.append(pr)
+        else:
+            unaccounted.append(pr if trusted and not ambiguous else dict(pr, base=None))
+    return known, unaccounted
 
 
 def _listed(record):

@@ -444,9 +444,11 @@ def test_apply_to_refuses_a_sandbox_the_decision_was_not_made_for(tmp_path):
 
 # --- review fixes: CI mode, one open-PR contract, the PR marker ------------------------
 
-def gh_record(branch=BRANCH, number=7, base=BASE, paths=("src/a.py",), url=URL):
+def gh_record(branch=BRANCH, number=7, base=BASE, paths=("src/a.py",), url=URL,
+              cross_repository=False):
     return {"branch": branch, "number": number, "url": url, "base": base,
-            "paths": None if paths is None else list(paths)}
+            "paths": None if paths is None else list(paths),
+            "cross_repository": cross_repository}
 
 
 def test_ci_mode_without_the_ledger_line_falls_back_to_the_listings_base_and_paths():
@@ -545,7 +547,10 @@ def test_a_gh_listing_item_becomes_a_record_and_a_capped_file_list_is_unknown():
             "body": "x\n" + sweep_marker(BASE), "files": [{"path": "src/b.py"},
                                                           {"path": "src/a.py"}]}
     assert sweep_pr_listing(item) == {"branch": BRANCH, "number": 7, "url": URL,
-                                      "base": BASE, "paths": ["src/a.py", "src/b.py"]}
+                                      "base": BASE, "paths": ["src/a.py", "src/b.py"],
+                                      "cross_repository": None}
+    assert sweep_pr_listing(dict(item, isCrossRepository=False))["cross_repository"] is False
+    assert sweep_pr_listing(dict(item, isCrossRepository=True))["cross_repository"] is True
     capped = dict(item, files=[{"path": f"f{i}.py"} for i in range(100)])
     assert sweep_pr_listing(capped)["paths"] is None
     assert sweep_pr_listing(dict(item, body=None))["base"] is None
@@ -600,3 +605,110 @@ def test_a_held_delete_file_remedy_survives_apply_to(tmp_path):
         sweep_decision(sandbox.work_list, sandbox.base, [], lambda: []).apply_to(sandbox)
         apply_file_remedies(sandbox)
         assert not (sandbox.path / VARIANT).exists()
+
+
+# --- review fix: the trust boundary is the same repository ----------------------------
+#
+# Fixture provenance: the gh items are the shape `gh pr list --json
+# headRefName,number,url,body,files,isCrossRepository` returns, built as the
+# reviewer's probe built them (its shadowing case is reproduced verbatim
+# below, with isCrossRepository added as gh would report it). A fork's
+# headRefName is the fork owner's choice, so it can equal ours.
+
+def gh_item(number, base, paths, cross=None, branch=BRANCH):
+    item = {"headRefName": branch, "number": number, "url": f"u{number}",
+            "body": "Fixes\n" + sweep_marker(base) + "\n",
+            "files": [{"path": path} for path in paths]}
+    if cross is not None:
+        item["isCrossRepository"] = cross
+    return item
+
+
+SHADOW_WORK = (violation("1", "x.py"), violation("2", "y.py"))
+
+
+@pytest.mark.parametrize("fork_first", [True, False])
+def test_a_fork_pr_shadowing_our_branch_is_dropped_and_ours_is_still_a_duplicate(fork_first):
+    """The reviewer's probe: our #7 at BASE covers x.py; a fork's #99 on the
+    same head branch name claims base NEWER and zzz.py. Listed newest first
+    it used to displace our ledger record and yield WORK on x.py: a second PR."""
+    ours = sweep_pr_listing(gh_item(7, BASE, ["x.py"], cross=False))
+    fork = sweep_pr_listing(gh_item(99, NEWER, ["zzz.py"], cross=True))
+    listing = [fork, ours] if fork_first else [ours, fork]
+    entries = [pr_line(7, paths=("x.py",))]
+    decision = sweep_decision(work_of(*SHADOW_WORK), BASE, entries, lambda: listing)
+    assert decision.kind == DUPLICATE_OPEN_PR
+    assert [pr["number"] for pr in decision.open_prs] == [7]
+    # The same at a newer base: x.py stays held by our #7, only y.py is work.
+    decision = sweep_decision(work_of(*SHADOW_WORK), NEWER, entries, lambda: listing)
+    assert decision.kind == WORK and [i.path for i in decision.work_list.items] == ["y.py"]
+
+
+@pytest.mark.parametrize("fork_first", [True, False])
+def test_the_probes_listing_without_provenance_never_yields_a_second_pr(fork_first):
+    # The probe verbatim: no isCrossRepository at all (a cm-fkd.4 that forgot
+    # the field). The ledger still pairs our #7 by number; #99 is unknown.
+    ours = sweep_pr_listing(gh_item(7, BASE, ["x.py"]))
+    fork = sweep_pr_listing(gh_item(99, NEWER, ["zzz.py"]))
+    listing = [fork, ours] if fork_first else [ours, fork]
+    entries = [pr_line(7, paths=("x.py",))]
+    assert sweep_decision(work_of(*SHADOW_WORK), BASE, entries,
+                          lambda: listing).kind == DUPLICATE_OPEN_PR
+    assert sweep_decision(work_of(*SHADOW_WORK), NEWER, entries,
+                          lambda: listing).kind == UNKNOWN
+
+
+def test_a_fork_pr_with_a_current_base_marker_holds_nothing_and_refuses_nothing():
+    work = work_of(*SHADOW_WORK)
+    for item in (gh_item(99, BASE, ["x.py"], cross=True),
+                 dict(gh_item(99, BASE, ["x.py"], cross=True), body="no marker")):
+        decision = sweep_decision(work, BASE, [], lambda item=item: [sweep_pr_listing(item)])
+        assert decision.kind == WORK, item
+        assert decision.open_prs == () and decision.held == ()
+
+
+def test_unknown_provenance_is_never_used_as_the_fallback():
+    work = work_of(*SHADOW_WORK)
+    for cross in (None, "false", 0, 1):
+        same_base = dict(gh_record(paths=("x.py",)), cross_repository=cross)
+        older = dict(gh_record(base=NEWER, paths=("x.py",)), cross_repository=cross)
+        for record in (same_base, older):
+            decision = sweep_decision(work, BASE, [], lambda record=record: [record])
+            assert decision.kind == UNKNOWN, (cross, record["base"])
+            assert "neither the ledger nor GitHub" in decision.refusal().message
+    unknown = dict(gh_record(paths=("x.py",)), cross_repository=None)
+    del unknown["cross_repository"]
+    assert sweep_decision(work, NEWER, [], lambda: [unknown]).kind == UNKNOWN
+    # ...but the ledger still knows its own PR, provenance or not (plain names too).
+    entries = [pr_line(7, paths=("x.py",))]
+    for listing in ([unknown], [BRANCH]):
+        decision = sweep_decision(work, NEWER, entries, lambda listing=listing: listing)
+        assert decision.kind == WORK and [i.path for i in decision.held] == ["x.py"]
+
+
+def test_two_same_repo_prs_on_one_branch_pair_with_the_ledger_by_number_else_refuse():
+    work = work_of(*SHADOW_WORK)
+    first = gh_record(number=8, base=NEWER, paths=("y.py",))
+    second = gh_record(number=7, base=NEWER, paths=("zzz.py",))
+    decision = sweep_decision(work, BASE, [], lambda: [first, second])
+    assert decision.kind == UNKNOWN
+    assert sweep_decision(work, BASE, [], lambda: [second, first]).kind == UNKNOWN
+    # The ledger knows #7: it is paired by number, whatever the order, and
+    # #8 (same repository, base and paths listed) is known by its listing.
+    entries = [pr_line(7, base=NEWER, paths=("x.py",))]
+    for listing in ([first, second], [second, first]):
+        decision = sweep_decision(work, BASE, entries, lambda listing=listing: listing)
+        assert decision.kind == DUPLICATE_OPEN_PR, listing
+        assert {pr["number"]: pr["paths"] for pr in decision.open_prs} == {
+            7: ["x.py"], 8: ["y.py"]}
+
+
+def test_the_cap_does_not_count_cross_repository_prs():
+    fork = gh_record(branch="curamoir/sweep-x", cross_repository=True)
+    ours = gh_record(branch="curamoir/sweep-y")
+    assert OpenPrCap(lambda: [fork, fork, fork], max_open_prs=1)(None) is None
+    assert isinstance(OpenPrCap(lambda: [fork, ours], max_open_prs=1)(None), Refusal)
+    # A plain name (the old contract) and unknown provenance still count.
+    unknown = dict(ours, cross_repository=None)
+    assert isinstance(OpenPrCap(lambda: ["curamoir/sweep-z"], max_open_prs=1)(None), Refusal)
+    assert isinstance(OpenPrCap(lambda: [unknown], max_open_prs=1)(None), Refusal)

@@ -60,8 +60,9 @@ Two layers, so the rules can be tested without git:
    yet): `decision = idempotence.sweep_decision(sandbox.work_list,
    sandbox.base, ledger.entries(), open_sweep_prs)`. cm-fkd.4 supplies
    `open_sweep_prs`, the `gh`-backed callable (`gh pr list --state open
-   --json headRefName,number,url,body,files`, each item mapped through
-   idempotence.sweep_pr_listing) shared with the open-PR cap
+   --json headRefName,number,url,body,files,isCrossRepository`, each item
+   mapped through idempotence.sweep_pr_listing; `isCrossRepository` is the
+   trust boundary, guards.pr_cap's docstring) shared with the open-PR cap
    (guards.pr_cap, whose docstring holds the listing contract), and puts
    `idempotence.sweep_marker(sandbox.base)` on a line of the sweep PR's
    body, so a fresh CI checkout whose ledger lacks this line still knows
