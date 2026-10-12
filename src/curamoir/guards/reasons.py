@@ -31,7 +31,8 @@ class Reason(str, Enum):
 
     # Guard-layer failures. An unrecorded guard failure is a silent loss of
     # enforcement, so both are ledgered (DEC-5).
-    GUARD_ERROR = "guard_error"      # produced here: a guard raised (gateway fails closed)
+    GUARD_ERROR = "guard_error"      # produced here: a guard raised (gateway fails closed);
+                                     # and by job_guard: a curamoir.yaml that cannot be loaded
     GUARD_TIMEOUT = "guard_timeout"  # NOT YET PRODUCED: owned by E0-R5 / E4-R4b, where a
                                      # PreToolUse hook can time out. Claude Code hooks fail
                                      # OPEN on timeout, unlike this gateway, which fails

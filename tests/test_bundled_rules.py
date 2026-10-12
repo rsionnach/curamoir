@@ -304,9 +304,10 @@ def test_the_cli_exits_1_on_the_planted_violations(tmp_path, capsys):
 #: zero. Neither of the other Python rules fires there either: cúramóir's tests
 #: assert on behaviour, not `.called`, and do not print.
 #:
-#: All four are `print(..., file=sys.stderr)` from code that runs as a process
+#: All five are `print(..., file=sys.stderr)` from code that runs as a process
 #: entry point: the guardrail gateway's and the job runner's last-resort
-#: messages when the ledger itself cannot be written (logging is not set up
+#: messages when the ledger itself cannot be written, job_guard's when there
+#: is no repository root to find a ledger under (logging is not set up
 #: there and stderr is the channel Claude Code shows the user), and
 #: curamoir-lint's own CLI error line. They are inside the CLI exception
 #: `structured-logging` states, but not inside the rule's filename exclusions
@@ -316,6 +317,7 @@ def test_the_cli_exits_1_on_the_planted_violations(tmp_path, capsys):
 #: `.curamoir/rules/`, so they fail nothing here.
 OWN_SRC_FINDINGS = Counter({
     ("src/curamoir/guards/gateway.py", "no-print"): 2,
+    ("src/curamoir/job_guard.py", "no-print"): 1,
     ("src/curamoir/job_run.py", "no-print"): 1,
     ("src/curamoir/lint.py", "no-print"): 1,
 })

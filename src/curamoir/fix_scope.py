@@ -32,6 +32,18 @@ Two layers, so the rules can be tested without git:
 
 **What the runner (cm-fkd.4) must do.**
 
+0. Wrap the whole pipeline, steps 1 to 10, in the guards (E3-R6):
+   `job_guard.run_guarded(repo, "sweep", open_sweep_prs, body)`, where
+   `body(run)` is everything below and records its outcome on `run`, the
+   `JobRun` writing to the repo's own ledger (use `run`, not a ledger of
+   your own, for every line below). A refusal (`paused`, `locked`,
+   `budget`, `pr_cap`, `guard_error`) then writes the job's one `job`
+   line, beside the gateway's `guard` line, before any clone, fix step or
+   spend. `open_sweep_prs` is the same callable as step 2b's, and it must
+   time out and raise: a hang the scheduler then kills writes no line at
+   all. `DefaultBranchGuard` is not among those guards: apply it at
+   push/PR time, on the `curamoir/sweep-...` branch (job_guard's
+   docstring).
 1. Make a sandbox: `git_guard.prepare_sandbox(repo, base_ref)`, and use it
    as a context manager so it is removed whatever happens.
 2. Lint it before anything edits it: `lint_sandbox(sandbox)`, which records

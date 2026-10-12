@@ -20,6 +20,10 @@ from pathlib import Path
 #: after `.{10}` matches; the `\.` before the digits is the fraction's own.
 _FRACTION = re.compile(r"^(.{10}.\d{2}:\d{2}:\d{2})\.(\d+)(.*)$")
 
+#: Where a repository's ledger lives, relative to its root. One constant, so
+#: the budget guard reads the file the job runner writes (curamoir.job_guard).
+LEDGER_PATH = (".curamoir", "state", "ledger.jsonl")
+
 
 def parse_ledger_timestamp(timestamp):
     """A ledger `at` value as an aware UTC datetime, or None if unusable.
@@ -169,3 +173,8 @@ class Ledger:
         with two producers on one field has no reset that is right for both.
         """
         return self._unreadable
+
+
+def repo_ledger(repo):
+    """The ledger of the repository rooted at `repo`."""
+    return Ledger(Path(repo).joinpath(*LEDGER_PATH))

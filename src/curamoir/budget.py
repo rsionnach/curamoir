@@ -15,7 +15,7 @@ from datetime import datetime, timezone
 from curamoir.guards.context import unusable_repo
 from curamoir.guards.reasons import Reason
 from curamoir.guards.result import Degraded, Refusal
-from curamoir.ledger import Ledger, parse_ledger_timestamp
+from curamoir.ledger import parse_ledger_timestamp, repo_ledger
 
 PER_MILLION = 1_000_000
 
@@ -164,7 +164,7 @@ class Budget:
                 ),
             )
 
-        ledger = Ledger(context.repo / ".curamoir" / "state" / "ledger.jsonl")
+        ledger = repo_ledger(context.repo)
         try:
             spend = month_to_date(ledger, self._prices, self._now())
             spent = spend.usd
