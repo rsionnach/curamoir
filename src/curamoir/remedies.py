@@ -57,31 +57,40 @@ reason, for the runner to report the violation as unfixed):
 
 **What keeps a file.** Otherwise a file is deleted only if nothing at the
 base refers to it. "Refers to" is read from git's objects at the base
-commit (hardened git, git_guard), never the work tree, binary-looking files
-included (`git grep -a`: a NUL byte does not hide an import), and is
-deliberately broad:
+commit (hardened git, git_guard), never the work tree, and is deliberately
+broad: any other file at the base containing the file's stem as a whole
+word (`handlers_v2` for `src/sample/web/handlers_v2.py`; `.` and `/` end a
+word, so the file name, its path and a dotted module path `web.handlers_v2`
+all hold it). That is an import, `from . import (` across lines,
+`import_module("…handlers_v2")`, a JS/TS `./handlers_v2`, `python
+scripts/migrate_v2.py` in a Makefile or a Jenkinsfile, `gunicorn
+app_v2:app`, an `ExecStart=` line, a `.vscode/launch.json` `program`, a
+Vue or Svelte component's import — and also a comment or string that only
+names it.
 
-- any other Python or JS/TS source file containing the file's stem as a
-  whole word — an import of the module or of its dotted name, a `from .
-  import (` list across lines, `import_module("…handlers_v2")`, a JS/TS
-  `./handlers_v2`, and also a comment or string that merely names it;
-- any build, CI or config file (_CONFIG_FILES: TOML, INI/cfg, YAML,
-  Makefiles, Dockerfiles, shell scripts, Procfile, HTML and Jinja
-  templates, package.json, tsconfig/jsconfig, anything under `.github/`)
-  containing the stem as a whole word. That one search covers the file name
-  (`python scripts/migrate_v2.py`, `CMD ["python", "serve_v2.py"]`, since
-  `.` ends a word), the bare stem (`gunicorn app_v2:app`) and an entry
-  point (`run = "run_old:main"`);
-- any other text file of any kind containing `<parent>.<stem>` (for
-  `src/sample/web/handlers_v2.py`, `web.handlers_v2`): a module path in
-  a config file of a kind not listed above, `python -m`, a server's
-  `module:app`.
+WHY every file and not a list of the kinds that can refer: such a list
+kept missing real uses (a `.vue`, `.pyx`, `.ipynb`, systemd unit, Jenkinsfile
+or `.ps1`), and each miss deletes a file in use. So the search reads
+everything but what is listed as not a reference:
 
-Prose is not searched for the stem: Markdown, reStructuredText and plain
-text anywhere, and cúramóir's and beads' own files (`.curamoir/`, `.beads/`).
-A file mentioned only by its path or name in a description (PLANTED.json,
-`principles.md`'s `bad` example, a changelog) is not kept for it: a
-description of a file is not a use of it.
+- prose, case-insensitively: `*.md`, `*.markdown`, `*.rst`, `*.adoc`, and
+  `CHANGELOG*` and `LICENSE*` files (_NOT_REFERENCES). Plain `*.txt` is
+  read: it can be a crontab or a list of commands;
+- cúramóir's and beads' own records, `.curamoir/` and `.beads/`;
+- any file the project declares documentation with the git attribute
+  `linguist-documentation` (set or `=true`; GitHub Linguist's attribute,
+  read from the base's `.gitattributes`). WHY: a record that names files
+  without using them (the sample fixture's PLANTED.json) is the project's
+  to declare; cúramóir knows no file names.
+
+Binary-looking files are searched as text (`git grep -a`: a NUL byte does
+not hide an import), and nothing is skipped as binary, so an image or
+archive that happens to hold the stem keeps the file. A mention in what is
+excluded keeps nothing: a description of a file is not a use of it.
+
+The search is one `git grep` over the base for every candidate's stem at
+once, its matches mapped back to the stems; a stem with a character other
+than a letter, digit or `_` gets a search of its own (_base_references).
 
 **Two phases.** Every decision, with every search, is made before anything
 is deleted. WHY: a search that fails (a git timeout is a GitGuardError)
@@ -97,15 +106,16 @@ way, and removing directories would be one more thing to get wrong.
 
 **Limits, stated rather than hidden.**
 
-- A reference the searches cannot see keeps nothing: an import whose
-  module name is computed (`import_module(f"handlers_{v}")`), a top-level
-  module (no parent directory) named in a file of a kind not searched for
-  the stem (say a `.json` other than package.json/tsconfig), a config that
-  names the file's directory some other way (`--app-dir`). The project's
-  tests (E3-R4) are the backstop.
-- The searches are word matches, not parses, so they err towards keeping:
-  a comment saying "unlike handlers_v2" in another module, or a CI step
-  naming a different file with the same stem, keeps the file.
+- A reference the search cannot see keeps nothing: an import whose
+  module name is computed (`import_module(f"handlers_{v}")`), a use written
+  only in a Markdown or reStructuredText file (an executed notebook in
+  `.md`, a Sphinx `automodule` in `.rst`), a config that names the file's
+  directory some other way (`--app-dir`). The project's tests (E3-R4) are
+  the backstop.
+- The search is a word match, not a parse, so it errs towards keeping: a
+  comment saying "unlike handlers_v2" in another module, a requirements or
+  data file, or a CI step naming a different file with the same stem,
+  keeps the file.
 - Only the `delete_file` remedy exists. A rename needs the new name, which
   is a judgement, and the agent may not rename either; such a violation is
   left for a person.
@@ -115,6 +125,7 @@ Syntax that imports on 3.9, like the rest of what `scripts/curamoir` runs.
 
 import dataclasses
 import os
+import re
 import stat
 from dataclasses import dataclass
 from fnmatch import fnmatchcase
@@ -135,29 +146,31 @@ from curamoir.rules import DELETE_FILE
 #: How many referring files a SkippedRemedy names before "and N more".
 _NAMED_REFERENCES = 5
 
-#: The source a remedy may delete, and in which other files the stem is a
-#: reference (module docstring).
+#: The source a remedy may delete (module docstring, "What is never
+#: deleted"). Not where references are looked for: that is every text file.
 _SOURCE_SUFFIXES = PYTHON_SUFFIXES + SCRIPT_SUFFIXES
 
 #: Directories whose files are tests, and test file names (lower-cased).
 _TEST_DIRECTORIES = ("tests", "test", "__tests__", "spec")
 _TEST_NAMES = ("test_*.py", "*_test.py", "conftest*.py", "*.test.*", "*.spec.*")
 
-#: The files that name a module or script they run: build, CI and config
-#: files (module docstring, "What keeps a file"). Glob pathspecs, so
-#: `**/Makefile` finds a nested one too.
-_CONFIG_FILES = tuple(f":(glob){pattern}" for pattern in (
-    "**/*.toml", "**/*.cfg", "**/*.ini", "**/*.conf", "**/*.yml", "**/*.yaml",
-    "**/Makefile", "**/makefile", "**/GNUmakefile", "**/*.mk", "**/justfile",
-    "**/Justfile", "**/Dockerfile*", "**/Containerfile*", "**/*.dockerfile",
-    "**/*.sh", "**/*.bash", "**/Procfile", "**/*.html", "**/*.htm", "**/*.j2",
-    "**/*.jinja*", "**/package.json", "**/tsconfig*.json", "**/jsconfig*.json",
-    ".github/**"))
+#: Subtracted from the reference search, which is otherwise every file at
+#: the base: prose (a mention there describes a file, it does not use it)
+#: and cúramóir's and beads' own records. Case-insensitive, so README.MD and
+#: changelog.rst are prose too. WHY not *.txt: a .txt can hold a crontab or
+#: a list of commands, and keeping a file wrongly costs less than deleting
+#: one wrongly (module docstring, "The governing rule").
+_NOT_REFERENCES = tuple(f":(exclude,glob,icase){pattern}" for pattern in (
+    "**/*.md", "**/*.markdown", "**/*.rst", "**/*.adoc", "**/CHANGELOG*",
+    "**/LICENSE*", ".curamoir/**", ".beads/**"))
 
-#: Prose and cúramóir's or beads' own records: a mention there describes a
-#: file, it does not use it.
-_NOT_REFERENCES = tuple(f":(exclude,glob){pattern}" for pattern in (
-    "**/*.md", "**/*.rst", "**/*.txt", ".curamoir/**", ".beads/**"))
+#: The git attribute by which a project declares a file documentation
+#: (GitHub Linguist's): a mention in such a file keeps nothing either.
+_DOCUMENTATION_ATTRIBUTE = "linguist-documentation"
+
+#: A stem made of git grep -w's word characters alone, which the one
+#: batched search handles (_base_references).
+_WORD_STEM = re.compile(r"[A-Za-z0-9_]+")
 
 
 @dataclass(frozen=True)
@@ -216,47 +229,51 @@ def apply_file_remedies(sandbox):
         if item.rule_id in deletable:
             by_path.setdefault(item.path, []).append(item)
     # Phase one: every decision, every search; nothing is touched.
-    targets, deleted, skipped = [], [], []
+    decisions = []  # [path, rule id, target or None, why kept or None], in work-list order
     for path, items in by_path.items():
         # WHY any item, not the first: one file-level violation of a
         # deletable rule is the license, whatever else the file has.
         file_level = [item for item in items if is_file_level(item)]
         if not file_level:
-            skipped.append(SkippedRemedy(
-                path, items[0].rule_id, DELETE_FILE,
-                "its violation is not file-level (the empty region at 1:1 a "
-                "`target: path` rule reports), so the file is not the violation"))
+            decisions.append([path, items[0].rule_id, None,
+                              "its violation is not file-level (the empty region at 1:1 a "
+                              "`target: path` rule reports), so the file is not the violation"])
             continue
-        target, reason = _decide(sandbox, path)
-        if reason is None:
-            targets.append(target)
-            deleted.append(path)
-        else:
-            skipped.append(SkippedRemedy(path, file_level[0].rule_id, DELETE_FILE, reason))
+        decisions.append([path, file_level[0].rule_id, *_check(sandbox, path)])
+    # WHY one search for every candidate, not one per file: a sweep can hold
+    # a hundred variants, and a search of the whole base each is slow.
+    referrers = _base_references(sandbox, [d[0] for d in decisions if d[2] is not None])
+    for decision in decisions:
+        if referrers.get(decision[0]):
+            decision[2:] = [None, _still_used(referrers[decision[0]])]
+    deleted = [path for path, _, target, _ in decisions if target is not None]
+    skipped = [SkippedRemedy(path, rule_id, DELETE_FILE, reason)
+               for path, rule_id, target, reason in decisions if target is None]
     # Phase two: the deletions, all decided on the untouched base.
-    for target in targets:
-        os.unlink(target)
+    for _, _, target, _ in decisions:
+        if target is not None:
+            os.unlink(target)
     return RemedyResult(deleted=tuple(sorted(deleted)), skipped=tuple(skipped),
                         deletable_rules=deletable)
 
 
-def _decide(sandbox, path):
-    """(absolute path to delete, None) for `path` in `sandbox`, or (None,
-    why it is kept). Deletes nothing."""
+def _check(sandbox, path):
+    """(absolute path to delete, None) for `path` in `sandbox` if nothing
+    but a reference could keep it, or (None, why it is kept). Searches for
+    no reference and deletes nothing."""
     problem = _unsafe(path) or _never_deleted(path)
     if problem:
         return None, problem
-    target, problem = _untracked(sandbox, path) or _regular_file(str(sandbox.path), path)
-    if problem:
-        return None, problem
-    referrers = _base_references(sandbox, path)
-    if referrers:
-        named = ", ".join(referrers[:_NAMED_REFERENCES])
-        more = len(referrers) - _NAMED_REFERENCES
-        return None, (f"the base still refers to it, from {named}"
-                      + (f" and {more} more" if more > 0 else "")
-                      + "; deleting a file something uses is not a mechanical fix")
-    return target, None
+    # _not_tracked_at_base is None when the base tracks it, else (None, why).
+    return _not_tracked_at_base(sandbox, path) or _regular_file(str(sandbox.path), path)
+
+
+def _still_used(referrers):
+    named = ", ".join(referrers[:_NAMED_REFERENCES])
+    more = len(referrers) - _NAMED_REFERENCES
+    return (f"the base still refers to it, from {named}"
+            + (f" and {more} more" if more > 0 else "")
+            + "; deleting a file something uses is not a mechanical fix")
 
 
 def _unsafe(path):
@@ -292,7 +309,7 @@ def _never_deleted(path):
     return None
 
 
-def _untracked(sandbox, path):
+def _not_tracked_at_base(sandbox, path):
     """(None, why) unless the base commit has a regular file at exactly
     `path`, read from its tree byte for byte (no case folding, no pathspec
     magic); None if it has."""
@@ -333,32 +350,79 @@ def _regular_file(root, path):
     return current, None
 
 
-def _base_references(sandbox, path):
-    """The other files at `sandbox`'s base commit that refer to `path`
-    (module docstring, "What keeps a file"), sorted."""
+def _stem(path):
     name = PurePosixPath(path).name
-    stem = name.split(".", 1)[0] or name
-    exclude = f":(exclude,literal){path}"
-    found = set(_grep(sandbox, stem, *(f"*{suffix}" for suffix in _SOURCE_SUFFIXES),
-                      exclude))
-    found.update(_grep(sandbox, stem, *_CONFIG_FILES, *_NOT_REFERENCES, exclude))
-    parent = PurePosixPath(path).parent.name
-    if parent:
-        found.update(_grep(sandbox, f"{parent}.{stem}", exclude))
-    return tuple(sorted(found))
+    return name.split(".", 1)[0] or name
 
 
-def _grep(sandbox, word, *pathspecs):
-    """Paths at the base whose content holds `word` as a whole word (fixed
-    string). `-a`: a file git thinks binary (a NUL byte) is searched too,
-    erring towards keeping. `-e` so a word starting with `-` is not an
-    option."""
+def _base_references(sandbox, paths):
+    """{path: the other files at `sandbox`'s base commit that refer to it,
+    sorted} for each of `paths` (module docstring, "What keeps a file")."""
+    by_stem = {}
+    for path in paths:
+        by_stem.setdefault(_stem(path), []).append(path)
+    hits = {stem: set() for stem in by_stem}
+    batched = [stem for stem in by_stem if _WORD_STEM.fullmatch(stem)]
+    # WHY batching only word stems: two whole-word matches of word-only
+    # strings are maximal runs of word characters, so they never partly
+    # overlap and `-o` reports each. A stem like `d-x_v2` can overlap
+    # another's match (`x_v2`) and be swallowed, so it gets its own search.
+    for referrer, word in _grep_words(sandbox, batched):
+        hits[word].add(referrer)
+    for stem in by_stem:
+        if stem not in batched:
+            hits[stem].update(_grep(sandbox, stem))
+    documentation = _documentation(sandbox, set().union(*hits.values()))
+    return {path: tuple(sorted(hits[_stem(path)] - documentation - {path})) for path in paths}
+
+
+def _grep_words(sandbox, words):
+    """(path, word) for each of `words` that a file at the base holds as a
+    whole word, in one search of every file but _NOT_REFERENCES. `-a`: a
+    file git thinks binary (a NUL byte) is searched as text too, erring
+    towards keeping; nothing is skipped as binary. Fixed strings, each after
+    `-e`, so a word starting with `-` is not an option."""
+    if not words:
+        return []
+    patterns = [arg for word in words for arg in ("-e", word)]
+    listing = git(sandbox.path, "grep", "-a", "-o", "-z", "-w", "-F", *patterns,
+                  sandbox.base, "--", *_NOT_REFERENCES, ok=(0, 1))
+    # Each match is `<base>:<path>\0<word>\n`; a path may hold a newline
+    # but no NUL, and a word holds neither, so read NUL first, then newline.
+    found, position = set(), 0
+    while position < len(listing):
+        nul = listing.index(b"\0", position)
+        end = listing.index(b"\n", nul)
+        found.add((_unprefix(sandbox, listing[position:nul]),
+                   listing[nul + 1:end].decode("utf-8", "surrogateescape")))
+        position = end + 1
+    return sorted(found)
+
+
+def _grep(sandbox, word):
+    """Paths at the base, but _NOT_REFERENCES, whose content holds `word` as
+    a whole word (fixed string; `-a` and `-e` as in _grep_words)."""
     listing = git(sandbox.path, "grep", "-a", "-l", "-z", "-w", "-F", "-e", word,
-                  sandbox.base, "--", *pathspecs, ok=(0, 1))
+                  sandbox.base, "--", *_NOT_REFERENCES, ok=(0, 1))
+    return [_unprefix(sandbox, entry) for entry in listing.split(b"\0") if entry]
+
+
+def _unprefix(sandbox, entry):
+    name = entry.decode("utf-8", "surrogateescape")
     prefix = f"{sandbox.base}:"
-    names = []
-    for entry in listing.split(b"\0"):
-        if entry:
-            name = entry.decode("utf-8", "surrogateescape")
-            names.append(name[len(prefix):] if name.startswith(prefix) else name)
-    return names
+    return name[len(prefix):] if name.startswith(prefix) else name
+
+
+def _documentation(sandbox, paths):
+    """Those of `paths` the project marks `linguist-documentation` (set or
+    `=true`). Read from the index (`--cached`): require_pristine has made it
+    the base commit's tree, and git 2.39 has no `check-attr --source`."""
+    paths, marked = sorted(paths), set()
+    for start in range(0, len(paths), 500):
+        listing = git(sandbox.path, "check-attr", "--cached", "-z", _DOCUMENTATION_ATTRIBUTE,
+                      "--", *paths[start:start + 500])
+        fields = listing.split(b"\0")
+        for index in range(0, len(fields) - 2, 3):
+            if fields[index + 2] in (b"set", b"true"):
+                marked.add(fields[index].decode("utf-8", "surrogateescape"))
+    return marked

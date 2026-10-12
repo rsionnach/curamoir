@@ -14,7 +14,8 @@ deletion, and only a deletion a rule with that remedy licenses.
 (tests/conftest.py, committed_sample), whose NO_VARIANT_MODULE carries
 `remedy: delete_file`; the work list is the real `scripts/curamoir-lint`'s
 in that sandbox (fix_scope.lint_sandbox). Nothing in the fixture refers to
-handlers_v2 but itself, PLANTED.json, the principles' `bad` example and a
+handlers_v2 but itself, PLANTED.json (which the fixture's .gitattributes
+declares `linguist-documentation`), the principles' `bad` example and a
 beads issue (checked below). The hardening tests use small repositories of
 their own with the work list and rules set by hand, as tests/test_fix_scope.py
 does.
@@ -68,7 +69,10 @@ def edit(root, path, old, new):
 
 
 def git_repo(tmp_path, setup):
-    """A one-commit repository; `setup(repo)` writes its files."""
+    """A one-commit repository; `setup(repo)` makes its entries. WHY beside
+    files_repo (tests/test_fix_scope.py's, a dict of text files): these
+    tests need a symlink or a directory where a file is expected, which
+    text alone cannot make."""
     repo = tmp_path / "plain"
     repo.mkdir()
     setup(repo)
@@ -104,10 +108,10 @@ def hand_sandbox(repo, items, rules):
 
 
 def remedy_files(tmp_path, files, *paths):
-    """apply_file_remedies on a one-commit repository of `files` whose work
-    list is a file-level violation of each of `paths` (default: the first
-    file), and (result, sandbox root). The sandbox is removed afterwards, so
-    what the root held is read through `kept`."""
+    """(result, kept): apply_file_remedies's RemedyResult on a one-commit
+    repository of `files` whose work list is a file-level violation of each
+    of `paths` (default: the first file), and which of `files` were still in
+    the sandbox afterwards (read before the sandbox is removed)."""
     repo = files_repo(tmp_path, files)
     with hand_sandbox(repo, [V(path) for path in paths or [next(iter(files))]],
                       [path_rule()]) as sandbox:
@@ -120,11 +124,16 @@ def remedy_files(tmp_path, files, *paths):
 
 def test_nothing_in_the_fixture_refers_to_the_variant_but_prose():
     """The premise of the acceptance: deleting handlers_v2.py breaks nothing,
-    because no source or config file names it."""
+    because only prose and records name it, and the one record of a kind the
+    search reads (PLANTED.json) is declared documentation."""
     fixture = os.path.join(os.path.dirname(__file__), os.pardir, "fixtures", "sample-repo")
     found = subprocess.run(["git", "grep", "-l", "-w", "handlers_v2", "--", "."], cwd=fixture,
                            capture_output=True, text=True).stdout.split()
     assert sorted(found) == [".beads/issues.jsonl", ".curamoir/principles.md", "PLANTED.json"]
+    attribute = subprocess.run(["git", "check-attr", "linguist-documentation", "--",
+                                "PLANTED.json"], cwd=fixture, capture_output=True,
+                               text=True).stdout
+    assert attribute.strip().endswith(": set")
 
 
 def test_the_variant_is_deleted_in_the_sandbox_and_the_review_accepts_it(sandboxed):
@@ -273,8 +282,8 @@ def test_a_file_the_base_refers_to_is_skipped_with_the_reason(tmp_path, path, te
 
 
 def test_a_mention_in_prose_does_not_keep_the_file(sandboxed):
-    """PLANTED.json and principles.md name `handlers_v2.py` by path; that is
-    a description of the file, not a use of it."""
+    """principles.md (prose) and PLANTED.json (declared documentation) name
+    `handlers_v2.py` by path; that is a description of the file, not a use."""
     assert apply_file_remedies(sandboxed).deleted == (VARIANT,)
 
 
@@ -378,7 +387,7 @@ def test_two_violations_of_one_file_delete_it_once(tmp_path):
         assert result.skipped == ()
 
 
-# --- what is never deleted (review of cm-ul5) ---------------------------------------
+# --- what is never deleted --------------------------------------------------------
 # The governing rule: never delete a file the base still uses. Each of these
 # is a file a word search cannot prove unused, so it is refused outright.
 
@@ -445,6 +454,20 @@ def test_a_package_init_or_main_is_never_deleted(tmp_path, name):
     ("app_v2.py", "deploy/run.sh", "#!/bin/sh\nexec python app_v2.py\n"),
     ("web/main_v2.ts", "package.json", '{"main": "web/main_v2.ts"}\n'),
     ("a_v2.py", "b.py", "\0import a_v2\n"),
+    # No allow-list of file kinds: each of these was missed by one.
+    ("src/util_v2.ts", "src/App.vue",
+     "<script setup>\nimport { f } from './util_v2'\n</script>\n"),
+    ("src/util_v2.ts", "src/A.svelte", "<script>\n  import { f } from './util_v2';\n</script>\n"),
+    ("k_v2.py", "fast.pyx", "from k_v2 import f\n"),
+    ("lib_v2.py", "nb.ipynb", '{"cells": [{"source": ["import lib_v2\\n"]}]}\n'),
+    ("srv/d_v2.py", "deploy/app.service",
+     "[Service]\nExecStart=/usr/bin/python3 /srv/d_v2.py\n"),
+    ("srv_v2.py", ".vscode/launch.json",
+     '{"configurations": [{"program": "${workspaceFolder}/srv_v2.py"}]}\n'),
+    ("ci/deploy_v2.py", "Jenkinsfile",
+     "pipeline { stages { stage('d') { steps { sh 'python ci/deploy_v2.py' } } } }\n"),
+    ("tools/gen_v2.py", "build.ps1", "python tools/gen_v2.py\n"),
+    ("tools/gen_v2.py", "ops/crontab.txt", "0 * * * * python /app/tools/gen_v2.py\n"),
 ])
 def test_a_build_or_config_file_that_runs_it_keeps_it(tmp_path, path, referrer, text):
     result, kept = remedy_files(tmp_path, {path: "x = 1\n", referrer: text}, path)
@@ -456,10 +479,89 @@ def test_a_build_or_config_file_that_runs_it_keeps_it(tmp_path, path, referrer, 
 def test_a_mention_in_prose_or_curamoirs_own_files_does_not_keep_it(tmp_path):
     files = {"a_v2.py": "x = 1\n", "docs/notes.md": "a_v2.py is gone\n",
              "CHANGES.rst": "a_v2\n", ".github/PULL_REQUEST_TEMPLATE.md": "a_v2\n",
+             "README.MD": "a_v2\n", "docs/guide.adoc": "a_v2\n", "x.markdown": "a_v2\n",
+             "CHANGELOG": "- removed a_v2\n", "pkg/LICENSE.txt": "a_v2\n",
              ".curamoir/config.yaml": "exclude: [a_v2.py]\n", ".beads/x.yaml": "a_v2\n"}
     result, kept = remedy_files(tmp_path, files, "a_v2.py")
 
     assert result.deleted == ("a_v2.py",) and "a_v2.py" not in kept
+
+
+@pytest.mark.parametrize("attributes, deleted", [
+    ("records/*.json linguist-documentation\n", ("a_v2.py",)),
+    ("records/*.json linguist-documentation=true\n", ("a_v2.py",)),
+    ("records/*.json linguist-documentation=false\n", ()),
+    ("records/*.json -linguist-documentation\n", ()),
+    ("other/*.json linguist-documentation\n", ()),
+])
+def test_a_record_the_project_declares_documentation_does_not_keep_it(tmp_path, attributes,
+                                                                      deleted):
+    """`linguist-documentation` (GitHub Linguist's attribute) is how a
+    project says a file describes code rather than being part of it; the
+    fixture's PLANTED.json is declared so. Anything else keeps the file."""
+    files = {"a_v2.py": "x = 1\n", ".gitattributes": attributes,
+             "records/manifest.json": '{"path": "a_v2.py"}\n'}
+    result, _ = remedy_files(tmp_path, files, "a_v2.py")
+
+    assert result.deleted == deleted
+    if not deleted:
+        assert "records/manifest.json" in result.skipped[0].reason
+
+
+def test_a_documentation_record_does_not_hide_a_real_use(tmp_path):
+    files = {"a_v2.py": "x = 1\n", ".gitattributes": "*.json linguist-documentation\n",
+             "m.json": '"a_v2"\n', "main.py": "import a_v2\n"}
+    result, _ = remedy_files(tmp_path, files, "a_v2.py")
+
+    assert result.deleted == ()
+    assert "main.py" in result.skipped[0].reason and "m.json" not in result.skipped[0].reason
+
+
+_WORD = rb"[A-Za-z0-9_]"
+
+
+def per_file_oracle(files, candidates):
+    """The candidates nothing refers to, decided one stem at a time by plain
+    Python over the files: the stem as a whole word (git grep -w's word
+    characters) in any other file that is not prose or a record."""
+    import re
+    prose = re.compile(r"(?i)(.*\.(md|markdown|rst|adoc)|(.*/)?(changelog|license)[^/]*)$")
+    unused = set()
+    for path in candidates:
+        stem = path.rsplit("/", 1)[-1].split(".", 1)[0]
+        word = re.compile(rb"(?<!" + _WORD + rb")" + re.escape(stem.encode()) + rb"(?!" + _WORD
+                          + rb")")
+        if not any(word.search(text.encode()) for other, text in files.items()
+                   if other != path and not prose.match(other)
+                   and not other.startswith((".curamoir/", ".beads/"))):
+            unused.add(path)
+    return unused
+
+
+def test_the_one_batched_search_decides_as_a_search_per_file_would(tmp_path):
+    """One `git grep` for every candidate's stem gives the decisions a
+    search per stem would, on stems that overlap, share a name, contain
+    non-word characters, or appear only in prose, a binary or the file
+    itself."""
+    files = {
+        "a_v2.py": "x = 1\n", "m.py": "import a_v2\n",
+        "b_v2.py": "x = 1\n", "n.py": "xb_v2 = b_v2x = 1\n",
+        "web/c_v2.py": "x = 1\n", "conf.ini": "[app]\nmodule = web.c_v2:app\n",
+        "d-x_v2.py": "x = 1\n", "x_v2.py": "x = 1\n", "run.sh": "python d-x_v2.py\n",
+        "e-f_v2.py": "x = 1\n", "f-g_v2.py": "x = 1\n", "o.txt": "e-f-g_v2\n",
+        "h_v2.ts": "x = 1\n", "blob.dat": "\0\x01h_v2\0",
+        "i_v2.py": "x = 1\n", "README.md": "i_v2 is old\n",
+        "p/k_v2.py": "k_v2 = 1\n", "q/k_v2.py": "x = 1\n",
+        "lone_v2.py": "lone_v2 = 'only itself'\n",
+    }
+    candidates = [path for path in files if "_v2." in path]
+    expected = per_file_oracle(files, candidates)
+    assert expected == {"b_v2.py", "e-f_v2.py", "i_v2.py", "p/k_v2.py", "lone_v2.py"}
+
+    result, _ = remedy_files(tmp_path, files, *candidates)
+
+    assert set(result.deleted) == expected
+    assert {s.path for s in result.skipped} == set(candidates) - expected
 
 
 def test_a_path_the_base_does_not_track_under_that_exact_name_is_refused(tmp_path):
@@ -482,16 +584,16 @@ def test_any_file_level_item_for_a_path_is_enough_not_the_first(tmp_path):
 
 
 def test_a_git_failure_while_deciding_leaves_the_sandbox_untouched(tmp_path, monkeypatch):
-    """Every search runs before any deletion: a grep that times out on the
-    second file must not leave the first deleted in a sandbox the runner is
-    about to discard as unanswered."""
-    real = remedies._grep
+    """Every search runs before any deletion: a grep that times out, after
+    both files have passed every other check, must not leave either deleted
+    in a sandbox the runner is about to discard as unanswered."""
+    real = remedies.git
 
-    def failing(sandbox, word, *pathspecs):
-        if "b_v2" in word:
+    def failing(repo, *args, **kwargs):
+        if args[0] == "grep":
             raise GitGuardError("git grep timed out")
-        return real(sandbox, word, *pathspecs)
-    monkeypatch.setattr(remedies, "_grep", failing)
+        return real(repo, *args, **kwargs)
+    monkeypatch.setattr(remedies, "git", failing)
     repo = files_repo(tmp_path, {"a_v2.py": "x = 1\n", "b_v2.py": "x = 1\n"})
     with hand_sandbox(repo, [V("a_v2.py"), V("b_v2.py")], [path_rule()]) as sandbox:
         with pytest.raises(GitGuardError):

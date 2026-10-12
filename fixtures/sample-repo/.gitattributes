@@ -1,0 +1,4 @@
+# PLANTED.json records the flaws planted in this fixture: it describes the
+# code, it is not part of it, so cúramóir's file remedies read a mention of a
+# file there as no use of it (src/curamoir/remedies.py).
+PLANTED.json linguist-documentation

@@ -60,23 +60,27 @@ may only edit files: it cannot create, rename or delete one. `remedy:
 delete_file` says the fix is deleting the file, and the sweep's runner does
 that itself, before the agent starts (`src/curamoir/remedies.py`). It keeps
 the file, and reports the violation unfixed with the reason, when anything at
-the commit being swept still refers to it: another Python or JS/TS file
-containing its stem as a word (`handlers_v2`), any build, CI or config file
-(TOML, INI, YAML, Makefile, Dockerfile, shell script, Procfile, template,
-package.json, `.github/`) containing the stem as a word (which covers its file
-name and a `run_old:main` entry point), or any file containing its dotted
-module path (`web.handlers_v2`). The review step accepts a deleted file only
-for such a rule's violation.
+the commit being swept still refers to it: any other file containing its stem
+as a word (`handlers_v2`), which covers an import, its file name or path in a
+Makefile, Jenkinsfile, systemd unit or `launch.json`, a `run_old:main` entry
+point and a dotted module path (`web.handlers_v2`). Every file is searched,
+binary-looking ones as text, except those listed below as not a reference;
+a list of the kinds of file that can refer kept missing some. The review step
+accepts a deleted file only for such a rule's violation.
 
 What it will not see, and what it will not delete (the module docstring of
 `src/curamoir/remedies.py` has the full list and its Limits):
 
-- A mention in prose does not keep a file: Markdown, reStructuredText, plain
-  text, and cúramóir's and beads' own files (`.curamoir/`, `.beads/`) are not
-  searched for the stem. A description of a file is not a use of it.
+- A mention in prose or a record does not keep a file, because those are not
+  searched: Markdown, reStructuredText and AsciiDoc files, `CHANGELOG*` and
+  `LICENSE*` files, cúramóir's and beads' own files (`.curamoir/`,
+  `.beads/`), and any file your `.gitattributes` marks
+  `linguist-documentation` (for a record that lists files without using
+  them, like the sample fixture's `PLANTED.json`). A description of a file is
+  not a use of it. Plain `.txt` files are searched: one can be a crontab.
 - An import whose module name is computed (`import_module(f"handlers_{v}")`)
-  is invisible, as is a reference from a file of a kind not searched; the
-  project's tests are the backstop.
+  is invisible, as is a use written only in an excluded file (a Sphinx
+  `automodule` in `.rst`); the project's tests are the backstop.
 - The search is for words, not parsed imports, so it errs towards keeping: a
   comment in another module that names the stem keeps the file.
 - It never deletes a test file (a `tests`, `test`, `__tests__` or `spec`
