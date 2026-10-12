@@ -36,6 +36,19 @@ Two layers, so the rules can be tested without git:
    as a context manager so it is removed whatever happens.
 2. Lint it before anything edits it: `lint_sandbox(sandbox)`, which records
    the work list of the base, and the rules the lint ran, on the sandbox.
+   Then compute what was found (E4-R4, fix_counts' "Introduced vs found"),
+   in the user's checkout, not the sandbox:
+   `current = fix_counts.found_set(sandbox.work_list, sandbox.base)` and
+   `delta = fix_counts.found_delta(fix_counts.read_snapshot(
+   fix_counts.snapshot_path(repo)), current)`. Every line recorded from
+   here on except a refusal carries `found_delta=delta`, including the
+   no_work line recorded when `sandbox.work_list` has nothing to fix
+   (E3-R7's; JobRun has no no_work method, so it is whichever call E3-R7
+   records it with, given `found_delta=delta`), and after a non-refusal line is recorded,
+   `fix_counts.write_snapshot(fix_counts.snapshot_path(repo), current,
+   sandbox=sandbox)`. A refusal, even one after the lint, carries no
+   `found_delta` and writes no snapshot: the next line's delta then covers
+   what it saw.
 3. Apply the file-level remedies, still before anything else edits it:
    `remedies.apply_file_remedies(sandbox)`, which deletes each file whose
    violation's rule says `remedy: delete_file` and nothing at the base
@@ -56,25 +69,26 @@ Two layers, so the rules can be tested without git:
    PR's: `gate = green_gate.run_test_gate(sandbox, verdict, paths=trimmed)`,
    which runs the base's test command in the sandbox and, on red, drops
    fixed paths until the rest is green. Then, by outcome:
-   - strategy `green` or `reduced`: go on to steps 8 and 9, and record
-     `run.succeeded(..., **gate.ledger_fields(), **fix_fields)` (step 8);
+   - strategy `green` or `reduced`: compute `fix_fields` (step 8), patch
+     and open the PR (step 9), then `run.succeeded(...,
+     **gate.ledger_fields(), **fix_fields)`;
    - strategy `abandoned`: no PR; `run.failed(gate.render(),
-     **gate.ledger_fields(), **fix_counts.found_fields(sandbox.work_list,
-     sandbox.base))` (render() carries the why; `found` is what E4-R4
-     compares, so every line whose base was linted carries it, no_work
-     included);
+     **gate.ledger_fields(), found_delta=delta)` (render() carries the
+     why; `found_delta` is step 2's);
    - GateError raised: a refusal, as in step 6, `run.refused(...)` with no
      `test_gate` field, since there is no GateResult to record.
 8. Record the fixes (E3-R5), still in the sandbox and before the patch:
-   `records = fix_counts.record_fixes(sandbox, gate, remedies_result)`,
-   which lints the PR's tree again with the base's rules and keeps only
-   the violations in `gate.paths_for_pr` it no longer reports; then
-   `fix_fields = fix_counts.ledger_fields(sandbox.work_list, records,
-   sandbox.base)`. They are written with the sweep's success line, once
-   the PR is opened, so a sweep whose PR failed to open records no fixes
-   (its failure line carries `found_fields` only). Its ScopeCheckError,
-   GateError or sweep.LintUntrusted is a refusal, as in step 6: a PR whose
-   fixes cannot be counted would starve the promotion ladder silently.
+   `records = fix_counts.record_fixes(sandbox, gate, remedies_result)`
+   (with the lint options step 2 used, the same timeout: the re-lint is a
+   full lint), which lints the PR's tree again with the base's rules and
+   keeps only the violations in `gate.paths_for_pr` it no longer reports;
+   then `fix_fields = fix_counts.ledger_fields(records, delta)`, with any
+   tier-1 records (cm-fkd.2) added to `records`. They are written with the
+   sweep's success line, once the PR is opened, so a sweep whose PR failed
+   to open records no fixes (its failure line carries `found_delta=delta`
+   only). record_fixes' ScopeCheckError, GateError or sweep.LintUntrusted
+   is a refusal, as in step 6: a PR whose fixes cannot be counted would
+   starve the promotion ladder silently.
 9. Take exactly `gate.paths_for_pr` out: `gate.patch(sandbox)`, the
    patch of those paths built from the bytes the green run tested (what
    `sandbox.patch(gate.paths_for_pr)` gives when nothing changed since),

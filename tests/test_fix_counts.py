@@ -20,24 +20,34 @@ chosen timestamps is what the acceptance criterion describes.
 """
 
 import json
+import os
+import shutil
 import subprocess
+import sys
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from curamoir.config import ConfigError, load_config
 from curamoir.fix_counts import (
     AGENT,
+    DELTA_CAP,
     REMEDY,
     RULE,
     TIER1,
     FixRecord,
     fix_counts,
-    found_fields,
+    found_delta,
+    found_set,
     ledger_fields,
+    read_snapshot,
     record_fixes,
     relint,
     rule_fix_records,
+    snapshot_path,
+    write_snapshot,
 )
 from curamoir.fix_scope import ScopeCheckError, lint_sandbox, verify_fix
 from curamoir.git_guard import prepare_sandbox, snapshot_git_state
@@ -46,6 +56,7 @@ from curamoir.job_run import JobRun
 from curamoir.ledger import Ledger
 from curamoir.lint_report import ReportedViolation
 from curamoir.remedies import apply_file_remedies
+from curamoir.sweep import LintUntrusted
 from tests.conftest import committed_sample
 
 BILLING = "src/sample/core/billing.py"
@@ -75,7 +86,7 @@ def edit(root, path, old, new):
     target.write_text(text.replace(old, new), encoding="utf-8")
 
 
-def fixture_sweep(tmp_path, edits, command="true", before_relint=None):
+def fixture_sweep(tmp_path, edits, command="true", before_relint=None, relint_options=None):
     """The sweep's steps on the committed fixture, as fix_scope's "What the
     runner must do" orders them, through the fix records: (work, gate,
     remedies, records). `edits` stand in for the agent's."""
@@ -95,7 +106,7 @@ def fixture_sweep(tmp_path, edits, command="true", before_relint=None):
         gate = run_test_gate(sandbox, verdict)
         if before_relint:
             before_relint(sandbox)
-        records = record_fixes(sandbox, gate, remedies)
+        records = record_fixes(sandbox, gate, remedies, **(relint_options or {}))
         return work, gate, remedies, records, sandbox.base
 
 
@@ -212,14 +223,14 @@ def test_a_fix_record_holds_its_source_to_its_shape():
 
 # --- the ledger line -------------------------------------------------------------------
 
-def test_the_sweep_line_carries_the_records_the_counts_and_what_was_found(tmp_path):
+def test_the_sweep_line_carries_the_records_the_summary_and_the_found_delta(tmp_path):
     work, gate, _remedies, records, base = fixture_sweep(
         tmp_path, [BILLING_PRINT, BILLING_RAISE, HANDLERS_PRINT, HANDLERS_RAISE],
         command=RED_IF_QUANTITY_ZEROED)
+    delta = found_delta(None, found_set(work, base))
     ledger = Ledger(tmp_path / "ledger.jsonl")
     with JobRun(ledger, "sweep") as run:
-        run.succeeded("opened one PR", **gate.ledger_fields(),
-                      **ledger_fields(work, records, base))
+        run.succeeded("opened one PR", **gate.ledger_fields(), **ledger_fields(records, delta))
 
     (line,) = ledger.entries()
     assert line["outcome"] == "success" and line["job"] == "sweep"
@@ -228,40 +239,184 @@ def test_the_sweep_line_carries_the_records_the_counts_and_what_was_found(tmp_pa
         "principle_id": "errors-carry-context", "rule_id": "no-unchained-raise",
         "source": "rule", "path": HANDLERS, "fingerprint": records[0].fingerprint,
         "fixed_by": "agent", "base": base}
-    assert line["fix_counts"] == {"errors-carry-context": 1,
-                                  "no-file-variant-proliferation": 1,
-                                  "structured-logging": 1}
-    # Everything the base's lint found, fixed or not, by rule: what E4-R4's
-    # introduced-vs-found compares between consecutive sweeps.
-    assert line["found"]["base"] == base
-    assert sorted(f for fps in line["found"]["fingerprints"].values() for f in fps) == sorted(
+    assert line["fix_summary"] == {"errors-carry-context": 1,
+                                   "no-file-variant-proliferation": 1,
+                                   "structured-logging": 1}
+    assert "fix_counts" not in line and "found" not in line
+    # No snapshot yet: everything the base's lint found is `added`, and the
+    # line says it is a baseline, not "introduced".
+    found = line["found_delta"]
+    assert found["base"] == base and found["previous_base"] is None
+    assert found["baseline"] is True and found["truncated"] is False
+    assert sorted(f for fps in found["added"].values() for f in fps) == sorted(
         item.fingerprint for item in work.items)
-    assert line["found"]["fingerprints"]["no-bare-print"] == sorted(
-        item.fingerprint for item in work.items if item.rule_id == "no-bare-print")
-    assert line["found"]["rules_checked"] == list(work.report.rules_checked)
-    assert line["found"]["tools"] == dict(work.report.tools)
+    assert found["removed"] == {}
+    assert found["rules_checked"] == list(work.report.rules_checked)
+    assert found["tools"] == dict(work.report.tools)
     assert line["test_gate"]["strategy"] == REDUCED
     # And the reader reads back what was written.
     now = datetime.fromisoformat(line["at"])
-    assert fix_counts(ledger.entries(), now=now, window_days=90) == line["fix_counts"]
+    assert fix_counts(ledger.entries(), now=now, window_days=90) == line["fix_summary"]
 
 
-def test_found_fields_alone_carry_no_fixes(tmp_path):
-    repo = committed_sample(tmp_path)
-    with prepare_sandbox(repo, "HEAD", parent=tmp_path) as sandbox:
-        work = lint_sandbox(sandbox)
-        fields = found_fields(work, sandbox.base)
-    assert set(fields) == {"found"}
-    assert fields["found"]["base"] == sandbox.base
-
-
-def test_ledger_fields_refuse_records_from_another_base(tmp_path):
-    repo = committed_sample(tmp_path)
-    with prepare_sandbox(repo, "HEAD", parent=tmp_path) as sandbox:
-        work = lint_sandbox(sandbox)
+def test_ledger_fields_refuse_records_from_another_base():
+    delta = found_delta(None, synthetic_found({"r": ["f"]}, base="b" * 40))
     other = FixRecord("p", None, TIER1, "src/a.py", None, AGENT, "c" * 40)
     with pytest.raises(ValueError, match="base"):
-        ledger_fields(work, [other], base="b" * 40)
+        ledger_fields([other], delta)
+
+
+def test_the_relint_failing_is_a_refusal_not_zero_fixes(tmp_path):
+    """A re-lint that exits 2 (or times out) must raise, so the runner
+    refuses: recording zero fixes would starve the ladder silently."""
+    lint = tmp_path / "bin" / "broken-lint"
+    lint.parent.mkdir()
+    lint.write_text(f"#!{sys.executable}\nimport sys\nsys.exit(2)\n", encoding="utf-8")
+    lint.chmod(0o755)
+    with pytest.raises(LintUntrusted):
+        fixture_sweep(tmp_path, [HANDLERS_PRINT], relint_options={"lint": lint})
+
+
+# --- what was found, as a delta against a rolling snapshot -----------------------------
+
+def synthetic_found(fingerprints, base="a" * 40, rules=None):
+    items = [SimpleNamespace(rule_id=rule, fingerprint=fp)
+             for rule, prints in fingerprints.items() for fp in prints]
+    report = SimpleNamespace(rules_checked=tuple(rules or sorted(fingerprints)),
+                             tools={"curamoir-lint": "test"})
+    return found_set(SimpleNamespace(items=items, report=report), base)
+
+
+def test_the_second_sweep_records_only_what_changed():
+    first = synthetic_found({"r": ["f1", "f2"], "s": ["g1"]}, base="a" * 40)
+    second = synthetic_found({"r": ["f2", "f3"], "s": ["g1"]}, base="c" * 40)
+    delta = found_delta(first, second)
+    assert delta["baseline"] is False and delta["truncated"] is False
+    assert delta["base"] == "c" * 40 and delta["previous_base"] == "a" * 40
+    assert delta["added"] == {"r": ["f3"]} and delta["removed"] == {"r": ["f1"]}
+    assert delta["added_count"] == 1 and delta["removed_count"] == 1
+    assert delta["previous_rules_checked"] == ["r", "s"]
+    assert delta["digest"] == second["digest"] != first["digest"]
+
+
+def test_a_rule_new_since_the_snapshot_is_added_but_not_in_the_previous_rules():
+    first = synthetic_found({"r": ["f1"]})
+    second = synthetic_found({"r": ["f1"], "new": ["n1"]})
+    delta = found_delta(first, second)
+    assert delta["baseline"] is False and delta["added"] == {"new": ["n1"]}
+    assert "new" not in delta["previous_rules_checked"]
+
+
+def test_a_delta_too_big_records_counts_only():
+    first = synthetic_found({"r": []})
+    second = synthetic_found({"r": [f"f{i}" for i in range(DELTA_CAP + 1)]})
+    delta = found_delta(first, second)
+    assert delta["truncated"] is True
+    assert delta["added"] is None and delta["removed"] is None
+    assert delta["added_count"] == DELTA_CAP + 1 and delta["removed_count"] == 0
+    assert delta["added_counts"] == {"r": DELTA_CAP + 1}
+
+
+def violation_set(count, base, churn=0):
+    """`count` violations over 50 rules and 500 files; `churn` of them
+    replaced by new ones."""
+    prints = {}
+    for i in range(churn, count + churn):
+        prints.setdefault(f"rule-{i % 50:02d}", []).append(f"{i:064x}")
+    return synthetic_found(prints, base=base)
+
+
+def test_a_steady_state_sweep_line_stays_small_with_10k_violations(tmp_path):
+    """The ledger is read whole before every job (the budget guard,
+    /curamoir:status): a line carrying every fingerprint was ~700 KB at
+    10k violations. A delta with small churn is a few KB."""
+    state = tmp_path / ".curamoir" / "state"
+    ledger = Ledger(state / "ledger.jsonl")
+    first, second = violation_set(10_000, "a" * 40), violation_set(10_000, "c" * 40, churn=5)
+    for found in (first, second):
+        delta = found_delta(read_snapshot(snapshot_path(tmp_path)), found)
+        with JobRun(ledger, "sweep") as run:
+            run.succeeded("ok", **ledger_fields((), delta))
+        write_snapshot(snapshot_path(tmp_path), found)
+    lines = (state / "ledger.jsonl").read_bytes().splitlines()
+    assert len(lines[0]) < 50_000, "the baseline line is truncated to counts"
+    assert len(lines[1]) < 50_000
+    second_line = ledger.entries()[1]["found_delta"]
+    assert second_line["baseline"] is False
+    assert second_line["added_count"] == 5 and second_line["removed_count"] == 5
+
+
+def test_the_snapshot_lives_next_to_the_ledger_and_round_trips(tmp_path):
+    path = snapshot_path(tmp_path)
+    assert path == tmp_path / ".curamoir" / "state" / "found.json"
+    assert read_snapshot(path) is None
+    found = synthetic_found({"r": ["f1", "f2"]})
+    write_snapshot(path, found)
+    assert read_snapshot(path) == found
+    assert [p.name for p in path.parent.iterdir()] == ["found.json"], "no temp file left"
+
+
+def test_the_snapshot_is_replaced_atomically(tmp_path, monkeypatch):
+    """Written to a temp file in the same directory, then os.replace'd: a
+    writer killed mid-write leaves the old snapshot whole."""
+    path = snapshot_path(tmp_path)
+    old = synthetic_found({"r": ["f1"]})
+    write_snapshot(path, old)
+    replaced = []
+    real_replace = os.replace
+
+    def spy(src, dst):
+        replaced.append((Path(src).parent, Path(dst)))
+        assert read_snapshot(path) == old, "the old snapshot is intact until the replace"
+        real_replace(src, dst)
+
+    monkeypatch.setattr(os, "replace", spy)
+    write_snapshot(path, synthetic_found({"r": ["f2"]}))
+    assert replaced == [(path.parent, path)]
+
+    def crash(src, dst):
+        raise OSError("killed")
+
+    monkeypatch.setattr(os, "replace", crash)
+    with pytest.raises(OSError):
+        write_snapshot(path, synthetic_found({"r": ["f3"]}))
+    assert read_snapshot(path)["fingerprints"] == {"r": ["f2"]}
+    assert [p.name for p in path.parent.iterdir()] == ["found.json"]
+
+
+def test_the_snapshot_is_never_written_inside_the_sandbox(tmp_path):
+    repo = committed_sample(tmp_path)
+    with prepare_sandbox(repo, "HEAD", parent=tmp_path) as sandbox:
+        with pytest.raises(ValueError, match="sandbox"):
+            write_snapshot(snapshot_path(sandbox.path), synthetic_found({"r": []}),
+                           sandbox=sandbox)
+        write_snapshot(snapshot_path(repo), synthetic_found({"r": []}), sandbox=sandbox)
+    assert read_snapshot(snapshot_path(repo)) is not None
+
+
+@pytest.mark.parametrize("content", [
+    "", "{", "[]", '{"base": "x"}', "null",
+    json.dumps({"version": 1, "base": "a", "digest": "0" * 64,
+                "fingerprints": {"r": ["f"]}, "rules_checked": ["r"], "tools": {}}),
+])
+def test_a_corrupt_snapshot_makes_the_next_line_a_baseline(tmp_path, content):
+    path = snapshot_path(tmp_path)
+    path.parent.mkdir(parents=True)
+    path.write_text(content, encoding="utf-8")
+    assert read_snapshot(path) is None
+    delta = found_delta(read_snapshot(path), synthetic_found({"r": ["f"]}))
+    assert delta["baseline"] is True and delta["added"] == {"r": ["f"]}
+
+
+def test_found_set_is_the_whole_base_lint_by_rule(tmp_path):
+    repo = committed_sample(tmp_path)
+    with prepare_sandbox(repo, "HEAD", parent=tmp_path) as sandbox:
+        work = lint_sandbox(sandbox)
+        found = found_set(work, sandbox.base)
+    assert found["base"] == sandbox.base
+    assert sorted(f for fps in found["fingerprints"].values() for f in fps) == sorted(
+        item.fingerprint for item in work.items)
+    assert len(found["digest"]) == 64
 
 
 # --- the reader ------------------------------------------------------------------------
@@ -269,12 +424,14 @@ def test_ledger_fields_refuse_records_from_another_base(tmp_path):
 NOW = datetime(2026, 10, 12, 12, 0, tzinfo=timezone.utc)
 
 
-def fix(principle, fingerprint=None, rule_id="r", path="src/a.py"):
-    if fingerprint is None:
-        return {"principle_id": principle, "rule_id": None, "source": "tier1",
-                "path": path, "fingerprint": None, "fixed_by": "agent", "base": "b" * 40}
+def rule_fix(principle, fingerprint, rule_id="r", path="src/a.py"):
     return {"principle_id": principle, "rule_id": rule_id, "source": "rule", "path": path,
             "fingerprint": fingerprint, "fixed_by": "agent", "base": "b" * 40}
+
+
+def tier1_fix(principle, path="src/a.py"):
+    return {"principle_id": principle, "rule_id": None, "source": "tier1",
+            "path": path, "fingerprint": None, "fixed_by": "agent", "base": "b" * 40}
 
 
 _RUN = iter(range(10 ** 6))
@@ -290,9 +447,9 @@ def test_three_structured_logging_fixes_in_30_days_reach_the_default_threshold()
     """The acceptance criterion's data half: what E4-R1 reads to file the one
     candidate. Filing it and drafting its rule are cm-kcq.1 and cm-kcq.2."""
     entries = [
-        sweep_line(28, [fix("structured-logging", "f1")]),
-        sweep_line(14, [fix("structured-logging", "f2")]),
-        sweep_line(1, [fix("structured-logging", "f3")]),
+        sweep_line(28, [rule_fix("structured-logging", "f1")]),
+        sweep_line(14, [rule_fix("structured-logging", "f2")]),
+        sweep_line(1, [rule_fix("structured-logging", "f3")]),
     ]
     defaults = load_config({})["promotion"]
     counts = fix_counts(entries, now=NOW, window_days=defaults["window_days"])
@@ -302,19 +459,19 @@ def test_three_structured_logging_fixes_in_30_days_reach_the_default_threshold()
 
 
 def test_rule_and_tier1_fixes_count_the_same():
-    entries = [sweep_line(1, [fix("p", "f1"), fix("p"), fix("p")])]
+    entries = [sweep_line(1, [rule_fix("p", "f1"), tier1_fix("p"), tier1_fix("p")])]
     assert fix_counts(entries, now=NOW, window_days=90) == {"p": 3}
 
 
 def test_fixes_older_than_the_window_are_not_counted():
-    entries = [sweep_line(91, [fix("p", "old")]), sweep_line(89, [fix("p", "new")]),
-               sweep_line(90, [fix("p", "edge")]), sweep_line(29, [fix("p", "recent")])]
+    entries = [sweep_line(91, [rule_fix("p", "old")]), sweep_line(89, [rule_fix("p", "new")]),
+               sweep_line(90, [rule_fix("p", "edge")]), sweep_line(29, [rule_fix("p", "recent")])]
     assert fix_counts(entries, now=NOW, window_days=90) == {"p": 3}
     assert fix_counts(entries, now=NOW, window_days=30) == {"p": 1}
 
 
 def test_each_principle_is_counted_on_its_own():
-    entries = [sweep_line(3, [fix("a", "1"), fix("b", "2")]), sweep_line(2, [fix("a", "3")])]
+    entries = [sweep_line(3, [rule_fix("a", "1"), rule_fix("b", "2")]), sweep_line(2, [rule_fix("a", "3")])]
     assert fix_counts(entries, now=NOW, window_days=90) == {"a": 2, "b": 1}
     assert fix_counts(entries, now=NOW, window_days=90, principle="a") == {"a": 2}
     assert fix_counts(entries, now=NOW, window_days=90, principle="c") == {}
@@ -322,42 +479,42 @@ def test_each_principle_is_counted_on_its_own():
 
 @pytest.mark.parametrize("outcome", ["failure", "refused", "unknown", None])
 def test_a_sweep_line_that_did_not_succeed_counts_nothing(outcome):
-    entries = [sweep_line(1, [fix("p", "f")], outcome=outcome)]
+    entries = [sweep_line(1, [rule_fix("p", "f")], outcome=outcome)]
     assert fix_counts(entries, now=NOW, window_days=90) == {}
 
 
 def test_only_sweep_job_lines_count():
-    entries = [sweep_line(1, [fix("p", "f")], job="review"),
-               sweep_line(1, [fix("p", "g")], kind="guard")]
+    entries = [sweep_line(1, [rule_fix("p", "f")], job="review"),
+               sweep_line(1, [rule_fix("p", "g")], kind="guard")]
     assert fix_counts(entries, now=NOW, window_days=90) == {}
 
 
 def test_the_same_fingerprint_fixed_in_two_sweeps_is_two_fixes():
     """Fixed, reintroduced, fixed again: the "keeps recurring" signal the
     ladder exists to see."""
-    entries = [sweep_line(20, [fix("p", "same")]), sweep_line(5, [fix("p", "same")])]
+    entries = [sweep_line(20, [rule_fix("p", "same")]), sweep_line(5, [rule_fix("p", "same")])]
     assert fix_counts(entries, now=NOW, window_days=90) == {"p": 2}
 
 
 def test_a_fingerprint_repeated_within_one_line_is_one_fix():
-    entries = [sweep_line(1, [fix("p", "same"), fix("p", "same")])]
+    entries = [sweep_line(1, [rule_fix("p", "same"), rule_fix("p", "same")])]
     assert fix_counts(entries, now=NOW, window_days=90) == {"p": 1}
 
 
 def test_a_line_duplicated_by_a_merge_is_counted_once():
-    line = sweep_line(1, [fix("p", "f")], run_id="abc")
+    line = sweep_line(1, [rule_fix("p", "f")], run_id="abc")
     assert fix_counts([line, dict(line)], now=NOW, window_days=90) == {"p": 1}
 
 
 def test_a_line_from_slightly_ahead_counts_and_one_from_far_ahead_does_not():
     """A writer's clock a few hours ahead must not hide the sweep just
     written; a line dated next month must not count for the whole window."""
-    entries = [sweep_line(-0.25, [fix("p", "soon")]), sweep_line(-30, [fix("p", "later")])]
+    entries = [sweep_line(-0.25, [rule_fix("p", "soon")]), sweep_line(-30, [rule_fix("p", "later")])]
     assert fix_counts(entries, now=NOW, window_days=90) == {"p": 1}
 
 
 def test_malformed_lines_and_records_are_skipped_not_fatal():
-    good = sweep_line(1, [fix("p", "ok")])
+    good = sweep_line(1, [rule_fix("p", "ok")])
     entries = [
         42, None, "text", ["a"],
         {**sweep_line(1, []), "at": "yesterday"},
@@ -365,22 +522,22 @@ def test_malformed_lines_and_records_are_skipped_not_fatal():
         {**sweep_line(1, []), "fixes": "not a list"},
         {**sweep_line(1, []), "fixes": None},
         sweep_line(1, [42, None, {"principle_id": ""}, {"principle_id": 7, "source": "rule"},
-                       {**fix("q", "x"), "source": "guessed"},
-                       {**fix("q", "y"), "principle_id": None},
-                       {**fix("q"), "fingerprint": ["x"]}]),
-        {k: v for k, v in sweep_line(1, [fix("r", "z")]).items() if k != "fixes"},
+                       {**rule_fix("q", "x"), "source": "guessed"},
+                       {**rule_fix("q", "y"), "principle_id": None},
+                       {**tier1_fix("q"), "fingerprint": ["x"]}]),
+        {k: v for k, v in sweep_line(1, [rule_fix("r", "z")]).items() if k != "fixes"},
         good,
     ]
     assert fix_counts(entries, now=NOW, window_days=90) == {"p": 1}
 
 
 def test_the_counts_are_in_a_stable_order():
-    entries = [sweep_line(1, [fix("b", "1"), fix("a", "2"), fix("c", "3")])]
+    entries = [sweep_line(1, [rule_fix("b", "1"), rule_fix("a", "2"), rule_fix("c", "3")])]
     assert list(fix_counts(entries, now=NOW, window_days=90)) == ["a", "b", "c"]
 
 
 def test_a_naive_now_is_read_as_utc():
-    entries = [sweep_line(1, [fix("p", "f")])]
+    entries = [sweep_line(1, [rule_fix("p", "f")])]
     naive = NOW.replace(tzinfo=None)
     assert fix_counts(entries, now=naive, window_days=90) == {"p": 1}
 
@@ -393,10 +550,82 @@ def test_a_window_that_is_not_a_positive_whole_number_is_refused(window):
 
 def test_the_reader_reads_a_real_ledger_file_with_a_truncated_line(tmp_path):
     path = tmp_path / "ledger.jsonl"
-    lines = [json.dumps(sweep_line(1, [fix("p", "a")])), '{"at": "2026-10-1',
-             json.dumps(sweep_line(2, [fix("p", "b")]))]
+    lines = [json.dumps(sweep_line(1, [rule_fix("p", "a")])), '{"at": "2026-10-1',
+             json.dumps(sweep_line(2, [rule_fix("p", "b")]))]
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     assert fix_counts(Ledger(path).entries(), now=NOW, window_days=90) == {"p": 2}
+
+
+def test_a_malformed_first_copy_of_a_line_does_not_hide_a_valid_second():
+    good = sweep_line(1, [rule_fix("p", "f")], run_id="dup")
+    assert fix_counts([{**good, "fixes": "oops"}, good], now=NOW, window_days=90) == {"p": 1}
+    assert fix_counts([{**good, "fixes": [42]}, good], now=NOW, window_days=90) == {"p": 1}
+
+
+def test_of_two_valid_copies_of_a_line_the_first_wins():
+    first = sweep_line(1, [rule_fix("p", "f")], run_id="dup")
+    second = sweep_line(1, [rule_fix("p", "f"), rule_fix("q", "g")], run_id="dup")
+    assert fix_counts([first, second], now=NOW, window_days=90) == {"p": 1}
+    assert fix_counts([second, first], now=NOW, window_days=90) == {"p": 1, "q": 1}
+
+
+@pytest.mark.parametrize("run_id", [5, ["x"], {"a": 1}, ""])
+def test_a_run_id_that_is_not_text_counts_but_cannot_dedupe(run_id):
+    line = {**sweep_line(1, [rule_fix("p", "f")]), "run_id": run_id}
+    assert fix_counts([line, dict(line)], now=NOW, window_days=90) == {"p": 2}
+
+
+def test_the_same_fingerprint_under_two_principles_is_two_fixes():
+    entries = [sweep_line(1, [rule_fix("p", "f"), rule_fix("q", "f")])]
+    assert fix_counts(entries, now=NOW, window_days=90) == {"p": 1, "q": 1}
+
+
+def test_the_reader_skips_what_the_writer_would_refuse():
+    entries = [sweep_line(1, [
+        {**tier1_fix("p"), "rule_id": "r"},
+        {**tier1_fix("p"), "fixed_by": "remedy"},
+        {**rule_fix("p", "f"), "fixed_by": "someone"},
+        {**rule_fix("p", "g"), "base": ""},
+        rule_fix("q", "ok"),
+    ])]
+    assert fix_counts(entries, now=NOW, window_days=90) == {"q": 1}
+
+
+@pytest.mark.parametrize("at", ["2026-10-11T12:00:00Z", "2026-10-11T12:00:00.5Z",
+                                "2026-10-11T12:00:00.12+00:00", "2026-10-11T12:00:00.1234567Z"])
+def test_a_z_suffix_and_short_fractions_are_read(at):
+    entries = [{**sweep_line(1, [rule_fix("p", "f")]), "at": at}]
+    assert fix_counts(entries, now=NOW, window_days=90) == {"p": 1}
+
+
+@pytest.mark.skipif(not shutil.which("python3.9") and not Path("/usr/bin/python3").exists(),
+                    reason="no system python3 to check 3.9 semantics with")
+def test_the_timestamp_parser_agrees_on_the_fallback_python():
+    """scripts/curamoir may run under the system python3 (3.9 on macOS),
+    whose fromisoformat rejects `Z` and 1-, 2-, 4- and 5-digit fractions."""
+    python = shutil.which("python3.9") or "/usr/bin/python3"
+    stamps = ["2026-10-11T12:00:00Z", "2026-10-11T12:00:00.5Z", "2026-10-11T12:00:00.12+00:00",
+              "2026-10-11T12:00:00+00:00", "2026-10-11T12:00:00", "nonsense"]
+    code = ("import json, sys; from curamoir.ledger import parse_ledger_timestamp as p; "
+            "print(json.dumps([None if p(s) is None else p(s).isoformat() "
+            "for s in json.loads(sys.argv[1])]))")
+    src = Path(__file__).resolve().parents[1] / "src"
+    out = subprocess.run([python, "-c", code, json.dumps(stamps)], capture_output=True,
+                         text=True, check=True, env={"PYTHONPATH": str(src), "PATH": "/usr/bin"},
+                         stdin=subprocess.DEVNULL)
+    from curamoir.ledger import parse_ledger_timestamp
+    here = [None if parse_ledger_timestamp(s) is None else parse_ledger_timestamp(s).isoformat()
+            for s in stamps]
+    assert json.loads(out.stdout) == here
+    assert here[0] == "2026-10-11T12:00:00+00:00" and here[-1] is None
+
+
+@pytest.mark.parametrize("now", ["2026-10-12", None, 1760270400,
+                                 datetime.max.replace(tzinfo=timezone.utc),
+                                 datetime.min.replace(tzinfo=timezone.utc)])
+def test_a_now_that_is_not_a_usable_datetime_is_refused(now):
+    with pytest.raises(ValueError, match="now"):
+        fix_counts([], now=now, window_days=90)
 
 
 # --- config ----------------------------------------------------------------------------

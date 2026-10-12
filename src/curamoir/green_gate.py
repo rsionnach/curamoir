@@ -416,11 +416,12 @@ class GateResult:
     def ledger_fields(self):
         """Keyword fields for the sweep's one ledger line (job_run.JobRun's
         succeeded and failed take them; a refusal has no GateResult):
-        `test_gate` and nothing else, so cm-fkd.6's fix records and counts
-        (fix_counts.ledger_fields) sit beside it, not inside it. Its keys: strategy (str), cause (str or
-        None), why (str, "" unless abandoned; render() carries it into the
-        message too), command and command_source (str or None), kept (list
-        of paths), dropped (list of {path, reason}), runs (list of
+        `test_gate` and nothing else, so cm-fkd.6's fix records, summary
+        and found delta (fix_counts.ledger_fields) sit beside it, not
+        inside it. Its keys: strategy (str), cause (str or None), why
+        (str, "" unless abandoned; render() carries it into the message
+        too), command and command_source (str or None), kept (list of
+        paths), dropped (list of {path, reason}), runs (list of
         {fixed_count: int, the fixed paths applied; outcome: str; code: int
         or None; seconds: float}) and canary (str)."""
         return {"test_gate": {

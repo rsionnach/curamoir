@@ -11,8 +11,12 @@ attribution.
 """
 
 import json
+import re
 from datetime import datetime, timezone
 from pathlib import Path
+
+#: The seconds and fraction of an ISO time: `...T12:00:00.5` (any separator).
+_FRACTION = re.compile(r"^(.{10}.\d{2}:\d{2}:\d{2})\.(\d+)(.*)$")
 
 
 def parse_ledger_timestamp(timestamp):
@@ -22,7 +26,21 @@ def parse_ledger_timestamp(timestamp):
     `2026-11-01T01:00+13:00` is 2026-10-31T12:00Z and belongs to October. A
     ledger merged from CI would otherwise lose and double-count entries across
     the month boundary.
+
+    A trailing `Z` and a fraction of other than 6 digits are normalised
+    first (to `+00:00`, and padded or cut to microseconds), because the
+    fallback interpreter's (3.9) fromisoformat rejects both and 3.11+
+    accepts them: the same ledger must read the same under either. Other
+    forms only 3.11+ reads (`20261012`, week dates) stay unread on 3.9.
     """
+    if not isinstance(timestamp, str):
+        return None
+    if timestamp[-1:] in ("Z", "z"):
+        timestamp = timestamp[:-1] + "+00:00"
+    fraction = _FRACTION.match(timestamp)
+    if fraction:
+        head, digits, tail = fraction.groups()
+        timestamp = f"{head}.{digits[:6].ljust(6, '0')}{tail}"
     try:
         when = datetime.fromisoformat(timestamp)
     except (TypeError, ValueError):
