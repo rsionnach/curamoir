@@ -64,9 +64,10 @@ the commit being swept still refers to it: any other file containing its stem
 as a word (`handlers_v2`), which covers an import, its file name or path in a
 Makefile, Jenkinsfile, systemd unit or `launch.json`, a `run_old:main` entry
 point and a dotted module path (`web.handlers_v2`). Every file is searched,
-binary-looking ones as text, except those listed below as not a reference;
-a list of the kinds of file that can refer kept missing some. The review step
-accepts a deleted file only for such a rule's violation.
+binary-looking ones as text, except those listed below as not a reference,
+so a use from an unusual kind of file — a Jenkinsfile, a `.vue` component —
+is still seen. The review step accepts a deleted file only for such a rule's
+violation.
 
 What it will not see, and what it will not delete (the module docstring of
 `src/curamoir/remedies.py` has the full list and its Limits):
@@ -76,11 +77,16 @@ What it will not see, and what it will not delete (the module docstring of
   `LICENSE*` files, cúramóir's and beads' own files (`.curamoir/`,
   `.beads/`), and any file your `.gitattributes` marks
   `linguist-documentation` (for a record that lists files without using
-  them, like the sample fixture's `PLANTED.json`). A description of a file is
-  not a use of it. Plain `.txt` files are searched: one can be a crontab.
+  them, like the sample fixture's `PLANTED.json`) unless it is code: a
+  Python, JS/TS, `.vue`, `.svelte`, `.pyx`, `.pxd` or `.ipynb` file is
+  searched even when so marked, so an `examples/**` script's import keeps
+  what it imports. A description of a file is not a use of it. Plain `.txt` files are searched: one can be a crontab.
 - An import whose module name is computed (`import_module(f"handlers_{v}")`)
-  is invisible, as is a use written only in an excluded file (a Sphinx
-  `automodule` in `.rst`); the project's tests are the backstop.
+  is invisible, as is a use written only in an excluded file; the project's
+  tests are the backstop.
+- A Sphinx `.. automodule:: pkg.h_v2` in a `.rst` file does not keep
+  `pkg/h_v2.py`; after the deletion your docs build may warn, or fail under
+  `-W`.
 - The search is for words, not parsed imports, so it errs towards keeping: a
   comment in another module that names the stem keeps the file.
 - It never deletes a test file (a `tests`, `test`, `__tests__` or `spec`

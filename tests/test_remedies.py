@@ -517,6 +517,25 @@ def test_a_documentation_record_does_not_hide_a_real_use(tmp_path):
     assert "main.py" in result.skipped[0].reason and "m.json" not in result.skipped[0].reason
 
 
+
+@pytest.mark.parametrize("referrer, text", [
+    ("examples/demo.py", "from pkg import h_v2\n"),
+    ("examples/demo.ts", "import { run } from '../pkg/h_v2';\n"),
+    ("examples/Demo.vue", "<script>import h from '../pkg/h_v2'</script>\n"),
+    ("examples/demo.ipynb", '{"cells": [{"source": ["from pkg import h_v2"]}]}\n'),
+])
+def test_declared_documentation_that_is_source_still_keeps_it(tmp_path, referrer, text):
+    """`linguist-documentation` is honoured only for a file that is not
+    code: an example script under `examples/**` runs, and its import is a
+    use, whatever the project told GitHub's language statistics."""
+    files = {"pkg/h_v2.py": "x = 1\n", "pkg/__init__.py": "",
+             ".gitattributes": "examples/** linguist-documentation\n", referrer: text}
+    result, kept = remedy_files(tmp_path, files, "pkg/h_v2.py")
+
+    assert result.deleted == () and "pkg/h_v2.py" in kept
+    assert referrer in result.skipped[0].reason
+
+
 _WORD = rb"[A-Za-z0-9_]"
 
 

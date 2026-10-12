@@ -79,9 +79,14 @@ everything but what is listed as not a reference:
 - cúramóir's and beads' own records, `.curamoir/` and `.beads/`;
 - any file the project declares documentation with the git attribute
   `linguist-documentation` (set or `=true`; GitHub Linguist's attribute,
-  read from the base's `.gitattributes`). WHY: a record that names files
+  read from the base's `.gitattributes`) that is not code: one whose
+  suffix (lower-cased) is not Python, JS/TS, `.vue`, `.svelte`, `.pyx`,
+  `.pxd` or `.ipynb` (_CODE_SUFFIXES). WHY: a record that names files
   without using them (the sample fixture's PLANTED.json) is the project's
-  to declare; cúramóir knows no file names.
+  to declare; cúramóir knows no file names. WHY not code: the attribute
+  only steers GitHub's language statistics, so `examples/**` is commonly
+  marked with it, and an example script's import runs; a code file the
+  attribute covers is searched like any other.
 
 Binary-looking files are searched as text (`git grep -a`: a NUL byte does
 not hide an import), and nothing is skipped as binary, so an image or
@@ -109,9 +114,11 @@ way, and removing directories would be one more thing to get wrong.
 - A reference the search cannot see keeps nothing: an import whose
   module name is computed (`import_module(f"handlers_{v}")`), a use written
   only in a Markdown or reStructuredText file (an executed notebook in
-  `.md`, a Sphinx `automodule` in `.rst`), a config that names the file's
-  directory some other way (`--app-dir`). The project's tests (E3-R4) are
-  the backstop.
+  `.md`), a config that names the file's directory some other way
+  (`--app-dir`). The project's tests (E3-R4) are the backstop.
+- A Sphinx `.. automodule:: pkg.h_v2` in a `.rst` is prose to the search,
+  so it does not keep `pkg/h_v2.py`; deleting the module may then make
+  the docs build warn, or fail under `-W`, which the tests do not catch.
 - The search is a word match, not a parse, so it errs towards keeping: a
   comment saying "unlike handlers_v2" in another module, a requirements or
   data file, or a CI step naming a different file with the same stem,
@@ -165,12 +172,38 @@ _NOT_REFERENCES = tuple(f":(exclude,glob,icase){pattern}" for pattern in (
     "**/LICENSE*", ".curamoir/**", ".beads/**"))
 
 #: The git attribute by which a project declares a file documentation
-#: (GitHub Linguist's): a mention in such a file keeps nothing either.
+#: (GitHub Linguist's): a mention in such a file keeps nothing either,
+#: unless the file is code (_CODE_SUFFIXES).
 _DOCUMENTATION_ATTRIBUTE = "linguist-documentation"
+
+#: Suffixes (compared lower-cased) of a file whose mention is a use even
+#: when it is marked `linguist-documentation`: the source a remedy weighs,
+#: plus code that imports it from another kind of file. WHY wider than
+#: _SOURCE_SUFFIXES: this list decides what keeps a file, so it errs
+#: towards keeping (module docstring, "The governing rule").
+_CODE_SUFFIXES = frozenset(suffix.lower() for suffix in (
+    *_SOURCE_SUFFIXES, ".vue", ".svelte", ".pyx", ".pxd", ".ipynb"))
+
+#: How many paths one `git check-attr` is given. WHY: every path is an
+#: argument, and a sweep's referrers could exceed the OS's argument-list
+#: length (ARG_MAX) in one call.
+_CHECK_ATTR_BATCH = 500
 
 #: A stem made of git grep -w's word characters alone, which the one
 #: batched search handles (_base_references).
 _WORD_STEM = re.compile(r"[A-Za-z0-9_]+")
+
+
+@dataclass
+class _Decision:
+    """Phase one's verdict on one path: delete `target` (the absolute path
+    to unlink), or keep it for `reason` (`target` None). Mutable: the
+    batched reference search may turn a deletion into a keep."""
+
+    path: str
+    rule_id: str
+    target: object = None
+    reason: str = None
 
 
 @dataclass(frozen=True)
@@ -229,30 +262,32 @@ def apply_file_remedies(sandbox):
         if item.rule_id in deletable:
             by_path.setdefault(item.path, []).append(item)
     # Phase one: every decision, every search; nothing is touched.
-    decisions = []  # [path, rule id, target or None, why kept or None], in work-list order
+    decisions = []  # _Decision, in work-list order
     for path, items in by_path.items():
         # WHY any item, not the first: one file-level violation of a
         # deletable rule is the license, whatever else the file has.
         file_level = [item for item in items if is_file_level(item)]
         if not file_level:
-            decisions.append([path, items[0].rule_id, None,
-                              "its violation is not file-level (the empty region at 1:1 a "
-                              "`target: path` rule reports), so the file is not the violation"])
+            decisions.append(_Decision(
+                path, items[0].rule_id,
+                reason="its violation is not file-level (the empty region at 1:1 a "
+                       "`target: path` rule reports), so the file is not the violation"))
             continue
-        decisions.append([path, file_level[0].rule_id, *_check(sandbox, path)])
+        target, reason = _check(sandbox, path)
+        decisions.append(_Decision(path, file_level[0].rule_id, target, reason))
     # WHY one search for every candidate, not one per file: a sweep can hold
     # a hundred variants, and a search of the whole base each is slow.
-    referrers = _base_references(sandbox, [d[0] for d in decisions if d[2] is not None])
+    referrers = _base_references(sandbox, [d.path for d in decisions if d.target is not None])
     for decision in decisions:
-        if referrers.get(decision[0]):
-            decision[2:] = [None, _still_used(referrers[decision[0]])]
-    deleted = [path for path, _, target, _ in decisions if target is not None]
-    skipped = [SkippedRemedy(path, rule_id, DELETE_FILE, reason)
-               for path, rule_id, target, reason in decisions if target is None]
+        if referrers.get(decision.path):
+            decision.target, decision.reason = None, _still_used(referrers[decision.path])
+    deleted = [d.path for d in decisions if d.target is not None]
+    skipped = [SkippedRemedy(d.path, d.rule_id, DELETE_FILE, d.reason)
+               for d in decisions if d.target is None]
     # Phase two: the deletions, all decided on the untouched base.
-    for _, _, target, _ in decisions:
-        if target is not None:
-            os.unlink(target)
+    for decision in decisions:
+        if decision.target is not None:
+            os.unlink(decision.target)
     return RemedyResult(deleted=tuple(sorted(deleted)), skipped=tuple(skipped),
                         deletable_rules=deletable)
 
@@ -351,6 +386,7 @@ def _regular_file(root, path):
 
 
 def _stem(path):
+    """The file name before its first `.` (`handlers_v2` for `web/handlers_v2.py`)."""
     name = PurePosixPath(path).name
     return name.split(".", 1)[0] or name
 
@@ -408,19 +444,25 @@ def _grep(sandbox, word):
 
 
 def _unprefix(sandbox, entry):
+    """A `git grep <base>` path entry decoded, without its `<base>:` prefix."""
     name = entry.decode("utf-8", "surrogateescape")
     prefix = f"{sandbox.base}:"
     return name[len(prefix):] if name.startswith(prefix) else name
 
 
 def _documentation(sandbox, paths):
-    """Those of `paths` the project marks `linguist-documentation` (set or
-    `=true`). Read from the index (`--cached`): require_pristine has made it
-    the base commit's tree, and git 2.39 has no `check-attr --source`."""
-    paths, marked = sorted(paths), set()
-    for start in range(0, len(paths), 500):
+    """Those of `paths` that are not code (_CODE_SUFFIXES) and that the
+    project marks `linguist-documentation` (set or `=true`). Read from the
+    index (`--cached`): require_pristine has made it the base commit's
+    tree, and git 2.39 has no `check-attr --source`."""
+    # WHY code is never documentation here: an example script marked so
+    # for GitHub's statistics still imports what it names.
+    paths = sorted(path for path in paths
+                   if PurePosixPath(path).suffix.lower() not in _CODE_SUFFIXES)
+    marked = set()
+    for start in range(0, len(paths), _CHECK_ATTR_BATCH):
         listing = git(sandbox.path, "check-attr", "--cached", "-z", _DOCUMENTATION_ATTRIBUTE,
-                      "--", *paths[start:start + 500])
+                      "--", *paths[start:start + _CHECK_ATTR_BATCH])
         fields = listing.split(b"\0")
         for index in range(0, len(fields) - 2, 3):
             if fields[index + 2] in (b"set", b"true"):
