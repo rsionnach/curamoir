@@ -321,7 +321,8 @@ class Sandbox:
     def patch(self, paths):
         """A binary-safe patch, `git apply`-able on the base commit, of
         exactly `paths`: how an accepted fix leaves the sandbox (cm-fkd.4
-        passes ScopeVerdict.paths and nothing else).
+        passes green_gate's GateResult.paths_for_pr, the tested subset of
+        ScopeVerdict.paths, and nothing else).
 
         Built in a throwaway index (GIT_INDEX_FILE), so the sandbox's own
         index and HEAD are untouched; `--force` so a path the base ignores

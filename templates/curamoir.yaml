@@ -86,6 +86,20 @@ sweep:
   # You should never come back to a wall of PRs.
   max_open_prs: 3
   max_files_per_pr: 20
+  # The project's test command, run before any PR (E3-R4) inside the sweep's
+  # disposable clone of the base commit, with your checkout's .venv and
+  # node_modules reused read-only. Run by /bin/sh, as you would type it. It
+  # is read from the COMMITTED file, so commit a change here before it counts.
+  # Empty = detect: `python3 -m pytest -q` for a Python project with test
+  # files, `npm test` for a package.json with a real `test` script. Nothing
+  # detected, or both, means no PR: a sweep that cannot test opens nothing.
+  test_command: ""
+  # A run past this is killed (its whole process group) and counted as red.
+  test_timeout_seconds: 600
+  # On red, fixes are dropped until the rest is green. This caps the test
+  # runs per sweep, the full run and the base run included; 12 always finds
+  # one bad fix among max_files_per_pr (20). What is untested is dropped.
+  max_test_runs: 12
 
 promotion:
   # A principle fixed this many times inside window_days becomes a candidate to

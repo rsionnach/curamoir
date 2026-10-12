@@ -62,6 +62,8 @@ COUNT_KEYS = [
     ("review", "random_extra"),
     ("sweep", "max_open_prs"),
     ("sweep", "max_files_per_pr"),
+    ("sweep", "test_timeout_seconds"),
+    ("sweep", "max_test_runs"),
     ("promotion", "fix_threshold"),
     ("promotion", "window_days"),
     ("filing", "max_per_run"),

@@ -51,10 +51,20 @@ Two layers, so the rules can be tested without git:
    same snapshot, same base: there is nothing else to pass.
 6. Treat git_guard.GitGuardError (ScopeCheckError is one) as a refusal: no
    verdict is not a verdict, and an unverified fix is not a fix.
-7. On an ok verdict with paths (not `nothing_changed`), take exactly
-   `verdict.paths` out: `sandbox.patch(verdict.paths)`, applied or pushed
-   by the runner. Never `git add -A`, never the whole tree.
-8. Never re-run the fix agent in the user's checkout, not even "to apply
+7. On an ok verdict with paths (not `nothing_changed`), test it (E3-R4):
+   `gate = green_gate.run_test_gate(sandbox, verdict)`, which runs the
+   base's test command in the sandbox and, on red, drops fixed paths
+   until the rest is green. Trim to `sweep.max_files_per_pr` BEFORE this,
+   by passing `paths=`, so the tree tested is the PR's. Write
+   `**gate.ledger_fields()` into the sweep's one ledger line whatever the
+   outcome (the strategy is what E3-R4's acceptance asks for); GateError
+   is a refusal, as in step 6.
+8. Take exactly `gate.paths_for_pr` out: `sandbox.patch(gate.paths_for_pr)`,
+   applied or pushed by the runner, and list only those paths' fixes in the
+   PR body. When it is empty (strategy `abandoned`: no test command, a red
+   base, or nothing green), open no PR at all. Never `verdict.paths` once
+   the gate has run, never `git add -A`, never the whole tree.
+9. Never re-run the fix agent in the user's checkout, not even "to apply
    the same fix": the sandbox is what the verdict is about.
 
 **The rules, and why each is drawn where it is.**
@@ -159,7 +169,7 @@ of a function to "fix" one line in it is refused.
   and a file it makes unreadable as UTF-8 is unverifiable, not passed.
 - Python's own semantics only: a change of behaviour inside a function body
   within the window is the violation's fix as far as this module can tell.
-  Whether it is a correct fix is E3-R4's question (the tests).
+  Whether it is a correct fix is E3-R4's question (the tests, green_gate).
 
 Syntax that imports on 3.9, like sweep.py: the sweep reaches this through
 `scripts/curamoir`, whose interpreter may be the fallback `python3`.

@@ -86,7 +86,17 @@ DEFAULTS = {
         "random_extra": 1,
         "backoff": {"clean_rounds_to_double": 2, "max_interval": "quarterly"},
     },
-    "sweep": {"max_open_prs": 3, "max_files_per_pr": 20},
+    "sweep": {
+        "max_open_prs": 3,
+        "max_files_per_pr": 20,
+        # E3-R4 (green_gate). Empty = detect from the base commit; nothing
+        # detectable means no PR, because "no test command" is not green.
+        "test_command": "",
+        "test_timeout_seconds": 600,
+        # Every run counts, the full set and the base included. 12 isolates a
+        # single offender among max_files_per_pr (20) fixes (green_gate).
+        "max_test_runs": 12,
+    },
     "promotion": {"fix_threshold": 3, "window_days": 90},
     "filing": {
         "beads": "auto",
@@ -152,7 +162,10 @@ SCHEMA = {
         "random_extra": COUNT,
         "backoff": {"clean_rounds_to_double": COUNT, "max_interval": STRING},
     },
-    "sweep": {"max_open_prs": COUNT, "max_files_per_pr": COUNT},
+    "sweep": {
+        "max_open_prs": COUNT, "max_files_per_pr": COUNT,
+        "test_command": STRING, "test_timeout_seconds": COUNT, "max_test_runs": COUNT,
+    },
     "promotion": {"fix_threshold": COUNT, "window_days": COUNT},
     "filing": {
         "beads": ("auto", "on", "off"),
