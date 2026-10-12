@@ -134,7 +134,7 @@ def test_one_fix_that_breaks_the_tests_is_dropped_and_the_rest_kept(tmp_path):
         assert any(run.passed and run.paths == result.paths_for_pr for run in result.runs)
         # And the patch of exactly those paths applies to the base and is green.
         patch = tmp_path / "fix.patch"
-        patch.write_bytes(sandbox.patch(result.paths_for_pr))
+        patch.write_bytes(result.patch(sandbox))
     subprocess.run(["git", "apply", str(patch)], cwd=repo, check=True)
     assert subprocess.run(["sh", "-c", RED_IF_BROKEN], cwd=repo).returncode == 0
 
@@ -784,6 +784,25 @@ def test_the_gates_patch_is_the_kept_paths_patch(tmp_path):
     assert b"a = 2" in patch and b"BROKEN" not in patch
 
 
+@pytest.mark.parametrize("attributes", ["*.txt text eol=crlf\n", "* text=auto\n"])
+def test_the_gates_patch_honours_the_bases_line_ending_attributes(tmp_path, attributes):
+    """Checkout converts line endings where the base's .gitattributes asks
+    (eol=crlf puts CRLF in the work tree), so the held bytes are converted
+    ones: hashed raw, every line of the file would be rewritten with CRLF
+    into a repository that stores LF. The gate's patch must be git's own."""
+    files = dict(THREE, **{".gitattributes": attributes, "a.txt": "one\ntwo\nthree\n"})
+    repo = repo_of(tmp_path, files, RED_IF_BROKEN)
+    with prepare_sandbox(repo, "HEAD", parent=tmp_path) as sandbox:
+        # Edited as bytes, so the work tree keeps whatever endings checkout wrote.
+        target = sandbox.path / "a.txt"
+        target.write_bytes(target.read_bytes().replace(b"two", b"TWO"))
+        result = run_test_gate(sandbox, ScopeVerdict(breaches=(), paths=("a.txt",)))
+        patch = result.patch(sandbox)
+        assert patch == sandbox.patch(("a.txt",))
+        assert patch.count(b"\n+") == 2  # the "+++ b/a.txt" header and one changed line
+        assert b"\r" not in patch
+
+
 def test_the_patch_is_built_from_the_tested_bytes_not_the_work_tree(tmp_path, monkeypatch):
     """A writer that puts BROKEN in a kept file only while git runs, and the
     tested content back before each check, passes verify_kept both times: the
@@ -1005,7 +1024,8 @@ def test_a_fixture_sweep_whose_one_fix_breaks_the_tests_opens_a_pr_without_it(tm
         assert verdict.paths == (BILLING, HANDLERS, VARIANT)
 
         result = run_test_gate(sandbox, verdict)
-        patch = sandbox.patch(result.paths_for_pr)
+        # The runner's own path (fix_scope step 8): the gate's patch of what it tested.
+        patch = result.patch(sandbox)
     with JobRun(ledger, "sweep") as run:
         run.succeeded("opened one PR", **result.ledger_fields())
 

@@ -378,9 +378,9 @@ class GateResult:
         Refused (GateError) unless the work tree still matches what was
         tested before and after: the patch would be right, but a mismatch
         means something is still writing the sandbox the runner is about to
-        push from. The limit: blobs are hashed without filters (`--no-filters`),
-        so the patch is git's own only for a repository with no clean filter
-        or eol conversion on these paths (the held bytes are what ran)."""
+        push from. Blobs are hashed with the path's attributes (`--path`), so
+        a base's text/eol conversion is applied exactly as `git add` would:
+        the patch is git's own, not the work tree's converted line endings."""
         self.verify_kept(sandbox)
         built = _patch_of(sandbox, self.held)
         self.verify_kept(sandbox)
@@ -940,7 +940,11 @@ def _patch_of(sandbox, held):
             blob = os.path.join(scratch, str(number))
             with open(blob, "xb") as handle:
                 handle.write(data)
-            digest = git(sandbox.path, "hash-object", "-w", "--no-filters", "--", blob)
+            # --path applies the base's attributes for `path` (text/eol), so the
+            # blob is what `git add` would store and the patch is git's own.
+            # Only git's built-in conversions can run here: the sandbox has no
+            # filter.* config, and system/global config and attributes are off.
+            digest = git(sandbox.path, "hash-object", "-w", f"--path={path}", "--", blob)
             # One "mode,id,path" argument: never read as an option, whatever the path.
             git(sandbox.path, "update-index", "--add", "--cacheinfo",
                 f"{'100755' if executable else '100644'},"
