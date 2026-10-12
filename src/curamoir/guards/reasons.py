@@ -24,6 +24,11 @@ class Reason(str, Enum):
     DEFAULT_BRANCH = "default_branch"    # E0-R1: attempted write to the default branch
     DENYLIST = "denylist"                # E0-R5: destructive command blocked
 
+    # Sweep refusals that are not guardrails. Raised by the runner, not the
+    # gateway, so they have no Degraded form.
+    IDEMPOTENCE = "idempotence"          # E3-R7: open sweep PRs unknown, so a second PR
+                                         # might duplicate one (curamoir.idempotence)
+
     # Guard-layer failures. An unrecorded guard failure is a silent loss of
     # enforcement, so both are ledgered (DEC-5).
     GUARD_ERROR = "guard_error"      # produced here: a guard raised (gateway fails closed)

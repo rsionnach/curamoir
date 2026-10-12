@@ -120,11 +120,30 @@ separators), so it does not depend on how the file is laid out: the file
 itself is indented with one fingerprint per line, because it is committed
 and git diffs, merges and delta-compresses it by line.
 
-Which keys appear on which outcome: a success carries `fixes`,
-`fix_summary` and `found_delta`; a failure or no_work after the base's lint
-carries `found_delta` only; a refusal carries none of them, even one after
-the lint (a refused sweep wrote no snapshot either, so the next line's
-delta still covers what it saw).
+E3-R7's fields (curamoir.idempotence, which decides them and holds the
+constants; the convention's reasons are in its docstring):
+
+- `work` (str): what kind of sweep line this is, on every line that got
+  past the base's lint and the idempotence decision: `"work"` (there was
+  work; the rest of the line says what came of it), `"no_work"` (the
+  base's work list was empty) or `"duplicate_open_pr"` (everything to do
+  is already in an open sweep PR). The last two are `success` lines.
+- `open_sweep_prs` ([{number, branch, url}]) and `held_for_open_prs`
+  (int): the open sweep PRs the decision found, and how many of the base's
+  violations it left to them because their files are in one. On `work`
+  and `duplicate_open_pr` lines.
+- `pr` (idempotence.pr_field: number, branch, url, `base` commit, sorted
+  `paths` the PR changes): the PR this sweep opened, on its line whatever
+  the outcome once the PR exists, because the next sweep's decision reads
+  `paths` from it to hold those files back.
+
+Which keys appear on which outcome: a success that opened a PR carries
+`fixes`, `fix_summary`, `found_delta`, `work` and `pr`; a `no_work` or
+`duplicate_open_pr` success, and a failure after the base's lint, carry
+`found_delta` and `work` but no `fixes` (so the reader counts nothing for
+them); a refusal carries none of them, even one after the lint (a refused
+sweep wrote no snapshot either, so the next line's delta still covers what
+it saw).
 
 **Limits, stated rather than hidden.**
 

@@ -69,7 +69,8 @@ DEFAULT_TIMEOUT = 600
 #: for the run not to be bounded, and `0 + grace` would bound it at `grace`.
 DEFAULT_GRACE = 30
 
-#: The work-list outcomes. NO_WORK is the string E3-R7's ledger line records.
+#: The work-list outcomes. They are also values of the sweep line's `work`
+#: field (curamoir.idempotence, E3-R7), which adds a third.
 WORK = "work"
 NO_WORK = "no_work"
 

@@ -45,16 +45,30 @@ Two layers, so the rules can be tested without git:
    from the sandbox's work list. snapshot_for drops a snapshot whose base
    is not an ancestor of this one (a rewritten history), so the line is a
    baseline. Every line recorded from here on except a refusal carries
-   `found_delta=delta`; the no_work line (E3-R7) also takes
-   `found_delta=delta` (JobRun has no no_work method, so it is whichever
-   call E3-R7 records it with). After it, the snapshot write (step 2a).
-2a. After any non-refusal line is recorded (success, failure, no_work):
+   `found_delta=delta`. After it, the snapshot write (step 2a).
+2a. After any non-refusal line is recorded (success, failure, no_work,
+   duplicate_open_pr):
    `fix_counts.write_snapshot_or_warn(fix_counts.snapshot_path(repo),
    current, sandbox=sandbox)`. It warns and keeps the old snapshot if the
    disk refuses: the line is already recorded, and the next line's
    `previous_digest` shows the gap. A refusal, even one after the lint,
    carries no `found_delta` and writes no snapshot: the next line's delta
    then covers what it saw.
+2b. Decide whether to sweep at all (E3-R7, curamoir.idempotence), after
+   step 2 (the work list and `current` are the whole base's) and before
+   step 3 (the remedies are fixes too, and nothing has edited the sandbox
+   yet): `decision = idempotence.sweep_decision(sandbox.work_list,
+   sandbox.base, ledger.entries(), open_pr_branches)`, with the same
+   `open_pr_branches` callable the open-PR cap (guards.pr_cap) is given.
+   If `decision.terminal` (NO_WORK, DUPLICATE_OPEN_PR, or UNKNOWN):
+   `decision.record(run, delta)`, which writes a success with `work` and
+   `found_delta` or, for UNKNOWN, a refusal (Reason.IDEMPOTENCE); then
+   the snapshot (step 2a) unless it was the refusal; and stop: no fix
+   step, no PR. Otherwise `decision.apply_to(sandbox)`, which narrows
+   `sandbox.work_list` to the violations in files no open sweep PR
+   changes, so steps 3 to 8 see only those and the scope check refuses an
+   edit to a held file; and pass `**decision.ledger_fields()` on the line
+   the sweep later writes, whatever its outcome.
 3. Apply the file-level remedies, still before anything else edits it:
    `remedies.apply_file_remedies(sandbox)`, which deletes each file whose
    violation's rule says `remedy: delete_file` and nothing at the base
@@ -92,7 +106,7 @@ Two layers, so the rules can be tested without git:
    tier-1 records (cm-fkd.2) added to `records`. They are written with the
    sweep's success line, once the PR is opened, so a sweep whose PR failed
    to open records no fixes (its failure line carries `found_delta=delta`
-   only). record_fixes' ScopeCheckError, GateError or sweep.LintUntrusted
+   and step 2b's fields, no `fixes`). record_fixes' ScopeCheckError, GateError or sweep.LintUntrusted
    is a refusal, as in step 6: a PR whose fixes cannot be counted would
    starve the promotion ladder silently.
 9. Take exactly `gate.paths_for_pr` out: `gate.patch(sandbox)`, the
@@ -100,7 +114,10 @@ Two layers, so the rules can be tested without git:
    `sandbox.patch(gate.paths_for_pr)` gives when nothing changed since),
    refused with GateError if a kept path no longer holds them (a refusal
    as in step 6: a process the tests left running rewrote one), applied or
-   pushed by the runner; list only those paths' fixes in the PR body. When
+   pushed by the runner; list only those paths' fixes in the PR body. Once
+   the PR exists, its line (success, or a failure after it) carries
+   `pr=idempotence.pr_field(number, branch, url, sandbox.base,
+   gate.paths_for_pr)`: the next sweep's step 2b holds those files. When
    it is empty (strategy `abandoned`, with any cause in
    green_gate.CAUSES), open no PR at all. Never `verdict.paths` once
    the gate has run, never `git add -A`, never the whole tree.
