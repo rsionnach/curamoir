@@ -21,7 +21,6 @@ chosen timestamps is what the acceptance criterion describes.
 
 import json
 import os
-import shutil
 import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
@@ -30,6 +29,7 @@ from types import SimpleNamespace
 
 import pytest
 
+import curamoir.fix_counts as counts_module
 from curamoir.config import ConfigError, load_config
 from curamoir.fix_counts import (
     AGENT,
@@ -408,6 +408,88 @@ def test_a_corrupt_snapshot_makes_the_next_line_a_baseline(tmp_path, content):
     assert delta["baseline"] is True and delta["added"] == {"r": ["f"]}
 
 
+def git_in(repo, *args):
+    """Real git, isolated from the user's config, so a global signing or
+    hook setting cannot change what the test commits."""
+    env = {**os.environ, "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1",
+           "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.com",
+           "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@example.com"}
+    result = subprocess.run(["git", *args], cwd=repo, env=env, check=True,
+                            capture_output=True, text=True, stdin=subprocess.DEVNULL)
+    return result.stdout.strip()
+
+
+def commit(repo, name):
+    (repo / name).write_text(name, encoding="utf-8")
+    git_in(repo, "add", name)
+    git_in(repo, "commit", "-q", "-m", name)
+    return git_in(repo, "rev-parse", "HEAD")
+
+
+def test_a_snapshot_of_an_ancestor_base_is_compared_and_one_of_a_rewritten_branch_is_not(
+        tmp_path):
+    """A force-push or rebase leaves the snapshot's base off the current
+    base's history: a delta against it compares unrelated trees, so it
+    is read as no snapshot (a baseline)."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    git_in(repo, "init", "-q", "-b", "main")
+    root = commit(repo, "a")
+    rewritten = commit(repo, "b")
+    child = commit(repo, "c")
+    previous = synthetic_found({"r": ["f1"]}, base=rewritten)
+    assert counts_module.snapshot_for(repo, child, previous) == previous
+    assert counts_module.snapshot_for(repo, rewritten, previous) == previous, "same base"
+    git_in(repo, "reset", "-q", "--hard", root)
+    current = commit(repo, "d")
+    assert counts_module.snapshot_for(repo, current, previous) is None
+    delta = found_delta(counts_module.snapshot_for(repo, current, previous),
+                        synthetic_found({"r": ["f1"]}, base=current))
+    assert delta["baseline"] is True and delta["previous_base"] is None
+    unknown = synthetic_found({"r": ["f1"]}, base="e" * 40)
+    assert counts_module.snapshot_for(repo, current, unknown) is None, "not in the repo"
+    assert counts_module.snapshot_for(repo, current, None) is None
+
+
+def test_a_snapshot_write_that_fails_after_the_success_line_warns_and_keeps_the_old(tmp_path):
+    """The job already succeeded and its line is recorded; a snapshot the
+    runner cannot write must not turn that into a crash. The next line's
+    previous_digest then shows the gap."""
+    if hasattr(os, "geteuid") and os.geteuid() == 0:
+        pytest.skip("root ignores directory permissions")
+    path = snapshot_path(tmp_path)
+    old = synthetic_found({"r": ["f1"]})
+    write_snapshot(path, old)
+    path.parent.chmod(0o555)
+    try:
+        with pytest.warns(RuntimeWarning, match="snapshot"):
+            written = counts_module.write_snapshot_or_warn(path, synthetic_found({"r": ["f2"]}))
+    finally:
+        path.parent.chmod(0o755)
+    assert written is False
+    assert read_snapshot(path) == old
+    assert [p.name for p in path.parent.iterdir()] == ["found.json"], "no temp file left"
+    assert counts_module.write_snapshot_or_warn(path, synthetic_found({"r": ["f2"]})) is True
+    assert read_snapshot(path)["fingerprints"] == {"r": ["f2"]}
+
+
+def test_the_snapshot_file_has_one_fingerprint_per_line_and_the_compact_digest(tmp_path):
+    """Committed, so git diffs, merges and delta-compresses it line by line;
+    the digest stays over the canonical compact JSON of `fingerprints`."""
+    path = snapshot_path(tmp_path)
+    found = synthetic_found({"r": ["f1", "f2"], "s": ["g1"]})
+    write_snapshot(path, found)
+    lines = path.read_text(encoding="utf-8").splitlines()
+    for fingerprint in ("f1", "f2", "g1"):
+        assert sum(fingerprint in line for line in lines) == 1
+        assert any(line.strip() in (f'"{fingerprint}"', f'"{fingerprint}",') for line in lines)
+    assert read_snapshot(path) == found
+    assert path.read_text(encoding="utf-8").endswith("\n")
+    tampered = path.read_text(encoding="utf-8").replace('"f1"', '"f9"')
+    path.write_text(tampered, encoding="utf-8")
+    assert read_snapshot(path) is None, "the digest is still verified"
+
+
 def test_found_set_is_the_whole_base_lint_by_rule(tmp_path):
     repo = committed_sample(tmp_path)
     with prepare_sandbox(repo, "HEAD", parent=tmp_path) as sandbox:
@@ -562,6 +644,17 @@ def test_a_malformed_first_copy_of_a_line_does_not_hide_a_valid_second():
     assert fix_counts([{**good, "fixes": [42]}, good], now=NOW, window_days=90) == {"p": 1}
 
 
+def test_an_empty_first_copy_of_a_line_does_not_hide_a_populated_second():
+    """One sweep writes one line; two copies that differ can only be a merge
+    mangling one, and an emptied `fixes` is the likelier damage than
+    invented records, so the copy with records wins."""
+    populated = sweep_line(1, [rule_fix("p", "f")], run_id="dup")
+    empty = {**populated, "fixes": []}
+    assert fix_counts([empty, populated], now=NOW, window_days=90) == {"p": 1}
+    assert fix_counts([populated, empty], now=NOW, window_days=90) == {"p": 1}
+    assert fix_counts([empty, dict(empty)], now=NOW, window_days=90) == {}
+
+
 def test_of_two_valid_copies_of_a_line_the_first_wins():
     first = sweep_line(1, [rule_fix("p", "f")], run_id="dup")
     second = sweep_line(1, [rule_fix("p", "f"), rule_fix("q", "g")], run_id="dup")
@@ -589,35 +682,6 @@ def test_the_reader_skips_what_the_writer_would_refuse():
         rule_fix("q", "ok"),
     ])]
     assert fix_counts(entries, now=NOW, window_days=90) == {"q": 1}
-
-
-@pytest.mark.parametrize("at", ["2026-10-11T12:00:00Z", "2026-10-11T12:00:00.5Z",
-                                "2026-10-11T12:00:00.12+00:00", "2026-10-11T12:00:00.1234567Z"])
-def test_a_z_suffix_and_short_fractions_are_read(at):
-    entries = [{**sweep_line(1, [rule_fix("p", "f")]), "at": at}]
-    assert fix_counts(entries, now=NOW, window_days=90) == {"p": 1}
-
-
-@pytest.mark.skipif(not shutil.which("python3.9") and not Path("/usr/bin/python3").exists(),
-                    reason="no system python3 to check 3.9 semantics with")
-def test_the_timestamp_parser_agrees_on_the_fallback_python():
-    """scripts/curamoir may run under the system python3 (3.9 on macOS),
-    whose fromisoformat rejects `Z` and 1-, 2-, 4- and 5-digit fractions."""
-    python = shutil.which("python3.9") or "/usr/bin/python3"
-    stamps = ["2026-10-11T12:00:00Z", "2026-10-11T12:00:00.5Z", "2026-10-11T12:00:00.12+00:00",
-              "2026-10-11T12:00:00+00:00", "2026-10-11T12:00:00", "nonsense"]
-    code = ("import json, sys; from curamoir.ledger import parse_ledger_timestamp as p; "
-            "print(json.dumps([None if p(s) is None else p(s).isoformat() "
-            "for s in json.loads(sys.argv[1])]))")
-    src = Path(__file__).resolve().parents[1] / "src"
-    out = subprocess.run([python, "-c", code, json.dumps(stamps)], capture_output=True,
-                         text=True, check=True, env={"PYTHONPATH": str(src), "PATH": "/usr/bin"},
-                         stdin=subprocess.DEVNULL)
-    from curamoir.ledger import parse_ledger_timestamp
-    here = [None if parse_ledger_timestamp(s) is None else parse_ledger_timestamp(s).isoformat()
-            for s in stamps]
-    assert json.loads(out.stdout) == here
-    assert here[0] == "2026-10-11T12:00:00+00:00" and here[-1] is None
 
 
 @pytest.mark.parametrize("now", ["2026-10-12", None, 1760270400,

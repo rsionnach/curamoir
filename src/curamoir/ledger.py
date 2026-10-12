@@ -15,7 +15,9 @@ import re
 from datetime import datetime, timezone
 from pathlib import Path
 
-#: The seconds and fraction of an ISO time: `...T12:00:00.5` (any separator).
+#: The seconds and fraction of an ISO time: `...T12:00:00.5`. "Any separator"
+#: is the date/time one at position 11 (`T`, a space, ...), which the bare `.`
+#: after `.{10}` matches; the `\.` before the digits is the fraction's own.
 _FRACTION = re.compile(r"^(.{10}.\d{2}:\d{2}:\d{2})\.(\d+)(.*)$")
 
 

@@ -36,19 +36,25 @@ Two layers, so the rules can be tested without git:
    as a context manager so it is removed whatever happens.
 2. Lint it before anything edits it: `lint_sandbox(sandbox)`, which records
    the work list of the base, and the rules the lint ran, on the sandbox.
-   Then compute what was found (E4-R4, fix_counts' "Introduced vs found"),
-   in the user's checkout, not the sandbox:
+   Then compute what was found (E4-R4, fix_counts' "Introduced vs found"):
    `current = fix_counts.found_set(sandbox.work_list, sandbox.base)` and
-   `delta = fix_counts.found_delta(fix_counts.read_snapshot(
-   fix_counts.snapshot_path(repo)), current)`. Every line recorded from
-   here on except a refusal carries `found_delta=delta`, including the
-   no_work line recorded when `sandbox.work_list` has nothing to fix
-   (E3-R7's; JobRun has no no_work method, so it is whichever call E3-R7
-   records it with, given `found_delta=delta`), and after a non-refusal line is recorded,
-   `fix_counts.write_snapshot(fix_counts.snapshot_path(repo), current,
-   sandbox=sandbox)`. A refusal, even one after the lint, carries no
-   `found_delta` and writes no snapshot: the next line's delta then covers
-   what it saw.
+   `delta = fix_counts.found_delta(fix_counts.snapshot_for(repo,
+   sandbox.base, fix_counts.read_snapshot(fix_counts.snapshot_path(repo))),
+   current)`. Read the snapshot from the user's checkout
+   (`snapshot_path(repo)`), not the sandbox; the found set itself comes
+   from the sandbox's work list. snapshot_for drops a snapshot whose base
+   is not an ancestor of this one (a rewritten history), so the line is a
+   baseline. Every line recorded from here on except a refusal carries
+   `found_delta=delta`; the no_work line (E3-R7) also takes
+   `found_delta=delta` (JobRun has no no_work method, so it is whichever
+   call E3-R7 records it with). After it, the snapshot write (step 2a).
+2a. After any non-refusal line is recorded (success, failure, no_work):
+   `fix_counts.write_snapshot_or_warn(fix_counts.snapshot_path(repo),
+   current, sandbox=sandbox)`. It warns and keeps the old snapshot if the
+   disk refuses: the line is already recorded, and the next line's
+   `previous_digest` shows the gap. A refusal, even one after the lint,
+   carries no `found_delta` and writes no snapshot: the next line's delta
+   then covers what it saw.
 3. Apply the file-level remedies, still before anything else edits it:
    `remedies.apply_file_remedies(sandbox)`, which deletes each file whose
    violation's rule says `remedy: delete_file` and nothing at the base
@@ -71,10 +77,10 @@ Two layers, so the rules can be tested without git:
    fixed paths until the rest is green. Then, by outcome:
    - strategy `green` or `reduced`: compute `fix_fields` (step 8), patch
      and open the PR (step 9), then `run.succeeded(...,
-     **gate.ledger_fields(), **fix_fields)`;
+     **gate.ledger_fields(), **fix_fields)`; then the snapshot (step 2a);
    - strategy `abandoned`: no PR; `run.failed(gate.render(),
      **gate.ledger_fields(), found_delta=delta)` (render() carries the
-     why; `found_delta` is step 2's);
+     why; `found_delta` is step 2's); then the snapshot (step 2a);
    - GateError raised: a refusal, as in step 6, `run.refused(...)` with no
      `test_gate` field, since there is no GateResult to record.
 8. Record the fixes (E3-R5), still in the sandbox and before the patch:

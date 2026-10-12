@@ -15,8 +15,9 @@ violations introduced from merely found. Four parts:
   fixes, and ledger_fields shapes them for the sweep's one JobRun line
   (E0-R9's line, the same append-only JSONL).
 - **What was found**: found_set, found_delta and the rolling snapshot
-  (read_snapshot / write_snapshot), so each line says what changed in the
-  base's violations since the last sweep without carrying all of them.
+  (read_snapshot, snapshot_for, write_snapshot / write_snapshot_or_warn),
+  so each line says what changed in the base's violations since the last
+  sweep without carrying all of them.
 - **The reader**: fix_counts, pure and deterministic, turns ledger entries
   back into {principle id: count} for a window. It is the exact input
   cm-kcq.1 consumes.
@@ -58,9 +59,26 @@ found set (found_set: every fingerprint the base's lint reported, fixed or
 not, by rule) at `.curamoir/state/found.json`, beside the ledger and under
 the same policy: committed, never redacted, never leaving the repository.
 Each sweep line whose base was linted carries `found_delta`: what was
-`added` and `removed` relative to the snapshot it read. A violation was
-introduced between two sweeps when it is in `added` on a line that is not
-a `baseline`, for a rule in that line's `previous_rules_checked`. WHY the
+`added` and `removed` relative to the snapshot it read.
+
+The "introduced" recipe, for E4-R4, all in one place. On a line whose
+`found_delta` is not a `baseline`:
+
+1. Gap check first: its `previous_digest` must equal the `digest` of the
+   prior line that carried a `found_delta`. If not, a snapshot write was
+   lost or a line is missing, and this delta spans more than one sweep:
+   still a true difference of found sets, but not one sweep's.
+2. Untruncated: a violation was introduced when its fingerprint is in
+   `added[rule]` for a rule in `previous_rules_checked` (a rule new since
+   the snapshot finds old violations, not new ones).
+3. Truncated: the number introduced per rule is `added_counts[rule]` for
+   the rules in `previous_rules_checked`; which fingerprints they were
+   cannot be named.
+
+A line is a `baseline` (nothing on it is introduced) when there was no
+usable snapshot: missing, corrupt, or of a base that is not an ancestor
+of this line's base (snapshot_for: after a force-push or rebase the
+delta would compare unrelated trees). WHY the
 whole set in a snapshot and not on every line: at 10k violations the set is
 ~680 KB, and the ledger is read whole before every job (the budget guard,
 /curamoir:status); a line with small churn is a few hundred bytes. WHY the
@@ -76,15 +94,31 @@ apart from a new one. The limits of this are in the Limits below.
   and the only field the reader counts.
 - `fix_summary` ({principle id: int}): the same numbers, for humans only;
   the reader does not read this field.
-- `found_delta` (found_delta's dict): `base` (str), `previous_base`
-  (str or None), `digest` (sha256 hex of the full current set),
-  `previous_digest` (str or None), `baseline` (bool: no usable snapshot, so
-  `added` is everything and none of it is "introduced"), `added` and
-  `removed` ({rule id: [fingerprint]}, or None when `truncated`),
-  `added_count` / `removed_count` (int), `added_counts` / `removed_counts`
-  ({rule id: int}), `truncated` (bool: a side exceeded DELTA_CAP, so only
-  the counts are kept), `rules_checked` (list), `previous_rules_checked`
-  (list or None) and `tools` ({tool: version}).
+- `found_delta` (found_delta's dict):
+  - `base` (str): the commit this line's lint ran on.
+  - `previous_base` (str or None): the snapshot's base.
+  - `digest` (str): the current set's digest (the snapshot format below).
+  - `previous_digest` (str or None): the snapshot's digest.
+  - `baseline` (bool): no usable snapshot, so `added` is everything and
+    none of it is "introduced".
+  - `added`, `removed` ({rule id: [fingerprint]}, or None when
+    `truncated`).
+  - `added_count`, `removed_count` (int).
+  - `added_counts`, `removed_counts` ({rule id: int}).
+  - `truncated` (bool): a side exceeded DELTA_CAP, so only the counts
+    are kept.
+  - `rules_checked` (list), `previous_rules_checked` (list or None).
+  - `tools` ({tool: version}).
+
+**The snapshot file** (`.curamoir/state/found.json`, found_set's dict):
+`version` (SNAPSHOT_VERSION), `base` (the commit linted), `digest`,
+`fingerprints` ({rule id: [fingerprint], sorted}), `rules_checked` and
+`tools`. The delta is per rule on fingerprints only, never paths (a
+fingerprint already identifies its file). `digest` is the sha256 hex of
+the canonical JSON of `fingerprints` alone (sorted keys, compact `,` `:`
+separators), so it does not depend on how the file is laid out: the file
+itself is indented with one fingerprint per line, because it is committed
+and git diffs, merges and delta-compresses it by line.
 
 Which keys appear on which outcome: a success carries `fixes`,
 `fix_summary` and `found_delta`; a failure or no_work after the base's lint
@@ -105,10 +139,13 @@ delta still covers what it saw).
   lint's version once cm-tmx adds it; the digest is the seam left open).
 - A sweep that did not lint, or was refused, leaves a gap: its changes
   land on the next line that did. A runner killed between the line and the
-  snapshot write leaves an older snapshot, so the next line's
-  `previous_base` / `previous_digest` will not match the line before it;
-  readers chain on those to see the gap.
+  snapshot write, or a write that failed (write_snapshot_or_warn warns and
+  keeps the old snapshot: the job had already succeeded), leaves an older
+  snapshot, so the next line's `previous_digest` will not match the line
+  before it; the recipe's gap check sees it.
 - A truncated delta has counts only, so its fingerprints cannot be named.
+- A rewritten history (force-push, rebase) restarts "introduced" at a
+  baseline: the old snapshot's base is off the new history.
 - Tier-1 records have no fingerprint, so the reader cannot dedupe them
   within a line; what makes two tier-1 findings the same is cm-fkd.2's to
   define (a span), and until then each record counts.
@@ -124,14 +161,16 @@ import contextlib
 import hashlib
 import json
 import os
+import re
 import tempfile
+import warnings
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
 from curamoir.fix_scope import ScopeCheckError
-from curamoir.git_guard import git, require_sandbox
+from curamoir.git_guard import GitGuardError, git, require_sandbox
 from curamoir.ledger import parse_ledger_timestamp
 from curamoir.sweep import work_list
 
@@ -169,8 +208,11 @@ SNAPSHOT_VERSION = 1
 
 #: The most fingerprints one side of a found_delta lists. WHY a cap: one
 #: pathological sweep (a rule that suddenly matches everything, a mass
-#: rename) must not write a multi-MB line every later job reads; past it the
-#: line keeps the counts, which is all the ladder's threshold needs.
+#: rename) must not write a multi-MB line every later job reads. The
+#: consumer is E4-R4 (introduced vs found), not the ladder's threshold,
+#: which counts `fixes`. Past the cap the line keeps the per-rule counts,
+#: which still say how many were introduced per rule, and the digests,
+#: which still chain the lines; only the fingerprints' names are lost.
 DELTA_CAP = 2000
 
 #: FixRecord's fields, in as_dict's order: what the reader rebuilds a record from.
@@ -327,9 +369,11 @@ def found_delta(previous, current):
 
     `baseline` is True when `previous` is None or not a valid found set (a
     corrupt or foreign snapshot): `added` is then everything, and none of it
-    is "introduced". A rule in `rules_checked` but not in
-    `previous_rules_checked` is not a baseline; its fingerprints are all
-    `added`, and a reader leaves them out of "introduced" by that list. Past
+    is "introduced". Pass snapshot_for's result, not read_snapshot's, so a
+    snapshot off the current base's history is None too. A rule in
+    `rules_checked` but not in `previous_rules_checked` does not make the
+    line a baseline; its fingerprints are all `added`, and a reader leaves
+    them out of "introduced" by that list. Past
     DELTA_CAP fingerprints on either side, `added` and `removed` are None,
     `truncated` is True, and only the counts remain."""
     if not _valid_found(previous):
@@ -385,6 +429,54 @@ def read_snapshot(path):
     return found if _valid_found(found) else None
 
 
+def snapshot_for(repo, base, snapshot):
+    """`snapshot` (read_snapshot's) if it can be compared with a lint of
+    `base` in `repo` (the user's checkout), else None, which found_delta
+    reads as a baseline. Comparable when its base is `base` or an ancestor
+    of it (hardened `git merge-base --is-ancestor`). WHY: after a
+    force-push, a rebase, or a checkout that rewrote found.json, the
+    snapshot's base is off the current history, and a delta against it
+    compares unrelated trees, so its "added" would not be "introduced".
+    Every git failure (exit 1, not an ancestor; 128, a commit the repository
+    does not have) is None as well: a baseline is the honest answer when
+    the history cannot be checked."""
+    if snapshot is None:
+        return None
+    previous = snapshot.get("base")
+    if previous == base:
+        return snapshot
+    # WHY the shape check: the base is read from a committed file, and must
+    # never reach git as an option or a revision expression.
+    if not (isinstance(previous, str) and _COMMIT.fullmatch(previous)
+            and isinstance(base, str) and _COMMIT.fullmatch(base)):
+        return None
+    try:
+        git(repo, "merge-base", "--is-ancestor", previous, base)
+    except GitGuardError:
+        return None
+    return snapshot
+
+
+def write_snapshot_or_warn(path, found, *, sandbox=None):
+    """write_snapshot, for the runner's call after a non-refusal line is
+    recorded: True if written; on OSError, a RuntimeWarning (printed to
+    stderr by default) and False, leaving the old snapshot whole and no temp
+    file. WHY not raise: the job's line is already recorded and the job
+    succeeded (or failed) on its own terms; a crash here would only lose
+    the runner's remaining cleanup. The gap is visible: the next line's
+    `previous_digest` will not match this line's `digest`. ValueError (not
+    a found set, or a path inside the sandbox) still raises: that is the
+    caller's bug, not the disk's."""
+    try:
+        write_snapshot(path, found, sandbox=sandbox)
+    except OSError as error:
+        warnings.warn(f"the found-set snapshot {path} was not written ({error}); the old "
+                      "one is kept, and the next sweep line's previous_digest shows the gap",
+                      RuntimeWarning, stacklevel=2)
+        return False
+    return True
+
+
 def write_snapshot(path, found, *, sandbox=None):
     """Replace the snapshot at `path` with `found` (found_set's), atomically:
     a temp file in the same directory (`*.tmp`, which `.curamoir/.gitignore`
@@ -408,7 +500,11 @@ def write_snapshot(path, found, *, sandbox=None):
                                         suffix=".tmp")
     try:
         with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-            json.dump(found, handle, sort_keys=True, separators=(",", ":"))
+            # WHY indented: one fingerprint per line, for git (the module
+            # docstring, "The snapshot file"); the digest is over the
+            # compact form, so the layout does not change it.
+            json.dump(found, handle, sort_keys=True, indent=1)
+            handle.write("\n")
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temp, path)
@@ -416,6 +512,10 @@ def write_snapshot(path, found, *, sandbox=None):
         with contextlib.suppress(OSError):
             os.unlink(temp)
         raise
+
+
+#: A full commit SHA (SHA-1 or SHA-256), the only base snapshot_for hands git.
+_COMMIT = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
 
 
 def _digest(fingerprints):
@@ -458,9 +558,12 @@ def fix_counts(entries, *, now, window_days, principle=None):
     is NOT deduped: fixed, reintroduced and fixed again is two fixes, and
     that recurrence is the signal the ladder promotes on. A line seen twice
     (the same `run_id`, which a merge of the ledger can duplicate) counts
-    once: the first copy that is countable (in the window, with a `fixes`
-    list that is empty or has a record that counts) wins, so a malformed
-    first copy never hides a valid second. A `run_id` that is not a
+    once: the first copy with a record that counts (in the window) wins, so
+    a malformed or empty first copy never hides a populated second. WHY an
+    empty copy does not win: one sweep writes one line, so two copies that
+    differ mean a merge mangled one, and emptying `fixes` is a likelier
+    mangling than inventing valid records. Of two populated copies the
+    first wins. A `run_id` that is not a
     non-empty string is treated as absent: the line counts, but copies of
     it cannot be told apart, so each counts."""
     if isinstance(window_days, bool) or not isinstance(window_days, int) or window_days < 1:
@@ -485,7 +588,7 @@ def fix_counts(entries, *, now, window_days, principle=None):
         if not isinstance(fixes, list):
             continue
         countable = [c for c in map(_countable, fixes) if c is not None]
-        if fixes and not countable:
+        if not countable:
             continue
         run_id = entry.get("run_id")
         if _text(run_id):
