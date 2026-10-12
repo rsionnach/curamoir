@@ -571,8 +571,9 @@ def test_deleting_a_file_level_violation_is_the_fix_when_its_rule_says_so():
 
 def test_deleting_a_file_level_violation_whose_rule_names_no_remedy_is_refused():
     """A `target: path` rule without `remedy: delete_file` may want a rename,
-    not a deletion; and requiring the remedy keeps the 1:1 exception from
-    being anyone's to use but the runner's (cm-ul5)."""
+    not a deletion. Requiring the remedy means a file-level violation alone
+    licenses no deletion: only one of a rule that asks for it, which the
+    runner applies (cm-ul5)."""
     file_level = V("a_v2.py", 1, end_line=1, col=1, end_col=1, rule_id="naming")
     deleted = FileChange("a_v2.py", DELETED, "x = 1\n", None)
 

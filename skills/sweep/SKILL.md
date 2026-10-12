@@ -65,8 +65,8 @@ and opens no PR from a fix that breaks any of them:
   Do not create, rename or delete a file. A violation that is the file
   itself (reported at line 1, column 1 to line 1, column 1 with an empty
   `match`, which is how a rule about a file's name is reported) is not
-  yours to fix: where its rule says `remedy: delete_file`, cúramóir deletes
-  the file before you start and leaves it out of your work list; any other
+  yours to fix: where its rule says `remedy: delete_file`, cúramóir handles
+  it before you start and leaves it out of your work list; any other
   such violation, leave as it is and say so.
 - Change only a violation's own lines and at most 3 lines either side
   of it. The one exception is adding, at the top of the module before its

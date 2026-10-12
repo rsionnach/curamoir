@@ -143,7 +143,9 @@ TARGETS = ("line", "path")
 #: What a rule's optional `remedy` may name, and the one target it may name it
 #: on. `delete_file`: the file's existence is the violation, so deleting it is
 #: the fix; the sweep's runner applies it (remedies.apply_file_remedies).
-REMEDIES = ("delete_file",)
+#: The one remedy (fix_scope and remedies import it from here).
+DELETE_FILE = "delete_file"
+REMEDIES = (DELETE_FILE,)
 REMEDY_TARGET = "path"
 
 #: Never searched, at any depth, whatever a rule says: tooling and dependency

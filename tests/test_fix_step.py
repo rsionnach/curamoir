@@ -85,7 +85,8 @@ def test_the_limits_leave_file_level_remedies_to_the_runner():
     text = flat(SCOPE_LIMITS)
     assert "Do not create, rename or delete a file" in text
     assert "line 1, column 1" in text
-    assert "`remedy: delete_file`, cúramóir deletes the file before you start" in text
+    assert ("`remedy: delete_file`, cúramóir handles it before you start and leaves it "
+            "out of your work list") in text
     assert "Delete a file only when" not in text
 
 

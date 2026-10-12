@@ -27,16 +27,19 @@ from pathlib import Path
 
 import pytest
 
+from curamoir import remedies
 from curamoir.fix_scope import (
     FILE_DELETED,
     ScopeCheckError,
     lint_sandbox,
     verify_fix,
 )
-from curamoir.git_guard import prepare_sandbox, snapshot_git_state
+from curamoir.git_guard import GitGuardError, prepare_sandbox, snapshot_git_state
 from curamoir.remedies import apply_file_remedies
 from curamoir.rules import Rule
 from tests.conftest import committed_sample
+from tests.test_fix_scope import git_repo as files_repo
+from tests.test_fix_scope import sandbox_of
 from tests.test_lint import NO_BARE_PRINT, NO_UNCHAINED_RAISE, NO_VARIANT_MODULE
 
 BILLING = "src/sample/core/billing.py"
@@ -94,10 +97,23 @@ def path_rule(rule_id="no-variant", remedy="delete_file"):
 
 
 def hand_sandbox(repo, items, rules):
-    sandbox = prepare_sandbox(repo, "HEAD", parent=repo.parent)
-    sandbox.work_list = type("WorkList", (), {"items": tuple(items)})()
+    """tests/test_fix_scope.py's sandbox_of, with `rules` as well."""
+    sandbox = sandbox_of(repo, *items)
     sandbox.rules = tuple(rules)
     return sandbox
+
+
+def remedy_files(tmp_path, files, *paths):
+    """apply_file_remedies on a one-commit repository of `files` whose work
+    list is a file-level violation of each of `paths` (default: the first
+    file), and (result, sandbox root). The sandbox is removed afterwards, so
+    what the root held is read through `kept`."""
+    repo = files_repo(tmp_path, files)
+    with hand_sandbox(repo, [V(path) for path in paths or [next(iter(files))]],
+                      [path_rule()]) as sandbox:
+        result = apply_file_remedies(sandbox)
+        kept = {path for path in files if (sandbox.path / path).exists()}
+    return result, kept
 
 
 # --- the acceptance path -----------------------------------------------------------
@@ -198,8 +214,8 @@ def test_a_path_rule_without_a_remedy_deletes_nothing(tmp_path):
 
 
 def test_deleting_a_file_whose_path_rule_names_no_remedy_is_refused(tmp_path):
-    """The 1:1 exception is not the agent's: without `remedy: delete_file`
-    the deletion is FILE_DELETED, whoever made it."""
+    """A file-level violation alone licenses no deletion: without `remedy:
+    delete_file` on its rule, the deletion is FILE_DELETED, whoever made it."""
     with prepare_sandbox(without_remedy(tmp_path), "HEAD", parent=tmp_path) as sandbox:
         lint_sandbox(sandbox)
         state = snapshot_git_state(sandbox)
@@ -360,3 +376,125 @@ def test_two_violations_of_one_file_delete_it_once(tmp_path):
 
         assert result.deleted == ("a_v2.py",)
         assert result.skipped == ()
+
+
+# --- what is never deleted (review of cm-ul5) ---------------------------------------
+# The governing rule: never delete a file the base still uses. Each of these
+# is a file a word search cannot prove unused, so it is refused outright.
+
+def test_a_test_file_that_is_a_variant_is_kept_and_keeps_what_it_imports(tmp_path):
+    """tests/test_handlers_v2.py matches the variant rule too; deleting it
+    would remove the only thing exercising handlers_v2, and it is a use."""
+    test_file = "tests/test_handlers_v2.py"
+    repo = committed_sample(tmp_path)
+    commit(repo, {test_file: "from sample.web.handlers_v2 import paginate\n\n"
+                             "def test_p():\n    assert paginate([1], 1) == [1]\n"})
+    with prepare_sandbox(repo, "HEAD", parent=tmp_path) as sandbox:
+        lint_sandbox(sandbox)
+
+        result = apply_file_remedies(sandbox)
+
+        assert result.deleted == ()
+        reasons = {s.path: s.reason for s in result.skipped}
+        assert "test" in reasons[test_file]
+        assert test_file in reasons[VARIANT]
+        assert (sandbox.path / test_file).is_file() and (sandbox.path / VARIANT).is_file()
+
+
+@pytest.mark.parametrize("path", [
+    "tests/a_v2.py", "test/a_v2.py", "src/__tests__/a_v2.js", "spec/a_v2.ts",
+    "test_a_v2.py", "a_v2_test.py", "conftest_v2.py", "a_v2.test.ts", "a_v2.spec.js"])
+def test_a_test_file_is_never_deleted(tmp_path, path):
+    result, kept = remedy_files(tmp_path, {path: "x = 1\n"})
+
+    assert result.deleted == () and kept == {path}
+    assert "test" in result.skipped[0].reason
+
+
+@pytest.mark.parametrize("path", ["templates/nav_v2.html", "static/site_v2.css",
+                                  "gen_v2.sh", "notes_v2.md", "a_v2.PY"])
+def test_a_file_that_is_not_python_or_js_ts_source_is_never_deleted(tmp_path, path):
+    """A template, stylesheet or script is used in ways a word search cannot
+    prove absent (`{% include 'nav_v2.html' %}`, a `<link>`, a cron line)."""
+    result, kept = remedy_files(tmp_path, {path: "x\n"})
+
+    assert result.deleted == () and kept == {path}
+    assert "source" in result.skipped[0].reason
+
+
+@pytest.mark.parametrize("name", ["__init__.py", "__main__.py"])
+def test_a_package_init_or_main_is_never_deleted(tmp_path, name):
+    """What is referenced is the package's name (`python -m tool_v2`), and
+    deleting either file changes what the package is."""
+    path = f"tool_v2/{name}"
+    result, kept = remedy_files(tmp_path, {path: "x = 1\n"})
+
+    assert result.deleted == () and kept == {path}
+    assert name in result.skipped[0].reason
+
+
+@pytest.mark.parametrize("path, referrer, text", [
+    ("scripts/migrate_v2.py", ".github/workflows/ci.yml",
+     "jobs:\n  m:\n    steps:\n      - run: python scripts/migrate_v2.py\n"),
+    ("tools/build_new.py", "Makefile", "build:\n\tpython tools/build_new.py\n"),
+    ("tools/build_new.py", "tools/Makefile", "build:\n\tpython build_new.py\n"),
+    ("serve_v2.py", "Dockerfile", 'CMD ["python", "serve_v2.py"]\n'),
+    ("run_old.py", "pyproject.toml", "[project.scripts]\nrun = 'run_old:main'\n"),
+    ("cli_v2.py", "pyproject.toml", "[project.scripts]\ncli = \"cli_v2:main\"\n"),
+    ("app_v2.py", "Procfile", "web: gunicorn app_v2:app\n"),
+    ("app_v2.py", "deploy/run.sh", "#!/bin/sh\nexec python app_v2.py\n"),
+    ("web/main_v2.ts", "package.json", '{"main": "web/main_v2.ts"}\n'),
+    ("a_v2.py", "b.py", "\0import a_v2\n"),
+])
+def test_a_build_or_config_file_that_runs_it_keeps_it(tmp_path, path, referrer, text):
+    result, kept = remedy_files(tmp_path, {path: "x = 1\n", referrer: text}, path)
+
+    assert result.deleted == () and path in kept
+    assert referrer in result.skipped[0].reason
+
+
+def test_a_mention_in_prose_or_curamoirs_own_files_does_not_keep_it(tmp_path):
+    files = {"a_v2.py": "x = 1\n", "docs/notes.md": "a_v2.py is gone\n",
+             "CHANGES.rst": "a_v2\n", ".github/PULL_REQUEST_TEMPLATE.md": "a_v2\n",
+             ".curamoir/config.yaml": "exclude: [a_v2.py]\n", ".beads/x.yaml": "a_v2\n"}
+    result, kept = remedy_files(tmp_path, files, "a_v2.py")
+
+    assert result.deleted == ("a_v2.py",) and "a_v2.py" not in kept
+
+
+def test_a_path_the_base_does_not_track_under_that_exact_name_is_refused(tmp_path):
+    """On a case-insensitive file system `A_V2.py` opens `a_v2.py`; the work
+    list's path must be the base's own spelling."""
+    result, kept = remedy_files(tmp_path, {"a_v2.py": "x = 1\n"}, "A_V2.py", "gone_v2.py")
+
+    assert result.deleted == () and kept == {"a_v2.py"}
+    assert [s.path for s in result.skipped] == ["A_V2.py", "gone_v2.py"]
+    assert all("tracks under exactly that name" in s.reason for s in result.skipped)
+
+
+def test_any_file_level_item_for_a_path_is_enough_not_the_first(tmp_path):
+    repo = files_repo(tmp_path, {"a_v2.py": "x = 1\n"})
+    items = [V("a_v2.py", end_col=6), V("a_v2.py")]
+    with hand_sandbox(repo, items, [path_rule()]) as sandbox:
+        result = apply_file_remedies(sandbox)
+
+    assert result.deleted == ("a_v2.py",) and result.skipped == ()
+
+
+def test_a_git_failure_while_deciding_leaves_the_sandbox_untouched(tmp_path, monkeypatch):
+    """Every search runs before any deletion: a grep that times out on the
+    second file must not leave the first deleted in a sandbox the runner is
+    about to discard as unanswered."""
+    real = remedies._grep
+
+    def failing(sandbox, word, *pathspecs):
+        if "b_v2" in word:
+            raise GitGuardError("git grep timed out")
+        return real(sandbox, word, *pathspecs)
+    monkeypatch.setattr(remedies, "_grep", failing)
+    repo = files_repo(tmp_path, {"a_v2.py": "x = 1\n", "b_v2.py": "x = 1\n"})
+    with hand_sandbox(repo, [V("a_v2.py"), V("b_v2.py")], [path_rule()]) as sandbox:
+        with pytest.raises(GitGuardError):
+            apply_file_remedies(sandbox)
+
+        assert (sandbox.path / "a_v2.py").is_file() and (sandbox.path / "b_v2.py").is_file()

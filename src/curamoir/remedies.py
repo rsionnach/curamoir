@@ -12,8 +12,9 @@ given a deletion tool.
 Not every path rule means "delete": a naming-convention rule wants a
 rename, which nothing applies. So a rule opts in with `remedy: delete_file`
 (rules.REMEDIES), and only a file-level violation of such a rule is
-deleted. fix_scope.verify_fix holds every deletion to the same test, so the
-1:1 exception is never anyone else's to use.
+deleted. fix_scope.verify_fix accepts a deleted file only for such a
+violation of such a rule, whoever deleted it, so a file-level violation
+licenses the runner's deletion and nothing else.
 
 **When.** apply_file_remedies runs after fix_scope.lint_sandbox and BEFORE
 the fix step, on the sandbox's pristine base (it refuses any other tree).
@@ -25,48 +26,86 @@ still sees it, because the review diffs against the base commit, not the
 snapshot). The agent's prompt is built from RemedyResult.for_agent, which
 leaves out what was handled here.
 
-**What keeps a file.** A file is deleted only if nothing at the base
-refers to it, because a variant someone still imports is not dead, and
-deleting it would sink the whole sweep at the test step (E3-R4) or, worse,
-pass a test suite that does not cover the importer. "Refers to" is read
-from git's objects at the base commit (hardened git, git_guard), never the
-work tree, and is deliberately broad, since a false "referenced" only
-leaves a violation unfixed and reported, while a false "unreferenced"
-breaks code:
+**The governing rule: never delete a file the base still uses.** A false
+"used" only leaves a violation unfixed and reported; a false "unused"
+breaks code, sinking the sweep at the test step (E3-R4) or, worse, passing
+a suite that does not cover the user. So every doubt keeps the file.
 
-- any other Python or JS/TS source file (fix_scope's PYTHON_SUFFIXES and
-  SCRIPT_SUFFIXES) containing the file's stem as a whole word — an import
-  of the module or of its dotted name, a `from . import (` list across
-  lines, `import_module("…handlers_v2")`, a JS/TS `./handlers_v2`, and also
-  a comment or string that merely names it;
+**What is never deleted**, whatever refers to it (a SkippedRemedy with the
+reason, for the runner to report the violation as unfixed):
+
+- a path that is not plainly repository-relative (empty, absolute, `.`,
+  `..`, empty or `.git` component), or that the base commit does not track
+  as a regular file under exactly that spelling (`git ls-tree`): WHY — on a
+  case-insensitive file system `A_V2.py` or `.GIT/x.py` would open another
+  file than the one linted;
+- a test file: a `tests`, `test`, `__tests__` or `spec` directory on the
+  way, or a name like `test_*.py`, `*_test.py`, `conftest*.py`, `*.test.*`
+  or `*.spec.*` (compared lower-cased). WHY — a test is run by a runner's
+  discovery, which no reference names, and it is what exercises the code;
+- anything but Python or JS/TS source (fix_scope's PYTHON_SUFFIXES and
+  SCRIPT_SUFFIXES, exact case): a template, stylesheet, shell script or
+  data file is used by an `{% include %}`, a `<link>`, a cron line or a
+  path built at run time, none of which a word search can prove absent;
+- a package's `__init__.py` or `__main__.py`: what refers to it is the
+  package's name (`import tool_v2`, `python -m tool_v2`), and deleting
+  either changes what the package is;
+- a dependency manifest or lockfile: the review refuses any change to one
+  (fix_scope, DEPENDENCY_CHANGE), so deleting it would discard the fix;
+- a symlink, a directory, or a path through a symlinked directory (every
+  directory on the way is lstat'ed; a remedy follows no link).
+
+**What keeps a file.** Otherwise a file is deleted only if nothing at the
+base refers to it. "Refers to" is read from git's objects at the base
+commit (hardened git, git_guard), never the work tree, binary-looking files
+included (`git grep -a`: a NUL byte does not hide an import), and is
+deliberately broad:
+
+- any other Python or JS/TS source file containing the file's stem as a
+  whole word — an import of the module or of its dotted name, a `from .
+  import (` list across lines, `import_module("…handlers_v2")`, a JS/TS
+  `./handlers_v2`, and also a comment or string that merely names it;
+- any build, CI or config file (_CONFIG_FILES: TOML, INI/cfg, YAML,
+  Makefiles, Dockerfiles, shell scripts, Procfile, HTML and Jinja
+  templates, package.json, tsconfig/jsconfig, anything under `.github/`)
+  containing the stem as a whole word. That one search covers the file name
+  (`python scripts/migrate_v2.py`, `CMD ["python", "serve_v2.py"]`, since
+  `.` ends a word), the bare stem (`gunicorn app_v2:app`) and an entry
+  point (`run = "run_old:main"`);
 - any other text file of any kind containing `<parent>.<stem>` (for
-  `src/sample/web/handlers_v2.py`, `web.handlers_v2`) as a whole word: a
-  module path in a config file, an entry point, `python -m`, a server's
+  `src/sample/web/handlers_v2.py`, `web.handlers_v2`): a module path in
+  a config file of a kind not listed above, `python -m`, a server's
   `module:app`.
 
-A file mentioned only by its path or file name in prose (PLANTED.json,
+Prose is not searched for the stem: Markdown, reStructuredText and plain
+text anywhere, and cúramóir's and beads' own files (`.curamoir/`, `.beads/`).
+A file mentioned only by its path or name in a description (PLANTED.json,
 `principles.md`'s `bad` example, a changelog) is not kept for it: a
 description of a file is not a use of it.
 
-**The deletion** is a plain os.unlink of a regular file inside the
-sandbox. The path must be repository-relative with no empty, `.`, `..` or
-`.git` component; every directory on the way is lstat'ed and must be a real
-directory (not a symlink), and the file itself must be a regular file, not
-a symlink, directory or anything else. A dependency manifest or lockfile is
-never deleted: the review refuses any change to one (fix_scope,
-DEPENDENCY_CHANGE), so deleting it would only discard the whole fix. Each
-refusal is a SkippedRemedy with the reason, for the runner to report the
-violation as unfixed.
+**Two phases.** Every decision, with every search, is made before anything
+is deleted. WHY: a search that fails (a git timeout is a GitGuardError)
+must leave the sandbox as it was; the exception propagates, and the runner,
+which opened the sandbox as a context manager (git_guard.prepare_sandbox),
+discards it unanswered. The deletion itself is a plain os.unlink of each
+regular file decided on.
+
+**Emptied directories are left.** Deleting `pkg/old_v2.py` may leave `pkg/`
+empty in the sandbox. That is harmless: git tracks no directory, so the
+diff the review reads and the patch carried to the PR are the same either
+way, and removing directories would be one more thing to get wrong.
 
 **Limits, stated rather than hidden.**
 
-- A reference the two searches cannot see keeps nothing: an import whose
+- A reference the searches cannot see keeps nothing: an import whose
   module name is computed (`import_module(f"handlers_{v}")`), a top-level
-  module (no parent directory) named only in a non-source file, a config
-  that names the file's directory some other way (`--app-dir`). The
-  project's tests (E3-R4) are the backstop.
+  module (no parent directory) named in a file of a kind not searched for
+  the stem (say a `.json` other than package.json/tsconfig), a config that
+  names the file's directory some other way (`--app-dir`). The project's
+  tests (E3-R4) are the backstop.
 - The searches are word matches, not parses, so they err towards keeping:
-  a comment saying "unlike handlers_v2" in another module keeps the file.
+  a comment saying "unlike handlers_v2" in another module, or a CI step
+  naming a different file with the same stem, keeps the file.
 - Only the `delete_file` remedy exists. A rename needs the new name, which
   is a judgement, and the agent may not rename either; such a violation is
   left for a person.
@@ -78,21 +117,47 @@ import dataclasses
 import os
 import stat
 from dataclasses import dataclass
+from fnmatch import fnmatchcase
 from pathlib import PurePosixPath
 
 from curamoir.fix_scope import (
-    DELETE_FILE,
     PYTHON_SUFFIXES,
     SCRIPT_SUFFIXES,
     ScopeCheckError,
     is_dependency_file,
     is_file_level,
     require_pristine,
+    rules_licensing_deletion,
 )
 from curamoir.git_guard import git, require_sandbox
+from curamoir.rules import DELETE_FILE
 
 #: How many referring files a SkippedRemedy names before "and N more".
 _NAMED_REFERENCES = 5
+
+#: The source a remedy may delete, and in which other files the stem is a
+#: reference (module docstring).
+_SOURCE_SUFFIXES = PYTHON_SUFFIXES + SCRIPT_SUFFIXES
+
+#: Directories whose files are tests, and test file names (lower-cased).
+_TEST_DIRECTORIES = ("tests", "test", "__tests__", "spec")
+_TEST_NAMES = ("test_*.py", "*_test.py", "conftest*.py", "*.test.*", "*.spec.*")
+
+#: The files that name a module or script they run: build, CI and config
+#: files (module docstring, "What keeps a file"). Glob pathspecs, so
+#: `**/Makefile` finds a nested one too.
+_CONFIG_FILES = tuple(f":(glob){pattern}" for pattern in (
+    "**/*.toml", "**/*.cfg", "**/*.ini", "**/*.conf", "**/*.yml", "**/*.yaml",
+    "**/Makefile", "**/makefile", "**/GNUmakefile", "**/*.mk", "**/justfile",
+    "**/Justfile", "**/Dockerfile*", "**/Containerfile*", "**/*.dockerfile",
+    "**/*.sh", "**/*.bash", "**/Procfile", "**/*.html", "**/*.htm", "**/*.j2",
+    "**/*.jinja*", "**/package.json", "**/tsconfig*.json", "**/jsconfig*.json",
+    ".github/**"))
+
+#: Prose and cúramóir's or beads' own records: a mention there describes a
+#: file, it does not use it.
+_NOT_REFERENCES = tuple(f":(exclude,glob){pattern}" for pattern in (
+    "**/*.md", "**/*.rst", "**/*.txt", ".curamoir/**", ".beads/**"))
 
 
 @dataclass(frozen=True)
@@ -109,13 +174,13 @@ class SkippedRemedy:
 @dataclass(frozen=True)
 class RemedyResult:
     """What apply_file_remedies did. `deleted` is sorted paths; `skipped`
-    SkippedRemedies in work-list order; `remedied_rules` the ids of the rules
-    that carry a remedy, whose file-level violations were the runner's to
-    handle, applied or not."""
+    SkippedRemedies in work-list order; `deletable_rules` the ids of the
+    rules that carry `remedy: delete_file` (fix_scope.rules_licensing_deletion),
+    whose file-level violations were the runner's to handle, applied or not."""
 
     deleted: tuple
     skipped: tuple
-    remedied_rules: frozenset
+    deletable_rules: frozenset
 
     def for_agent(self, work):
         """`work` (a sweep.WorkList) without what the runner handled: every
@@ -126,63 +191,72 @@ class RemedyResult:
         deleted = set(self.deleted)
         items = tuple(item for item in work.items
                       if item.path not in deleted
-                      and not (is_file_level(item) and item.rule_id in self.remedied_rules))
+                      and not (is_file_level(item) and item.rule_id in self.deletable_rules))
         return dataclasses.replace(work, items=items)
 
 
 def apply_file_remedies(sandbox):
     """Apply every `remedy: delete_file` the base's work list asks for in
-    `sandbox`, and return a RemedyResult (module docstring: when, what keeps a
-    file, how it is deleted).
+    `sandbox`, and return a RemedyResult (module docstring: what is never
+    deleted, what keeps a file, the two phases).
 
     Needs fix_scope.lint_sandbox to have run (the work list and the rules it
     recorded), and the sandbox's tree to be its base commit still: run it
-    once, before the fix step. ScopeCheckError otherwise."""
+    once, before the fix step. ScopeCheckError otherwise; GitGuardError if a
+    search fails, with nothing deleted."""
     require_sandbox(sandbox, ScopeCheckError)
     if sandbox.work_list is None or sandbox.rules is None:
         raise ScopeCheckError("no work list or rules were linted in this sandbox at its base "
                               "(fix_scope.lint_sandbox), so there is nothing to remedy from")
     require_pristine(sandbox)
     # rules.REMEDIES is delete_file alone; a second remedy needs its own step.
-    remedied = frozenset(rule.id for rule in sandbox.rules if rule.remedy == DELETE_FILE)
-    deleted, skipped, seen = [], [], set()
+    deletable = rules_licensing_deletion(sandbox.rules)
+    by_path = {}
     for item in sandbox.work_list.items:
-        if item.rule_id not in remedied or item.path in seen:
+        if item.rule_id in deletable:
+            by_path.setdefault(item.path, []).append(item)
+    # Phase one: every decision, every search; nothing is touched.
+    targets, deleted, skipped = [], [], []
+    for path, items in by_path.items():
+        # WHY any item, not the first: one file-level violation of a
+        # deletable rule is the license, whatever else the file has.
+        file_level = [item for item in items if is_file_level(item)]
+        if not file_level:
+            skipped.append(SkippedRemedy(
+                path, items[0].rule_id, DELETE_FILE,
+                "its violation is not file-level (the empty region at 1:1 a "
+                "`target: path` rule reports), so the file is not the violation"))
             continue
-        seen.add(item.path)
-        if not is_file_level(item):
-            reason = ("its violation is not file-level (the empty region at 1:1 a "
-                      "`target: path` rule reports), so the file is not the violation")
-        else:
-            reason = _delete(sandbox, item.path)
+        target, reason = _decide(sandbox, path)
         if reason is None:
-            deleted.append(item.path)
+            targets.append(target)
+            deleted.append(path)
         else:
-            skipped.append(SkippedRemedy(item.path, item.rule_id, DELETE_FILE, reason))
+            skipped.append(SkippedRemedy(path, file_level[0].rule_id, DELETE_FILE, reason))
+    # Phase two: the deletions, all decided on the untouched base.
+    for target in targets:
+        os.unlink(target)
     return RemedyResult(deleted=tuple(sorted(deleted)), skipped=tuple(skipped),
-                        remedied_rules=remedied)
+                        deletable_rules=deletable)
 
 
-def _delete(sandbox, path):
-    """Delete `path` in `sandbox` and return None, or return why not."""
-    problem = _unsafe(path)
+def _decide(sandbox, path):
+    """(absolute path to delete, None) for `path` in `sandbox`, or (None,
+    why it is kept). Deletes nothing."""
+    problem = _unsafe(path) or _never_deleted(path)
     if problem:
-        return problem
-    if is_dependency_file(path):
-        return ("a dependency manifest or lockfile; the review refuses any change to "
-                "one, so deleting it would discard the whole fix")
-    target, problem = _regular_file(str(sandbox.path), path)
+        return None, problem
+    target, problem = _untracked(sandbox, path) or _regular_file(str(sandbox.path), path)
     if problem:
-        return problem
-    referrers = base_references(sandbox, path)
+        return None, problem
+    referrers = _base_references(sandbox, path)
     if referrers:
         named = ", ".join(referrers[:_NAMED_REFERENCES])
         more = len(referrers) - _NAMED_REFERENCES
-        return (f"the base still refers to it, from {named}"
-                + (f" and {more} more" if more > 0 else "")
-                + "; deleting a file something uses is not a mechanical fix")
-    os.unlink(target)
-    return None
+        return None, (f"the base still refers to it, from {named}"
+                      + (f" and {more} more" if more > 0 else "")
+                      + "; deleting a file something uses is not a mechanical fix")
+    return target, None
 
 
 def _unsafe(path):
@@ -194,6 +268,47 @@ def _unsafe(path):
     if ".git" in parts:
         return f"{path!r} is inside a .git directory"
     return None
+
+
+def _never_deleted(path):
+    """Why `path` is of a kind a remedy never deletes (module docstring), or
+    None."""
+    pure = PurePosixPath(path)
+    name = pure.name
+    lowered = [part.lower() for part in pure.parts]
+    if name in ("__init__.py", "__main__.py"):
+        return (f"a package's {name}: what refers to it is the package's name, and "
+                "deleting it changes what the package is")
+    if any(part in _TEST_DIRECTORIES for part in lowered[:-1]) \
+            or any(fnmatchcase(lowered[-1], pattern) for pattern in _TEST_NAMES):
+        return ("a test file: a test runner finds it by discovery, which no reference "
+                "names, and it is what exercises the code")
+    if is_dependency_file(path):
+        return ("a dependency manifest or lockfile; the review refuses any change to "
+                "one, so deleting it would discard the whole fix")
+    if pure.suffix not in _SOURCE_SUFFIXES:
+        return ("not Python or JS/TS source: a template, stylesheet, script or data file "
+                "is used in ways a search for its name cannot prove absent")
+    return None
+
+
+def _untracked(sandbox, path):
+    """(None, why) unless the base commit has a regular file at exactly
+    `path`, read from its tree byte for byte (no case folding, no pathspec
+    magic); None if it has."""
+    listing = git(sandbox.path, "ls-tree", "-z", sandbox.base, "--", path)
+    for entry in listing.split(b"\0"):
+        meta, _, name = entry.partition(b"\t")
+        if name.decode("utf-8", "surrogateescape") != path:
+            continue
+        mode = meta.split(b" ")[0]
+        if mode == b"120000":
+            return None, f"{path} is a symlink at the base, and a remedy follows none"
+        if mode in (b"100644", b"100755"):
+            return None
+        break
+    return None, (f"{path} is not a regular file the base commit tracks under exactly "
+                  "that name, so it is not the file that was linted")
 
 
 def _regular_file(root, path):
@@ -218,14 +333,15 @@ def _regular_file(root, path):
     return current, None
 
 
-def base_references(sandbox, path):
+def _base_references(sandbox, path):
     """The other files at `sandbox`'s base commit that refer to `path`
     (module docstring, "What keeps a file"), sorted."""
     name = PurePosixPath(path).name
     stem = name.split(".", 1)[0] or name
     exclude = f":(exclude,literal){path}"
-    found = set(_grep(sandbox, stem, *(f"*{suffix}" for suffix in
-                                       PYTHON_SUFFIXES + SCRIPT_SUFFIXES), exclude))
+    found = set(_grep(sandbox, stem, *(f"*{suffix}" for suffix in _SOURCE_SUFFIXES),
+                      exclude))
+    found.update(_grep(sandbox, stem, *_CONFIG_FILES, *_NOT_REFERENCES, exclude))
     parent = PurePosixPath(path).parent.name
     if parent:
         found.update(_grep(sandbox, f"{parent}.{stem}", exclude))
@@ -233,10 +349,11 @@ def base_references(sandbox, path):
 
 
 def _grep(sandbox, word, *pathspecs):
-    """Paths at the base whose text holds `word` as a whole word (fixed
-    string, binary files skipped). `-e` so a word starting with `-` is not
-    an option."""
-    listing = git(sandbox.path, "grep", "-I", "-l", "-z", "-w", "-F", "-e", word,
+    """Paths at the base whose content holds `word` as a whole word (fixed
+    string). `-a`: a file git thinks binary (a NUL byte) is searched too,
+    erring towards keeping. `-e` so a word starting with `-` is not an
+    option."""
+    listing = git(sandbox.path, "grep", "-a", "-l", "-z", "-w", "-F", "-e", word,
                   sandbox.base, "--", *pathspecs, ok=(0, 1))
     prefix = f"{sandbox.base}:"
     names = []

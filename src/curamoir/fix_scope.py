@@ -188,7 +188,7 @@ from curamoir.git_guard import (
     verify_git_state,
 )
 from curamoir.principles import PrincipleError, PrinciplesFile, parse_principles
-from curamoir.rules import RuleError, load_rules
+from curamoir.rules import DELETE_FILE, RuleError, load_rules
 from curamoir.sweep import work_list
 
 #: Lines either side of a violation's span that a fix may touch.
@@ -224,10 +224,6 @@ KINDS = (FILE_NOT_IN_WORK_LIST, FILE_ADDED, FILE_DELETED, DEPENDENCY_CHANGE,
 
 #: The principle permission that lifts SIGNATURE_CHANGE (principles.PERMISSIONS).
 SIGNATURE_PERMISSION = "signature_change"
-
-#: The rule remedy that lifts FILE_DELETED for a file-level violation
-#: (rules.REMEDIES).
-DELETE_FILE = "delete_file"
 
 #: Change statuses.
 ADDED = "added"
@@ -436,7 +432,7 @@ def _check_file(change, violations, permitting, known_modules, window, deletable
         found.append(Breach(UNVERIFIABLE, path, None, change.unverifiable))
         return found
     if change.status == DELETED:
-        if not any(is_file_level(v) and getattr(v, "rule_id", None) in deletable_rules
+        if not any(is_file_level(v) and v.rule_id in deletable_rules
                    for v in violations):
             found.append(Breach(
                 FILE_DELETED, path, None,
@@ -1207,9 +1203,9 @@ def verify_fix(sandbox, *, git_state, window=WINDOW):
         raise ScopeCheckError(f"the git-state snapshot was taken for base {git_state.base}, "
                               f"not {sandbox.base}")
     if sandbox.work_list is None or sandbox.rules is None:
-        raise ScopeCheckError("no work list was linted in this sandbox at its base "
-                              "(fix_scope.lint_sandbox), so there is nothing to hold the "
-                              "fix to")
+        raise ScopeCheckError("no work list or rules were linted in this sandbox at its "
+                              "base (fix_scope.lint_sandbox), so there is nothing to hold "
+                              "the fix to")
     changed = verify_git_state(git_state)
     if changed:
         return ScopeVerdict(breaches=tuple(
@@ -1233,7 +1229,7 @@ def verify_fix(sandbox, *, git_state, window=WINDOW):
                            if SIGNATURE_PERMISSION in p.permits)
     verdict = check_scope(changes, sandbox.work_list.items, permitting=permitting,
                           known_modules=base_known_modules(sandbox.path, base), window=window,
-                          deletable_rules=deletable_rules(sandbox.rules))
+                          deletable_rules=rules_licensing_deletion(sandbox.rules))
     if not hidden:
         return verdict
     return ScopeVerdict(
@@ -1245,7 +1241,7 @@ def verify_fix(sandbox, *, git_state, window=WINDOW):
         paths=tuple(sorted(set(verdict.paths) | set(hidden))))
 
 
-def deletable_rules(rules):
+def rules_licensing_deletion(rules):
     """The ids of `rules` whose file-level violation licenses deleting the
     file: those with `remedy: delete_file` (rules.REMEDIES)."""
     return frozenset(rule.id for rule in rules if rule.remedy == DELETE_FILE)

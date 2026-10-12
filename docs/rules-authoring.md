@@ -61,9 +61,30 @@ delete_file` says the fix is deleting the file, and the sweep's runner does
 that itself, before the agent starts (`src/curamoir/remedies.py`). It keeps
 the file, and reports the violation unfixed with the reason, when anything at
 the commit being swept still refers to it: another Python or JS/TS file
-containing its stem as a word (`handlers_v2`), or any file containing its
-dotted module path (`web.handlers_v2`, as in an entry point). The review step
-accepts a deleted file only for such a rule's violation.
+containing its stem as a word (`handlers_v2`), any build, CI or config file
+(TOML, INI, YAML, Makefile, Dockerfile, shell script, Procfile, template,
+package.json, `.github/`) containing the stem as a word (which covers its file
+name and a `run_old:main` entry point), or any file containing its dotted
+module path (`web.handlers_v2`). The review step accepts a deleted file only
+for such a rule's violation.
+
+What it will not see, and what it will not delete (the module docstring of
+`src/curamoir/remedies.py` has the full list and its Limits):
+
+- A mention in prose does not keep a file: Markdown, reStructuredText, plain
+  text, and cúramóir's and beads' own files (`.curamoir/`, `.beads/`) are not
+  searched for the stem. A description of a file is not a use of it.
+- An import whose module name is computed (`import_module(f"handlers_{v}")`)
+  is invisible, as is a reference from a file of a kind not searched; the
+  project's tests are the backstop.
+- The search is for words, not parsed imports, so it errs towards keeping: a
+  comment in another module that names the stem keeps the file.
+- It never deletes a test file (a `tests`, `test`, `__tests__` or `spec`
+  directory, or `test_*.py`, `*_test.py`, `conftest*.py`, `*.test.*`,
+  `*.spec.*`), anything but Python or JS/TS source, a package's `__init__.py`
+  or `__main__.py`, a dependency manifest or lockfile, a symlink, or a path the
+  commit being swept does not track under exactly that name. Each is reported
+  unfixed with the reason.
 
 Leave `remedy` out when the fix is something else — a naming-convention rule
 whose fix is a rename, say. Nothing applies a rename; the violation is
