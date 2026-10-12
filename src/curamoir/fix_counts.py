@@ -130,7 +130,8 @@ constants; the convention's reasons are in its docstring):
   is already in an open sweep PR). The last two are `success` lines.
 - `open_sweep_prs` ([{number, branch, url}]) and `held_for_open_prs`
   (int): the open sweep PRs the decision found, and how many of the base's
-  violations it left to them because their files are in one. On `work`
+  violations it left to them (all of them when one was opened from this
+  base). On `work`
   and `duplicate_open_pr` lines.
 - `pr` (idempotence.pr_field: number, branch, url, `base` commit, sorted
   `paths` the PR changes): the PR this sweep opened, on its line whatever

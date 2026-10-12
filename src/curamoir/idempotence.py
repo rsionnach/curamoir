@@ -24,9 +24,10 @@ that got as far as this decision, with one of three values:
 WHY a field and not the summary text: the summary is for people and
 changes wording; the brief should not parse prose. WHY not a refusal: the
 brief groups refusals as "something stopped me", and a sweep with nothing
-to do stopped nobody. The one refusal here is when the open PRs cannot be
-listed (UNKNOWN, Reason.IDEMPOTENCE): then the check did not run, and that
-is a refusal in the ordinary sense. The open-PR cap and the budget (E3-R6,
+to do stopped nobody. The one refusal here is UNKNOWN (Reason.IDEMPOTENCE:
+the open PRs cannot be listed, or an open sweep PR's files are known to
+neither the ledger nor GitHub): then the check could not run, and that is
+a refusal in the ordinary sense. The open-PR cap and the budget (E3-R6,
 cm-fkd.7) are the guard layer's refusals (`pr_cap`, `budget`) and do not
 touch `work`. Every field and which line carries it: fix_counts' module
 docstring, "The ledger line".
@@ -35,18 +36,26 @@ docstring, "The ledger line".
 
 1. The base's work list is empty: NO_WORK. The open PRs are not asked for;
    they cannot change the answer.
-2. The open PRs cannot be listed (`open_pr_branches` raises, or returns
-   something other than a list of branch names): UNKNOWN, refuse.
-3. An open sweep PR (branch under SWEEP_BRANCH_PREFIX) has no `pr` record
-   in the ledger: UNKNOWN, refuse. Its files are unknown, so no file is
-   known to be free of it.
-4. An open sweep PR was made from this very base: DUPLICATE_OPEN_PR,
-   whatever it left out. Nothing has changed since it was opened, and E3-R7
-   says that produces no second PR. WHY even for leftovers (a file past
-   `max_files_per_pr`, a fix the test gate dropped): "two consecutive
-   sweeps with no intervening changes" is exactly this, and the leftovers
-   are E3-R3's "rest for the next run" once something has changed.
-5. Otherwise every violation in a file that an open sweep PR changes is
+2. The open PRs cannot be listed (the callable raises, returns None, or
+   returns something outside the listing contract, guards.pr_cap's
+   docstring): UNKNOWN, refuse; the message says the next sweep will try
+   again, because a `gh` outage passes.
+3. Each open sweep PR (branch under SWEEP_BRANCH_PREFIX) is known by its
+   ledger `pr` record when there is one (primary: it is what the sweep that
+   opened it wrote), else by the listing's `base` and `paths` when both are
+   present and valid (GitHub's own account, "Open PRs on GitHub" below).
+4. An open sweep PR was made from this very base, by whichever base is
+   known (ledger, else listing; the base alone is enough here, no paths
+   needed): DUPLICATE_OPEN_PR, whatever it left out. WHY even for leftovers
+   (a file past `max_files_per_pr`, a fix the test gate dropped, or a rule
+   changed at the same commit): E3-R7's "no intervening changes" is judged
+   by the base commit, and the leftovers are E3-R3's "rest for the next
+   run", which is the next base.
+5. An open sweep PR neither source knows the files of: UNKNOWN, refuse. No
+   file is known to be free of it. The message names the branch(es) and
+   says this clears when the PR is merged or closed: it does not pass by
+   itself, so "try again" would be false.
+6. Otherwise every violation in a file that an open sweep PR changes is
    held back (`held`). Nothing left: DUPLICATE_OPEN_PR. Something left:
    WORK, with the work list narrowed to it (`Decision.work_list`), which
    the runner installs on the sandbox (Decision.apply_to) before the
@@ -64,15 +73,15 @@ leave a fixed-elsewhere violation alone in a file it was editing, which
 only the prompt could ask. It also keeps the fix records exact:
 fix_counts.record_fixes nets vanished against appeared fingerprints per
 (rule, file), and a file held whole never splits one of those groups. It
-subsumes "the same fingerprints": every fix
-the PR records is in one of its paths. WHY a PR at an older base still
-holds its files: a lint fingerprint does not depend on line numbers
-(docs/curamoir-lint.md, "Fingerprint"), so an unchanged file's violations
-are the same ones at the newer base, and the PR still fixes them.
+subsumes "the same fingerprints": every fix the PR records is in one of
+its paths. WHY a PR at an older base still holds its files: a lint
+fingerprint does not depend on line numbers (docs/curamoir-lint.md,
+"Fingerprint"), so an unchanged file's violations are the same ones at
+the newer base, and the PR still fixes them.
 
 **Merged or closed.** The open-PR list is the same source of truth as the
-open-PR cap (guards.pr_cap.OpenPrCap's `open_pr_branches`: the branch names
-of OPEN PRs), so a merged PR and a closed one look alike: not open, and
+open-PR cap (guards.pr_cap.OpenPrCap's callable, one contract for both:
+OPEN PRs only), so a merged PR and a closed one look alike: not open, and
 their files are free. Merged: the base holds the fixes, the lint no longer
 reports them, and what it still reports is new. Closed unmerged: the fixes
 were never applied, and are proposed again (see Limits).
@@ -85,9 +94,34 @@ PRs cannot open one either (cm-fkd.4 opens it through the same `gh`), so
 refusing before the fix step costs only the spend it saves.
 
 **Where it reads from.** The previous sweeps' `pr` records come from the
-ledger (sweep_prs): the latest valid one per branch on any sweep job line,
+ledger (sweep_prs): per branch, the latest `pr` on any sweep job line,
 whatever its outcome (a runner that opened the PR and then crashed still
-opened it). Which of them are still open comes from `open_pr_branches`.
+opened it). Latest means ledger order (the order lines were appended),
+not the lines' `at`: an append-only file's order is the order things
+happened in this repository, and a clock can be wrong. A malformed latest
+record makes that branch's ledger record unknown (None), never the older
+valid one, which may describe another PR. A ledger record whose number is
+not the listed PR's number is an older PR on a reused branch name and is
+not used. Which PRs are open, and GitHub's account of them, comes from
+the open-PR callable.
+
+**Open PRs on GitHub** (what cm-fkd.4 supplies). The ledger reaches the
+repository only through the runner's state PR (spec section 6.1, E11-R3),
+so in CI mode (a fresh checkout per run, E10-R2) sweep 1's `pr` line is
+not visible to sweep 2 until that PR is merged. Without a second source
+every sweep in between would refuse. So the sweep PR carries its base on
+GitHub: its body has the line `sweep_marker(base)`, exactly
+`<!-- curamoir-sweep base=<full lowercase commit SHA> -->` on a line of
+its own (an HTML comment, invisible when rendered), which
+parse_sweep_marker reads back strictly (anything else is None). Its paths
+are GitHub's own list of the PR's files. cm-fkd.4's callable runs `gh pr
+list --state open --json headRefName,number,url,body,files` (bounded by
+its own timeout: nothing here can interrupt it) and returns
+`[sweep_pr_listing(item) for item in ...]`, the listing contract's
+records. `gh` returns at most GH_FILES_CAP files per PR, so a list that
+long may be cut short; sweep_pr_listing then gives `paths` None, which
+refuses unless the ledger knows (a cut list would free files the PR
+changes).
 
 **Limits, stated rather than hidden.**
 
@@ -95,11 +129,21 @@ opened it). Which of them are still open comes from `open_pr_branches`.
   fixes again. Remembering a rejection is not E3-R7's (it is "no second PR
   with no intervening changes", and a close is a change); it is a separate
   question of whether a rejected fix should be retried.
-- A branch name is the identity: a PR closed and another opened on the same
-  branch name is matched to the latest `pr` record of that branch.
-- A ledger without the open PR's line (lost, or a fresh checkout that
-  never had it) refuses every sweep with work until that PR is merged or
-  closed: safe, and the message says which branch.
+- A branch name is the identity, checked against the listed PR number
+  when the listing has one: a PR closed and another opened on the same
+  branch name is matched to the latest `pr` record of that branch only if
+  the numbers agree. Two open PRs from one branch name (to different base
+  branches) are seen as the first listed.
+- An open sweep PR that neither the ledger nor GitHub accounts for (no
+  line, and no marker or more than GH_FILES_CAP files) refuses every sweep
+  with work until it is merged or closed: safe, and the message says which
+  branch.
+- The `curamoir/sweep-` branch prefix is reserved for cúramóir: a
+  developer's own branch under it is taken for a sweep PR, and, having no
+  record and no marker, refuses sweeps until it is merged or closed.
+- Two sweeps deciding at once could each see no open PR and both open
+  one. Nothing here prevents that: it depends on the runner's lock
+  (cm-x5a.6) admitting one sweep per repository at a time.
 - Tier-1 work items (cm-fkd.2) have a path, so they are held by file like
   the rest; nothing here depends on their fingerprint.
 - Open PRs on other `curamoir/` branches (promote, review) are not sweep
@@ -111,15 +155,17 @@ Syntax that imports on 3.9, like sweep.py: the runner reaches this through
 
 import dataclasses
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass
 
-from curamoir.guards.pr_cap import DEFAULT_PREFIX
+from curamoir.guards.pr_cap import DEFAULT_PREFIX, clipped_repr, open_pr_records
 from curamoir.guards.reasons import Reason
 from curamoir.guards.result import Refusal
 from curamoir.sweep import NO_WORK, WORK
 
 __all__ = ["WORK_FIELD", "PR_FIELD", "WORK", "NO_WORK", "DUPLICATE_OPEN_PR", "UNKNOWN",
-           "SWEEP_BRANCH_PREFIX", "Decision", "pr_field", "sweep_prs", "sweep_decision"]
+           "SWEEP_BRANCH_PREFIX", "GH_FILES_CAP", "Decision", "pr_field", "sweep_prs",
+           "sweep_decision", "sweep_marker", "parse_sweep_marker", "sweep_pr_listing"]
 
 #: The ledger field that says what kind of sweep line this is (module docstring).
 WORK_FIELD = "work"
@@ -135,10 +181,24 @@ DUPLICATE_OPEN_PR = "duplicate_open_pr"
 UNKNOWN = "unknown"
 
 #: The branches sweep PRs are opened on (E3-R3: `curamoir/sweep-<date>`).
+#: Reserved for cúramóir (module docstring, Limits).
 SWEEP_BRANCH_PREFIX = DEFAULT_PREFIX + "sweep-"
 
 #: A full commit SHA (SHA-1 or SHA-256).
 _COMMIT = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
+
+#: The most files `gh pr list --json files` returns for one PR: a list this
+#: long may be cut short, so its paths are unknown (sweep_pr_listing).
+GH_FILES_CAP = 100
+
+#: The sweep PR body's base marker (module docstring, "Open PRs on GitHub").
+#: WHY the same SHA pattern as pr_field (40 or 64): a SHA-256 repository's
+#: sweep PRs must be readable too, and both are lowercase hex only.
+_MARKER = re.compile(r"<!-- curamoir-sweep base=([0-9a-f]{40}|[0-9a-f]{64}) -->")
+_MARKER_WORD = "curamoir-sweep"
+
+#: How much of an error a message quotes.
+_CLIP = 200
 
 
 def pr_field(number, branch, url, base, paths):
@@ -163,19 +223,71 @@ def pr_field(number, branch, url, base, paths):
 
 
 def sweep_prs(entries):
-    """{branch: pr record} from ledger `entries` (Ledger.entries()): the
-    latest valid `pr` on a sweep job line per branch, any outcome, in the
-    order the branches were first seen. Pure. Malformed entries and records
-    are skipped, never fatal, like the ledger's own reader."""
+    """{branch: pr record or None} from ledger `entries` (Ledger.entries()):
+    per branch, the latest `pr` on a sweep job line in ledger order, any
+    outcome, in the order the branches were first seen. None when that
+    latest record is malformed: the branch's ledger record is unknown, and an
+    older valid one is not resurrected. Pure; a `pr` with no recoverable
+    branch is skipped, never fatal, like the ledger's own reader."""
     found = {}
     for entry in entries:
         if not (isinstance(entry, dict) and entry.get("kind") == "job"
                 and entry.get("job") == "sweep"):
             continue
-        record = _valid_pr(entry.get(PR_FIELD))
+        raw = entry.get(PR_FIELD)
+        if raw is None:
+            continue
+        record = _valid_pr(raw)
         if record is not None:
             found[record["branch"]] = record
+        elif isinstance(raw, Mapping) and _text(raw.get("branch")):
+            found[raw["branch"]] = None
     return found
+
+
+def sweep_marker(base):
+    """The line a sweep PR's body carries so GitHub records its base (module
+    docstring, "Open PRs on GitHub"). ValueError unless `base` is a full
+    lowercase commit SHA."""
+    if not (isinstance(base, str) and _COMMIT.fullmatch(base)):
+        raise ValueError(f"a sweep marker's base must be a full commit SHA, not "
+                         f"{clipped_repr(base)}")
+    return f"<!-- curamoir-sweep base={base} -->"
+
+
+def parse_sweep_marker(body):
+    """The base in a PR `body`'s sweep_marker line, else None. Strict: the
+    marker is a whole line of exactly sweep_marker's form; any line naming
+    `curamoir-sweep` in another form, or two markers with different bases,
+    is None (a base read wrong would free files or hide work). Pure."""
+    if not isinstance(body, str):
+        return None
+    bases = set()
+    for line in body.splitlines():
+        if _MARKER_WORD not in line:
+            continue
+        match = _MARKER.fullmatch(line)
+        if match is None:
+            return None
+        bases.add(match.group(1))
+    return bases.pop() if len(bases) == 1 else None
+
+
+def sweep_pr_listing(item):
+    """One `gh pr list --json headRefName,number,url,body,files` item as a
+    record of the open-PR listing contract (guards.pr_cap): `base` from the
+    body's marker, `paths` from `files`, None when there are GH_FILES_CAP or
+    more (possibly cut short), none, or any is malformed. Pure: cm-fkd.4
+    runs `gh` and maps its items through this."""
+    files = item.get("files")
+    paths = None
+    if isinstance(files, list) and 0 < len(files) < GH_FILES_CAP:
+        names = [file.get("path") if isinstance(file, Mapping) else None for file in files]
+        if all(_text(name) for name in names):
+            paths = sorted(set(names))
+    return {"branch": item.get("headRefName"), "number": item.get("number"),
+            "url": item.get("url"), "base": parse_sweep_marker(item.get("body")),
+            "paths": paths}
 
 
 @dataclass(frozen=True)
@@ -251,40 +363,54 @@ class Decision:
         sandbox.work_list = self.work_list
 
 
-def sweep_decision(work, base, entries, open_pr_branches,
+def sweep_decision(work, base, entries, open_sweep_prs,
                    branch_prefix=SWEEP_BRANCH_PREFIX):
     """The Decision for a sweep whose base `base` linted to `work` (a
     sweep.WorkList, the sandbox's, before any remedy). `entries` are the
-    ledger's (Ledger.entries()); `open_pr_branches` is the open-PR cap's
-    callable (the branch names of open PRs), called at most once and only
-    when there is work. The rules: the module docstring."""
+    ledger's (Ledger.entries()); `open_sweep_prs` is the open-PR callable
+    the open-PR cap is given (guards.pr_cap's listing contract: branch names
+    or records), called at most once and only when there is work. The rules:
+    the module docstring."""
     if not work.items:
         return Decision(NO_WORK, "no work: the lint found nothing to fix at this base", base)
     try:
-        listed = open_pr_branches()
+        records = open_pr_records(open_sweep_prs())
     except Exception as error:
-        # WHY so broad: the callable is injected (a `gh` query by default in
-        # the runner), and whatever it raises, the open PRs are unknown.
-        return Decision(UNKNOWN, _unknown(f"could not list open pull requests ({error})"),
-                        base)
-    if not isinstance(listed, (list, tuple)) or not all(_text(b) for b in listed):
-        return Decision(UNKNOWN, _unknown(
-            f"the open pull requests were listed as {listed!r}, not branch names"), base)
-    open_sweeps = sorted({b for b in listed if b.startswith(branch_prefix)})
-    records = sweep_prs(entries)
-    unaccounted = [branch for branch in open_sweeps if branch not in records]
-    if unaccounted:
-        return Decision(UNKNOWN, _unknown(
-            "the ledger has no record of which files the open sweep PR(s) on "
-            + ", ".join(unaccounted) + " change; merge or close them, or restore the "
-            "ledger line"), base)
-    open_prs = tuple(sorted((records[branch] for branch in open_sweeps),
-                            key=lambda pr: pr["number"]))
+        # WHY so broad: the callable is injected (cm-fkd.4's `gh` query), and
+        # whatever it raises, or a listing of the wrong shape, the open PRs
+        # are unknown.
+        return Decision(UNKNOWN, _unknown(f"could not list open pull requests ("
+                                          f"{_clip(str(error))})"), base)
+    listed = {}
+    for record in records:
+        if record["branch"].startswith(branch_prefix):
+            listed.setdefault(record["branch"], _listed(record))
+    ledger = sweep_prs(entries)
+    known, unaccounted = [], []
+    for branch in sorted(listed):
+        on_github = listed[branch]
+        record = ledger.get(branch)
+        if record is not None and on_github["number"] not in (None, record["number"]):
+            record = None  # an older PR's line on a reused branch name
+        if record is None and on_github["base"] and on_github["paths"]:
+            record = on_github
+        if record is None:
+            unaccounted.append(on_github)  # its listed base may still be known
+        else:
+            known.append(record)
+    open_prs = tuple(sorted(known + unaccounted, key=_by_number))
     same_base = [pr for pr in open_prs if pr["base"] == base]
     if same_base:
-        return Decision(DUPLICATE_OPEN_PR, "no new PR: nothing has changed since "
-                        + _names(same_base) + " was opened from this base, and it is still "
-                        "open", base, open_prs=open_prs, held=work.items)
+        return Decision(DUPLICATE_OPEN_PR, "no new PR: an open sweep PR, " + _names(same_base)
+                        + ", was opened from this same base commit; its leftovers wait for "
+                        "the next base", base, open_prs=open_prs, held=work.items)
+    if unaccounted:
+        branches = [pr["branch"] for pr in unaccounted]
+        return Decision(UNKNOWN, (
+            "neither the ledger nor GitHub says which files the open sweep PR(s) on "
+            + ", ".join(branches) + " change, so a new sweep PR might duplicate one (E3-R7); "
+            "nothing was fixed, and this clears once "
+            + ("it is" if len(branches) == 1 else "they are") + " merged or closed"), base)
     held_paths = {path for pr in open_prs for path in pr["paths"]}
     held = tuple(item for item in work.items if item.path in held_paths)
     remaining = tuple(item for item in work.items if item.path not in held_paths)
@@ -298,12 +424,37 @@ def sweep_decision(work, base, entries, open_pr_branches,
 
 
 def _unknown(why):
+    # Only for a listing that failed, which passes: "try again" is true here.
     return (f"{why}, so a new sweep PR might duplicate an open one (E3-R7); "
             "nothing was fixed, and the next sweep will try again")
 
 
+def _listed(record):
+    """A listing record's fields, each None unless valid (pr_field's rules)."""
+    number, url = record.get("number"), record.get("url")
+    base, paths = record.get("base"), record.get("paths")
+    if isinstance(number, bool) or not isinstance(number, int) or number < 1:
+        number = None
+    if not (isinstance(base, str) and _COMMIT.fullmatch(base)):
+        base = None
+    if not (isinstance(paths, (list, tuple)) and paths and all(_text(p) for p in paths)):
+        paths = None
+    return {"number": number, "branch": record["branch"],
+            "url": url if isinstance(url, str) else None, "base": base,
+            "paths": None if paths is None else sorted(set(paths))}
+
+
+def _by_number(pr):
+    return (pr["number"] is None, pr["number"] or 0, pr["branch"])
+
+
+def _clip(text):
+    return text if len(text) <= _CLIP else text[:_CLIP] + "...(clipped)"
+
+
 def _names(prs):
-    return ", ".join(f"#{pr['number']} ({pr['branch']})" for pr in prs)
+    return ", ".join(f"#{pr['number']} ({pr['branch']})" if pr["number"] is not None
+                     else pr["branch"] for pr in prs)
 
 
 def _valid_pr(record):

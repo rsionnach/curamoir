@@ -36,7 +36,9 @@ from curamoir.fix_counts import (
 from curamoir.fix_scope import FILE_NOT_IN_WORK_LIST, lint_sandbox, verify_fix
 from curamoir.git_guard import prepare_sandbox, snapshot_git_state
 from curamoir.green_gate import run_test_gate
+from curamoir.guards.pr_cap import OpenPrCap
 from curamoir.guards.reasons import Reason
+from curamoir.guards.result import Degraded, Refusal
 from curamoir.idempotence import (
     DUPLICATE_OPEN_PR,
     NO_WORK,
@@ -45,8 +47,11 @@ from curamoir.idempotence import (
     UNKNOWN,
     WORK,
     WORK_FIELD,
+    parse_sweep_marker,
     pr_field,
     sweep_decision,
+    sweep_marker,
+    sweep_pr_listing,
     sweep_prs,
 )
 from curamoir.job_run import JobRun
@@ -242,9 +247,12 @@ def test_the_latest_valid_pr_record_per_branch_wins_and_malformed_ones_are_skipp
     broken = dict(pr_line(10), pr={"number": "ten", "branch": BRANCH})
     noise = [42, {"kind": "guard", "job": "sweep", "pr": newer["pr"]},
              pr_line(11, job="review"), {"kind": "job", "job": "sweep"}]
-    prs = sweep_prs([older, *noise, newer, broken])
+    prs = sweep_prs([older, *noise, newer])
     assert list(prs) == [BRANCH]
     assert prs[BRANCH]["number"] == 9
+    # Latest is ledger order: a malformed newest record does not resurrect #9;
+    # the branch's ledger record is unknown (None).
+    assert sweep_prs([older, *noise, newer, broken]) == {BRANCH: None}
 
 
 def test_a_pr_recorded_on_a_failed_line_still_counts_as_opened():
@@ -432,3 +440,163 @@ def test_apply_to_refuses_a_sandbox_the_decision_was_not_made_for(tmp_path):
         terminal = sweep_decision(work_of(), sandbox.base, [], never_called)
         with pytest.raises(ValueError):
             terminal.apply_to(sandbox)
+
+
+# --- review fixes: CI mode, one open-PR contract, the PR marker ------------------------
+
+def gh_record(branch=BRANCH, number=7, base=BASE, paths=("src/a.py",), url=URL):
+    return {"branch": branch, "number": number, "url": url, "base": base,
+            "paths": None if paths is None else list(paths)}
+
+
+def test_ci_mode_without_the_ledger_line_falls_back_to_the_listings_base_and_paths():
+    """CI mode: a fresh checkout's ledger lacks sweep 1's line until the state
+    PR merges; GitHub's listing (the PR body's marker, its files) says it."""
+    work = work_of(violation("f1", "src/a.py"), violation("f2", "src/b.py"))
+    decision = sweep_decision(work, NEWER, [], lambda: [gh_record()])
+    assert decision.kind == WORK
+    assert [i.path for i in decision.work_list.items] == ["src/b.py"]
+    assert [i.path for i in decision.held] == ["src/a.py"]
+    assert decision.ledger_fields()["open_sweep_prs"] == [
+        {"number": 7, "branch": BRANCH, "url": URL}]
+
+
+def test_a_listed_base_alone_is_enough_to_see_a_same_base_duplicate():
+    work = work_of(violation("f1", "src/a.py"))
+    decision = sweep_decision(work, BASE, [], lambda: [gh_record(paths=None)])
+    assert decision.kind == DUPLICATE_OPEN_PR
+    assert "same base commit" in decision.message
+    assert "leftovers wait for the next base" in decision.message
+    assert "nothing has changed" not in decision.message
+
+
+def test_neither_source_knowing_the_files_refuses_and_says_when_it_clears():
+    work = work_of(violation("f1", "src/a.py"))
+    for listing in ([BRANCH], [gh_record(paths=None)], [gh_record(base=None)],
+                    [gh_record(paths=["ok.py", ""])], [gh_record(base="A" * 40)]):
+        decision = sweep_decision(work, NEWER, [], lambda listing=listing: listing)
+        message = decision.refusal().message
+        assert decision.kind == UNKNOWN, listing
+        assert BRANCH in message and "neither the ledger nor GitHub" in message
+        assert "merged or closed" in message
+        assert "next sweep will try again" not in message
+        assert "restore the ledger line" not in message
+
+
+def test_a_transient_listing_failure_keeps_the_try_again_wording():
+    def gh_down():
+        raise OSError("gh: command not found")
+    decision = sweep_decision(work_of(violation("f1")), NEWER, [], gh_down)
+    assert "next sweep will try again" in decision.refusal().message
+
+
+def test_the_ledger_record_is_primary_over_the_listing():
+    work = work_of(violation("f1", "src/a.py"), violation("f2", "src/b.py"))
+    decision = sweep_decision(work, NEWER, [pr_line(7, paths=("src/a.py",))],
+                              lambda: [gh_record(paths=("src/b.py",))])
+    assert [i.path for i in decision.held] == ["src/a.py"]
+
+
+def test_a_ledger_record_for_an_older_pr_on_a_reused_branch_is_not_used():
+    work = work_of(violation("f1", "src/a.py"), violation("f2", "src/b.py"))
+    stale = [pr_line(5, paths=("src/a.py",))]
+    assert sweep_decision(work, NEWER, stale,
+                          lambda: [gh_record(number=9, base=None)]).kind == UNKNOWN
+    decision = sweep_decision(work, NEWER, stale,
+                              lambda: [gh_record(number=9, paths=("src/b.py",))])
+    assert [i.path for i in decision.held] == ["src/b.py"]
+
+
+def test_a_malformed_newest_ledger_record_falls_back_to_the_listing_else_refuses():
+    work = work_of(violation("f1", "src/a.py"), violation("f2", "src/b.py"))
+    broken = dict(pr_line(9), pr={"number": 9, "branch": BRANCH, "paths": "src/b.py"})
+    entries = [pr_line(5, paths=("src/a.py",)), broken]
+    assert sweep_decision(work, NEWER, entries, lambda: [BRANCH]).kind == UNKNOWN
+    decision = sweep_decision(work, NEWER, entries,
+                              lambda: [gh_record(number=9, paths=("src/b.py",))])
+    assert [i.path for i in decision.held] == ["src/b.py"]
+
+
+def test_a_huge_listing_is_clipped_in_the_message():
+    decision = sweep_decision(work_of(violation("f1")), NEWER, [], lambda: "x" * 5000)
+    assert decision.kind == UNKNOWN and len(decision.message) < 600
+
+
+def test_the_sweep_marker_round_trips_and_parses_strictly():
+    assert sweep_marker(BASE) == f"<!-- curamoir-sweep base={BASE} -->"
+    body = f"Fixes things.\r\n\r\n{sweep_marker(BASE)}\r\n"
+    assert parse_sweep_marker(body) == BASE
+    assert parse_sweep_marker(f"{sweep_marker(BASE)}\n{sweep_marker(BASE)}") == BASE
+    for bad in (None, 5, "", "no marker here",
+                f"<!-- curamoir-sweep base={'A' * 40} -->",
+                f"<!-- curamoir-sweep base={'a' * 39} -->",
+                f"<!--  curamoir-sweep base={BASE} -->",
+                f"<!-- curamoir-sweep base={BASE} --> trailing",
+                f"quoted: <!-- curamoir-sweep base={BASE} -->",
+                f"{sweep_marker(BASE)}\n{sweep_marker(NEWER)}",
+                f"{sweep_marker(BASE)}\n<!-- curamoir-sweep base=oops -->"):
+        assert parse_sweep_marker(bad) is None, bad
+    with pytest.raises(ValueError):
+        sweep_marker("A" * 40)
+
+
+def test_a_gh_listing_item_becomes_a_record_and_a_capped_file_list_is_unknown():
+    item = {"headRefName": BRANCH, "number": 7, "url": URL,
+            "body": "x\n" + sweep_marker(BASE), "files": [{"path": "src/b.py"},
+                                                          {"path": "src/a.py"}]}
+    assert sweep_pr_listing(item) == {"branch": BRANCH, "number": 7, "url": URL,
+                                      "base": BASE, "paths": ["src/a.py", "src/b.py"]}
+    capped = dict(item, files=[{"path": f"f{i}.py"} for i in range(100)])
+    assert sweep_pr_listing(capped)["paths"] is None
+    assert sweep_pr_listing(dict(item, body=None))["base"] is None
+    assert sweep_pr_listing(dict(item, files=None))["paths"] is None
+
+
+SHAPES = {
+    "list": lambda: [BRANCH],
+    "tuple": lambda: (BRANCH,),
+    "set": lambda: {BRANCH},
+    "generator": lambda: (b for b in [BRANCH]),
+    "dict_keys": lambda: {BRANCH: 1}.keys(),
+    "records": lambda: [gh_record()],
+}
+
+
+@pytest.mark.parametrize("shape", sorted(SHAPES))
+def test_one_contract_any_iterable_of_names_or_records_for_cap_and_decision(shape):
+    work = work_of(violation("f1", "src/a.py"), violation("f2", "src/b.py"))
+    decision = sweep_decision(work, NEWER, [pr_line()], SHAPES[shape])
+    assert decision.kind == WORK and [i.path for i in decision.held] == ["src/a.py"]
+    assert isinstance(OpenPrCap(SHAPES[shape], max_open_prs=1)(None), Refusal)
+    assert OpenPrCap(SHAPES[shape], max_open_prs=2)(None) is None
+
+
+def _raises():
+    raise RuntimeError("gh timed out")
+
+
+@pytest.mark.parametrize("listing", [lambda: None, _raises, lambda: "curamoir/sweep-x",
+                                     lambda: [BRANCH, 5], lambda: {"branch": BRANCH}])
+def test_one_contract_none_or_garbage_is_could_not_list_for_cap_and_decision(listing):
+    assert sweep_decision(work_of(violation("f1")), NEWER, [], listing).kind == UNKNOWN
+    assert isinstance(OpenPrCap(listing)(None), Degraded)
+
+
+def test_a_held_delete_file_remedy_survives_apply_to(tmp_path):
+    repo, _ledger = fixture(tmp_path)
+    with prepare_sandbox(repo, "HEAD", parent=tmp_path) as sandbox:
+        lint_sandbox(sandbox)
+        free = sweep_decision(sandbox.work_list, sandbox.base, [], lambda: [])
+        assert VARIANT in [i.path for i in free.work_list.items]
+    with prepare_sandbox(repo, "HEAD", parent=tmp_path) as sandbox:
+        lint_sandbox(sandbox)
+        held = sweep_decision(sandbox.work_list, sandbox.base, [pr_line(base=NEWER,
+                              paths=(VARIANT,))], lambda: [BRANCH])
+        held.apply_to(sandbox)
+        apply_file_remedies(sandbox)
+        assert (sandbox.path / VARIANT).is_file()
+    with prepare_sandbox(repo, "HEAD", parent=tmp_path) as sandbox:
+        lint_sandbox(sandbox)  # control: unheld, the same remedy deletes it
+        sweep_decision(sandbox.work_list, sandbox.base, [], lambda: []).apply_to(sandbox)
+        apply_file_remedies(sandbox)
+        assert not (sandbox.path / VARIANT).exists()

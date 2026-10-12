@@ -22,6 +22,7 @@ from curamoir.budget import PriceTable, UnknownModel, combined_shortfall, month_
 from curamoir.cadence import scheduled_jobs
 from curamoir.config import DEFAULTS, ConfigError, load_config_text
 from curamoir.grades import graded_modules
+from curamoir.guards.pr_cap import open_pr_branch_names
 from curamoir.ledger import Ledger
 
 NOT_AVAILABLE = "not yet available"
@@ -193,7 +194,8 @@ def _read_open_prs(open_pr_branches, config):
     if open_pr_branches is None:
         return {"checked": False, "unavailable": False, "ours": [], "cap": cap, "detail": None}
     try:
-        branches = list(open_pr_branches() or [])
+        # One contract with the cap (guards.pr_cap): None is "could not list".
+        branches = open_pr_branch_names(open_pr_branches())
     except Exception as error:
         return {
             "checked": True, "unavailable": True, "ours": [], "cap": cap,

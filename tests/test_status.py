@@ -259,3 +259,9 @@ def test_the_grades_section_says_not_available_independently_of_cadence(tmp_path
     assert "not yet available" not in _summarise_grades(
         {"modules": {"src/a": {"grade": "B"}}}
     ).lower()
+
+
+def test_a_listing_of_none_means_could_not_list_not_no_prs(tmp_path):
+    """One contract with the cap and the sweep's decision: None is unknown."""
+    status = collect_status(initialised(tmp_path), open_pr_branches=lambda: None)
+    assert status["open_prs"]["unavailable"] is True

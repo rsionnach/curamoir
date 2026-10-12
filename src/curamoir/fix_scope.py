@@ -58,8 +58,14 @@ Two layers, so the rules can be tested without git:
    step 2 (the work list and `current` are the whole base's) and before
    step 3 (the remedies are fixes too, and nothing has edited the sandbox
    yet): `decision = idempotence.sweep_decision(sandbox.work_list,
-   sandbox.base, ledger.entries(), open_pr_branches)`, with the same
-   `open_pr_branches` callable the open-PR cap (guards.pr_cap) is given.
+   sandbox.base, ledger.entries(), open_sweep_prs)`. cm-fkd.4 supplies
+   `open_sweep_prs`, the `gh`-backed callable (`gh pr list --state open
+   --json headRefName,number,url,body,files`, each item mapped through
+   idempotence.sweep_pr_listing) shared with the open-PR cap
+   (guards.pr_cap, whose docstring holds the listing contract), and puts
+   `idempotence.sweep_marker(sandbox.base)` on a line of the sweep PR's
+   body, so a fresh CI checkout whose ledger lacks this line still knows
+   the PR's base.
    If `decision.terminal` (NO_WORK, DUPLICATE_OPEN_PR, or UNKNOWN):
    `decision.record(run, delta)`, which writes a success with `work` and
    `found_delta` or, for UNKNOWN, a refusal (Reason.IDEMPOTENCE); then
@@ -106,9 +112,10 @@ Two layers, so the rules can be tested without git:
    tier-1 records (cm-fkd.2) added to `records`. They are written with the
    sweep's success line, once the PR is opened, so a sweep whose PR failed
    to open records no fixes (its failure line carries `found_delta=delta`
-   and step 2b's fields, no `fixes`). record_fixes' ScopeCheckError, GateError or sweep.LintUntrusted
-   is a refusal, as in step 6: a PR whose fixes cannot be counted would
-   starve the promotion ladder silently.
+   and step 2b's fields, no `fixes`). record_fixes' ScopeCheckError,
+   GateError or sweep.LintUntrusted is a refusal, as in step 6: a PR
+   whose fixes cannot be counted would starve the promotion ladder
+   silently.
 9. Take exactly `gate.paths_for_pr` out: `gate.patch(sandbox)`, the
    patch of those paths built from the bytes the green run tested (what
    `sandbox.patch(gate.paths_for_pr)` gives when nothing changed since),
