@@ -96,7 +96,9 @@ NO_UNCHAINED_RAISE = textwrap.dedent("""\
 """)
 
 # No `fix:` on purpose: the runner must fall back to the principle's `good`
-# example rather than hand the agent an empty remediation.
+# example rather than hand the agent an empty remediation. `remedy:
+# delete_file` because the variant's fix is deleting it, which the sweep's
+# runner does (src/curamoir/remedies.py); the lint ignores the field.
 NO_VARIANT_MODULE = textwrap.dedent("""\
     id: no-variant-module
     principle: no-file-variant-proliferation
@@ -106,6 +108,7 @@ NO_VARIANT_MODULE = textwrap.dedent("""\
     files: ["**/*.py"]
     target: path
     message: "{path} is a parallel variant of another module"
+    remedy: delete_file
 """)
 
 AST_GREP_PRINT = textwrap.dedent("""\

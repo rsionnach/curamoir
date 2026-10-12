@@ -32,7 +32,19 @@ survives reformatting.
 
 and the optional ones: `languages` or `files` to scope it, `exclude` to carve
 out the places the principle itself exempts, `fix` for the remediation E2-R4
-prints, and `target` to match a path rather than a line.
+prints, `target` to match a path rather than a line, and `remedy` (REMEDIES)
+for a path rule whose fix the sweep applies itself.
+
+**Why `remedy` is a field** (cm-ul5). E2-R3 lists what a rule MUST define,
+not all it may, so an optional field extends the format the way `fix` and
+`target` already do: a rule without it means what it always meant. It exists
+because a `target: path` rule's violation is a file's name, and the sweep's
+fix agent may not delete, create or rename files (fix_step.SCOPE_LIMITS).
+`remedy: delete_file` says the fix is deleting the file, and the sweep's
+runner does that deterministically (src/curamoir/remedies.py). Not every path
+rule means "delete" — a naming-convention rule wants a rename, which nothing
+applies — so it is opt-in per rule and a closed vocabulary: a typo read as
+"no remedy" would leave the violation unfixed every sweep, saying nothing.
 """
 
 import os
@@ -128,6 +140,12 @@ AST_GREP_DEFAULT_LANGUAGES = tuple(
 #: `no-file-variant-proliferation` matches a NAME, which is not a language.
 TARGETS = ("line", "path")
 
+#: What a rule's optional `remedy` may name, and the one target it may name it
+#: on. `delete_file`: the file's existence is the violation, so deleting it is
+#: the fix; the sweep's runner applies it (remedies.apply_file_remedies).
+REMEDIES = ("delete_file",)
+REMEDY_TARGET = "path"
+
 #: Never searched, at any depth, whatever a rule says: tooling and dependency
 #: directories, whose names nobody gives a source package. Extracted from the
 #: source lint scripts' shared EXCLUDE_DIRS, less the three below.
@@ -191,6 +209,8 @@ class Rule:
     files: tuple = ()
     exclude: tuple = ()
     target: str = "line"
+    #: One of REMEDIES, or "" for none (the default).
+    remedy: str = ""
     #: Where this came from, for error messages and for E2-R4's output.
     source: str = ""
 
@@ -423,6 +443,8 @@ def parse_rule(text, source, known_principles):
             "'regex' matcher can match one; use `matcher: regex`."
         )
 
+    remedy = _remedy(data.get("remedy"), target, rule_id, source)
+
     return Rule(
         id=rule_id,
         principle=principle,
@@ -435,8 +457,29 @@ def parse_rule(text, source, known_principles):
         files=files,
         exclude=exclude,
         target=target,
+        remedy=remedy,
         source=source,
     )
+
+
+def _remedy(value, target, rule_id, source):
+    """The rule's `remedy`, "" when it gives none. Only a string naming one of
+    REMEDIES is accepted, and only on a REMEDY_TARGET rule: deleting a file is
+    the fix only when the file's existence is the violation."""
+    if value is None:
+        return ""
+    if not isinstance(value, str) or value.strip() not in REMEDIES:
+        raise RuleError(
+            f"{source}: rule {rule_id!r} has remedy {value!r}; allowed: "
+            f"{', '.join(REMEDIES)}, or no `remedy` at all. A misspelt remedy "
+            "read as none would leave the violation unfixed every sweep.")
+    if target != REMEDY_TARGET:
+        raise RuleError(
+            f"{source}: rule {rule_id!r} has remedy {value.strip()!r} but target "
+            f"{target!r}; a remedy is only for `target: {REMEDY_TARGET}` rules, whose "
+            "violation is the file itself. On a line rule it would delete a whole "
+            "file for one line.")
+    return value.strip()
 
 
 def glob_regex(pattern):

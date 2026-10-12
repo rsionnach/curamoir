@@ -76,14 +76,17 @@ def test_the_limits_state_the_window_the_review_step_checks():
     assert f"at most {WINDOW} lines either side" in flat(SCOPE_LIMITS)
 
 
-def test_the_limits_allow_the_one_deletion_the_review_step_allows():
-    """fix_scope accepts deleting a file only for a file-level violation (the
-    empty region at 1:1 a `target: path` rule reports); the prompt says the
-    same, so a compliant agent is never refused for following it."""
+def test_the_limits_leave_file_level_remedies_to_the_runner():
+    """The agent has no deletion tool, and fix_scope accepts a deletion only
+    for a file-level violation (the empty region at 1:1 a `target: path` rule
+    reports) of a rule saying `remedy: delete_file`, which the runner applies
+    before the agent starts (remedies, cm-ul5). The prompt says so, so a
+    compliant agent neither tries nor is refused."""
     text = flat(SCOPE_LIMITS)
-    assert "Do not create or rename a file" in text
-    assert "Delete a file only when one of its violations is the file itself" in text
+    assert "Do not create, rename or delete a file" in text
     assert "line 1, column 1" in text
+    assert "`remedy: delete_file`, cúramóir deletes the file before you start" in text
+    assert "Delete a file only when" not in text
 
 
 def test_the_limits_tie_a_signature_permission_to_a_violation_in_that_definition():
@@ -413,6 +416,7 @@ def test_an_owner_include_path_cannot_carry_a_filter_into_the_review(tmp_path):
 
     with prepare_sandbox(repo, "HEAD", parent=tmp_path) as sandbox:
         sandbox.work_list = SimpleNamespace(items=[V("m.py", 1)])
+        sandbox.rules = ()
         run = run_fix_step(sandbox, "p", model="m", claude=str(claude))
         result = verify_fix(sandbox, git_state=run.git_state)
         sandbox.patch(("m.py",))
@@ -441,6 +445,7 @@ def test_a_file_written_under_an_ignored_directory_is_refused(tmp_path):
 
     with prepare_sandbox(repo, "HEAD", parent=tmp_path) as sandbox:
         sandbox.work_list = SimpleNamespace(items=[V("m.py", 1)])
+        sandbox.rules = ()
         run = run_fix_step(sandbox, "p", model="m", claude=str(claude))
         result = verify_fix(sandbox, git_state=run.git_state)
 

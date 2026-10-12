@@ -11,12 +11,12 @@ def harness(tmp_path):
     return Harness(tmp_path / "repo")
 
 
-def committed_sample(tmp_path):
-    """`fixtures/sample-repo` as a git repository at one commit, with
-    tests/test_lint.py's regex rules installed."""
+def committed_sample(tmp_path, *rules):
+    """`fixtures/sample-repo` as a git repository at one commit, with `rules`
+    installed: by default tests/test_lint.py's regex rules."""
     from tests.test_lint import ALL_REGEX_RULES, sample_repo
 
-    repo = sample_repo(tmp_path, *ALL_REGEX_RULES)
+    repo = sample_repo(tmp_path, *(rules or ALL_REGEX_RULES))
     for command in (["init", "--initial-branch=main"],
                     ["config", "user.email", "test@example.invalid"],
                     ["config", "user.name", "test"],

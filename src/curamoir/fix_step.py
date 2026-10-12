@@ -125,7 +125,8 @@ the first scheduled sweep is the first end-to-end evidence.
 Bash tool call is bounded at ten minutes and the lint's own bound is 600s
 plus sweep's 30s grace, so the runner runs it (fix_scope.lint_sandbox(sandbox),
 which also records it as sandbox.work_list, without which verify_fix
-refuses) and passes the result in.
+refuses), applies the file-level remedies (remedies.apply_file_remedies),
+and passes in the work list the agent is left with (RemedyResult.for_agent).
 
 Syntax that imports on 3.9, like sweep.py.
 """
@@ -159,10 +160,12 @@ After you finish, cúramóir checks every change against these limits in code
 and opens no PR from a fix that breaks any of them:
 
 - Edit only the files in the work list's `paths`, and touch no other file.
-  Do not create or rename a file. Delete a file only when one of its
-  violations is the file itself: reported at line 1, column 1 to line 1,
-  column 1 with an empty `match`, which is how a rule about a file's name is
-  reported.
+  Do not create, rename or delete a file. A violation that is the file
+  itself (reported at line 1, column 1 to line 1, column 1 with an empty
+  `match`, which is how a rule about a file's name is reported) is not
+  yours to fix: where its rule says `remedy: delete_file`, cúramóir deletes
+  the file before you start and leaves it out of your work list; any other
+  such violation, leave as it is and say so.
 - Change only a violation's own lines and at most {WINDOW} lines either side
   of it. The one exception is adding, at the top of the module before its
   first function or class, an import, a logger (`logger =

@@ -27,7 +27,7 @@ Two layers, so the rules can be tested without git:
   reads what changed between the base commit and the work tree (tracked
   changes with `git diff --raw`, hunks with `git diff -U0`, untracked files
   with `git ls-files --others`, nothing excluded), the sandbox's work list
-  (lint_sandbox), the principles at the base commit, and what the
+  and rules (lint_sandbox), the principles at the base commit, and what the
   repository already imports there, and calls the core.
 
 **What the runner (cm-fkd.4) must do.**
@@ -35,18 +35,26 @@ Two layers, so the rules can be tested without git:
 1. Make a sandbox: `git_guard.prepare_sandbox(repo, base_ref)`, and use it
    as a context manager so it is removed whatever happens.
 2. Lint it before anything edits it: `lint_sandbox(sandbox)`, which records
-   the work list of the base on the sandbox; build the prompt from that and
-   from `base_principles(sandbox)`.
-3. Run the fix step in it: `fix_step.run_fix_step(sandbox, prompt)`, which
-   snapshots the sandbox (FixStepRun.git_state) before the agent starts.
-4. Review it: `verify_fix(sandbox, git_state=run.git_state)`. Same sandbox,
+   the work list of the base, and the rules the lint ran, on the sandbox.
+3. Apply the file-level remedies, still before anything else edits it:
+   `remedies.apply_file_remedies(sandbox)`, which deletes each file whose
+   violation's rule says `remedy: delete_file` and nothing at the base
+   refers to (the agent has no deletion tool). Build the prompt from
+   `result.for_agent(sandbox.work_list)`, which leaves out what the runner
+   handled, and from `base_principles(sandbox)`; report `result.skipped` as
+   unfixed, with each reason.
+4. Run the fix step in it: `fix_step.run_fix_step(sandbox, prompt)`, which
+   snapshots the sandbox (FixStepRun.git_state) before the agent starts,
+   so after the remedies; the review still sees their deletions, because
+   it diffs against the base commit.
+5. Review it: `verify_fix(sandbox, git_state=run.git_state)`. Same sandbox,
    same snapshot, same base: there is nothing else to pass.
-5. Treat git_guard.GitGuardError (ScopeCheckError is one) as a refusal: no
+6. Treat git_guard.GitGuardError (ScopeCheckError is one) as a refusal: no
    verdict is not a verdict, and an unverified fix is not a fix.
-6. On an ok verdict with paths (not `nothing_changed`), take exactly
+7. On an ok verdict with paths (not `nothing_changed`), take exactly
    `verdict.paths` out: `sandbox.patch(verdict.paths)`, applied or pushed
    by the runner. Never `git add -A`, never the whole tree.
-7. Never re-run the fix agent in the user's checkout, not even "to apply
+8. Never re-run the fix agent in the user's checkout, not even "to apply
    the same fix": the sandbox is what the verdict is about.
 
 **The rules, and why each is drawn where it is.**
@@ -60,10 +68,16 @@ Two layers, so the rules can be tested without git:
   both sides: a macOS file system hands names back in the form they were
   written, and git reports NFC.
 - *Deleting a file.* Allowed only when the file carries a file-level
-  violation: the lint reports a `target: path` rule's match (a name like
-  `handlers_v2.py`) as the empty region at 1:1 (docs/curamoir-lint.md), and
-  for such a violation the file's existence is the violation, so removing it
-  is the fix rather than a refactor. The prompt states the same exception.
+  violation — the lint reports a `target: path` rule's match (a name like
+  `handlers_v2.py`) as the empty region at 1:1 (docs/curamoir-lint.md) —
+  AND that violation's rule says `remedy: delete_file` (rules.REMEDIES), as
+  loaded at the base by lint_sandbox. For such a violation the file's
+  existence is the violation, so removing it is the fix rather than a
+  refactor. The runner makes that deletion itself (remedies), before the
+  agent starts; the agent may delete nothing, and the prompt says so. WHY
+  the remedy is required here too, and not only the 1:1 region: a path
+  rule without it may want a rename instead, and requiring it keeps the
+  exception the runner's even if a later toolset could delete.
 - *Dependencies.* Any change to a dependency manifest or lockfile (by name:
   DEPENDENCY_FILES) is refused, whatever else is in it and even when the
   file is on the work list. A section-aware check — "pyproject.toml may
@@ -174,6 +188,7 @@ from curamoir.git_guard import (
     verify_git_state,
 )
 from curamoir.principles import PrincipleError, PrinciplesFile, parse_principles
+from curamoir.rules import RuleError, load_rules
 from curamoir.sweep import work_list
 
 #: Lines either side of a violation's span that a fix may touch.
@@ -209,6 +224,10 @@ KINDS = (FILE_NOT_IN_WORK_LIST, FILE_ADDED, FILE_DELETED, DEPENDENCY_CHANGE,
 
 #: The principle permission that lifts SIGNATURE_CHANGE (principles.PERMISSIONS).
 SIGNATURE_PERMISSION = "signature_change"
+
+#: The rule remedy that lifts FILE_DELETED for a file-level violation
+#: (rules.REMEDIES).
+DELETE_FILE = "delete_file"
 
 #: Change statuses.
 ADDED = "added"
@@ -375,25 +394,27 @@ class ScopeCheckError(GitGuardError):
 # --- the pure core ---------------------------------------------------------------
 
 def check_scope(changes, violations, permitting=frozenset(), known_modules=frozenset(),
-                window=WINDOW):
+                window=WINDOW, deletable_rules=frozenset()):
     """The verdict on `changes` (FileChanges) against `violations` (anything
-    with path, line, col, end_line, end_col and principle_id: the work list's
-    items). `permitting` is the ids of principles that permit signature
-    changes; `known_modules` the top-level module and package names the
-    repository already uses or contains, which are not new dependencies.
-    Paths are matched in NFC (module docstring)."""
+    with path, line, col, end_line, end_col, principle_id and rule_id: the
+    work list's items). `permitting` is the ids of principles that permit
+    signature changes; `known_modules` the top-level module and package names
+    the repository already uses or contains, which are not new dependencies;
+    `deletable_rules` the ids of rules with `remedy: delete_file` (rules.
+    REMEDIES), the only ones whose file-level violation licenses deleting the
+    file. Paths are matched in NFC (module docstring)."""
     by_path = {}
     for violation in violations:
         by_path.setdefault(nfc(violation.path), []).append(violation)
     breaches = []
     for change in sorted(changes, key=lambda c: c.path):
         breaches.extend(_check_file(change, by_path.get(nfc(change.path), ()), permitting,
-                                    known_modules, window))
+                                    known_modules, window, deletable_rules))
     return ScopeVerdict(breaches=tuple(breaches),
                         paths=tuple(sorted({c.path for c in changes})))
 
 
-def _check_file(change, violations, permitting, known_modules, window):
+def _check_file(change, violations, permitting, known_modules, window, deletable_rules):
     path = change.path
     found = []
     if is_dependency_file(path):
@@ -415,11 +436,13 @@ def _check_file(change, violations, permitting, known_modules, window):
         found.append(Breach(UNVERIFIABLE, path, None, change.unverifiable))
         return found
     if change.status == DELETED:
-        if not any(_is_file_level(v) for v in violations):
+        if not any(is_file_level(v) and getattr(v, "rule_id", None) in deletable_rules
+                   for v in violations):
             found.append(Breach(
                 FILE_DELETED, path, None,
-                "deleted, but none of its violations is about the file itself "
-                "(a `target: path` rule's empty region at 1:1)"))
+                "deleted, but none of its violations is about the file itself (a "
+                "`target: path` rule's empty region at 1:1) with a rule that says "
+                "`remedy: delete_file`"))
         return found
 
     old, new = change.old_text, change.new_text
@@ -532,7 +555,9 @@ def parse_hunks(diff_text):
     return tuple(hunks)
 
 
-def _is_file_level(violation):
+def is_file_level(violation):
+    """Whether `violation` is about the file itself: the empty region at 1:1
+    that the lint reports for a `target: path` rule (docs/curamoir-lint.md)."""
     return (violation.line, violation.col, violation.end_line, violation.end_col) == (1, 1, 1, 1)
 
 
@@ -1096,7 +1121,10 @@ def _new_import_breaches(path, before, after, known_modules, builtins):
 def lint_sandbox(sandbox, **lint_options):
     """Run the lint (sweep.work_list, with `lint_options`) in `sandbox` while
     its work tree is still exactly its base commit, record the result as
-    `sandbox.work_list` for verify_fix, and return it.
+    `sandbox.work_list` for verify_fix, and return it. Record too, as
+    `sandbox.rules`, the rules the lint ran (rules.load_rules on the same
+    pristine tree): which of them carry a `remedy` is the base's answer for
+    remedies.apply_file_remedies and verify_fix, never the edited tree's.
 
     WHY here and not by the caller: the verdict's line numbers and its "only
     files with violations" are the work list's, so the work list must be the
@@ -1106,14 +1134,22 @@ def lint_sandbox(sandbox, **lint_options):
     staged or untracked, ignored or not); sweep.LintUntrusted if the lint's
     report cannot be acted on."""
     require_sandbox(sandbox, ScopeCheckError)
-    _require_pristine(sandbox)
+    require_pristine(sandbox)
     result = work_list(sandbox.path, **lint_options)
-    _require_pristine(sandbox)
+    try:
+        rules = tuple(load_rules(sandbox.path))
+    except RuleError as error:
+        raise ScopeCheckError(f"the rules at the base commit cannot be loaded: {error}") \
+            from error
+    require_pristine(sandbox)
     sandbox.work_list = result
+    sandbox.rules = rules
     return result
 
 
-def _require_pristine(sandbox):
+def require_pristine(sandbox):
+    """ScopeCheckError unless `sandbox`'s work tree is exactly its base
+    commit: nothing modified, staged or untracked, ignored or not."""
     status = git(sandbox.path, "status", "--porcelain", "-z", "--ignored",
                  "--untracked-files=all", "--ignore-submodules=all")
     if status or sandbox.head() != sandbox.base:
@@ -1170,7 +1206,7 @@ def verify_fix(sandbox, *, git_state, window=WINDOW):
     if git_state.base != sandbox.base:
         raise ScopeCheckError(f"the git-state snapshot was taken for base {git_state.base}, "
                               f"not {sandbox.base}")
-    if sandbox.work_list is None:
+    if sandbox.work_list is None or sandbox.rules is None:
         raise ScopeCheckError("no work list was linted in this sandbox at its base "
                               "(fix_scope.lint_sandbox), so there is nothing to hold the "
                               "fix to")
@@ -1196,7 +1232,8 @@ def verify_fix(sandbox, *, git_state, window=WINDOW):
     permitting = frozenset(p.id for p in base_principles(sandbox).principles
                            if SIGNATURE_PERMISSION in p.permits)
     verdict = check_scope(changes, sandbox.work_list.items, permitting=permitting,
-                          known_modules=base_known_modules(sandbox.path, base), window=window)
+                          known_modules=base_known_modules(sandbox.path, base), window=window,
+                          deletable_rules=deletable_rules(sandbox.rules))
     if not hidden:
         return verdict
     return ScopeVerdict(
@@ -1206,6 +1243,12 @@ def verify_fix(sandbox, *, git_state, window=WINDOW):
             "an uninitialised submodule, or hidden another way); a change git cannot see "
             "can be neither reviewed nor carried to a PR") for path in hidden),
         paths=tuple(sorted(set(verdict.paths) | set(hidden))))
+
+
+def deletable_rules(rules):
+    """The ids of `rules` whose file-level violation licenses deleting the
+    file: those with `remedy: delete_file` (rules.REMEDIES)."""
+    return frozenset(rule.id for rule in rules if rule.remedy == DELETE_FILE)
 
 
 def _missing_submodules(repo, base):

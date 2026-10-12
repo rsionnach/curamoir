@@ -118,9 +118,10 @@ def git_repo(tmp_path, files, name="plain"):
 
 def sandbox_of(repo, *violations):
     """A sandbox of `repo` at HEAD whose work list is `violations`, set by
-    hand where lint_sandbox would set the real lint's."""
+    hand where lint_sandbox would set the real lint's, and no rules."""
     sandbox = prepare_sandbox(repo, "HEAD", parent=repo.parent)
     sandbox.work_list = SimpleNamespace(items=list(violations))
+    sandbox.rules = ()
     return sandbox
 
 
@@ -149,6 +150,7 @@ class V:
     col: int = 5
     end_col: int = 10
     principle_id: str = "p"
+    rule_id: str = "r"
 
     def __post_init__(self):
         if self.end_line is None:
@@ -560,10 +562,25 @@ def test_other_files_are_not_dependency_files(path):
     assert not is_dependency_file(path)
 
 
-def test_deleting_a_file_level_violation_is_the_fix():
-    file_level = V("a_v2.py", 1, end_line=1, col=1, end_col=1)
+def test_deleting_a_file_level_violation_is_the_fix_when_its_rule_says_so():
+    file_level = V("a_v2.py", 1, end_line=1, col=1, end_col=1, rule_id="no-variant")
+    deleted = FileChange("a_v2.py", DELETED, "x = 1\n", None)
 
-    assert check_scope([FileChange("a_v2.py", DELETED, "x = 1\n", None)], [file_level]).ok
+    assert check_scope([deleted], [file_level], deletable_rules={"no-variant"}).ok
+
+
+def test_deleting_a_file_level_violation_whose_rule_names_no_remedy_is_refused():
+    """A `target: path` rule without `remedy: delete_file` may want a rename,
+    not a deletion; and requiring the remedy keeps the 1:1 exception from
+    being anyone's to use but the runner's (cm-ul5)."""
+    file_level = V("a_v2.py", 1, end_line=1, col=1, end_col=1, rule_id="naming")
+    deleted = FileChange("a_v2.py", DELETED, "x = 1\n", None)
+
+    found = check_scope([deleted], [file_level], deletable_rules={"other"}).breaches
+
+    assert [(b.kind, b.path) for b in found] == [(FILE_DELETED, "a_v2.py")]
+    assert "remedy: delete_file" in found[0].detail
+    assert not check_scope([deleted], [file_level]).ok
 
 
 def test_an_added_file_is_refused_even_if_a_violation_names_it():

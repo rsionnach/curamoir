@@ -38,6 +38,7 @@ languages: [python]              # scope by language
 files: ["**/*.py"]               # or by glob, which wins over `languages`
 exclude: ["**/cli.py"]           # carve out what the principle itself exempts
 target: line                     # or `path`, to match a filename
+remedy: delete_file              # `target: path` only: the sweep deletes the file
 ```
 
 | field | what it is |
@@ -50,6 +51,24 @@ target: line                     # or `path`, to match a filename
 | `message` | what the agent reads. May use `{path}`, `{line}`, `{col}`, `{match}`, `{rule}`, `{principle}`. |
 | `fix` | the remediation. Optional, because some principles have no mechanical fix — but write one if you can, because it is the field that stops an agent retrying the same thing. |
 | `target` | `line` (default) or `path`, for rules about filenames. |
+| `remedy` | `delete_file`, or leave it out. Only on a `target: path` rule, and only when the file's existence is the violation (`foo_v2.py` beside `foo.py`). See below. |
+
+### `remedy`: a fix the sweep applies itself
+
+A `target: path` rule's violation is a file's name, and the sweep's fix agent
+may only edit files: it cannot create, rename or delete one. `remedy:
+delete_file` says the fix is deleting the file, and the sweep's runner does
+that itself, before the agent starts (`src/curamoir/remedies.py`). It keeps
+the file, and reports the violation unfixed with the reason, when anything at
+the commit being swept still refers to it: another Python or JS/TS file
+containing its stem as a word (`handlers_v2`), or any file containing its
+dotted module path (`web.handlers_v2`, as in an entry point). The review step
+accepts a deleted file only for such a rule's violation.
+
+Leave `remedy` out when the fix is something else — a naming-convention rule
+whose fix is a rename, say. Nothing applies a rename; the violation is
+reported for a person. The lint itself ignores `remedy`: it does not appear in
+`curamoir-lint`'s output.
 
 ## Exactly one principle
 
@@ -194,6 +213,8 @@ naming the file and the field:
 - an unknown language
 - `target: path` with the `ast-grep` matcher (a filename is in no syntax tree,
   so the rule could never fire)
+- a `remedy` other than `delete_file`, or any `remedy` on a `target: line`
+  rule (it would delete a whole file for one line)
 - the `ast-grep` matcher over `languages: [markdown]` or `[toml]`, which
   `curamoir-lint` has no ast-grep grammar for (the rule would search nothing)
 - a `files` or `exclude` glob that does not compile

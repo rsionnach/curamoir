@@ -62,10 +62,12 @@ After you finish, cúramóir checks every change against these limits in code
 and opens no PR from a fix that breaks any of them:
 
 - Edit only the files in the work list's `paths`, and touch no other file.
-  Do not create or rename a file. Delete a file only when one of its
-  violations is the file itself: reported at line 1, column 1 to line 1,
-  column 1 with an empty `match`, which is how a rule about a file's name is
-  reported.
+  Do not create, rename or delete a file. A violation that is the file
+  itself (reported at line 1, column 1 to line 1, column 1 with an empty
+  `match`, which is how a rule about a file's name is reported) is not
+  yours to fix: where its rule says `remedy: delete_file`, cúramóir deletes
+  the file before you start and leaves it out of your work list; any other
+  such violation, leave as it is and say so.
 - Change only a violation's own lines and at most 3 lines either side
   of it. The one exception is adding, at the top of the module before its
   first function or class, an import, a logger (`logger =

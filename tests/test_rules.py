@@ -581,3 +581,59 @@ def test_a_filename_echoed_in_a_rule_error_cannot_redraw_the_terminal(tmp_path):
     assert "\x1b" not in str(caught.value)
     assert "\n" not in str(caught.value)
     assert "evil\\x1b[2J\\nforged.txt" in str(caught.value)
+
+
+# --- `remedy`: a file-level fix the sweep's runner applies (cm-ul5) -----------------
+# E2-R3 names the fields a rule MUST define, not the only ones it may: `fix`,
+# `languages`, `files`, `exclude` and `target` are optional already, and
+# `remedy` is one more. A rule without it means what it always meant.
+
+VARIANT_RULE = textwrap.dedent("""\
+    id: no-variant-module
+    principle: structured-logging
+    severity: error
+    matcher: regex
+    pattern: '_v[0-9]+\\.py$'
+    files: ["**/*.py"]
+    target: path
+    message: "{path} is a parallel variant of another module"
+""")
+
+
+def test_a_rule_has_no_remedy_unless_it_says_so(tmp_path):
+    assert load_rules(write(tmp_path, VARIANT_RULE, name="v.yaml"))[0].remedy == ""
+    assert load_rules(write(tmp_path / "line", RULE))[0].remedy == ""
+
+
+def test_a_path_rule_may_name_the_delete_file_remedy(tmp_path):
+    rule = load_rules(write(tmp_path, VARIANT_RULE + "remedy: delete_file\n",
+                            name="v.yaml"))[0]
+
+    assert rule.remedy == "delete_file"
+
+
+def test_a_line_rule_with_a_remedy_is_refused(tmp_path):
+    """Deleting a file is the fix only when the file's existence is the
+    violation, which is what a `target: path` rule reports. On a line rule it
+    would delete a whole file for one line."""
+    with pytest.raises(RuleError) as caught:
+        load_rules(write(tmp_path, RULE + "remedy: delete_file\n"))
+
+    message = str(caught.value)
+    assert "no-bare-print.yaml" in message
+    assert "remedy" in message
+    assert "target: path" in message
+
+
+@pytest.mark.parametrize("value", ["rename_file", "Delete_File", "delete", "''", "[delete_file]",
+                                   "true"])
+def test_a_remedy_outside_the_closed_vocabulary_is_refused(tmp_path, value):
+    """A typo read as "no remedy" would leave a violation the author meant
+    to be fixed unfixed every sweep, saying nothing."""
+    with pytest.raises(RuleError) as caught:
+        load_rules(write(tmp_path, VARIANT_RULE + f"remedy: {value}\n", name="v.yaml"))
+
+    message = str(caught.value)
+    assert "v.yaml" in message
+    assert "remedy" in message
+    assert "delete_file" in message

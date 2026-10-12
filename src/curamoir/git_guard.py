@@ -266,17 +266,19 @@ class Sandbox:
     (_remove_or_warn), so the exception that ended the block is the one
     that propagates.
 
-    `work_list` is fix_scope's slot, not this module's: the sweep.WorkList
-    the lint gave for this sandbox at its base, set by
-    fix_scope.lint_sandbox and read by fix_scope.verify_fix, so the review
-    can only ever compare a fix with the work list of the commit the fix was
-    made on. Nothing here reads it."""
+    `work_list` and `rules` are fix_scope's slots, not this module's: the
+    sweep.WorkList the lint gave for this sandbox at its base, and the rules
+    it ran, set by fix_scope.lint_sandbox and read by fix_scope.verify_fix
+    and remedies.apply_file_remedies, so the review can only ever compare a
+    fix with the work list and rules of the commit the fix was made on.
+    Nothing here reads them."""
 
     def __init__(self, source, path, base, root):
         self.source = source
         self.path = path
         self.base = base
         self.work_list = None
+        self.rules = None
         self._root = root
 
     def __enter__(self):
