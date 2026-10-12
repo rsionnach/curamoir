@@ -39,6 +39,23 @@ NUMBER = "number"
 #: are legitimately fractional.
 COUNT = "whole number of 0 or more"
 STRING = "string"
+
+
+class WholeRange:
+    """A whole number from `low` to `high`, both included: a COUNT whose
+    zero or whose size is a mistake. WHY for sweep.test_timeout_seconds: 0
+    timed out every test run, which the gate then reported as a red base,
+    and a huge one overflowed the wait (OverflowError) instead of waiting."""
+
+    def __init__(self, low, high):
+        self.low, self.high = low, high
+
+    def __repr__(self):
+        return f"whole number from {self.low} to {self.high}"
+
+
+#: A test run's timeout: at least a second, at most a day.
+TIMEOUT_SECONDS = WholeRange(1, 86400)
 BOOLEAN = "boolean"
 STRING_LIST = "list of strings"
 MAPPING = "mapping"
@@ -94,7 +111,8 @@ DEFAULTS = {
         "test_command": "",
         "test_timeout_seconds": 600,
         # Every run counts, the full set and the base included. 12 isolates a
-        # single offender among max_files_per_pr (20) fixes (green_gate).
+        # single offender among max_files_per_pr (20) fixes (green_gate); it
+        # needs about 2 + 2*ceil(log2(max_files_per_pr)).
         "max_test_runs": 12,
     },
     "promotion": {"fix_threshold": 3, "window_days": 90},
@@ -164,7 +182,7 @@ SCHEMA = {
     },
     "sweep": {
         "max_open_prs": COUNT, "max_files_per_pr": COUNT,
-        "test_command": STRING, "test_timeout_seconds": COUNT, "max_test_runs": COUNT,
+        "test_command": STRING, "test_timeout_seconds": TIMEOUT_SECONDS, "max_test_runs": COUNT,
     },
     "promotion": {"fix_threshold": COUNT, "window_days": COUNT},
     "filing": {
@@ -396,7 +414,12 @@ def _validate(value, schema, prefix, problems):
 
 
 def _check_scalar(path, given, expected, problems):
-    if expected is COUNT:
+    if isinstance(expected, WholeRange):
+        if isinstance(given, bool) or not isinstance(given, int):
+            problems.append(f"{path}: expected a {expected!r}, got {_type_name(given)}")
+        elif not expected.low <= given <= expected.high:
+            problems.append(f"{path}: must be a {expected!r} (got {given})")
+    elif expected is COUNT:
         # A count indexes and slices, so a float is not merely untidy: it
         # reached `files[: len(files) - keep]` as a TypeError that the hooks
         # swallow, so handoffs stopped silently. A negative one pruned the

@@ -95,10 +95,13 @@ sweep:
   # detected, or both, means no PR: a sweep that cannot test opens nothing.
   test_command: ""
   # A run past this is killed (its whole process group) and counted as red.
+  # 1 to 86400 seconds.
   test_timeout_seconds: 600
   # On red, fixes are dropped until the rest is green. This caps the test
   # runs per sweep, the full run and the base run included; 12 always finds
-  # one bad fix among max_files_per_pr (20). What is untested is dropped.
+  # one bad fix among max_files_per_pr (20). It needs about
+  # 2 + 2*ceil(log2(max_files_per_pr)), so raise it if you raise
+  # max_files_per_pr. What is untested is dropped.
   max_test_runs: 12
 
 promotion:

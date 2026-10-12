@@ -162,13 +162,23 @@ def scrubbed_environment():
     return {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
 
 
-def run_in_group(argv, *, cwd, env, timeout, stdin=subprocess.DEVNULL):
+def run_in_group(argv, *, cwd, env, timeout, stdin=subprocess.DEVNULL, tail_bytes=None):
     """Run `argv` in a new session and return a CompletedProcess with bytes
     output. At `timeout` seconds, kill its whole process group and raise
     subprocess.TimeoutExpired. WHY a group: killing only the child leaves a
     helper it started (a model CLI's tool process, a git's filter) running,
     and still writing, after the caller has moved on. A descendant that left
-    the group with setsid() escapes this; nothing here starts one."""
+    the group with setsid() escapes this; nothing here starts one.
+
+    `tail_bytes` (green_gate's mode, for output nobody here controls): the
+    output goes to unlinked temporary files, not pipes, and only the last
+    `tail_bytes` of each stream are returned. WHY files: memory stays
+    bounded however much a test suite prints (disk does not), and the run
+    ends when the child does, even if a setsid() daemon still holds the
+    output open, which with pipes holds communicate() until the daemon
+    exits. git's own capture keeps pipes and the whole output."""
+    if tail_bytes is not None:
+        return _run_in_group_to_files(argv, cwd, env, timeout, stdin, tail_bytes)
     process = subprocess.Popen(argv, cwd=cwd, env=env, stdin=stdin, stdout=subprocess.PIPE,
                                stderr=subprocess.PIPE, start_new_session=True)
     try:
@@ -184,6 +194,32 @@ def run_in_group(argv, *, cwd, env, timeout, stdin=subprocess.DEVNULL):
     # The child is done; anything it left behind in its group goes with it.
     _kill_group(process)
     return subprocess.CompletedProcess(argv, process.returncode, out, err)
+
+
+def _run_in_group_to_files(argv, cwd, env, timeout, stdin, tail_bytes):
+    with tempfile.TemporaryFile() as out, tempfile.TemporaryFile() as err:
+        process = subprocess.Popen(argv, cwd=cwd, env=env, stdin=stdin, stdout=out,
+                                   stderr=err, start_new_session=True)
+        try:
+            process.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            _kill_group(process)
+            process.wait()
+            raise subprocess.TimeoutExpired(argv, timeout, output=_file_tail(out, tail_bytes),
+                                            stderr=_file_tail(err, tail_bytes)) from None
+        except BaseException:
+            _kill_group(process)
+            process.wait()
+            raise
+        _kill_group(process)
+        return subprocess.CompletedProcess(argv, process.returncode, _file_tail(out, tail_bytes),
+                                           _file_tail(err, tail_bytes))
+
+
+def _file_tail(handle, size):
+    handle.seek(0, os.SEEK_END)
+    handle.seek(max(0, handle.tell() - size))
+    return handle.read()
 
 
 def _kill_group(process):

@@ -51,14 +51,17 @@ Two layers, so the rules can be tested without git:
    same snapshot, same base: there is nothing else to pass.
 6. Treat git_guard.GitGuardError (ScopeCheckError is one) as a refusal: no
    verdict is not a verdict, and an unverified fix is not a fix.
-7. On an ok verdict with paths (not `nothing_changed`), test it (E3-R4):
-   `gate = green_gate.run_test_gate(sandbox, verdict)`, which runs the
-   base's test command in the sandbox and, on red, drops fixed paths
-   until the rest is green. Trim to `sweep.max_files_per_pr` BEFORE this,
-   by passing `paths=`, so the tree tested is the PR's. Write
-   `**gate.ledger_fields()` into the sweep's one ledger line whatever the
-   outcome (the strategy is what E3-R4's acceptance asks for); GateError
-   is a refusal, as in step 6.
+7. On an ok verdict with paths (not `nothing_changed`), test it (E3-R4).
+   Trim to `sweep.max_files_per_pr` BEFORE this, so the tree tested is the
+   PR's: `gate = green_gate.run_test_gate(sandbox, verdict, paths=trimmed)`,
+   which runs the base's test command in the sandbox and, on red, drops
+   fixed paths until the rest is green. Then, by outcome:
+   - strategy `green` or `reduced`: go on to step 8 and record
+     `run.succeeded(..., **gate.ledger_fields())`;
+   - strategy `abandoned`: no PR; `run.failed(gate.render(),
+     **gate.ledger_fields())` (render() carries the why);
+   - GateError raised: a refusal, as in step 6, `run.refused(...)` with no
+     `test_gate` field, since there is no GateResult to record.
 8. Take exactly `gate.paths_for_pr` out: `sandbox.patch(gate.paths_for_pr)`,
    applied or pushed by the runner, and list only those paths' fixes in the
    PR body. When it is empty (strategy `abandoned`: no test command, a red

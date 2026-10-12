@@ -17,11 +17,13 @@ committed_sample) with PLANTED.json's own `test_command` committed as the
 config, the real lint, the real remedy, and the real review.
 """
 
+import contextlib
 import hashlib
 import json
 import os
 import stat
 import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -430,7 +432,7 @@ def test_one_offender_among_max_files_per_pr_is_found_within_the_default_cap(off
 
     assert kept == tuple(c for c in candidates if c != bad)
     assert [d.path for d in dropped] == [bad]
-    assert trials.runs <= 12
+    assert trials.used <= 12
 
 
 def test_reaching_the_cap_drops_what_was_not_tested():
@@ -441,7 +443,7 @@ def test_reaching_the_cap_drops_what_was_not_tested():
 
     kept, dropped = reduce_scope(candidates, trials)
 
-    assert trials.runs == 4
+    assert trials.used == 4
     assert "f0" not in kept and "f5" not in kept
     assert {d.path for d in dropped} | set(kept) == set(candidates)
     assert any("max_test_runs" in d.reason for d in dropped)
@@ -596,3 +598,186 @@ def test_a_fixture_sweep_whose_one_fix_breaks_the_tests_opens_a_pr_without_it(tm
                            capture_output=True, env={**os.environ,
                                                      "PYTHONDONTWRITEBYTECODE": "1"})
     assert green.returncode == 0, green.stdout.decode() + green.stderr.decode()
+
+
+# --- review findings (cm-fkd.5): the environment, the tree, the edges -------------------
+
+def venv_with_pth(repo, pth_text):
+    """A real venv in the SOURCE checkout `repo` whose site-packages holds a
+    `.pth` with `pth_text`, which is what an editable install leaves."""
+    subprocess.run([sys.executable, "-m", "venv", "--without-pip", str(repo / ".venv")],
+                   check=True, capture_output=True)
+    site = next((repo / ".venv" / "lib").glob("python*/site-packages"))
+    (site / "__editable__pkg.pth").write_text(pth_text, encoding="utf-8")
+
+
+PKG_TEST = "python3 -c 'import pkg, sys; sys.exit(0 if pkg.x == 1 else 1)'"
+PKG = {"src/pkg/__init__.py": "x = 1\n", "src/pkg/other.py": "y = 1\n", "pyproject.toml": ""}
+
+
+def test_an_editable_install_of_the_checkout_does_not_test_the_unfixed_code(tmp_path):
+    """A plain path `.pth` (pip -e, hatch's `_editable_impl_*`) puts the
+    CHECKOUT's src on sys.path; the sandbox's src on PYTHONPATH comes first."""
+    repo = repo_of(tmp_path, PKG, PKG_TEST)
+    venv_with_pth(repo, str(repo / "src") + "\n")
+    with prepare_sandbox(repo, "HEAD", parent=tmp_path) as sandbox:
+        verdict = fix(sandbox, {"src/pkg/__init__.py": "x = 2\n", "src/pkg/other.py": "y = 2\n"})
+        result = run_test_gate(sandbox, verdict)
+
+    assert result.strategy == REDUCED, [run.tail for run in result.runs]
+    assert result.kept == ("src/pkg/other.py",)
+
+
+def test_an_import_that_still_resolves_to_the_checkout_abandons_the_sweep(tmp_path):
+    """An editable hook that puts the checkout FIRST on sys.path (old
+    setuptools' easy-install.pth does) beats PYTHONPATH: the canary sees it."""
+    repo = repo_of(tmp_path, PKG, PKG_TEST)
+    venv_with_pth(repo, f"import sys; sys.path.insert(0, {str(repo / 'src')!r})\n")
+    with prepare_sandbox(repo, "HEAD", parent=tmp_path) as sandbox:
+        result = run_test_gate(sandbox, fix(sandbox, {"src/pkg/__init__.py": "x = 2\n"}))
+
+    assert result.strategy == ABANDONED
+    assert result.cause == "imports_the_checkout"
+    assert "pkg" in result.why and str(repo) in result.why
+    assert result.runs == () and result.paths_for_pr == ()
+
+
+ALLOWED = {"PATH", "HOME", "TMPDIR", "USER", "LOGNAME", "LANG", "TZ", "VIRTUAL_ENV",
+           "NODE_PATH", "PYTHONPATH", "PYTHONDONTWRITEBYTECODE", "CI",
+           # set by /bin/sh itself
+           "PWD", "OLDPWD", "SHLVL", "_"}
+
+
+def test_the_test_command_sees_only_an_allowlisted_environment(tmp_path, monkeypatch):
+    seen = tmp_path / "env"
+    command = f'env > {seen}; echo "$HOME" > {seen}.home; echo "$TMPDIR" > {seen}.tmp; ' \
+              'touch "$HOME/x" "$TMPDIR/y"'
+    repo = repo_of(tmp_path, THREE, command)
+    for name, value in {"CURAMOIR_PROBE_TOKEN": "s3cret-a", "AWS_SECRET_ACCESS_KEY": "s3cret-b",
+                        "SSH_AUTH_SOCK": "/s3cret-c", "GH_TOKEN": "s3cret-d",
+                        "ANTHROPIC_API_KEY": "s3cret-e", "LC_ALL": "C"}.items():
+        monkeypatch.setenv(name, value)
+    with prepare_sandbox(repo, "HEAD", parent=tmp_path) as sandbox:
+        result = run_test_gate(sandbox, fix(sandbox, {"src/a.py": "a = 2\n"}))
+        root = os.path.realpath(sandbox.path)
+
+    assert result.strategy == GREEN
+    text = seen.read_text()
+    keys = {line.split("=", 1)[0] for line in text.splitlines() if "=" in line}
+    assert keys - ALLOWED - {k for k in keys if k.startswith("LC_")} == set()
+    assert "s3cret" not in text
+    assert "CI=true" in text.splitlines()
+    for dump in (f"{seen}.home", f"{seen}.tmp"):
+        made = Path(Path(dump).read_text().strip())
+        assert made.is_absolute() and not made.exists(), f"{made} was left behind"
+        assert not str(os.path.realpath(made)).startswith(root)
+
+
+def test_a_test_command_that_locks_a_directory_is_a_refusal_not_an_oserror(tmp_path):
+    repo = repo_of(tmp_path, THREE, "chmod 000 src; true")
+    with prepare_sandbox(repo, "HEAD", parent=tmp_path) as sandbox:
+        verdict = fix(sandbox, {"src/a.py": "a = 2\n"})
+        with pytest.raises(GateError):
+            run_test_gate(sandbox, verdict)
+
+
+@pytest.mark.parametrize("seconds", [0, 86401, 10 ** 30])
+def test_the_timeout_is_bounded_by_the_schema(seconds):
+    with pytest.raises(ConfigError, match=r"sweep\.test_timeout_seconds"):
+        load_config({"sweep": {"test_timeout_seconds": seconds}})
+
+
+@pytest.mark.parametrize("command", ["rm -rf src; true", "echo x >> src/c.py; true"])
+def test_a_test_that_changes_a_file_outside_the_fix_is_refused(tmp_path, command):
+    repo = repo_of(tmp_path, THREE, command)
+    with prepare_sandbox(repo, "HEAD", parent=tmp_path) as sandbox:
+        verdict = fix(sandbox, {"src/a.py": "a = 2\n"})
+        with pytest.raises(GateError, match=r"src/c\.py"):
+            run_test_gate(sandbox, verdict)
+
+
+def test_files_a_test_leaves_behind_do_not_reach_the_next_run(tmp_path):
+    command = f"test ! -e leftover && mkdir -p cache/d && touch leftover cache/d/f && {RED_IF_BROKEN}"
+    repo = repo_of(tmp_path, THREE, command)
+    with prepare_sandbox(repo, "HEAD", parent=tmp_path) as sandbox:
+        result = run_test_gate(sandbox, fix(sandbox, {"src/a.py": "a = 2\n",
+                                                      "src/b.py": "BROKEN\n"}))
+        assert not (sandbox.path / "leftover").exists()
+        assert not (sandbox.path / "cache").exists()
+
+    assert result.strategy == REDUCED and result.kept == ("src/a.py",)
+
+
+@pytest.mark.parametrize("max_runs", [2, 3])
+def test_the_cap_reached_during_the_reduction_is_run_cap(tmp_path, max_runs):
+    repo = repo_of(tmp_path, THREE, RED_IF_BROKEN, extra=f"  max_test_runs: {max_runs}\n")
+    with prepare_sandbox(repo, "HEAD", parent=tmp_path) as sandbox:
+        result = run_test_gate(sandbox, fix(sandbox, {"src/a.py": "BROKEN\n",
+                                                      "src/b.py": "b = 2\n"}))
+
+    assert result.strategy == ABANDONED and result.cause == "run_cap"
+    assert len(result.runs) == max_runs
+
+
+def test_a_command_that_cannot_run_is_not_a_red_base(tmp_path):
+    repo = repo_of(tmp_path, THREE, "no-such-test-runner-xyz -q")
+    with prepare_sandbox(repo, "HEAD", parent=tmp_path) as sandbox:
+        result = run_test_gate(sandbox, fix(sandbox, {"src/a.py": "a = 2\n"}))
+
+    assert result.strategy == ABANDONED and result.cause == "command_not_runnable"
+    assert "no-such-test-runner-xyz" in result.why
+
+
+def test_a_large_output_keeps_separate_bounded_tails(tmp_path):
+    import resource
+    command = ("head -c 50000000 /dev/zero | tr '\\0' a; echo; echo OUT-END; "
+               "head -c 5000000 /dev/zero | tr '\\0' b >&2; echo ERR-END >&2; true")
+    repo = repo_of(tmp_path, THREE, command)
+    before = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    with prepare_sandbox(repo, "HEAD", parent=tmp_path) as sandbox:
+        result = run_test_gate(sandbox, fix(sandbox, {"src/a.py": "a = 2\n"}))
+    grown = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss - before
+    grown_bytes = grown if sys.platform == "darwin" else grown * 1024
+
+    (run,) = result.runs
+    assert run.stdout_tail.endswith("OUT-END\n") and "b" not in run.stdout_tail
+    assert run.stderr_tail.endswith("ERR-END\n") and "a" not in run.stderr_tail
+    assert len(run.stdout_tail) <= 4000 and len(run.stderr_tail) <= 4000
+    assert grown_bytes < 30_000_000, f"the gate's memory grew by {grown_bytes} bytes"
+
+
+def test_a_daemon_that_keeps_the_output_open_does_not_hold_the_run(tmp_path):
+    pid_file = tmp_path / "daemon.pid"
+    daemon = (f"perl -e 'use POSIX; my $p = fork; if ($p) {{ open F, \">{pid_file}\"; "
+              "print F $p; exit } POSIX::setsid(); sleep 30'; true")
+    repo = repo_of(tmp_path, THREE, daemon)
+    try:
+        with prepare_sandbox(repo, "HEAD", parent=tmp_path) as sandbox:
+            started = time.monotonic()
+            result = run_test_gate(sandbox, fix(sandbox, {"src/a.py": "a = 2\n"}))
+        assert time.monotonic() - started < 15
+        assert result.strategy == GREEN
+    finally:
+        if pid_file.exists():
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(int(pid_file.read_text()), 9)
+
+
+def test_reverting_an_added_file_leaves_no_empty_directory(tmp_path):
+    repo = repo_of(tmp_path, THREE, RED_IF_BROKEN)
+    with prepare_sandbox(repo, "HEAD", parent=tmp_path) as sandbox:
+        (sandbox.path / "src/new/deep").mkdir(parents=True)
+        verdict = fix(sandbox, {"src/new/deep/m.py": "BROKEN\n", "src/a.py": "a = 2\n"})
+        result = run_test_gate(sandbox, verdict)
+
+        assert result.kept == ("src/a.py",)
+        assert not (sandbox.path / "src/new").exists()
+        assert (sandbox.path / "src").is_dir()
+
+
+def test_the_ledger_names_the_count_of_fixed_files_per_run(tmp_path):
+    repo = repo_of(tmp_path, THREE, RED_IF_BROKEN)
+    with prepare_sandbox(repo, "HEAD", parent=tmp_path) as sandbox:
+        result = run_test_gate(sandbox, fix(sandbox, {"src/a.py": "a = 2\n"}))
+    (run,) = result.ledger_fields()["test_gate"]["runs"]
+    assert run["fixed_count"] == 1 and "fixed" not in run
