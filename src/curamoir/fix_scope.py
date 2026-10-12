@@ -62,10 +62,13 @@ Two layers, so the rules can be tested without git:
      **gate.ledger_fields())` (render() carries the why);
    - GateError raised: a refusal, as in step 6, `run.refused(...)` with no
      `test_gate` field, since there is no GateResult to record.
-8. Take exactly `gate.paths_for_pr` out: `sandbox.patch(gate.paths_for_pr)`,
-   applied or pushed by the runner, and list only those paths' fixes in the
-   PR body. When it is empty (strategy `abandoned`: no test command, a red
-   base, or nothing green), open no PR at all. Never `verdict.paths` once
+8. Take exactly `gate.paths_for_pr` out: `gate.patch(sandbox)`, which is
+   `sandbox.patch(gate.paths_for_pr)` once every kept path is checked to
+   hold what the green run tested (GateError otherwise, a refusal as in
+   step 6: a process the tests left running rewrote one), applied or
+   pushed by the runner; list only those paths' fixes in the PR body. When
+   it is empty (strategy `abandoned`, with any cause in
+   green_gate.CAUSES), open no PR at all. Never `verdict.paths` once
    the gate has run, never `git add -A`, never the whole tree.
 9. Never re-run the fix agent in the user's checkout, not even "to apply
    the same fix": the sandbox is what the verdict is about.

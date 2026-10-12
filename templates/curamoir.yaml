@@ -90,6 +90,13 @@ sweep:
   # disposable clone of the base commit, with your checkout's .venv and
   # node_modules reused read-only. Run by /bin/sh, as you would type it. It
   # is read from the COMMITTED file, so commit a change here before it counts.
+  # It does NOT see your shell's environment: only USER, LOGNAME, LANG, TZ,
+  # LC_*, your PATH (after the reused .venv/bin and node_modules/.bin), the
+  # version managers' roots (PYENV_ROOT, ASDF_DATA_DIR, ASDF_DIR, VOLTA_HOME,
+  # NVM_DIR) and python3's PYTHONUSERBASE; plus a fresh, empty HOME and
+  # TMPDIR, PYTHONPATH set to the clone's src then its root, CI=true and
+  # PYTHONDONTWRITEBYTECODE=1. A variable your tests need goes in the
+  # command itself: `FOO=bar python3 -m pytest -q`. Never put a secret here.
   # Empty = detect: `python3 -m pytest -q` for a Python project with test
   # files, `npm test` for a package.json with a real `test` script. Nothing
   # detected, or both, means no PR: a sweep that cannot test opens nothing.

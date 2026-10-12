@@ -296,6 +296,37 @@ def test_an_executable_bit_is_restored_with_the_base_content(tmp_path):
         assert os.stat(target).st_mode & stat.S_IXUSR
 
 
+def test_a_command_that_cannot_run_is_not_a_red_base(tmp_path):
+    repo = repo_of(tmp_path, THREE, "no-such-test-runner-xyz -q")
+    with prepare_sandbox(repo, "HEAD", parent=tmp_path) as sandbox:
+        result = run_test_gate(sandbox, fix(sandbox, {"src/a.py": "a = 2\n"}))
+
+    assert result.strategy == ABANDONED and result.cause == "command_not_runnable"
+    assert "no-such-test-runner-xyz" in result.why
+
+
+def test_reverting_an_added_file_leaves_no_empty_directory(tmp_path):
+    repo = repo_of(tmp_path, THREE, RED_IF_BROKEN)
+    with prepare_sandbox(repo, "HEAD", parent=tmp_path) as sandbox:
+        (sandbox.path / "src/new/deep").mkdir(parents=True)
+        verdict = fix(sandbox, {"src/new/deep/m.py": "BROKEN\n", "src/a.py": "a = 2\n"})
+        result = run_test_gate(sandbox, verdict)
+
+        assert result.kept == ("src/a.py",)
+        assert not (sandbox.path / "src/new").exists()
+        assert (sandbox.path / "src").is_dir()
+
+
+@pytest.mark.parametrize("message", ["/usr/bin/python3: No module named pytest",
+                                     "sh: jest: command not found"])
+def test_a_missing_test_runner_that_exits_1_is_not_a_red_base(tmp_path, message):
+    repo = repo_of(tmp_path, THREE, f"echo '{message}' >&2; exit 1")
+    with prepare_sandbox(repo, "HEAD", parent=tmp_path) as sandbox:
+        result = run_test_gate(sandbox, fix(sandbox, {"src/a.py": "a = 2\n"}))
+    assert result.strategy == ABANDONED and result.cause == "command_not_runnable"
+    assert message in result.why
+
+
 # --- hardening ------------------------------------------------------------------------
 
 def test_a_timeout_is_red_and_kills_the_process_group(tmp_path):
@@ -308,7 +339,9 @@ def test_a_timeout_is_red_and_kills_the_process_group(tmp_path):
         result = run_test_gate(sandbox, verdict)
 
     assert time.monotonic() - started < 20
-    assert result.strategy == ABANDONED and result.cause == BASE_RED
+    # Timing out at the base and with the fix says the budget is too small,
+    # not that the base is red.
+    assert result.strategy == ABANDONED and result.cause == "test_timeout"
     assert [run.outcome for run in result.runs] == ["timed_out", "timed_out"]
     for pid in map(int, pids.read_text().split()):
         deadline = time.monotonic() + 5
@@ -365,7 +398,7 @@ def test_the_command_runs_in_the_sandbox_with_the_sources_environment(tmp_path, 
     assert tree_digest(repo) == before, "the user's checkout was written"
 
 
-def test_no_source_venv_leaves_the_inherited_environment(tmp_path, monkeypatch):
+def test_without_a_source_venv_the_allowlist_keeps_the_inherited_virtual_env_and_path(tmp_path, monkeypatch):
     monkeypatch.setenv("VIRTUAL_ENV", "/runner/venv")
     env = sandbox_environment(tmp_path)
     assert env["VIRTUAL_ENV"] == "/runner/venv"
@@ -415,6 +448,276 @@ def test_a_test_command_that_edits_a_fixed_file_does_not_reach_the_pr(tmp_path):
         assert b"tampered" not in sandbox.patch(result.paths_for_pr)
 
 
+def venv_with_pth(repo, pth_text):
+    """A real venv in the SOURCE checkout `repo` whose site-packages holds a
+    `.pth` with `pth_text`, which is what an editable install leaves."""
+    subprocess.run([sys.executable, "-m", "venv", "--without-pip", str(repo / ".venv")],
+                   check=True, capture_output=True)
+    site = next((repo / ".venv" / "lib").glob("python*/site-packages"))
+    (site / "__editable__pkg.pth").write_text(pth_text, encoding="utf-8")
+
+
+PKG_TEST = "python3 -c 'import pkg, sys; sys.exit(0 if pkg.x == 1 else 1)'"
+
+
+PKG = {"src/pkg/__init__.py": "x = 1\n", "src/pkg/other.py": "y = 1\n", "pyproject.toml": ""}
+
+
+def test_an_editable_install_of_the_checkout_does_not_test_the_unfixed_code(tmp_path):
+    """A plain path `.pth` (pip -e, hatch's `_editable_impl_*`) puts the
+    CHECKOUT's src on sys.path; the sandbox's src on PYTHONPATH comes first."""
+    repo = repo_of(tmp_path, PKG, PKG_TEST)
+    venv_with_pth(repo, str(repo / "src") + "\n")
+    with prepare_sandbox(repo, "HEAD", parent=tmp_path) as sandbox:
+        verdict = fix(sandbox, {"src/pkg/__init__.py": "x = 2\n", "src/pkg/other.py": "y = 2\n"})
+        result = run_test_gate(sandbox, verdict)
+
+    assert result.strategy == REDUCED, [run.tail for run in result.runs]
+    assert result.kept == ("src/pkg/other.py",)
+
+
+def test_an_import_that_still_resolves_to_the_checkout_abandons_the_sweep(tmp_path):
+    """An editable hook that puts the checkout FIRST on sys.path (old
+    setuptools' easy-install.pth does) beats PYTHONPATH: the canary sees it."""
+    repo = repo_of(tmp_path, PKG, PKG_TEST)
+    venv_with_pth(repo, f"import sys; sys.path.insert(0, {str(repo / 'src')!r})\n")
+    with prepare_sandbox(repo, "HEAD", parent=tmp_path) as sandbox:
+        result = run_test_gate(sandbox, fix(sandbox, {"src/pkg/__init__.py": "x = 2\n"}))
+
+    assert result.strategy == ABANDONED
+    assert result.cause == "imports_the_checkout"
+    assert "pkg" in result.why and str(repo) in result.why
+    assert result.runs == () and result.paths_for_pr == ()
+
+
+ALLOWED = {"PATH", "HOME", "TMPDIR", "USER", "LOGNAME", "LANG", "TZ", "VIRTUAL_ENV",
+           "NODE_PATH", "PYTHONPATH", "PYTHONDONTWRITEBYTECODE", "CI", "PYTHONUSERBASE",
+           # version managers' roots: directories a shim on PATH needs
+           "PYENV_ROOT", "ASDF_DATA_DIR", "ASDF_DIR", "VOLTA_HOME", "NVM_DIR",
+           # set by /bin/sh itself
+           "PWD", "OLDPWD", "SHLVL", "_"}
+
+
+def test_the_test_command_sees_only_an_allowlisted_environment(tmp_path, monkeypatch):
+    seen = tmp_path / "env"
+    command = f'env > {seen}; echo "$HOME" > {seen}.home; echo "$TMPDIR" > {seen}.tmp; ' \
+              'touch "$HOME/x" "$TMPDIR/y"'
+    repo = repo_of(tmp_path, THREE, command)
+    for name, value in {"CURAMOIR_PROBE_TOKEN": "s3cret-a", "AWS_SECRET_ACCESS_KEY": "s3cret-b",
+                        "SSH_AUTH_SOCK": "/s3cret-c", "GH_TOKEN": "s3cret-d",
+                        "ANTHROPIC_API_KEY": "s3cret-e", "LC_ALL": "C"}.items():
+        monkeypatch.setenv(name, value)
+    with prepare_sandbox(repo, "HEAD", parent=tmp_path) as sandbox:
+        result = run_test_gate(sandbox, fix(sandbox, {"src/a.py": "a = 2\n"}))
+        root = os.path.realpath(sandbox.path)
+
+    assert result.strategy == GREEN
+    text = seen.read_text()
+    keys = {line.split("=", 1)[0] for line in text.splitlines() if "=" in line}
+    assert keys - ALLOWED - {k for k in keys if k.startswith("LC_")} == set()
+    assert "s3cret" not in text
+    assert "CI=true" in text.splitlines()
+    for dump in (f"{seen}.home", f"{seen}.tmp"):
+        made = Path(Path(dump).read_text().strip())
+        assert made.is_absolute() and not made.exists(), f"{made} was left behind"
+        assert not str(os.path.realpath(made)).startswith(root)
+
+
+def test_a_test_command_that_locks_a_directory_is_a_refusal_not_an_oserror(tmp_path):
+    repo = repo_of(tmp_path, THREE, "chmod 000 src; true")
+    with prepare_sandbox(repo, "HEAD", parent=tmp_path) as sandbox:
+        verdict = fix(sandbox, {"src/a.py": "a = 2\n"})
+        with pytest.raises(GateError):
+            run_test_gate(sandbox, verdict)
+
+
+@pytest.mark.parametrize("command", ["rm -rf src; true", "echo x >> src/c.py; true"])
+def test_a_test_that_changes_a_file_outside_the_fix_is_refused(tmp_path, command):
+    repo = repo_of(tmp_path, THREE, command)
+    with prepare_sandbox(repo, "HEAD", parent=tmp_path) as sandbox:
+        verdict = fix(sandbox, {"src/a.py": "a = 2\n"})
+        with pytest.raises(GateError, match=r"src/c\.py"):
+            run_test_gate(sandbox, verdict)
+
+
+def test_files_a_test_leaves_behind_do_not_reach_the_next_run(tmp_path):
+    command = f"test ! -e leftover && mkdir -p cache/d && touch leftover cache/d/f && {RED_IF_BROKEN}"
+    repo = repo_of(tmp_path, THREE, command)
+    with prepare_sandbox(repo, "HEAD", parent=tmp_path) as sandbox:
+        result = run_test_gate(sandbox, fix(sandbox, {"src/a.py": "a = 2\n",
+                                                      "src/b.py": "BROKEN\n"}))
+        assert not (sandbox.path / "leftover").exists()
+        assert not (sandbox.path / "cache").exists()
+
+    assert result.strategy == REDUCED and result.kept == ("src/a.py",)
+
+
+def test_a_large_output_keeps_separate_bounded_tails(tmp_path):
+    import resource
+    command = ("head -c 50000000 /dev/zero | tr '\\0' a; echo; echo OUT-END; "
+               "head -c 5000000 /dev/zero | tr '\\0' b >&2; echo ERR-END >&2; true")
+    repo = repo_of(tmp_path, THREE, command)
+    before = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    with prepare_sandbox(repo, "HEAD", parent=tmp_path) as sandbox:
+        result = run_test_gate(sandbox, fix(sandbox, {"src/a.py": "a = 2\n"}))
+    grown = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss - before
+    grown_bytes = grown if sys.platform == "darwin" else grown * 1024
+
+    (run,) = result.runs
+    assert run.stdout_tail.endswith("OUT-END\n") and "b" not in run.stdout_tail
+    assert run.stderr_tail.endswith("ERR-END\n") and "a" not in run.stderr_tail
+    assert len(run.stdout_tail) <= 4000 and len(run.stderr_tail) <= 4000
+    assert grown_bytes < 30_000_000, f"the gate's memory grew by {grown_bytes} bytes"
+
+
+def test_a_daemon_that_keeps_the_output_open_does_not_hold_the_run(tmp_path):
+    pid_file = tmp_path / "daemon.pid"
+    daemon = (f"perl -e 'use POSIX; my $p = fork; if ($p) {{ open F, \">{pid_file}\"; "
+              "print F $p; exit } POSIX::setsid(); sleep 30'; true")
+    repo = repo_of(tmp_path, THREE, daemon)
+    try:
+        with prepare_sandbox(repo, "HEAD", parent=tmp_path) as sandbox:
+            started = time.monotonic()
+            result = run_test_gate(sandbox, fix(sandbox, {"src/a.py": "a = 2\n"}))
+        assert time.monotonic() - started < 15
+        assert result.strategy == GREEN
+    finally:
+        if pid_file.exists():
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(int(pid_file.read_text()), 9)
+
+
+USER_BASE = "import site, sys; sys.stdout.write(site.getuserbase())"
+
+
+@pytest.mark.parametrize("inherited", [None, "set"])
+def test_python3s_user_base_is_kept_despite_the_fresh_home(tmp_path, monkeypatch, inherited):
+    """`pip install --user` puts pytest under the user base, which python
+    derives from HOME; the fresh HOME would hide it, so the gate passes the
+    user base python3 reports in the sweep's own environment."""
+    if inherited:
+        monkeypatch.setenv("PYTHONUSERBASE", str(tmp_path / "userbase"))
+    else:
+        monkeypatch.delenv("PYTHONUSERBASE", raising=False)
+    expected = subprocess.run(["python3", "-c", USER_BASE], capture_output=True, text=True,
+                              check=True).stdout
+    out = tmp_path / "seen"
+    repo = repo_of(tmp_path, THREE, f'printf "%s" "$PYTHONUSERBASE" > {out}')
+    with prepare_sandbox(repo, "HEAD", parent=tmp_path) as sandbox:
+        run_test_gate(sandbox, fix(sandbox, {"src/a.py": "a = 2\n"}))
+    assert out.read_text() == expected
+    if inherited:
+        assert expected == str(tmp_path / "userbase")
+
+
+def test_a_user_site_module_imports_in_the_test_run(tmp_path, monkeypatch):
+    enabled = subprocess.run(["python3", "-c", "import site, sys; sys.exit(not site.ENABLE_USER_SITE)"])
+    if enabled.returncode:
+        pytest.skip("the python3 on PATH has the user site disabled (a venv's)")
+    monkeypatch.setenv("PYTHONUSERBASE", str(tmp_path / "userbase"))
+    site_dir = Path(subprocess.run(["python3", "-c", "import site, sys; "
+                                    "sys.stdout.write(site.getusersitepackages())"],
+                                   capture_output=True, text=True, check=True).stdout)
+    site_dir.mkdir(parents=True)
+    (site_dir / "curamoir_user_probe.py").write_text("ok = 1\n")
+    repo = repo_of(tmp_path, THREE, "python3 -c 'import curamoir_user_probe'")
+    with prepare_sandbox(repo, "HEAD", parent=tmp_path) as sandbox:
+        result = run_test_gate(sandbox, fix(sandbox, {"src/a.py": "a = 2\n"}))
+    assert result.strategy == GREEN, [run.tail for run in result.runs]
+
+
+MOD = {"src/mod.py": "x = 1\n", "pyproject.toml": ""}
+
+
+MOD_TEST = "python3 -c 'import mod, sys; sys.exit(0 if mod.x == 1 else 1)'"
+
+
+NS = {"src/pkg/core.py": "x = 1\n", "pyproject.toml": ""}
+
+
+NS_TEST = "python3 -c 'import pkg.core as m, sys; sys.exit(0 if m.x == 1 else 1)'"
+
+
+@pytest.mark.parametrize("files, command, edits", [
+    (MOD, MOD_TEST, {"src/mod.py": "x = 2\n"}),
+    (NS, NS_TEST, {"src/pkg/core.py": "x = 2\n"}),
+], ids=["single-module", "namespace-package"])
+def test_a_checkout_first_on_sys_path_is_refused_with_no_package_to_name(
+        tmp_path, files, command, edits):
+    """No `__init__.py` to name, so the import check has nothing to import:
+    the sys.path check still sees the checkout's src ahead of the sandbox's."""
+    repo = repo_of(tmp_path, files, command)
+    venv_with_pth(repo, f"import sys; sys.path.insert(0, {str(repo / 'src')!r})\n")
+    with prepare_sandbox(repo, "HEAD", parent=tmp_path) as sandbox:
+        result = run_test_gate(sandbox, fix(sandbox, edits))
+    assert result.strategy == ABANDONED and result.cause == "imports_the_checkout", result.canary
+    assert str(repo / "src") in result.why
+    assert result.runs == ()
+
+
+def test_a_checkout_appended_to_sys_path_passes_the_canary(tmp_path):
+    repo = repo_of(tmp_path, MOD, MOD_TEST)
+    venv_with_pth(repo, str(repo / "src") + "\n")
+    with prepare_sandbox(repo, "HEAD", parent=tmp_path) as sandbox:
+        result = run_test_gate(sandbox, fix(sandbox, {"src/mod.py": "x = 2\n"}))
+    # The sandbox's mod (x = 2) was tested, and is red.
+    assert result.cause == NO_GREEN_SUBSET, result.canary
+    assert result.canary.startswith("checked: sys.path")
+
+
+def test_a_kept_file_rewritten_after_the_gate_is_never_patched(tmp_path):
+    """A setsid() daemon a test left behind rewrites a kept file after the
+    green run: the patch must carry what was tested or nothing."""
+    daemon = ("perl -e 'use POSIX; if (!fork) { POSIX::setsid(); sleep 1; "
+              "open F, \">src/a.py\"; print F \"BROKEN\\n\"; exit }'; " + RED_IF_BROKEN)
+    repo = repo_of(tmp_path, THREE, daemon)
+    with prepare_sandbox(repo, "HEAD", parent=tmp_path) as sandbox:
+        result = run_test_gate(sandbox, fix(sandbox, {"src/a.py": "a = 2\n"}))
+        assert result.strategy == GREEN
+        deadline = time.monotonic() + 10
+        while "BROKEN" not in (sandbox.path / "src/a.py").read_text():
+            assert time.monotonic() < deadline, "the daemon never wrote"
+            time.sleep(0.05)
+        with pytest.raises(GateError, match=r"src/a\.py"):
+            result.patch(sandbox)
+
+
+def test_the_gates_patch_is_the_kept_paths_patch(tmp_path):
+    repo = repo_of(tmp_path, THREE, RED_IF_BROKEN)
+    with prepare_sandbox(repo, "HEAD", parent=tmp_path) as sandbox:
+        result = run_test_gate(sandbox, fix(sandbox, {"src/a.py": "a = 2\n",
+                                                      "src/b.py": "BROKEN\n", "src/c.py": None}))
+        patch = result.patch(sandbox)
+        assert patch == sandbox.patch(("src/a.py", "src/c.py"))
+    assert b"a = 2" in patch and b"BROKEN" not in patch
+
+
+def test_output_past_the_disk_cap_is_killed_and_red(tmp_path, monkeypatch):
+    from curamoir import green_gate
+    monkeypatch.setattr(green_gate, "_OUTPUT_CAP", 1_000_000)
+    repo = repo_of(tmp_path, THREE, "head -c 20000000 /dev/zero | tr '\\0' a; sleep 5; true")
+    with prepare_sandbox(repo, "HEAD", parent=tmp_path) as sandbox:
+        started = time.monotonic()
+        result = run_test_gate(sandbox, fix(sandbox, {"src/a.py": "a = 2\n"}))
+    assert time.monotonic() - started < 8
+    assert result.strategy == ABANDONED
+    assert result.runs[0].outcome == "failed" and result.runs[0].code is None
+    assert "output" in result.runs[0].stderr_tail
+
+
+def test_a_rewrite_that_restores_size_and_mtime_is_still_drift(tmp_path):
+    """The drift walk hashes only entries whose stat changed; ctime, which
+    no process can set back, is part of that stat."""
+    rewrite = (f"{sys.executable} -c \"import os; s = os.stat('src/c.py'); "
+               "open('src/c.py', 'w').write('c = 9\\n'); "
+               "os.utime('src/c.py', ns=(s.st_atime_ns, s.st_mtime_ns))\"; true")
+    repo = repo_of(tmp_path, THREE, rewrite)
+    with prepare_sandbox(repo, "HEAD", parent=tmp_path) as sandbox:
+        verdict = fix(sandbox, {"src/a.py": "a = 2\n"})
+        with pytest.raises(GateError, match=r"src/c\.py"):
+            run_test_gate(sandbox, verdict)
+
+
 # --- the reduction, bounded -----------------------------------------------------------
 
 @pytest.mark.parametrize("offender", range(20))
@@ -447,6 +750,17 @@ def test_reaching_the_cap_drops_what_was_not_tested():
     assert "f0" not in kept and "f5" not in kept
     assert {d.path for d in dropped} | set(kept) == set(candidates)
     assert any("max_test_runs" in d.reason for d in dropped)
+
+
+@pytest.mark.parametrize("max_runs", [2, 3])
+def test_the_cap_reached_during_the_reduction_is_run_cap(tmp_path, max_runs):
+    repo = repo_of(tmp_path, THREE, RED_IF_BROKEN, extra=f"  max_test_runs: {max_runs}\n")
+    with prepare_sandbox(repo, "HEAD", parent=tmp_path) as sandbox:
+        result = run_test_gate(sandbox, fix(sandbox, {"src/a.py": "BROKEN\n",
+                                                      "src/b.py": "b = 2\n"}))
+
+    assert result.strategy == ABANDONED and result.cause == "run_cap"
+    assert len(result.runs) == max_runs
 
 
 # --- configuration and detection ------------------------------------------------------
@@ -500,6 +814,12 @@ def test_a_configured_command_wins_over_detection(tmp_path):
     assert (chosen.command, chosen.source) == ("make check", "config")
 
 
+@pytest.mark.parametrize("seconds", [0, 86401, 10 ** 30])
+def test_the_timeout_is_bounded_by_the_schema(seconds):
+    with pytest.raises(ConfigError, match=r"sweep\.test_timeout_seconds"):
+        load_config({"sweep": {"test_timeout_seconds": seconds}})
+
+
 # --- the ledger -----------------------------------------------------------------------
 
 def test_the_runner_records_the_strategy_on_the_sweeps_ledger_line(tmp_path):
@@ -535,6 +855,14 @@ def test_an_abandoned_sweep_records_why(tmp_path):
     assert "test command" in line["message"]
 
 
+def test_the_ledger_names_the_count_of_fixed_files_per_run(tmp_path):
+    repo = repo_of(tmp_path, THREE, RED_IF_BROKEN)
+    with prepare_sandbox(repo, "HEAD", parent=tmp_path) as sandbox:
+        result = run_test_gate(sandbox, fix(sandbox, {"src/a.py": "a = 2\n"}))
+    (run,) = result.ledger_fields()["test_gate"]["runs"]
+    assert run["fixed_count"] == 1 and "fixed" not in run
+
+
 # --- the acceptance criterion, end to end ---------------------------------------------
 
 BILLING = "src/sample/core/billing.py"
@@ -549,13 +877,20 @@ def edit(root, path, old, new):
     target.write_text(text.replace(old, new), encoding="utf-8")
 
 
-def test_a_fixture_sweep_whose_one_fix_breaks_the_tests_opens_a_pr_without_it(tmp_path):
+def test_a_fixture_sweep_whose_one_fix_breaks_the_tests_opens_a_pr_without_it(tmp_path, monkeypatch):
     """E3-R4's acceptance: the fixture's five planted fixes, one of which
     (the billing print fix) also zeroes the quantity and so breaks
     `test_line_total_applies_tax` under PLANTED.json's own test command. The
     PR excludes it and the ledger says `reduced`. The billing file's other,
     good fix goes with it: the gate drops whole paths, as the review and the
-    patch work per path."""
+    patch work per path.
+
+    The command's `python3` is pinned to the interpreter running these
+    tests (its directory first on PATH), which has pytest: an ambient
+    `python3` (macOS's /usr/bin/python3, with pytest from `pip install
+    --user` or none) must not decide this test."""
+    monkeypatch.setenv("PATH", os.pathsep.join([os.path.dirname(sys.executable),
+                                                os.environ.get("PATH", os.defpath)]))
     repo = committed_sample(tmp_path)
     (repo / ".curamoir" / "curamoir.yaml").write_text(config(PLANTED["test_command"]))
     subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
@@ -598,186 +933,3 @@ def test_a_fixture_sweep_whose_one_fix_breaks_the_tests_opens_a_pr_without_it(tm
                            capture_output=True, env={**os.environ,
                                                      "PYTHONDONTWRITEBYTECODE": "1"})
     assert green.returncode == 0, green.stdout.decode() + green.stderr.decode()
-
-
-# --- review findings (cm-fkd.5): the environment, the tree, the edges -------------------
-
-def venv_with_pth(repo, pth_text):
-    """A real venv in the SOURCE checkout `repo` whose site-packages holds a
-    `.pth` with `pth_text`, which is what an editable install leaves."""
-    subprocess.run([sys.executable, "-m", "venv", "--without-pip", str(repo / ".venv")],
-                   check=True, capture_output=True)
-    site = next((repo / ".venv" / "lib").glob("python*/site-packages"))
-    (site / "__editable__pkg.pth").write_text(pth_text, encoding="utf-8")
-
-
-PKG_TEST = "python3 -c 'import pkg, sys; sys.exit(0 if pkg.x == 1 else 1)'"
-PKG = {"src/pkg/__init__.py": "x = 1\n", "src/pkg/other.py": "y = 1\n", "pyproject.toml": ""}
-
-
-def test_an_editable_install_of_the_checkout_does_not_test_the_unfixed_code(tmp_path):
-    """A plain path `.pth` (pip -e, hatch's `_editable_impl_*`) puts the
-    CHECKOUT's src on sys.path; the sandbox's src on PYTHONPATH comes first."""
-    repo = repo_of(tmp_path, PKG, PKG_TEST)
-    venv_with_pth(repo, str(repo / "src") + "\n")
-    with prepare_sandbox(repo, "HEAD", parent=tmp_path) as sandbox:
-        verdict = fix(sandbox, {"src/pkg/__init__.py": "x = 2\n", "src/pkg/other.py": "y = 2\n"})
-        result = run_test_gate(sandbox, verdict)
-
-    assert result.strategy == REDUCED, [run.tail for run in result.runs]
-    assert result.kept == ("src/pkg/other.py",)
-
-
-def test_an_import_that_still_resolves_to_the_checkout_abandons_the_sweep(tmp_path):
-    """An editable hook that puts the checkout FIRST on sys.path (old
-    setuptools' easy-install.pth does) beats PYTHONPATH: the canary sees it."""
-    repo = repo_of(tmp_path, PKG, PKG_TEST)
-    venv_with_pth(repo, f"import sys; sys.path.insert(0, {str(repo / 'src')!r})\n")
-    with prepare_sandbox(repo, "HEAD", parent=tmp_path) as sandbox:
-        result = run_test_gate(sandbox, fix(sandbox, {"src/pkg/__init__.py": "x = 2\n"}))
-
-    assert result.strategy == ABANDONED
-    assert result.cause == "imports_the_checkout"
-    assert "pkg" in result.why and str(repo) in result.why
-    assert result.runs == () and result.paths_for_pr == ()
-
-
-ALLOWED = {"PATH", "HOME", "TMPDIR", "USER", "LOGNAME", "LANG", "TZ", "VIRTUAL_ENV",
-           "NODE_PATH", "PYTHONPATH", "PYTHONDONTWRITEBYTECODE", "CI",
-           # set by /bin/sh itself
-           "PWD", "OLDPWD", "SHLVL", "_"}
-
-
-def test_the_test_command_sees_only_an_allowlisted_environment(tmp_path, monkeypatch):
-    seen = tmp_path / "env"
-    command = f'env > {seen}; echo "$HOME" > {seen}.home; echo "$TMPDIR" > {seen}.tmp; ' \
-              'touch "$HOME/x" "$TMPDIR/y"'
-    repo = repo_of(tmp_path, THREE, command)
-    for name, value in {"CURAMOIR_PROBE_TOKEN": "s3cret-a", "AWS_SECRET_ACCESS_KEY": "s3cret-b",
-                        "SSH_AUTH_SOCK": "/s3cret-c", "GH_TOKEN": "s3cret-d",
-                        "ANTHROPIC_API_KEY": "s3cret-e", "LC_ALL": "C"}.items():
-        monkeypatch.setenv(name, value)
-    with prepare_sandbox(repo, "HEAD", parent=tmp_path) as sandbox:
-        result = run_test_gate(sandbox, fix(sandbox, {"src/a.py": "a = 2\n"}))
-        root = os.path.realpath(sandbox.path)
-
-    assert result.strategy == GREEN
-    text = seen.read_text()
-    keys = {line.split("=", 1)[0] for line in text.splitlines() if "=" in line}
-    assert keys - ALLOWED - {k for k in keys if k.startswith("LC_")} == set()
-    assert "s3cret" not in text
-    assert "CI=true" in text.splitlines()
-    for dump in (f"{seen}.home", f"{seen}.tmp"):
-        made = Path(Path(dump).read_text().strip())
-        assert made.is_absolute() and not made.exists(), f"{made} was left behind"
-        assert not str(os.path.realpath(made)).startswith(root)
-
-
-def test_a_test_command_that_locks_a_directory_is_a_refusal_not_an_oserror(tmp_path):
-    repo = repo_of(tmp_path, THREE, "chmod 000 src; true")
-    with prepare_sandbox(repo, "HEAD", parent=tmp_path) as sandbox:
-        verdict = fix(sandbox, {"src/a.py": "a = 2\n"})
-        with pytest.raises(GateError):
-            run_test_gate(sandbox, verdict)
-
-
-@pytest.mark.parametrize("seconds", [0, 86401, 10 ** 30])
-def test_the_timeout_is_bounded_by_the_schema(seconds):
-    with pytest.raises(ConfigError, match=r"sweep\.test_timeout_seconds"):
-        load_config({"sweep": {"test_timeout_seconds": seconds}})
-
-
-@pytest.mark.parametrize("command", ["rm -rf src; true", "echo x >> src/c.py; true"])
-def test_a_test_that_changes_a_file_outside_the_fix_is_refused(tmp_path, command):
-    repo = repo_of(tmp_path, THREE, command)
-    with prepare_sandbox(repo, "HEAD", parent=tmp_path) as sandbox:
-        verdict = fix(sandbox, {"src/a.py": "a = 2\n"})
-        with pytest.raises(GateError, match=r"src/c\.py"):
-            run_test_gate(sandbox, verdict)
-
-
-def test_files_a_test_leaves_behind_do_not_reach_the_next_run(tmp_path):
-    command = f"test ! -e leftover && mkdir -p cache/d && touch leftover cache/d/f && {RED_IF_BROKEN}"
-    repo = repo_of(tmp_path, THREE, command)
-    with prepare_sandbox(repo, "HEAD", parent=tmp_path) as sandbox:
-        result = run_test_gate(sandbox, fix(sandbox, {"src/a.py": "a = 2\n",
-                                                      "src/b.py": "BROKEN\n"}))
-        assert not (sandbox.path / "leftover").exists()
-        assert not (sandbox.path / "cache").exists()
-
-    assert result.strategy == REDUCED and result.kept == ("src/a.py",)
-
-
-@pytest.mark.parametrize("max_runs", [2, 3])
-def test_the_cap_reached_during_the_reduction_is_run_cap(tmp_path, max_runs):
-    repo = repo_of(tmp_path, THREE, RED_IF_BROKEN, extra=f"  max_test_runs: {max_runs}\n")
-    with prepare_sandbox(repo, "HEAD", parent=tmp_path) as sandbox:
-        result = run_test_gate(sandbox, fix(sandbox, {"src/a.py": "BROKEN\n",
-                                                      "src/b.py": "b = 2\n"}))
-
-    assert result.strategy == ABANDONED and result.cause == "run_cap"
-    assert len(result.runs) == max_runs
-
-
-def test_a_command_that_cannot_run_is_not_a_red_base(tmp_path):
-    repo = repo_of(tmp_path, THREE, "no-such-test-runner-xyz -q")
-    with prepare_sandbox(repo, "HEAD", parent=tmp_path) as sandbox:
-        result = run_test_gate(sandbox, fix(sandbox, {"src/a.py": "a = 2\n"}))
-
-    assert result.strategy == ABANDONED and result.cause == "command_not_runnable"
-    assert "no-such-test-runner-xyz" in result.why
-
-
-def test_a_large_output_keeps_separate_bounded_tails(tmp_path):
-    import resource
-    command = ("head -c 50000000 /dev/zero | tr '\\0' a; echo; echo OUT-END; "
-               "head -c 5000000 /dev/zero | tr '\\0' b >&2; echo ERR-END >&2; true")
-    repo = repo_of(tmp_path, THREE, command)
-    before = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-    with prepare_sandbox(repo, "HEAD", parent=tmp_path) as sandbox:
-        result = run_test_gate(sandbox, fix(sandbox, {"src/a.py": "a = 2\n"}))
-    grown = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss - before
-    grown_bytes = grown if sys.platform == "darwin" else grown * 1024
-
-    (run,) = result.runs
-    assert run.stdout_tail.endswith("OUT-END\n") and "b" not in run.stdout_tail
-    assert run.stderr_tail.endswith("ERR-END\n") and "a" not in run.stderr_tail
-    assert len(run.stdout_tail) <= 4000 and len(run.stderr_tail) <= 4000
-    assert grown_bytes < 30_000_000, f"the gate's memory grew by {grown_bytes} bytes"
-
-
-def test_a_daemon_that_keeps_the_output_open_does_not_hold_the_run(tmp_path):
-    pid_file = tmp_path / "daemon.pid"
-    daemon = (f"perl -e 'use POSIX; my $p = fork; if ($p) {{ open F, \">{pid_file}\"; "
-              "print F $p; exit } POSIX::setsid(); sleep 30'; true")
-    repo = repo_of(tmp_path, THREE, daemon)
-    try:
-        with prepare_sandbox(repo, "HEAD", parent=tmp_path) as sandbox:
-            started = time.monotonic()
-            result = run_test_gate(sandbox, fix(sandbox, {"src/a.py": "a = 2\n"}))
-        assert time.monotonic() - started < 15
-        assert result.strategy == GREEN
-    finally:
-        if pid_file.exists():
-            with contextlib.suppress(ProcessLookupError):
-                os.kill(int(pid_file.read_text()), 9)
-
-
-def test_reverting_an_added_file_leaves_no_empty_directory(tmp_path):
-    repo = repo_of(tmp_path, THREE, RED_IF_BROKEN)
-    with prepare_sandbox(repo, "HEAD", parent=tmp_path) as sandbox:
-        (sandbox.path / "src/new/deep").mkdir(parents=True)
-        verdict = fix(sandbox, {"src/new/deep/m.py": "BROKEN\n", "src/a.py": "a = 2\n"})
-        result = run_test_gate(sandbox, verdict)
-
-        assert result.kept == ("src/a.py",)
-        assert not (sandbox.path / "src/new").exists()
-        assert (sandbox.path / "src").is_dir()
-
-
-def test_the_ledger_names_the_count_of_fixed_files_per_run(tmp_path):
-    repo = repo_of(tmp_path, THREE, RED_IF_BROKEN)
-    with prepare_sandbox(repo, "HEAD", parent=tmp_path) as sandbox:
-        result = run_test_gate(sandbox, fix(sandbox, {"src/a.py": "a = 2\n"}))
-    (run,) = result.ledger_fields()["test_gate"]["runs"]
-    assert run["fixed_count"] == 1 and "fixed" not in run

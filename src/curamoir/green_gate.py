@@ -9,8 +9,9 @@ state or reduce scope, and MUST NOT open a red PR."
 The runner calls run_test_gate(sandbox, verdict) after fix_scope.verify_fix
 has accepted the fix and before sandbox.patch (fix_scope's module docstring,
 "What the runner (cm-fkd.4) must do", step 7, gives the order). It returns
-a GateResult whose `paths_for_pr` is the only thing the runner may patch,
-and whose `strategy` the ledger records (ledger_fields), because the
+a GateResult whose `paths_for_pr` is the only thing the runner may patch
+(through GateResult.patch, which first checks the sandbox still holds
+what was tested), and whose `strategy` the ledger records (ledger_fields), because the
 acceptance criterion asks which strategy was used.
 
 **Outcomes.** `strategy` is `green` (every fix kept), `reduced` (some
@@ -19,11 +20,16 @@ abandoned, one of:
 
 - `no_test_command`: none configured and none detected;
 - `config_invalid`: the base's `.curamoir/curamoir.yaml` cannot be loaded;
-- `imports_the_checkout`: the import canary found a package of the project
-  imported from outside the sandbox (below);
+- `imports_the_checkout`: the canary found the checkout ahead of the
+  sandbox on sys.path, or a package of the project imported from outside
+  the sandbox (below);
 - `command_not_runnable`: the full and the base runs both exited 126 or 127,
-  the shell's "cannot execute" and "not found";
-- `base_red`: the base itself is red (a timeout counts as red);
+  the shell's "cannot execute" and "not found", or both exited 1 with a
+  missing runner's message (`No module named pytest`, `command not found`);
+- `test_timeout`: the full and the base runs both timed out, so the
+  timeout, not the code, decided;
+- `base_red`: the base itself is red (a timeout of one of the two runs
+  counts as red);
 - `no_green_subset`: every fixed file was tested on the green base and each
   one alone is red;
 - `run_cap`: `sweep.max_test_runs` was reached before the fix and the base
@@ -47,19 +53,30 @@ install -e`, `uv sync`; this repository's own is hatch's
   files) is appended after it; setuptools' `__editable___*_finder` is
   appended to sys.meta_path, after the path finder that reads sys.path.
   Either way the sandbox's copy is found first.
-- The canary: before any test run, `python3` (the tests' environment, cwd
-  the sandbox) imports each top-level package of the base (import_names)
-  and prints its `__file__`. One outside the sandbox (a `.pth` that inserts
-  itself FIRST on sys.path, as old setuptools' easy-install.pth does)
-  abandons the sweep, `imports_the_checkout`: never green. With no package
-  to name (a Node project, a namespace package, top-level modules only)
-  the canary is skipped and GateResult.canary says so; a package that does
-  not import, or no `python3`, is not evidence and is not refused.
+- The canary (_canary): before any test run, `python3` (the tests'
+  environment, cwd the sandbox) prints its sys.path and imports each
+  top-level package of the base (import_names). An entry inside the
+  checkout before the sandbox's first PYTHONPATH entry (a `.pth` that
+  inserts itself FIRST, as old setuptools' easy-install.pth does), which
+  shadows every layout, single modules and namespace packages included,
+  or a package whose `__file__` is outside the sandbox (a meta-path
+  finder ahead of the path finder), abandons the sweep,
+  `imports_the_checkout`: never green. An ordinary appended `.pth` passes:
+  PYTHONPATH is ahead of it. A package that does not import is not
+  evidence; no `python3` (a Node project) checks nothing, and
+  GateResult.canary says which.
 
 **The environment** is an ALLOWLIST (sandbox_environment), not the user's
 minus a denylist, so a credential whose name announces nothing (a token in
 `MY_SERVICE`) stays out as surely as `GH_TOKEN`, `AWS_*`, `ANTHROPIC_*`,
-`SSH_AUTH_SOCK` or `KUBECONFIG`. Kept: USER, LOGNAME, LANG, TZ and LC_*.
+`SSH_AUTH_SOCK` or `KUBECONFIG`. Kept: USER, LOGNAME, LANG, TZ and LC_*,
+and the version managers' roots (PYENV_ROOT, ASDF_DATA_DIR, ASDF_DIR,
+VOLTA_HOME, NVM_DIR; directories, not secrets), defaulted to their place
+under the real HOME when unset, so a pyenv, asdf or volta shim on PATH
+still finds its installs. PYTHONUSERBASE is the user base that PATH's
+`python3` reports in the sweep's own environment, so a pytest installed
+with `pip install --user` (macOS's /usr/bin/python3 has no other) is still
+found under the fresh HOME.
 Built: PATH (the reused venv's bin and `node_modules/.bin` first, then the
 user's PATH whole: PATH names directories, not secrets, and pruning those
 under $HOME would break a pyenv, nvm or ~/.local python3 while protecting
@@ -96,7 +113,8 @@ sandbox, its own process group, killed whole at `sweep.test_timeout_seconds`
 (1 to 86400; a timeout is red). Its output goes to temporary files, not
 pipes, and only the last 4000 characters of stdout and of stderr are kept
 (git_guard.run_in_group's `tail_bytes`), so memory is bounded however much
-it prints.
+it prints; disk is too: past 256 MiB of output (_OUTPUT_CAP) the group is
+killed and the run is red, saying why.
 
 **On red, reduce scope** before abandoning. First the base is run (every
 changed path back at its base content): a red base means the tests cannot
@@ -157,8 +175,20 @@ front (memory without bound on a large repository) or git between runs.
   run (git_guard.verify_git_state); a test that writes `.git` makes the
   gate raise GateError (a refusal), since the patch is built by git in that
   sandbox next.
-- Each run hashes the whole work tree (the manifest), which costs time in
-  proportion to the repository, not memory.
+- Each run walks the whole work tree (the manifest) and re-hashes only the
+  files whose stat (size, mtime, ctime, inode, mode) changed, which costs
+  time in proportion to the repository, not memory.
+- The canary asks `python3` only. A command that runs another interpreter
+  (`tox`, `poetry run`, `.venv/bin/python`) is protected by PYTHONPATH
+  from an appended `.pth`, but a front-inserting one there is not checked.
+- PYTHONUSERBASE is that of the `python3` on PATH: a command that runs
+  another interpreter whose user base differs (a macOS framework
+  python3.12 beside a 3.9) does not see its `--user` installs. asdf's
+  global versions live in ~/.tool-versions, under the HOME that is not
+  the user's: set them in the repository's own `.tool-versions`.
+- GateResult.patch checks the kept files before and after git builds the
+  patch; a writer that changes a file and changes it back between those
+  checks, while git reads it, is not seen.
 - A process that leaves the group with setsid() escapes the kill at the
   timeout and lives on. It cannot hold a run open: the run ends when the
   command's own process does, because the output goes to files, not pipes
@@ -177,13 +207,14 @@ import stat
 import subprocess
 import tempfile
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import PurePosixPath
 from typing import Optional
 
 from curamoir.config import DEFAULTS, load_config_text
 from curamoir.git_guard import (
     GitGuardError,
+    OutputCapExceeded,
     git,
     remove_tree,
     require_sandbox,
@@ -204,11 +235,12 @@ NO_TEST_COMMAND = "no_test_command"
 CONFIG_INVALID = "config_invalid"
 IMPORTS_THE_CHECKOUT = "imports_the_checkout"
 COMMAND_NOT_RUNNABLE = "command_not_runnable"
+TEST_TIMEOUT = "test_timeout"
 BASE_RED = "base_red"
 NO_GREEN_SUBSET = "no_green_subset"
 RUN_CAP = "run_cap"
 CAUSES = (NO_TEST_COMMAND, CONFIG_INVALID, IMPORTS_THE_CHECKOUT, COMMAND_NOT_RUNNABLE,
-          BASE_RED, NO_GREEN_SUBSET, RUN_CAP)
+          TEST_TIMEOUT, BASE_RED, NO_GREEN_SUBSET, RUN_CAP)
 
 PASSED = "passed"
 FAILED = "failed"
@@ -221,8 +253,17 @@ _CONFIG = ".curamoir/curamoir.yaml"
 _PYTHON_TEST_FILE = re.compile(r"(^test_.*|.*_test)\.py$")
 #: Characters of a run's output kept for the PR body and diagnosis.
 _TAIL = 4000
+#: Bytes a run may write to its two output files together before its group
+#: is killed and the run counted red: disk, like memory, is bounded. 256 MiB
+#: is far past any test suite's honest output and well under a laptop's
+#: free space; a constant, not a setting, because no project should need it.
+_OUTPUT_CAP = 256 << 20
 #: The shell's exits for "no such command" (127) and "cannot execute" (126).
 _NOT_RUNNABLE = frozenset({126, 127})
+#: What a missing runner prints when it exits 1 rather than 127: `python3
+#: -m pytest` without pytest ("No module named pytest"), and an npm script
+#: or a wrapper whose tool is not installed ("command not found").
+_MISSING_RUNNER = re.compile(r"No module named '?pytest'?|command not found")
 
 _RED_REASON = ("the tests fail with this fix applied on top of the fixes kept before it, "
                "so it is left for a later sweep")
@@ -287,8 +328,17 @@ class GateResult:
     and `cause` (one of CAUSES) is set if and only if it is ABANDONED, with
     `why` saying it in a sentence. `kept` is the green set (sorted paths);
     `paths_for_pr` is it when the strategy is green or reduced and () when
-    abandoned: the runner patches `paths_for_pr` and nothing else. `canary`
-    says whether the import canary ran (module docstring)."""
+    abandoned: the runner patches them with `patch(sandbox)`, never
+    `sandbox.patch` directly, and nothing else.
+
+    `canary` says what the canary (module docstring) checked, in one of
+    three forms: "" (not reached: no test command), `checked: sys.path`
+    followed by `; imported <names>` and/or `; could not import <names>`
+    for the base's packages, or `skipped: <why>` (python3 did not run).
+
+    `tested` is, per kept path, (path, executable, sha256 hex) of the
+    content the final green run tested, (path, None, None) for a path that
+    run had absent: what patch() holds the sandbox to."""
 
     strategy: str
     cause: Optional[str]
@@ -299,10 +349,40 @@ class GateResult:
     runs: tuple
     why: str = ""
     canary: str = ""
+    tested: tuple = ()
 
     @property
     def paths_for_pr(self):
         return self.kept if self.strategy in (GREEN, REDUCED) else ()
+
+    def patch(self, sandbox):
+        """The PR's patch, sandbox.patch(paths_for_pr), refused (GateError)
+        unless every kept path holds exactly what the green run tested, both
+        before and after git builds it. WHY: a process a test started with
+        setsid() outlives the run and can rewrite a kept file after the gate
+        returned; the patch would then carry code no run tested. The window
+        left is the instant git reads a file, and a writer that changes it
+        and puts it back inside that instant."""
+        self.verify_kept(sandbox)
+        built = sandbox.patch(self.paths_for_pr)
+        self.verify_kept(sandbox)
+        return built
+
+    def verify_kept(self, sandbox):
+        """GateError naming each kept path whose state is not the tested one."""
+        changed = []
+        for path, executable, digest in self.tested:
+            try:
+                state = _work_tree_state(sandbox.path, path)
+            except (OSError, GateError):
+                changed.append(path)
+                continue
+            if _fingerprint(state) != (executable, digest):
+                changed.append(path)
+        if changed:
+            raise GateError(", ".join(changed) + " changed after the green run (a process the "
+                            "tests left running may still be writing the sandbox), so the "
+                            "patch would carry content no run tested")
 
     def render(self):
         """One line for the PR body (green, reduced) or for the ledger
@@ -407,6 +487,30 @@ def _npm_test_script(data):
 
 #: Inherited as they are: who the user is and how text and time are read.
 _INHERITED = ("USER", "LOGNAME", "LANG", "TZ")
+#: Version managers' roots, each a directory and never a secret: a shim on
+#: PATH (pyenv's `python3`, asdf's, volta's `node`) finds its installs
+#: through it, and defaults it to a path under HOME, which the fresh HOME
+#: would break. -> the default under the user's real HOME, taken when unset
+#: and that directory exists (None: inherited only; nvm puts the node bin on
+#: PATH itself, and ASDF_DIR is where asdf's own code is, if moved).
+_VERSION_MANAGER_ROOTS = {"PYENV_ROOT": ".pyenv", "ASDF_DATA_DIR": ".asdf", "ASDF_DIR": None,
+                          "VOLTA_HOME": ".volta", "NVM_DIR": None}
+_USER_BASE = "import site, sys; sys.stdout.write(site.getuserbase())"
+
+
+def _user_base(path):
+    """The user base (`pip install --user`'s prefix) of the `python3` the
+    tests will find on `path`, asked in the sweep's own environment, or None.
+    WHY asked, not derived: it depends on the interpreter (a macOS framework
+    build's is ~/Library/Python/X.Y, others' ~/.local) and on
+    PYTHONUSERBASE, and the fresh HOME would move it."""
+    try:
+        done = subprocess.run(["python3", "-c", _USER_BASE], env=dict(os.environ, PATH=path),
+                              stdin=subprocess.DEVNULL, capture_output=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    base = done.stdout.decode("utf-8", "replace")
+    return base if done.returncode == 0 and os.path.isabs(base) else None
 
 
 def sandbox_environment(source, root=None, src=False):
@@ -422,8 +526,11 @@ def sandbox_environment(source, root=None, src=False):
     sandbox), PYTHONPATH is the sandbox's `src` (when `src`: the base tracks
     a top-level `src/`) then `root`, so an editable install of the
     checkout in the reused venv cannot shadow the fixed code. Plus
-    PYTHONDONTWRITEBYTECODE=1 and CI=true; HOME and TMPDIR are added per
-    run (_run_command), each a fresh directory removed after it."""
+    PYTHONDONTWRITEBYTECODE=1 and CI=true; PYTHONUSERBASE is the user
+    base of that PATH's `python3` (_user_base) and the version managers'
+    roots are kept (_VERSION_MANAGER_ROOTS), so a `pip install --user`
+    pytest and a pyenv or asdf shim still resolve under the fresh HOME and
+    TMPDIR that are added per run (_run_command), each removed after it."""
     env = {key: value for key, value in os.environ.items()
            if key in _INHERITED or key.startswith("LC_")}
     env["PYTHONDONTWRITEBYTECODE"] = "1"
@@ -445,6 +552,15 @@ def sandbox_environment(source, root=None, src=False):
             prefix.append(os.path.join(modules, ".bin"))
         env["NODE_PATH"] = modules
     env["PATH"] = os.pathsep.join([*prefix, os.environ.get("PATH", os.defpath)])
+    home = os.path.expanduser("~")
+    for name, default in _VERSION_MANAGER_ROOTS.items():
+        if os.environ.get(name):
+            env[name] = os.environ[name]
+        elif default and os.path.isdir(os.path.join(home, default)):
+            env[name] = os.path.join(home, default)
+    user_base = _user_base(env["PATH"])
+    if user_base:
+        env["PYTHONUSERBASE"] = user_base
     if root is not None:
         env["PYTHONPATH"] = os.pathsep.join(
             ([os.path.join(str(root), "src")] if src else []) + [str(root)])
@@ -464,8 +580,15 @@ def _run_command(sandbox, argv, env, timeout, paths=()):
         env = dict(env, PWD=str(sandbox.path), HOME=home, TMPDIR=tmp)
         started = time.monotonic()
         try:
+            # 4 bytes per character: UTF-8's widest, so the last _TAIL
+            # characters are inside the bytes kept whatever the text.
             done = run_in_group(argv, cwd=str(sandbox.path), env=env, timeout=timeout,
-                                tail_bytes=4 * _TAIL)
+                                tail_bytes=4 * _TAIL, max_output_bytes=_OUTPUT_CAP)
+        except OutputCapExceeded as capped:
+            return GateRun(paths, FAILED, None, time.monotonic() - started,
+                           _tail(capped.output),
+                           _tail(capped.stderr) + f"\n[killed with its process group: its "
+                           f"output passed {_OUTPUT_CAP >> 20} MiB, so it counts as red]")
         except subprocess.TimeoutExpired as expired:
             return GateRun(paths, TIMED_OUT, None, time.monotonic() - started,
                            _tail(expired.output),
@@ -476,7 +599,7 @@ def _run_command(sandbox, argv, env, timeout, paths=()):
         return GateRun(paths, PASSED if done.returncode == 0 else FAILED, done.returncode,
                        time.monotonic() - started, _tail(done.stdout), _tail(done.stderr))
     finally:
-        remove_tree(scratch)
+        remove_tree(scratch, what="the test run's scratch directory (its HOME and TMPDIR)")
 
 
 def _tail(data):
@@ -487,13 +610,14 @@ def _tail(data):
 
 _CANARY = r"""
 import importlib, json, sys
+path = list(sys.path)
 found = {}
 for name in sys.argv[1:]:
     try:
         found[name] = getattr(importlib.import_module(name), "__file__", None)
     except BaseException:
         found[name] = None
-sys.stdout.write("\n" + json.dumps(found) + "\n")
+sys.stdout.write("\n" + json.dumps({"path": path, "found": found}) + "\n")
 """
 
 
@@ -512,23 +636,49 @@ def import_names(names):
     return ()
 
 
-def _imports_outside(sandbox, env, timeout, names):
-    """(outside, imported): (name, file) for each of `names` that `python3`,
-    in the tests' environment and the sandbox, imports from outside the
-    sandbox, and the names it imported at all. A name that cannot be
-    imported, or no python3, is not evidence either way."""
+def _inside(path, root):
+    return os.path.commonpath([root, path]) == root
+
+
+def _canary(sandbox, env, timeout, names):
+    """(outside, said): what `python3`, in the tests' environment with cwd
+    the sandbox, resolves from the source checkout ahead of the sandbox, as
+    (what, where) pairs, and the GateResult.canary text.
+
+    Two layers. sys.path: an entry inside the checkout (and not inside the
+    sandbox) before the first PYTHONPATH entry shadows the sandbox for every
+    layout, single modules and namespace packages included. '' is skipped:
+    `python3 -c` puts the cwd first itself, and a test runner's sys.path[0]
+    is its own. Then the import: each of `names` whose `__file__` is
+    outside the sandbox (a meta-path finder, which sys.path does not show).
+    No python3, or output that is not the canary's, checks nothing."""
     run = _run_command(sandbox, ["/bin/sh", "-c", 'exec python3 -c "$0" "$@"', _CANARY, *names],
                        env, timeout)
     try:
-        found = json.loads(run.stdout_tail.strip().splitlines()[-1])
-    except (IndexError, ValueError):
-        return (), ()
-    if not isinstance(found, dict):
-        return (), ()
+        report = json.loads(run.stdout_tail.strip().splitlines()[-1])
+        path, found = report["path"], report["found"]
+        if not (isinstance(path, list) and isinstance(found, dict)):
+            raise ValueError(report)
+    except (IndexError, KeyError, TypeError, ValueError):
+        return (), "skipped: python3 did not run the canary in the test environment, so " \
+                   "neither sys.path nor the imports were checked"
     root = os.path.realpath(str(sandbox.path))
-    imported = tuple(sorted(name for name, file in found.items() if isinstance(file, str)))
-    return tuple((name, found[name]) for name in imported if os.path.commonpath(
-        [root, os.path.realpath(found[name])]) != root), imported
+    source = os.path.realpath(str(sandbox.source))
+    first = os.path.realpath(env["PYTHONPATH"].split(os.pathsep)[0])
+    outside = []
+    for entry in (e for e in path if isinstance(e, str) and e):
+        resolved = os.path.realpath(os.path.join(root, entry))
+        if resolved == first:
+            break
+        if _inside(resolved, source) and not _inside(resolved, root):
+            outside.append(("sys.path", entry))
+    imported = sorted(name for name, file in found.items() if isinstance(file, str))
+    missing = sorted(set(names) - set(imported))
+    outside.extend((name, found[name]) for name in imported
+                   if not _inside(os.path.realpath(found[name]), root))
+    said = "checked: sys.path" + (f"; imported {', '.join(imported)}" if imported else "") \
+        + (f"; could not import {', '.join(missing)}" if missing else "")
+    return tuple(outside), said
 
 
 # --- the reduction --------------------------------------------------------------------
@@ -628,8 +778,10 @@ def run_test_gate(sandbox, verdict, paths=None):
                               src=any(name.startswith("src/") for name in names))
     git_state = snapshot_git_state(sandbox)
     held = _held(every)
-    manifest = _tree(str(sandbox.path))
+    manifest = _tree(str(sandbox.path), held)
     runs = []
+
+    canary = ""
 
     def settle():
         _settle(str(sandbox.path), manifest, held)
@@ -639,19 +791,14 @@ def run_test_gate(sandbox, verdict, paths=None):
                           dropped or tuple(DroppedFix(path, why) for path in candidates),
                           tuple(runs), why, canary)
 
-    packages = import_names(names)
-    canary = "skipped: the base tracks no top-level Python package"
-    if packages:
-        outside, imported = _imports_outside(sandbox, env, chosen.timeout, packages)
-        settle()
-        canary = (f"checked: {', '.join(imported)}" if imported else
-                  f"skipped: python3 could not import {', '.join(packages)} in the sandbox")
-        if outside:
-            result = abandoned(IMPORTS_THE_CHECKOUT, "the test environment imports " + "; ".join(
-                f"{name} from {file}" for name, file in outside) + ", not the sandbox, so a "
-                "green run would test unfixed code (an editable install of your checkout "
-                "in its venv that puts itself first on sys.path)")
-            return _finish(sandbox, git_state, every, fixed, base, (), result)
+    outside, canary = _canary(sandbox, env, chosen.timeout, import_names(names))
+    settle()
+    if outside:
+        result = abandoned(IMPORTS_THE_CHECKOUT, "the test environment resolves " + "; ".join(
+            f"{what} to {where}" for what, where in outside) + " in your checkout ahead of "
+            "the sandbox, so a green run would test unfixed code (an editable install of "
+            "your checkout in its venv that puts itself first on sys.path)")
+        return _finish(sandbox, git_state, every, fixed, base, (), result)
 
     def run(subset):
         _write_states(sandbox.path, {p: fixed[p] if p in subset else base[p] for p in every})
@@ -673,11 +820,16 @@ def run_test_gate(sandbox, verdict, paths=None):
         if green_base is None:
             result = abandoned(RUN_CAP, f"sweep.max_test_runs ({chosen.max_runs}) allows too "
                                         "few runs to test the fix and the base")
-        elif not green_base and {run.code for run in runs} <= _NOT_RUNNABLE:
+        elif not green_base and all(run.outcome == TIMED_OUT for run in runs):
+            result = abandoned(TEST_TIMEOUT, (
+                f"the tests timed out both with the fix and at the base, after "
+                f"sweep.test_timeout_seconds ({chosen.timeout}s), so nothing was judged; "
+                "raise it"))
+        elif not green_base and _not_runnable(runs):
             result = abandoned(COMMAND_NOT_RUNNABLE, (
                 f"the test command `{chosen.command}` could not be run (exit "
-                f"{runs[-1].code}: the shell found no such command, or could not execute "
-                "it), so nothing was tested: " + runs[-1].tail.strip()[-300:]))
+                f"{runs[-1].code}: no such command or test runner, or it could not be "
+                "executed), so nothing was tested: " + runs[-1].tail.strip()[-300:]))
         elif not green_base:
             result = abandoned(BASE_RED, "the tests fail at the base commit itself, with no fix "
                                          "applied, so they cannot tell a good fix from a bad one")
@@ -697,16 +849,32 @@ def run_test_gate(sandbox, verdict, paths=None):
     return _finish(sandbox, git_state, every, fixed, base, result.kept, result)
 
 
+def _not_runnable(runs):
+    """The full and the base run both say the runner is missing: the shell's
+    126 or 127, or exit 1 with a missing runner's message (_MISSING_RUNNER).
+    Both, so a real failure that merely prints "command not found" once is
+    still red."""
+    return all(run.code in _NOT_RUNNABLE for run in runs) or all(
+        run.code == 1 and _MISSING_RUNNER.search(run.tail) for run in runs)
+
+
+def _fingerprint(state):
+    if state.data is None:
+        return None, None
+    return state.executable, hashlib.sha256(state.data).hexdigest()
+
+
 def _finish(sandbox, git_state, every, fixed, base, kept, result):
     """Refuse a run that changed git's files, then leave the sandbox with
-    `kept` fixed and every other path of the verdict at its base."""
+    `kept` fixed and every other path of the verdict at its base, and record
+    in the result what that is (GateResult.tested)."""
     changed = verify_git_state(git_state)
     if changed:
         raise GateError("the test command changed the sandbox's git files ("
                         + ", ".join(f"{c.label} {c.change}" for c in changed)
                         + "), and the patch would be built by git in that sandbox")
     _write_states(sandbox.path, {p: fixed[p] if p in kept else base[p] for p in every})
-    return result
+    return replace(result, tested=tuple((path, *_fingerprint(fixed[path])) for path in kept))
 
 
 # --- the tree outside the verdict ----------------------------------------------------
@@ -722,11 +890,19 @@ def _held(every):
     return frozenset(held)
 
 
-def _tree(root):
-    """label -> digest of every entry under `root` but its own `.git`,
-    directories included ("dir"), symlinks recorded and never followed.
-    Digests, not contents: one line per file, whatever the repository's
-    size. GateError if a directory cannot be listed or a file read."""
+def _tree(root, held=frozenset(), previous=None):
+    """label -> (stat key, digest) of every entry under `root` but its own
+    `.git`, directories included ("dir"), symlinks recorded and never
+    followed. Digests, not contents: one line per file, whatever the
+    repository's size. GateError if a directory cannot be listed or a file
+    read.
+
+    A file of `held` is not hashed (the gate rewrites it; nothing compares
+    it), and one whose stat key is `previous`'s takes its digest from there
+    rather than being read again. The key holds st_ctime_ns, which the
+    kernel sets on every write and metadata change and no process can set
+    back (utime sets mtime, not ctime), so a rewrite that keeps size and
+    mtime still changes it; only a clock reset by root could hide one."""
     found = {}
 
     def unlistable(error):
@@ -738,24 +914,32 @@ def _tree(root):
             subdirs[:] = [d for d in subdirs if d != ".git"]
         for name in subdirs + files:
             target = os.path.join(directory, name)
-            found[os.path.relpath(target, root).replace(os.sep, "/")] = _entry_digest(target)
+            label = os.path.relpath(target, root).replace(os.sep, "/")
+            found[label] = _entry(target, label in held, (previous or {}).get(label))
     return found
 
 
-def _entry_digest(target):
+def _entry(target, held, previous):
     try:
-        mode = os.lstat(target).st_mode
+        info = os.lstat(target)
+        mode = info.st_mode
+        key = (mode, info.st_size, info.st_mtime_ns, info.st_ctime_ns, info.st_ino,
+               info.st_dev)
         if stat.S_ISLNK(mode):
-            return "link:" + os.readlink(target)
+            return key, "link:" + os.readlink(target)
         if stat.S_ISDIR(mode):
-            return "dir"
+            return key, "dir"
         if not stat.S_ISREG(mode):
-            return f"special:{stat.S_IFMT(mode):o}"
+            return key, f"special:{stat.S_IFMT(mode):o}"
+        if held:
+            return key, "held"
+        if previous is not None and previous[0] == key:
+            return previous
         digest = hashlib.sha256()
         with open(target, "rb") as handle:
             for chunk in iter(lambda: handle.read(1 << 20), b""):
                 digest.update(chunk)
-        return ("x:" if mode & stat.S_IXUSR else "f:") + digest.hexdigest()
+        return key, ("x:" if mode & stat.S_IXUSR else "f:") + digest.hexdigest()
     except OSError as error:
         raise GateError(f"{target} cannot be read after a test run ({error}), so the tree "
                         "the next run tests cannot be known") from error
@@ -764,26 +948,28 @@ def _entry_digest(target):
 def _settle(root, manifest, held):
     """After a run: remove every entry it added outside `held` (a cache, a
     new snapshot, a leftover file), then refuse if it changed or removed one
-    that was there before the first run. WHY refuse rather than restore: the
-    content to restore would have to be read up front for every tracked
-    file (unbounded memory) or asked of git between runs (which a run could
-    have planted for); a test suite that rewrites its own tracked files is
-    rare, and a guessed tree is never tested."""
-    for label in sorted(set(_tree(root)) - set(manifest) - held):
+    that was there before the first run. One walk serves both (removing an
+    added entry changes no entry of the manifest's but a directory's, whose
+    digest is "dir"). WHY refuse rather than restore: the content to
+    restore would have to be read up front for every tracked file
+    (unbounded memory) or asked of git between runs (which a run could have
+    planted for); a test suite that rewrites its own tracked files is rare,
+    and a guessed tree is never tested."""
+    now = _tree(root, held, manifest)
+    for label in sorted(set(now) - set(manifest) - held):
         target = os.path.join(root, label)
         try:
             if not os.path.lexists(target):
                 continue  # inside a directory removed above
             if stat.S_ISDIR(os.lstat(target).st_mode):
-                remove_tree(target)
+                remove_tree(target, what=f"{label}, which a test run left behind,")
             else:
                 os.unlink(target)
         except OSError as error:
             raise GateError(f"{label}, which a test run left behind, cannot be removed: "
                             f"{error}") from error
-    now = _tree(root)
-    drifted = sorted(label for label, digest in manifest.items()
-                     if label not in held and now.get(label) != digest)
+    drifted = sorted(label for label, (_, digest) in manifest.items()
+                     if label not in held and (label not in now or now[label][1] != digest))
     if drifted:
         raise GateError("the test command changed " + ", ".join(drifted[:10])
                         + (f" and {len(drifted) - 10} more" if len(drifted) > 10 else "")

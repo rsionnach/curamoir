@@ -97,6 +97,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import time
 import warnings
 from dataclasses import dataclass
 from pathlib import Path
@@ -162,7 +163,22 @@ def scrubbed_environment():
     return {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
 
 
-def run_in_group(argv, *, cwd, env, timeout, stdin=subprocess.DEVNULL, tail_bytes=None):
+class OutputCapExceeded(subprocess.SubprocessError):
+    """run_in_group's `max_output_bytes` was passed: the group was killed.
+    `output` and `stderr` hold the tails, as on subprocess.TimeoutExpired."""
+
+    def __init__(self, cmd, cap, output=None, stderr=None):
+        super().__init__(f"{cmd!r} wrote more than {cap} bytes of output")
+        self.cmd, self.cap, self.output, self.stderr = cmd, cap, output, stderr
+
+
+#: How often run_in_group looks at the output files' size with
+#: `max_output_bytes`: past the cap by at most what a process writes in this.
+_OUTPUT_POLL_SECONDS = 0.1
+
+
+def run_in_group(argv, *, cwd, env, timeout, stdin=subprocess.DEVNULL, tail_bytes=None,
+                 max_output_bytes=None):
     """Run `argv` in a new session and return a CompletedProcess with bytes
     output. At `timeout` seconds, kill its whole process group and raise
     subprocess.TimeoutExpired. WHY a group: killing only the child leaves a
@@ -176,9 +192,16 @@ def run_in_group(argv, *, cwd, env, timeout, stdin=subprocess.DEVNULL, tail_byte
     bounded however much a test suite prints (disk does not), and the run
     ends when the child does, even if a setsid() daemon still holds the
     output open, which with pipes holds communicate() until the daemon
-    exits. git's own capture keeps pipes and the whole output."""
+    exits. git's own capture keeps pipes and the whole output.
+
+    `max_output_bytes` (with `tail_bytes`) bounds the disk too: the files'
+    size is checked every _OUTPUT_POLL_SECONDS and past it the group is
+    killed and OutputCapExceeded raised. A descendant that left the group
+    and still holds the unlinked files open can grow them after that; its
+    writes are no longer read, and the space is freed when it exits."""
     if tail_bytes is not None:
-        return _run_in_group_to_files(argv, cwd, env, timeout, stdin, tail_bytes)
+        return _run_in_group_to_files(argv, cwd, env, timeout, stdin, tail_bytes,
+                                      max_output_bytes)
     process = subprocess.Popen(argv, cwd=cwd, env=env, stdin=stdin, stdout=subprocess.PIPE,
                                stderr=subprocess.PIPE, start_new_session=True)
     try:
@@ -196,17 +219,32 @@ def run_in_group(argv, *, cwd, env, timeout, stdin=subprocess.DEVNULL, tail_byte
     return subprocess.CompletedProcess(argv, process.returncode, out, err)
 
 
-def _run_in_group_to_files(argv, cwd, env, timeout, stdin, tail_bytes):
+def _run_in_group_to_files(argv, cwd, env, timeout, stdin, tail_bytes, max_output_bytes):
     with tempfile.TemporaryFile() as out, tempfile.TemporaryFile() as err:
         process = subprocess.Popen(argv, cwd=cwd, env=env, stdin=stdin, stdout=out,
                                    stderr=err, start_new_session=True)
+        deadline = float("inf") if timeout is None else time.monotonic() + timeout
         try:
-            process.wait(timeout=timeout)
-        except subprocess.TimeoutExpired:
+            while True:
+                left = deadline - time.monotonic()
+                if left <= 0:
+                    raise subprocess.TimeoutExpired(argv, timeout)
+                try:
+                    process.wait(timeout=left if max_output_bytes is None
+                                 else min(left, _OUTPUT_POLL_SECONDS))
+                    break
+                except subprocess.TimeoutExpired:
+                    pass
+                if max_output_bytes is not None and (os.fstat(out.fileno()).st_size
+                                                     + os.fstat(err.fileno()).st_size
+                                                     > max_output_bytes):
+                    raise OutputCapExceeded(argv, max_output_bytes)
+        except (subprocess.TimeoutExpired, OutputCapExceeded) as stopped:
             _kill_group(process)
             process.wait()
-            raise subprocess.TimeoutExpired(argv, timeout, output=_file_tail(out, tail_bytes),
-                                            stderr=_file_tail(err, tail_bytes)) from None
+            stopped.output = _file_tail(out, tail_bytes)
+            stopped.stderr = _file_tail(err, tail_bytes)
+            raise stopped from None
         except BaseException:
             _kill_group(process)
             process.wait()
@@ -426,14 +464,14 @@ def prepare_sandbox(repo, base_ref, parent=None, timeout=CLONE_TIMEOUT):
         raise
 
 
-def remove_tree(root):
+def remove_tree(root, what="the sandbox"):
     """Remove `root` and everything under it; GitGuardError if any of it is
     left. WHY not rmtree(ignore_errors=True): the fix agent can make a
     directory unlistable (mode 000) or read-only (555), and rmtree then
     silently leaves the whole clone. Every directory is made u+rwx first,
     and the error handler does the same to a path and its parent (never to
     anything above `root`: the directory the sandbox was made in is the
-    caller's) and retries.
+    caller's) and retries. `what` names `root` in the error.
 
     Nothing is chmodded by path (_make_removable): chmod follows a symlink,
     and a process still running in the sandbox could swap a directory for
@@ -453,7 +491,7 @@ def remove_tree(root):
     else:
         shutil.rmtree(root, onerror=retry)
     if os.path.lexists(root):
-        raise GitGuardError(f"the sandbox at {root} could not be removed; delete it by hand")
+        raise GitGuardError(f"{what} at {root} could not be removed; delete it by hand")
 
 
 def _remove_or_warn(root):

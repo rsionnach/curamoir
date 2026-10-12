@@ -39,6 +39,9 @@ NUMBER = "number"
 #: are legitimately fractional.
 COUNT = "whole number of 0 or more"
 STRING = "string"
+BOOLEAN = "boolean"
+STRING_LIST = "list of strings"
+MAPPING = "mapping"
 
 
 class WholeRange:
@@ -56,9 +59,6 @@ class WholeRange:
 
 #: A test run's timeout: at least a second, at most a day.
 TIMEOUT_SECONDS = WholeRange(1, 86400)
-BOOLEAN = "boolean"
-STRING_LIST = "list of strings"
-MAPPING = "mapping"
 
 DEFAULTS = {
     "version": 1,
