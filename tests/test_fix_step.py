@@ -51,6 +51,7 @@ from curamoir.fix_step import (
 from curamoir.git_guard import GitGuardError, prepare_sandbox
 from curamoir.principles import load_principles, parse_principles
 from curamoir.sweep import work_list, work_list_document
+from tests import claude_payloads
 from tests.conftest import committed_sample
 from tests.test_fix_scope import BILLING, PRINCIPLES, V, git_repo
 from tests.test_lint import ROOT
@@ -273,7 +274,7 @@ def fake_claude(tmp_path, edits=(), writes=None, sleep=0, exit_code=0, backgroun
         f"for path, text in {dict(writes or {})!r}.items():\n"
         "    os.makedirs(os.path.dirname(path) or '.', exist_ok=True)\n"
         "    open(path, 'w', encoding='utf-8').write(text)\n"
-        "print(json.dumps({'type': 'result', 'result': 'done', 'total_cost_usd': 0.01}))\n"
+        f"print(json.dumps({claude_payloads.success('done', cost=0.01)!r}))\n"
         f"sys.exit({exit_code})\n",
         encoding="utf-8",
     )
@@ -416,7 +417,7 @@ def test_an_owner_include_path_cannot_carry_a_filter_into_the_review(tmp_path):
                             writes={"local.gitconfig": planted})
 
     with prepare_sandbox(repo, "HEAD", parent=tmp_path) as sandbox:
-        sandbox.work_list = SimpleNamespace(items=[V("m.py", 1)])
+        sandbox.work_list = SimpleNamespace(items=[V("m.py", 1)], tier1=())
         sandbox.rules = ()
         run = run_fix_step(sandbox, "p", model="m", claude=str(claude))
         result = verify_fix(sandbox, git_state=run.git_state)
@@ -445,7 +446,7 @@ def test_a_file_written_under_an_ignored_directory_is_refused(tmp_path):
                                     "sub/.gitignore": "*\n", "sub/boot.py": "import os\n"})
 
     with prepare_sandbox(repo, "HEAD", parent=tmp_path) as sandbox:
-        sandbox.work_list = SimpleNamespace(items=[V("m.py", 1)])
+        sandbox.work_list = SimpleNamespace(items=[V("m.py", 1)], tier1=())
         sandbox.rules = ()
         run = run_fix_step(sandbox, "p", model="m", claude=str(claude))
         result = verify_fix(sandbox, git_state=run.git_state)

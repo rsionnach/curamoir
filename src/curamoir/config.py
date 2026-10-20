@@ -15,6 +15,10 @@ graph:
          collapses a src-layout repo to a single module named `src`.
 - DEC-3  rule matchers are `ast-grep` (primary) or `regex` (escape hatch).
 - DEC-4  `filing.github` defaults to OFF — mirroring is opt-in.
+- DEC-5  `sweep.tier1_scan` defaults to ON (E3-R1's "MAY additionally scan",
+         cm-fkd.2): a starter set's principles have no rules, so without the
+         tier-1 scan the promotion ladder (E4-R1) has no intake. No scan runs,
+         and nothing is spent, when no principle is eligible.
 
 Model ids are NOT validated against a list. The spec says "verify current model
 ids", and a hardcoded whitelist would reject every model released after this
@@ -122,6 +126,9 @@ DEFAULTS = {
         # single offender among max_files_per_pr (20) fixes (green_gate); it
         # needs about 2 + 2*ceil(log2(max_files_per_pr)).
         "max_test_runs": 12,
+        # DEC-5 (E3-R1b, curamoir.tier1): scan for violations of principles
+        # that have no rule yet, on models.cheap, once per base commit.
+        "tier1_scan": True,
     },
     "promotion": {"fix_threshold": 3, "window_days": 90},
     "filing": {
@@ -191,6 +198,7 @@ SCHEMA = {
     "sweep": {
         "max_open_prs": COUNT, "max_files_per_pr": COUNT,
         "test_command": STRING, "test_timeout_seconds": TIMEOUT_SECONDS, "max_test_runs": COUNT,
+        "tier1_scan": BOOLEAN,
     },
     "promotion": {"fix_threshold": PROMOTION_FIX_THRESHOLD,
                   "window_days": PROMOTION_WINDOW_DAYS},

@@ -69,25 +69,69 @@ Two layers, so the rules can be tested without git:
 2b. Decide whether to sweep at all (E3-R7, curamoir.idempotence), after
    step 2 (the work list and `current` are the whole base's) and before
    step 3 (the remedies are fixes too, and nothing has edited the sandbox
-   yet): `decision = idempotence.sweep_decision(sandbox.work_list,
-   sandbox.base, ledger.entries(), open_sweep_prs)`. cm-fkd.4 supplies
-   `open_sweep_prs`, the `gh`-backed callable (`gh pr list --state open
-   --json headRefName,number,url,body,files,isCrossRepository`, each item
-   mapped through idempotence.sweep_pr_listing; `isCrossRepository` is the
-   trust boundary, guards.pr_cap's docstring) shared with the open-PR cap
-   (guards.pr_cap, whose docstring holds the listing contract), and puts
-   `idempotence.sweep_marker(sandbox.base)` on a line of the sweep PR's
-   body, so a fresh CI checkout whose ledger lacks this line still knows
-   the PR's base.
-   If `decision.terminal` (NO_WORK, DUPLICATE_OPEN_PR, or UNKNOWN):
-   `decision.record(run, delta)`, which writes a success with `work` and
-   `found_delta` or, for UNKNOWN, a refusal (Reason.IDEMPOTENCE); then
-   the snapshot (step 2a) unless it was the refusal; and stop: no fix
-   step, no PR. Otherwise `decision.apply_to(sandbox)`, which narrows
-   `sandbox.work_list` to the violations in files no open sweep PR
-   changes, so steps 3 to 8 see only those and the scope check refuses an
-   edit to a held file; and pass `**decision.ledger_fields()` on the line
-   the sweep later writes, whatever its outcome.
+   yet), in four sub-steps:
+   (i) Plan tier 1 (E3-R1b, curamoir.tier1) on the still-pristine
+       sandbox: `plan = tier1.plan_scan(sandbox, ledger.entries())`.
+   (ii) Decide: `decision = idempotence.sweep_decision(
+       sandbox.work_list, sandbox.base, ledger.entries(), open_sweep_prs,
+       tier1=plan.will_scan)`. cm-fkd.4 supplies `open_sweep_prs`, the
+       `gh`-backed callable (`gh pr list --state open --json
+       headRefName,number,url,body,files,isCrossRepository`, each item
+       mapped through idempotence.sweep_pr_listing; `isCrossRepository`
+       is the trust boundary, guards.pr_cap's docstring) shared with the
+       open-PR cap (guards.pr_cap, whose docstring holds the listing
+       contract), and puts `idempotence.sweep_marker(sandbox.base)` on a
+       line of the sweep PR's body, so a fresh CI checkout whose ledger
+       lacks this line still knows the PR's base.
+   (iii) If `decision.terminal` (NO_WORK, DUPLICATE_OPEN_PR, or UNKNOWN):
+       `decision.record(run, delta, **tier1_fields)` (the tier1 field
+       note below says which), which writes a success with `work` and
+       `found_delta` or, for UNKNOWN, a refusal (Reason.IDEMPOTENCE,
+       without them); then the snapshot (step 2a) unless it was the
+       refusal; and stop: no fix step, no PR.
+   (iv) Otherwise `decision.apply_to(sandbox)`, which narrows
+       `sandbox.work_list` to the violations in files no open sweep PR
+       changes, so steps 3 to 8 see only those and the scope check
+       refuses an edit to a held file; and pass
+       `**decision.ledger_fields()` on the line the sweep later writes,
+       whatever its outcome.
+2c. Tier 1 (E3-R1b), only when `plan.will_scan`, still before anything
+   edits the sandbox. First scan: `scan = tier1.run_tier1_scan(sandbox,
+   plan, decision.held_paths, ledger.entries())`, which runs the read-only
+   scan call on `models.cheap` (bounded by tier1.SCAN_MAX_TURNS, inside
+   the run's one `per_run_ceiling_usd` estimate) and returns the findings
+   it accepted; its tier1.ScanRefused (a ScopeCheckError: the scan changed
+   the sandbox) is a refusal, as in step 6, whose line carries
+   `**error.ledger_fields()` (the tier1 field note). Then install the findings: `sandbox.work_list =
+   tier1.with_findings(sandbox.work_list, scan)`. Then settle the
+   decision: `decision = decision.after_tier1(sandbox.work_list, scan)`.
+   If that is terminal (TIER1_FAILED, which `record` writes as a failure,
+   DUPLICATE_OPEN_PR, or NO_WORK): `decision.record(run, delta,
+   **scan.ledger_fields())`, the snapshot (step 2a), and stop. Otherwise
+   go on, with the scan's `cost_usd` added to the fix step's for the
+   line's cost.
+
+   **The tier1 field.** The tier-1 field goes on lines so that the
+   once-per-base rule and the attempt cap (curamoir.tier1, "Once per
+   base") can read them back, and so the scan's spend (`cost_usd`) is on
+   record:
+   - before step 2c, every non-refusal line carries
+     `plan.skipped().ledger_fields()` when the plan does not scan (OFF,
+     NO_ELIGIBLE, ALREADY_SCANNED, ATTEMPTS_EXHAUSTED), and nothing when it
+     is READY (a READY plan whose sweep ended at 2b never scanned, and a
+     line must not say it did);
+   - from step 2c on, EVERY line, refusals included, carries
+     `scan.ledger_fields()` (or the skipped plan's): the refusals of steps
+     6, 7 and 8 as `run.refused(refusal, **scan.ledger_fields())`, and
+     step 2c's own ScanRefused as `**error.ledger_fields()`. WHY refusals
+     too: a refusal after the scan is an attempt that did not end the
+     matter, and without the field the attempt cap never sees it (retries
+     without bound) and the scan's cost goes unrecorded.
+   A line carrying `scanned: true` counts as "already scanned" only if it
+   is a success or carries `pr`; any other (a failure, a refusal) counts as
+   an attempt, and the next sweep at that base scans again, up to
+   MAX_SCAN_ATTEMPTS. Steps 2b(iii), 2c, 6, 7, 8 and 9 write lines that
+   carry it.
 3. Apply the file-level remedies, still before anything else edits it:
    `remedies.apply_file_remedies(sandbox)`, which deletes each file whose
    violation's rule says `remedy: delete_file` and nothing at the base
@@ -101,11 +145,16 @@ Two layers, so the rules can be tested without git:
    it diffs against the base commit.
 5. Review it: `verify_fix(sandbox, git_state=run.git_state)`. Same sandbox,
    same snapshot, same base: there is nothing else to pass.
-6. Treat git_guard.GitGuardError (ScopeCheckError is one) as a refusal: no
+6. Treat git_guard.GitGuardError (ScopeCheckError is one) as a refusal
+   (with the tier1 field, step 2c's note): no
    verdict is not a verdict, and an unverified fix is not a fix.
 7. On an ok verdict with paths (not `nothing_changed`), test it (E3-R4).
    Trim to `sweep.max_files_per_pr` BEFORE this, so the tree tested is the
-   PR's: `gate = green_gate.run_test_gate(sandbox, verdict, paths=trimmed)`,
+   PR's, with the lint's paths first (`trimmed = tier1.trim_pr_paths(
+   verdict.paths, sandbox.work_list, max_files_per_pr)`: rule fixes take
+   precedence over tier-1 fixes; every line from here carries the tier1
+   field, step 2c's note): `gate = green_gate.run_test_gate(sandbox,
+   verdict, paths=trimmed)`,
    which runs the base's test command in the sandbox and, on red, drops
    fixed paths until the rest is green. Then, by outcome:
    - strategy `green` or `reduced`: compute `fix_fields` (step 8), patch
@@ -121,8 +170,11 @@ Two layers, so the rules can be tested without git:
    (with the lint options step 2 used, the same timeout: the re-lint is a
    full lint), which lints the PR's tree again with the base's rules and
    keeps only the violations in `gate.paths_for_pr` it no longer reports;
-   then `fix_fields = fix_counts.ledger_fields(records, delta)`, with any
-   tier-1 records (cm-fkd.2) added to `records`. They are written with the
+   then the tier-1 records, `records += tier1.record_tier1_fixes(sandbox,
+   gate, fix_run)` (`fix_run` is step 4's FixStepRun, whose reply says
+   which findings the agent fixed), then `fix_fields =
+   fix_counts.ledger_fields(records, delta)`, beside the tier1 field
+   (step 2c's note). They are written with the
    sweep's success line, once the PR is opened, so a sweep whose PR failed
    to open records no fixes (its failure line carries `found_delta=delta`
    and step 2b's fields, no `fixes`). record_fixes' ScopeCheckError,
@@ -134,7 +186,9 @@ Two layers, so the rules can be tested without git:
    `sandbox.patch(gate.paths_for_pr)` gives when nothing changed since),
    refused with GateError if a kept path no longer holds them (a refusal
    as in step 6: a process the tests left running rewrote one), applied or
-   pushed by the runner; list only those paths' fixes in the PR body. Once
+   pushed by the runner; list only those paths' fixes in the PR body,
+   each with its principle id (E3-R3); the tier-1 ones as
+   `tier1.tier1_pr_lines(records, sandbox.work_list.tier1)` gives them. Once
    the PR exists, its line (success, or a failure after it) carries
    `pr=idempotence.pr_field(number, branch, url, sandbox.base,
    gate.paths_for_pr)`: the next sweep's step 2b holds those files. When
@@ -531,7 +585,7 @@ def _check_file(change, violations, permitting, known_modules, window, deletable
     old, new = change.old_text, change.new_text
     hunks = change.hunks if change.hunks is not None else compute_hunks(old, new)
     old_lines, new_lines = git_lines(old), git_lines(new)
-    spans = [_span(v, window) for v in violations]
+    spans = [violation_span(v, window) for v in violations]
     python = path.endswith(PYTHON_SUFFIXES)
     script = path.endswith(SCRIPT_SUFFIXES)
 
@@ -548,7 +602,7 @@ def _check_file(change, violations, permitting, known_modules, window, deletable
 
     header_end = _header_end(old_tree, old_lines, python)
     for hunk in hunks:
-        if any(_overlaps(_hunk_range(hunk), span) for span in spans):
+        if any(overlaps(_hunk_range(hunk), span) for span in spans):
             continue
         added = new_lines[hunk.new_start - 1:hunk.new_start - 1 + hunk.new_count]
         if (hunk.old_count == 0 and hunk.old_start < header_end
@@ -560,7 +614,11 @@ def _check_file(change, violations, permitting, known_modules, window, deletable
             f"{_describe(hunk)} at base line {max(hunk.old_start, 1)}, "
             f"more than {window} line(s) from every violation in this file"))
 
-    permitted_spans = [_span(v, window) for v in violations if v.principle_id in permitting]
+    # A tier-1 finding (rule_id None, curamoir.tier1) never licenses a
+    # signature change, whatever its principle permits: its span is the scan
+    # agent's choice, and a licence the agent can draw is no limit.
+    permitted_spans = [violation_span(v, window) for v in violations
+                       if v.principle_id in permitting and v.rule_id is not None]
     if python:
         found.extend(_python_signature_breaches(path, old_tree, new_tree, permitted_spans,
                                                 hunks))
@@ -644,7 +702,7 @@ def is_file_level(violation):
     return (violation.line, violation.col, violation.end_line, violation.end_col) == (1, 1, 1, 1)
 
 
-def _span(violation, window):
+def violation_span(violation, window):
     """The violation's base lines, widened by `window`. The end is exclusive at
     a column, so a match ending at column 1 of `end_line` ends on the line
     before it."""
@@ -662,7 +720,8 @@ def _hunk_range(hunk):
     return (hunk.old_start, hunk.old_start + hunk.old_count - 1)
 
 
-def _overlaps(first, second):
+def overlaps(first, second):
+    """Whether two inclusive (first, last) line ranges share a line."""
     return first[0] <= second[1] and second[0] <= first[1]
 
 
@@ -1032,7 +1091,7 @@ def _python_signature_breaches(path, old_tree, new_tree, permitted_spans, hunks=
         if old is not None and new is not None and old[0] == new[0]:
             continue
         span, allowed_spans = (old[1], permitted_spans) if old else (new[1], shifted)
-        if any(_overlaps(span, allowed) for allowed in allowed_spans):
+        if any(overlaps(span, allowed) for allowed in allowed_spans):
             continue
         if new is None:
             what, line, side = "removed", old[1][0], "base"
@@ -1069,7 +1128,7 @@ def _to_new_line(line, hunks, end=False):
 def _script_signature_breaches(path, hunks, old_lines, new_lines, permitted_spans):
     found = []
     for hunk in hunks:
-        if any(_overlaps(_hunk_range(hunk), allowed) for allowed in permitted_spans):
+        if any(overlaps(_hunk_range(hunk), allowed) for allowed in permitted_spans):
             continue
         removed = old_lines[hunk.old_start - 1:hunk.old_start - 1 + hunk.old_count]
         added = new_lines[hunk.new_start - 1:hunk.new_start - 1 + hunk.new_count]
@@ -1314,7 +1373,10 @@ def verify_fix(sandbox, *, git_state, window=WINDOW):
                      | set(_missing_submodules(sandbox.path, base))) - seen)
     permitting = frozenset(p.id for p in base_principles(sandbox).principles
                            if SIGNATURE_PERMISSION in p.permits)
-    verdict = check_scope(changes, sandbox.work_list.items, permitting=permitting,
+    # The tier-1 findings the runner accepted (curamoir.tier1) are violations
+    # too: each is a whole-line span at the base, validated before any edit.
+    violations = (*sandbox.work_list.items, *sandbox.work_list.tier1)
+    verdict = check_scope(changes, violations, permitting=permitting,
                           known_modules=base_known_modules(sandbox.path, base), window=window,
                           deletable_rules=rules_licensing_deletion(sandbox.rules))
     if not hidden:

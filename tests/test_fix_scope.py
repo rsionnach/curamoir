@@ -120,7 +120,7 @@ def sandbox_of(repo, *violations):
     """A sandbox of `repo` at HEAD whose work list is `violations`, set by
     hand where lint_sandbox would set the real lint's, and no rules."""
     sandbox = prepare_sandbox(repo, "HEAD", parent=repo.parent)
-    sandbox.work_list = SimpleNamespace(items=list(violations))
+    sandbox.work_list = SimpleNamespace(items=list(violations), tier1=())
     sandbox.rules = ()
     return sandbox
 

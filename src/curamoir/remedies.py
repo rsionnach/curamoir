@@ -144,6 +144,7 @@ from curamoir.fix_scope import (
     ScopeCheckError,
     is_dependency_file,
     is_file_level,
+    nfc,
     require_pristine,
     rules_licensing_deletion,
 )
@@ -233,12 +234,16 @@ class RemedyResult:
         violation in a deleted file, and every file-level violation of a rule
         with a remedy. WHY the skipped ones too: the agent cannot apply a
         remedy (it may not delete or rename), so handing it one only invites
-        an out-of-scope attempt; the runner reports them as unfixed."""
+        an out-of-scope attempt; the runner reports them as unfixed. A tier-1
+        finding (curamoir.tier1) in a deleted file goes too: nothing is
+        left of it to edit."""
         deleted = set(self.deleted)
         items = tuple(item for item in work.items
                       if item.path not in deleted
                       and not (is_file_level(item) and item.rule_id in self.deletable_rules))
-        return dataclasses.replace(work, items=items)
+        gone = {nfc(path) for path in deleted}
+        tier1 = tuple(finding for finding in work.tier1 if nfc(finding.path) not in gone)
+        return dataclasses.replace(work, items=items, tier1=tier1)
 
 
 def apply_file_remedies(sandbox):

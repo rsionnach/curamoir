@@ -90,8 +90,11 @@ apart from a new one. The limits of this are in the Limits below.
 `outcome`, `run_id` and the rest):
 
 - `fixes` (list of FixRecord.as_dict(): principle_id, rule_id or None,
-  source, path, fingerprint or None, fixed_by, base): the source of truth,
-  and the only field the reader counts.
+  source, path, fingerprint or None, fixed_by, base, span or None): the
+  source of truth, and the only field the reader counts.
+- `tier1` (curamoir.tier1's Tier1Scan.ledger_fields): whether the tier-1
+  scan ran at this base and what came of it, on every line that got past
+  the idempotence decision; the once-per-base rule reads it back.
 - `fix_summary` ({principle id: int}): the same numbers, for humans only;
   the reader does not read this field.
 - `found_delta` (found_delta's dict):
@@ -166,9 +169,12 @@ it saw).
 - A truncated delta has counts only, so its fingerprints cannot be named.
 - A rewritten history (force-push, rebase) restarts "introduced" at a
   baseline: the old snapshot's base is off the new history.
-- Tier-1 records have no fingerprint, so the reader cannot dedupe them
-  within a line; what makes two tier-1 findings the same is cm-fkd.2's to
-  define (a span), and until then each record counts.
+- Tier-1 records have no fingerprint; their identity is their span at the
+  base (FixRecord.span, curamoir.tier1), which dedupes within a line only.
+  Across lines a tier-1 fix cannot be followed the way a fingerprint is: an
+  edit above it moves its lines.
+  A tier-1 record without a span is skipped by the reader; none was ever
+  written, since `span` and the first tier-1 writer landed together.
 - The ledger is not redacted (E0-R7 covers briefs, handoffs, issues and PR
   bodies): paths, rule ids and hex fingerprints are not secrets, and the
   ledger never leaves the repository (E11-R3).
@@ -236,7 +242,8 @@ SNAPSHOT_VERSION = 1
 DELTA_CAP = 2000
 
 #: FixRecord's fields, in as_dict's order: what the reader rebuilds a record from.
-FIELDS = ("principle_id", "rule_id", "source", "path", "fingerprint", "fixed_by", "base")
+FIELDS = ("principle_id", "rule_id", "source", "path", "fingerprint", "fixed_by", "base",
+          "span")
 
 
 @dataclass(frozen=True)
@@ -245,8 +252,11 @@ class FixRecord:
     RULE fix and None for a TIER1 fix (it has neither); a TIER1 fix is
     always the agent's, since remedies apply only to rule violations. `base`
     is the commit the violation was found at, which with the fingerprint
-    identifies it over time. ValueError for any other shape: a record the
-    reader would skip must not be written."""
+    identifies it over time. `span` is a TIER1 fix's (line, end_line) at
+    `base`, both 1-based and inclusive (curamoir.tier1): its identity in
+    place of a fingerprint. None for a RULE fix. A list is accepted (the
+    ledger's JSON) and kept as a tuple. ValueError for any other shape: a
+    record the reader would skip must not be written."""
 
     principle_id: str
     rule_id: Optional[str]
@@ -255,6 +265,7 @@ class FixRecord:
     fingerprint: Optional[str]
     fixed_by: str
     base: str
+    span: Optional[tuple] = None
 
     def __post_init__(self):
         for name in ("principle_id", "path", "base"):
@@ -269,11 +280,22 @@ class FixRecord:
         if self.source == TIER1 and (self.rule_id is not None or self.fingerprint is not None
                                      or self.fixed_by != AGENT):
             raise ValueError("a tier-1 fix has no rule_id or fingerprint, and is the agent's")
+        if self.source == RULE and self.span is not None:
+            raise ValueError("a rule fix is identified by its fingerprint, and has no span")
+        if self.source == TIER1:
+            span = self.span
+            if not (isinstance(span, (list, tuple)) and len(span) == 2
+                    and all(isinstance(n, int) and not isinstance(n, bool) for n in span)
+                    and 1 <= span[0] <= span[1]):
+                raise ValueError("a tier-1 fix names its span: [line, end_line], whole "
+                                 "numbers with 1 <= line <= end_line")
+            object.__setattr__(self, "span", (span[0], span[1]))
 
     def as_dict(self):
         return {"principle_id": self.principle_id, "rule_id": self.rule_id,
                 "source": self.source, "path": self.path, "fingerprint": self.fingerprint,
-                "fixed_by": self.fixed_by, "base": self.base}
+                "fixed_by": self.fixed_by, "base": self.base,
+                "span": None if self.span is None else list(self.span)}
 
 
 # --- the writer ------------------------------------------------------------------------
@@ -310,9 +332,9 @@ def record_fixes(sandbox, gate, remedies, **lint_options):
     remedies' RemedyResult; `lint_options` go to the re-lint and should be
     the ones lint_sandbox was given (the same `timeout`: the re-lint is a
     full lint). Empty, and no lint run, when the gate kept nothing. Tier-1
-    records (TIER1) are not found here: cm-fkd.2 builds them and the runner
-    passes them to ledger_fields beside these. Raises as relint, so a
-    re-lint that fails is a refusal, never zero fixes."""
+    records (TIER1) are not found here: tier1.record_tier1_fixes builds
+    them and the runner passes them to ledger_fields beside these. Raises
+    as relint, so a re-lint that fails is a refusal, never zero fixes."""
     if not gate.paths_for_pr:
         return ()
     after = relint(sandbox, gate, **lint_options)
@@ -574,7 +596,8 @@ def fix_counts(entries, *, now, window_days, principle=None):
     datetime the window can be computed around.
 
     Dedupe: the same (principle, rule, path, fingerprint) repeated within
-    one line counts once (one sweep fixes a violation once). Across lines it
+    one line, or for a tier-1 fix the same (principle, path, span), counts
+    once (one sweep fixes a violation once). Across lines it
     is NOT deduped: fixed, reintroduced and fixed again is two fixes, and
     that recurrence is the signal the ladder promotes on. A line seen twice
     (the same `run_id`, which a merge of the ledger can duplicate) counts
@@ -617,10 +640,9 @@ def fix_counts(entries, *, now, window_days, principle=None):
             runs.add(run_id)
         seen = set()
         for principle_id, identity in countable:
-            if identity is not None:
-                if identity in seen:
-                    continue
-                seen.add(identity)
+            if identity in seen:
+                continue
+            seen.add(identity)
             if principle is None or principle_id == principle:
                 counts[principle_id] = counts.get(principle_id, 0) + 1
     return dict(sorted(counts.items()))
@@ -632,9 +654,13 @@ def _successful_sweep(entry):
 
 
 def _countable(item):
-    """(principle id, identity or None) for a record FixRecord would accept,
-    else None. The identity, a rule fix's (principle, rule, path,
-    fingerprint), is what dedupes within a line; a tier-1 fix has none."""
+    """(principle id, identity) for a record FixRecord would accept, else
+    None. The identity is what dedupes within a line: a rule fix's
+    (principle, rule, path, fingerprint), a tier-1 fix's (principle,
+    "tier1", path, line, end_line). WHY the span suffices for tier 1: the
+    dedupe is within one line, whose records are all of one base, so base
+    line numbers name one place; curamoir.tier1 also refuses overlapping
+    findings at intake, so this is the backstop, not the rule."""
     if not isinstance(item, dict):
         return None
     try:
@@ -644,7 +670,7 @@ def _countable(item):
     if record.source == RULE:
         return record.principle_id, (record.principle_id, record.rule_id, record.path,
                                      record.fingerprint)
-    return record.principle_id, None
+    return record.principle_id, (record.principle_id, TIER1, record.path, *record.span)
 
 
 def _text(value):

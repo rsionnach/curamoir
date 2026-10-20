@@ -101,31 +101,38 @@ class WorkList:
     docstring), and the report they came from (for its notes, tools and
     rules_checked, which the ledger line and PR body will want)."""
 
-    #: Lint violations only for now; cm-fkd.2 (E3-R1b) will widen this to
-    #: include tier-1 findings, which are not ReportedViolations. A string, so
-    #: 3.9 never evaluates `tuple[...]` (dataclasses only read it).
+    #: The lint's violations. A string, so 3.9 never evaluates `tuple[...]`
+    #: (dataclasses only read it).
     items: "tuple[ReportedViolation, ...]"
     report: LintReport
+    #: The tier-1 findings (E3-R1b, curamoir.tier1.Tier1Finding) the scan
+    #: reported and the runner accepted, in (path, line) order: violations of
+    #: principles with no rule yet. Never mixed into `items`, which are the
+    #: lint's alone (they have no rule id or fingerprint). Empty from
+    #: work_list(), which is deterministic; the runner installs them with
+    #: dataclasses.replace after the scan (tier1.with_findings).
+    tier1: tuple = ()
 
     @property
     def outcome(self):
-        """WORK or NO_WORK. This is the lint's half only: E3-R7's `no_work`
-        also needs tier 1 (E3-R1b, cm-fkd.2) to have found nothing."""
-        return WORK if self.items else NO_WORK
+        """WORK or NO_WORK: NO_WORK only when neither the lint nor the tier-1
+        scan found anything (E3-R7's `no_work`)."""
+        return WORK if self.items or self.tier1 else NO_WORK
 
     @property
     def principle_ids(self):
-        """The principles with work, sorted."""
-        return tuple(sorted({item.principle_id for item in self.items}))
+        """The principles with work, lint and tier 1, sorted."""
+        return tuple(sorted({item.principle_id for item in self.items + tuple(self.tier1)}))
 
     @property
     def paths(self):
-        """Every file with a violation, sorted: E3-R2's "only files with
-        violations" is this set."""
-        return tuple(sorted({item.path for item in self.items}))
+        """Every file with a violation or a tier-1 finding, sorted: E3-R2's
+        "only files with violations" is this set."""
+        return tuple(sorted({item.path for item in self.items + tuple(self.tier1)}))
 
     def by_principle(self):
-        """principle id -> its items, in work-list order."""
+        """principle id -> its lint items, in work-list order. Lint only:
+        tier-1 findings are in `tier1`, and the document lists them apart."""
         grouped = OrderedDict()
         for item in self.items:
             grouped.setdefault(item.principle_id, []).append(item)
@@ -254,7 +261,12 @@ def work_list_document(result):
         })
     return {
         "outcome": result.outcome,
+        # The lint's violations only; the tier-1 findings are `tier1`.
         "count": len(result.items),
+        # Tier-1 findings (E3-R1b) are not the lint's: they have no rule id
+        # or fingerprint, and each carries the `id` the fix agent replies with.
+        # Empty here unless the runner's scan installed some.
+        "tier1": [finding.as_dict() for finding in result.tier1],
         "fail_on": result.report.fail_on,
         "rules_checked": list(result.report.rules_checked),
         # Kinds only, each once in first-seen order: the skill reports which

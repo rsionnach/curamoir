@@ -208,13 +208,30 @@ def test_a_vanished_violation_outside_the_kept_paths_is_not_a_fix():
 
 
 def test_a_fix_record_holds_its_source_to_its_shape():
-    FixRecord("p", None, TIER1, "src/a.py", None, AGENT, "b" * 40)
+    FixRecord("p", None, TIER1, "src/a.py", None, AGENT, "b" * 40, span=(3, 4))
     with pytest.raises(ValueError):
         FixRecord("p", None, RULE, "src/a.py", None, AGENT, "b" * 40)
     with pytest.raises(ValueError):
-        FixRecord("p", "r", TIER1, "src/a.py", "f", AGENT, "b" * 40)
+        FixRecord("p", "r", TIER1, "src/a.py", "f", AGENT, "b" * 40, span=(3, 4))
     with pytest.raises(ValueError):
-        FixRecord("p", None, TIER1, "src/a.py", None, REMEDY, "b" * 40)
+        FixRecord("p", None, TIER1, "src/a.py", None, REMEDY, "b" * 40, span=(3, 4))
+    with pytest.raises(ValueError):
+        FixRecord("p", "r", RULE, "src/a.py", "f", AGENT, "b" * 40, span=(3, 4))
+
+
+@pytest.mark.parametrize("span", [None, (), (3,), (0, 1), (4, 3), (1.0, 2), (True, 2),
+                                  ("1", "2"), (1, 2, 3)])
+def test_a_tier1_fix_record_names_a_well_formed_span(span):
+    """A tier-1 fix's span is its identity (curamoir.tier1): one the reader
+    could not dedupe on must not be written."""
+    with pytest.raises(ValueError, match="span"):
+        FixRecord("p", None, TIER1, "src/a.py", None, AGENT, "b" * 40, span=span)
+
+
+def test_a_tier1_span_from_json_is_kept_as_a_tuple_and_written_as_a_list():
+    record = FixRecord("p", None, TIER1, "src/a.py", None, AGENT, "b" * 40, span=[3, 4])
+    assert record.span == (3, 4)
+    assert record.as_dict()["span"] == [3, 4]
     with pytest.raises(ValueError):
         FixRecord("", "r", RULE, "src/a.py", "f", AGENT, "b" * 40)
     with pytest.raises(ValueError):
@@ -238,7 +255,7 @@ def test_the_sweep_line_carries_the_records_the_summary_and_the_found_delta(tmp_
     assert line["fixes"][0] == {
         "principle_id": "errors-carry-context", "rule_id": "no-unchained-raise",
         "source": "rule", "path": HANDLERS, "fingerprint": records[0].fingerprint,
-        "fixed_by": "agent", "base": base}
+        "fixed_by": "agent", "base": base, "span": None}
     assert line["fix_summary"] == {"errors-carry-context": 1,
                                    "no-file-variant-proliferation": 1,
                                    "structured-logging": 1}
@@ -261,7 +278,7 @@ def test_the_sweep_line_carries_the_records_the_summary_and_the_found_delta(tmp_
 
 def test_ledger_fields_refuse_records_from_another_base():
     delta = found_delta(None, synthetic_found({"r": ["f"]}, base="b" * 40))
-    other = FixRecord("p", None, TIER1, "src/a.py", None, AGENT, "c" * 40)
+    other = FixRecord("p", None, TIER1, "src/a.py", None, AGENT, "c" * 40, span=(1, 1))
     with pytest.raises(ValueError, match="base"):
         ledger_fields([other], delta)
 
@@ -511,9 +528,10 @@ def rule_fix(principle, fingerprint, rule_id="r", path="src/a.py"):
             "fingerprint": fingerprint, "fixed_by": "agent", "base": "b" * 40}
 
 
-def tier1_fix(principle, path="src/a.py"):
+def tier1_fix(principle, path="src/a.py", span=(1, 1)):
     return {"principle_id": principle, "rule_id": None, "source": "tier1",
-            "path": path, "fingerprint": None, "fixed_by": "agent", "base": "b" * 40}
+            "path": path, "fingerprint": None, "fixed_by": "agent", "base": "b" * 40,
+            "span": list(span)}
 
 
 _RUN = iter(range(10 ** 6))
@@ -541,8 +559,26 @@ def test_three_structured_logging_fixes_in_30_days_reach_the_default_threshold()
 
 
 def test_rule_and_tier1_fixes_count_the_same():
-    entries = [sweep_line(1, [rule_fix("p", "f1"), tier1_fix("p"), tier1_fix("p")])]
+    entries = [sweep_line(1, [rule_fix("p", "f1"), tier1_fix("p", span=(3, 4)),
+                              tier1_fix("p", span=(9, 9))])]
     assert fix_counts(entries, now=NOW, window_days=90) == {"p": 3}
+
+
+def test_one_tier1_finding_reported_twice_in_a_line_is_one_fix():
+    """The tier-1 identity (principle, path, span) dedupes within a line,
+    as a fingerprint does for a rule fix; across lines it is a recurrence."""
+    twice = [tier1_fix("p", span=(3, 4)), tier1_fix("p", span=(3, 4))]
+    assert fix_counts([sweep_line(1, twice)], now=NOW, window_days=90) == {"p": 1}
+    assert fix_counts([sweep_line(1, [tier1_fix("p", "src/b.py", (3, 4)), *twice])],
+                      now=NOW, window_days=90) == {"p": 2}
+    assert fix_counts([sweep_line(1, twice), sweep_line(2, twice)],
+                      now=NOW, window_days=90) == {"p": 2}
+
+
+def test_a_tier1_record_without_a_span_is_skipped():
+    spanless = {k: v for k, v in tier1_fix("p").items() if k != "span"}
+    assert fix_counts([sweep_line(1, [spanless, {**tier1_fix("p"), "span": None}])],
+                      now=NOW, window_days=90) == {}
 
 
 def test_fixes_older_than_the_window_are_not_counted():

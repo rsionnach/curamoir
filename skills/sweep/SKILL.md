@@ -103,8 +103,10 @@ location) and change nothing. A fix made here would reach no review step.
 
 Each is its own requirement, and none is done by this skill yet:
 
-- Tier-1 findings for principles with no rule (E3-R1b, cm-fkd.2), each tagged
-  with its principle id. `no_work` means no lint work AND no tier-1 findings.
+- Tier-1 findings for principles with no rule (E3-R1b). The scheduled sweep
+  scans for them itself (`src/curamoir/tier1.py`) before its fix step; this
+  skill does not scan, so the work list's `tier1` array is always empty here.
+  `no_work` means no lint work AND no tier-1 findings.
 - The project's test command before any PR, and no red PR (E3-R4, cm-fkd.5).
 - Exactly one PR, capped at `sweep.max_files_per_pr`, on `curamoir/sweep-<date>`,
   listing every fix with its principle id (E3-R3, cm-fkd.4).

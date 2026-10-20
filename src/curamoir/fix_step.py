@@ -191,6 +191,11 @@ DEFAULT_TIMEOUT = 1800
 #: The fix agent's whole toolset (the module docstring cites the docs).
 FIX_TOOLS = ("Read", "Grep", "Glob", "Edit")
 
+#: The tools Claude Code checks file permission rules for ("checks file
+#: permissions against `Edit(path)` and `Read(path)` rules only"): the
+#: tools the allow and deny rules name.
+_RULE_TOOLS = ("Read", "Edit")
+
 
 def fix_prompt(result, principles):
     """The fix step's prompt for `result` (a sweep.WorkList with work) and
@@ -215,9 +220,27 @@ def fix_prompt(result, principles):
         "principle's whole corrected example, not text to paste. Nothing off this "
         "list is yours to fix.\n\n"
         "```json\n" + document + "\n```\n\n"
-        "When you are done, reply with one line per violation: its fingerprint, "
-        "then `fixed` or `skipped`, and for a skipped one the reason.\n"
+        + (_TIER1_SECTION if result.tier1 else "")
+        + "When you are done, reply with one line per violation: its fingerprint, "
+        "then `fixed` or `skipped`, and for a skipped one the reason."
+        + (" Then one line per tier-1 finding: its `id`, then `fixed` or `skipped`, "
+           "and for a skipped one the reason." if result.tier1 else "")
+        + "\n"
     )
+
+
+#: What the fix prompt says about tier-1 findings (E3-R1b, curamoir.tier1),
+#: only when there are some.
+_TIER1_SECTION = (
+    "The work list's `tier1` entries are tier-1 findings: violations of a "
+    "principle that has no lint rule yet, found by an earlier read of this "
+    "repository. Each names a principle, a file and a span of whole lines "
+    "(`line` to `end_line`, both included). Fix one only within its span, under "
+    "the same limits as a lint violation, and only if it really violates its "
+    "principle; otherwise skip it and say why. A tier-1 finding never permits a "
+    "signature change, whatever its principle says. A tier-1 fix is credited "
+    "only if you report it `fixed` and your change touches its span.\n\n"
+)
 
 
 #: The gitignore metacharacters a repo path may contain that would make a rule
@@ -227,7 +250,7 @@ def fix_prompt(result, principles):
 _GITIGNORE_SPECIAL = "\\*?["
 
 
-def repo_rules(repo):
+def repo_rules(repo, tools=_RULE_TOOLS):
     """The fix step's allow rules: Read and Edit under `repo` and nothing
     else, as `Read(//<abs path>/**)` and `Edit(//<abs path>/**)`.
 
@@ -242,8 +265,10 @@ def repo_rules(repo):
 
     Raises ValueError for a path that cannot be a rule: one with a comma
     (--allowedTools takes one comma-separated value, and the comma would cut
-    the rule in two), a control character, or no absolute POSIX form."""
-    return [f"{tool}(/{root}/**)" for tool in ("Read", "Edit") for root in _rule_roots(repo)]
+    the rule in two), a control character, or no absolute POSIX form.
+    `tools` narrows them: the tier-1 scan (curamoir.tier1) is given Read's
+    alone, so nothing approves an edit at all."""
+    return [f"{tool}(/{root}/**)" for tool in tools for root in _rule_roots(repo)]
 
 
 def repo_deny_rules(repo):
@@ -266,7 +291,7 @@ def repo_deny_rules(repo):
     Code also lists `.git` among its protected paths (same page,
     "bypassPermissions"); these rules do not lean on that. git_guard's
     snapshot (snapshot_git_state) is the check in code behind them."""
-    return [f"{tool}(/{root}/{tail})" for tool in ("Read", "Edit")
+    return [f"{tool}(/{root}/{tail})" for tool in _RULE_TOOLS
             for root in _rule_roots(repo) for tail in (".git", ".git/**")]
 
 
@@ -287,16 +312,22 @@ def _rule_roots(repo):
             for root in roots]
 
 
-def fix_step_argv(prompt, model, repo, max_turns=DEFAULT_MAX_TURNS, claude="claude"):
+def fix_step_argv(prompt, model, repo, max_turns=DEFAULT_MAX_TURNS, claude="claude",
+                  tools=FIX_TOOLS):
     """The `claude -p` command line for the fix step in `repo`. The prompt
     sits right after `-p`, as in the CLI reference's examples, and each
     list-valued flag takes one comma-separated value, so no flag can swallow
-    the prompt. Raises ValueError as repo_rules does."""
+    the prompt. Raises ValueError as repo_rules does.
+
+    `tools` is the whole toolset; the allow rules follow it, so a toolset
+    without Edit (the tier-1 scan's, curamoir.tier1.SCAN_TOOLS) approves no
+    edit either. Every other flag is the same for both calls."""
+    allowed = tuple(tool for tool in _RULE_TOOLS if tool in tools)
     return [
         claude, "-p", prompt,
         "--model", model,
-        "--tools", ",".join(FIX_TOOLS),
-        "--allowedTools", ",".join(repo_rules(repo)),
+        "--tools", ",".join(tools),
+        "--allowedTools", ",".join(repo_rules(repo, allowed)),
         "--disallowedTools", ",".join(["mcp__*", *repo_deny_rules(repo)]),
         "--strict-mcp-config",
         "--restricted",
@@ -334,11 +365,12 @@ class FixStepRun:
 
 
 def run_fix_step(sandbox, prompt, model=None, timeout=DEFAULT_TIMEOUT,
-                 max_turns=DEFAULT_MAX_TURNS, claude="claude"):
+                 max_turns=DEFAULT_MAX_TURNS, claude="claude", tools=FIX_TOOLS):
     """Run the fix step in `sandbox` (a git_guard.Sandbox) and return a
     FixStepRun. `model` defaults to `models.cheap` in the sandbox's config,
     which is the base commit's. `claude` is a seam for tests, which pass a
-    stand-in script: no test calls a model.
+    stand-in script: no test calls a model. `tools` is fix_step_argv's
+    (the tier-1 scan passes its read-only set).
 
     The sandbox is snapshotted (git_guard.snapshot_git_state) before the
     agent starts; fix_scope.verify_fix needs that snapshot. GitGuardError,
@@ -348,7 +380,7 @@ def run_fix_step(sandbox, prompt, model=None, timeout=DEFAULT_TIMEOUT,
     path = str(sandbox.path)
     if model is None:
         model = config_value(path, "models", "cheap")
-    argv = fix_step_argv(prompt, model, path, max_turns=max_turns, claude=claude)
+    argv = fix_step_argv(prompt, model, path, max_turns=max_turns, claude=claude, tools=tools)
     git_state = snapshot_git_state(sandbox)
     environment = scrubbed_environment()
     environment["PWD"] = path

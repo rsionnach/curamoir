@@ -34,7 +34,8 @@ docstring, "The ledger line".
 
 **The decision**, in order:
 
-1. The base's work list is empty: NO_WORK. The open PRs are not asked for;
+1. The base's work list is empty and no tier-1 scan will run (`tier1`,
+   Limits): NO_WORK. The open PRs are not asked for;
    they cannot change the answer.
 2. The open PRs cannot be listed (the callable raises, returns None, or
    returns something outside the listing contract, guards.pr_cap's
@@ -63,6 +64,11 @@ docstring, "The ledger line".
    WORK, with the work list narrowed to it (`Decision.work_list`), which
    the runner installs on the sandbox (Decision.apply_to) before the
    remedies.
+
+With `tier1=True` (the tier-1 scan will run at this base), step 1 does not
+apply and steps 4 and 6 never end the sweep on the lint's account alone:
+the decision is WORK, and Decision.after_tier1 settles it once the scan
+has run (TIER1_FAILED, DUPLICATE_OPEN_PR or NO_WORK, in that order).
 
 **What "the same fixes" is.** By file, not by violation: a violation is
 held when its path is in an open sweep PR's `pr.paths` (the gate's
@@ -172,8 +178,13 @@ changes).
 - Two sweeps deciding at once could each see no open PR and both open
   one. Nothing here prevents that: it depends on the runner's lock
   (cm-x5a.6) admitting one sweep per repository at a time.
-- Tier-1 work items (cm-fkd.2) have a path, so they are held by file like
-  the rest; nothing here depends on their fingerprint.
+- Tier-1 findings (curamoir.tier1) are held by file too, before they
+  exist: the scan may not choose a file in `held_paths`. With the scan to
+  run (`tier1=True`), an empty or wholly held lint list is not yet
+  NO_WORK or DUPLICATE_OPEN_PR; Decision.after_tier1 settles it once the
+  scan has run, and a PR from this same base still ends the sweep before
+  the scan is paid for.
+- Tier 1 and E3-R7: see curamoir.tier1, "Once per base" and "Limits".
 - Open PRs on other `curamoir/` branches (promote, review) are not sweep
   PRs and hold nothing here; the cap still counts them.
 
@@ -190,10 +201,12 @@ from curamoir.guards.pr_cap import DEFAULT_PREFIX, clipped_repr, open_pr_records
 from curamoir.guards.reasons import Reason
 from curamoir.guards.result import Refusal
 from curamoir.sweep import NO_WORK, WORK
+from curamoir.tier1 import FAILED as SCAN_FAILED
 
 __all__ = ["WORK_FIELD", "PR_FIELD", "WORK", "NO_WORK", "DUPLICATE_OPEN_PR", "UNKNOWN",
-           "SWEEP_BRANCH_PREFIX", "GH_FILES_CAP", "Decision", "pr_field", "sweep_prs",
-           "sweep_decision", "sweep_marker", "parse_sweep_marker", "sweep_pr_listing"]
+           "TIER1_FAILED", "SWEEP_BRANCH_PREFIX", "GH_FILES_CAP", "Decision", "pr_field",
+           "sweep_prs", "sweep_decision", "sweep_marker", "parse_sweep_marker",
+           "sweep_pr_listing"]
 
 #: The ledger field that says what kind of sweep line this is (module docstring).
 WORK_FIELD = "work"
@@ -207,6 +220,11 @@ DUPLICATE_OPEN_PR = "duplicate_open_pr"
 #: The open PRs could not be known: a decision kind, never a `work` value
 #: (the line is a refusal, with Reason.IDEMPOTENCE).
 UNKNOWN = "unknown"
+
+#: The tier-1 scan failed and nothing else is left to fix: a decision kind,
+#: never a `work` value (the line is a failure, `work: "work"`). WHY not
+#: NO_WORK: nothing was shown clean (Decision.after_tier1).
+TIER1_FAILED = "tier1_failed"
 
 #: The branches sweep PRs are opened on (E3-R3: `curamoir/sweep-<date>`).
 #: Reserved for cúramóir (module docstring, Limits).
@@ -323,11 +341,14 @@ def sweep_pr_listing(item):
 @dataclass(frozen=True)
 class Decision:
     """What this sweep does (module docstring, "The decision"). `kind` is
-    WORK, NO_WORK, DUPLICATE_OPEN_PR or UNKNOWN; `message` the line's
+    WORK, NO_WORK, DUPLICATE_OPEN_PR, UNKNOWN, or TIER1_FAILED (only from
+    after_tier1); `message` the line's
     summary (or the refusal's message); `base` the commit decided for;
     `work_list` the narrowed sweep.WorkList for WORK, else None; `open_prs`
     the open sweep PRs' records considered, by PR number; `held` the
-    violations left to them, in work-list order."""
+    violations left to them, in work-list order; `held_paths` every file an
+    open sweep PR changes, sorted, which the tier-1 scan may not choose
+    (curamoir.tier1.scan_candidates)."""
 
     kind: str
     message: str
@@ -335,6 +356,7 @@ class Decision:
     work_list: object = None
     open_prs: tuple = ()
     held: tuple = ()
+    held_paths: tuple = ()
 
     @property
     def terminal(self):
@@ -346,13 +368,14 @@ class Decision:
         """Keyword fields for the sweep's line: `work` always;
         `open_sweep_prs` ([{number, branch, url}]) and `held_for_open_prs`
         (int) once the open PRs were listed. For WORK they go on the line
-        the runner writes later, beside `pr`. ValueError for UNKNOWN, which
-        is a refusal and carries none."""
+        the runner writes later, beside `pr`. TIER1_FAILED is written as
+        `work: "work"` (it is a decision kind, not a `work` value).
+        ValueError for UNKNOWN, which is a refusal and carries none."""
         if self.kind == UNKNOWN:
             raise ValueError("an unknown decision is a refusal; it has no work fields")
         if self.kind == NO_WORK:
             return {WORK_FIELD: NO_WORK}
-        return {WORK_FIELD: self.kind,
+        return {WORK_FIELD: WORK if self.kind == TIER1_FAILED else self.kind,
                 "open_sweep_prs": [{name: pr[name] for name in ("number", "branch", "url")}
                                    for pr in self.open_prs],
                 "held_for_open_prs": len(self.held)}
@@ -363,19 +386,60 @@ class Decision:
             raise ValueError(f"a {self.kind} decision is not a refusal")
         return Refusal(reason=Reason.IDEMPOTENCE, message=self.message)
 
-    def record(self, run, found_delta):
+    def record(self, run, found_delta, **extra):
         """Write a terminal decision's line on `run` (a JobRun): a refusal
         for UNKNOWN (no `found_delta`, as every refusal, and the runner
-        writes no snapshot), else `run.succeeded` with ledger_fields and
-        `found_delta` (fix_scope's step 2; the runner then writes the
-        snapshot, step 2a). ValueError for WORK, whose line is the runner's
-        once it knows what came of the work."""
+        writes no snapshot); `run.failed` for TIER1_FAILED; else
+        `run.succeeded`; the last two with ledger_fields, `found_delta` and
+        `extra` (fix_scope's step 2; the runner then writes the snapshot,
+        step 2a). `extra` carries the tier-1 field (fix_scope, "The tier1
+        field"); a refusal carries no work fields, so not `extra` either.
+        ValueError for WORK, whose line is the runner's once it knows what
+        came of the work."""
         if self.kind == WORK:
             raise ValueError("a work decision is not terminal; the runner records its line")
         if self.kind == UNKNOWN:
             run.refused(self.refusal())
+        elif self.kind == TIER1_FAILED:
+            run.failed(self.message, **self.ledger_fields(), found_delta=found_delta,
+                       **extra)
         else:
-            run.succeeded(self.message, **self.ledger_fields(), found_delta=found_delta)
+            run.succeeded(self.message, **self.ledger_fields(), found_delta=found_delta,
+                          **extra)
+
+    def after_tier1(self, work, scan):
+        """The decision once the tier-1 scan has run, for a WORK decision
+        made with `tier1=True`: `work` is the sandbox's work list with the
+        accepted findings installed (curamoir.tier1.with_findings), `scan`
+        the scan's Tier1Scan. Itself while there is anything to fix; else
+        terminal, checked in this order:
+
+        1. TIER1_FAILED when the scan failed: nothing was shown clean, so
+           the line is a failure (`record` writes it), never `no_work`;
+        2. DUPLICATE_OPEN_PR when the lint's work was all held for open
+           sweep PRs;
+        3. NO_WORK: neither the lint nor the scan found anything (E3-R7's
+           `no_work`).
+
+        ValueError for any other kind."""
+        if self.kind != WORK:
+            raise ValueError(f"a {self.kind} decision did not wait for the tier-1 scan")
+        if work.items or work.tier1:
+            return self
+        if scan.status == SCAN_FAILED:
+            return dataclasses.replace(
+                self, kind=TIER1_FAILED, work_list=None,
+                message=f"{scan.reason}; the lint left nothing else to fix, so nothing "
+                        "was shown clean at this base")
+        if self.held:
+            return dataclasses.replace(
+                self, kind=DUPLICATE_OPEN_PR, work_list=None,
+                message="no new PR: every file with lint work is already in open "
+                + _names(self.open_prs) + ", and the tier-1 scan found nothing else")
+        return dataclasses.replace(
+            self, kind=NO_WORK, work_list=None,
+            message="no work: neither the lint nor the tier-1 scan found anything to fix "
+                    "at this base")
 
     def apply_to(self, sandbox):
         """Install the narrowed work list on `sandbox` (fix_scope's slot,
@@ -394,14 +458,21 @@ class Decision:
 
 
 def sweep_decision(work, base, entries, open_sweep_prs,
-                   branch_prefix=SWEEP_BRANCH_PREFIX):
+                   branch_prefix=SWEEP_BRANCH_PREFIX, tier1=False):
     """The Decision for a sweep whose base `base` linted to `work` (a
     sweep.WorkList, the sandbox's, before any remedy). `entries` are the
     ledger's (Ledger.entries()); `open_sweep_prs` is the open-PR callable
     the open-PR cap is given (guards.pr_cap's listing contract: branch names
     or records), called at most once and only when there is work. The rules:
-    the module docstring."""
-    if not work.items:
+    the module docstring.
+
+    `tier1` is True when the tier-1 scan will run at this base
+    (curamoir.tier1.plan_scan): the lint's work is then not all the work
+    there may be, so an empty or wholly held lint list is WORK (with the
+    narrowed list, possibly empty), not terminal, and the runner settles it
+    after the scan with Decision.after_tier1. A PR already opened from this
+    base is DUPLICATE_OPEN_PR either way, before any scan is paid for."""
+    if not work.items and not tier1:
         return Decision(NO_WORK, "no work: the lint found nothing to fix at this base", base)
     try:
         records = open_pr_records(open_sweep_prs())
@@ -442,13 +513,15 @@ def sweep_decision(work, base, entries, open_sweep_prs,
     held_paths = {path for pr in open_prs for path in pr["paths"]}
     held = tuple(item for item in work.items if item.path in held_paths)
     remaining = tuple(item for item in work.items if item.path not in held_paths)
-    if not remaining:
+    if not remaining and not tier1:
         return Decision(DUPLICATE_OPEN_PR, "no new PR: every file with work is already in "
-                        "open " + _names(open_prs), base, open_prs=open_prs, held=held)
+                        "open " + _names(open_prs), base, open_prs=open_prs, held=held,
+                        held_paths=tuple(sorted(held_paths)))
     message = (f"{len(remaining)} violation(s) to fix"
-               + (f"; {len(held)} held for open {_names(open_prs)}" if held else ""))
+               + (f"; {len(held)} held for open {_names(open_prs)}" if held else "")
+               + ("; the tier-1 scan runs next" if tier1 else ""))
     return Decision(WORK, message, base, work_list=dataclasses.replace(work, items=remaining),
-                    open_prs=open_prs, held=held)
+                    open_prs=open_prs, held=held, held_paths=tuple(sorted(held_paths)))
 
 
 def _unknown(why):
