@@ -32,18 +32,52 @@ Two layers, so the rules can be tested without git:
 
 **What the runner (cm-fkd.4) must do.**
 
-0. Wrap the whole pipeline, steps 1 to 10, in the guards (E3-R6):
-   `job_guard.run_guarded(repo, "sweep", open_sweep_prs, body)`, where
-   `body(run)` is everything below and records its outcome on `run`, the
-   `JobRun` writing to the repo's own ledger (use `run`, not a ledger of
-   your own, for every line below). A refusal (`paused`, `locked`,
-   `budget`, `pr_cap`, `guard_error`) then writes the job's one `job`
-   line, beside the gateway's `guard` line, before any clone, fix step or
-   spend. `open_sweep_prs` is the same callable as step 2b's, and it must
-   time out and raise: a hang the scheduler then kills writes no line at
-   all. `DefaultBranchGuard` is not among those guards: apply it at
-   push/PR time, on the `curamoir/sweep-...` branch (job_guard's
-   docstring).
+0. Wrap the whole pipeline, steps 1 to 10, in the guards (E3-R6), in four
+   parts:
+   (i) The wrap: `job_guard.run_guarded(repo, "sweep", open_sweep_prs,
+       body, repo_labels=repo_labels)`, where `body(run)` is everything
+       below and records its outcome on `run`, the `JobRun` writing to the
+       repo's own ledger. Use `run`, not a ledger of your own, for every
+       line below, and read history as `run.ledger.entries()`, the same
+       ledger. A refusal (`paused`, `locked`, `budget`, `pr_cap`,
+       `guard_error`) then writes the job's one `job` line, beside the
+       gateway's `guard` line, before any clone, fix step or spend.
+       `DefaultBranchGuard` is not among those guards: apply it at push/PR
+       time, on the `curamoir/sweep-...` branch (job_guard's docstring).
+   (ii) `repo_labels`: the `gh`-backed callable returning the repository's
+       labels, for the `curamoir:paused` kill switch (guards.kill_switch),
+       as an iterable of label-name strings (not gh's `{name: ...}`
+       objects; any other shape degrades the check). Like (iii)'s, it must
+       time out and raise: a raise degrades the check (a degraded `guard`
+       line, and the job still runs), but a hang the scheduler then kills
+       writes no line at all.
+   (iii) `open_sweep_prs`: the same callable as step 2b's, and it must time
+       out and raise, because a hang the scheduler then kills writes no
+       line at all. It is called twice per sweep, once by the cap here and
+       once by step 2b's decision, so it must not cache across the two:
+       the second call must see what was opened or closed in between.
+   (iv) The result. Nothing in the repository yet fixes a job's exit codes
+       (lint's EXIT_CLEAN, EXIT_VIOLATIONS and EXIT_ERROR, documented in
+       docs/curamoir-lint.md, are the lint gate's, not a job's, and
+       cli.py has no convention of its own), so the codes are cm-fkd.4's
+       to choose. What
+       they must tell apart is the returned job_guard.GuardedRun:
+       - `outcome` "success": the body recorded a success (a sweep, or a
+         terminal NO_WORK or DUPLICATE_OPEN_PR decision); `value` is what
+         `body` returned.
+       - `outcome` "refused": a guard or the body refused; `reason` is the
+         refusal's Reason (`pr_cap`, `budget`, `idempotence`, ...).
+       - `outcome` "failure": the body recorded a failure.
+       - `outcome` "unknown": the body returned without recording an
+         outcome, which is a bug in the runner, not a success.
+       - `outcome` `job_guard.UNUSABLE_ROOT`: the repo root could not be
+         inspected, so the job did not run and no line was written (the
+         reason is on stderr). A ledger write that fails is NOT this: the
+         outcome is still the one the body recorded, and JobRun reports
+         the failed write on stderr.
+       A body that raises does not return a GuardedRun at all: JobRun
+       writes a `failure` line and the exception propagates out of
+       run_guarded, for the runner to report as a crash.
 1. Make a sandbox: `git_guard.prepare_sandbox(repo, base_ref)`, and use it
    as a context manager so it is removed whatever happens.
 2. Lint it before anything edits it: `lint_sandbox(sandbox)`, which records
@@ -71,9 +105,9 @@ Two layers, so the rules can be tested without git:
    step 3 (the remedies are fixes too, and nothing has edited the sandbox
    yet), in four sub-steps:
    (i) Plan tier 1 (E3-R1b, curamoir.tier1) on the still-pristine
-       sandbox: `plan = tier1.plan_scan(sandbox, ledger.entries())`.
+       sandbox: `plan = tier1.plan_scan(sandbox, run.ledger.entries())`.
    (ii) Decide: `decision = idempotence.sweep_decision(
-       sandbox.work_list, sandbox.base, ledger.entries(), open_sweep_prs,
+       sandbox.work_list, sandbox.base, run.ledger.entries(), open_sweep_prs,
        tier1=plan.will_scan)`. cm-fkd.4 supplies `open_sweep_prs`, the
        `gh`-backed callable (`gh pr list --state open --json
        headRefName,number,url,body,files,isCrossRepository`, each item
@@ -97,7 +131,7 @@ Two layers, so the rules can be tested without git:
        whatever its outcome.
 2c. Tier 1 (E3-R1b), only when `plan.will_scan`, still before anything
    edits the sandbox. First scan: `scan = tier1.run_tier1_scan(sandbox,
-   plan, decision.held_paths, ledger.entries())`, which runs the read-only
+   plan, decision.held_paths, run.ledger.entries())`, which runs the read-only
    scan call on `models.cheap` (bounded by tier1.SCAN_MAX_TURNS, inside
    the run's one `per_run_ceiling_usd` estimate) and returns the findings
    it accepted; its tier1.ScanRefused (a ScopeCheckError: the scan changed

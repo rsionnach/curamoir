@@ -97,3 +97,52 @@ def test_guard_events_and_the_job_line_are_separable(tmp_path):
     entries = ledger.entries()
     assert [e["kind"] for e in entries] == ["guard", "job"]
     assert len(job_lines(ledger)) == 1
+
+
+def test_the_ledger_is_readable_from_the_run_and_cannot_be_replaced(tmp_path):
+    """A job reads its history through the run (fix_scope step 2b), from the
+    ledger its own line goes to; it cannot point the run somewhere else."""
+    ledger = Ledger(tmp_path / "ledger.jsonl")
+
+    with JobRun(ledger, job="sweep") as run:
+        assert run.ledger is ledger
+        with pytest.raises(AttributeError):
+            run.ledger = Ledger(tmp_path / "elsewhere.jsonl")
+        run.succeeded()
+
+    assert len(job_lines(ledger)) == 1
+
+
+@pytest.mark.parametrize("finish", [
+    lambda run: run.succeeded("swept after all"),
+    lambda run: run.failed("clone failed"),
+])
+def test_a_later_outcome_clears_the_reason_an_earlier_refusal_recorded(tmp_path, finish):
+    """The line carries the outcome last recorded, and a reason only when that
+    outcome is a refusal: `success` with reason `budget` would contradict
+    itself in the brief."""
+    ledger = Ledger(tmp_path / "ledger.jsonl")
+
+    with JobRun(ledger, job="sweep") as run:
+        run.refused(Refusal(Reason.BUDGET, "over the ceiling"))
+        finish(run)
+
+    assert run.reason is None
+    assert job_lines(ledger)[0]["reason"] is None
+
+
+def test_a_crash_after_a_refusal_clears_the_reason_it_recorded(tmp_path):
+    """The crash path's own clear: a body that refused and then raised wrote a
+    failure, and a `failure` line carrying reason `budget` would tell the
+    brief the job was refused for its budget when it in fact fell over."""
+    ledger = Ledger(tmp_path / "ledger.jsonl")
+
+    with (pytest.raises(RuntimeError, match="after the refusal"),
+          JobRun(ledger, job="sweep") as run):
+        run.refused(Refusal(Reason.BUDGET, "over the ceiling"))
+        raise RuntimeError("after the refusal")
+
+    [line] = job_lines(ledger)
+    assert line["outcome"] == "failure"
+    assert line["reason"] is None
+    assert run.reason is None

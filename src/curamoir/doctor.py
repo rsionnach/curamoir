@@ -29,6 +29,7 @@ from pathlib import Path
 
 from curamoir.config import ConfigError, load_config_text
 from curamoir.guards.lock import LOCK_PATH
+from curamoir.repo_config import CONFIG_PATH
 from curamoir.rules import AST_GREP_INSTALL
 from curamoir.scaffold import detect_languages, detect_modules
 
@@ -64,7 +65,7 @@ def diagnose(repo, tools=None):
     findings.append(Finding("initialised", "ok", str(base)))
 
     findings.append(_check_pyyaml(tools))
-    findings.append(_check_config(base))
+    findings.append(_check_config(repo))
     findings.append(_check_principles(repo))
     findings.append(_check_rules(repo))
     findings.extend(_check_modules(repo))
@@ -123,8 +124,8 @@ def _check_pyyaml(tools):
     )
 
 
-def _check_config(base):
-    path = base / "curamoir.yaml"
+def _check_config(repo):
+    path = Path(repo).joinpath(*CONFIG_PATH)
     if not path.is_file():
         return Finding(
             "config", "error", f"{path} is missing",

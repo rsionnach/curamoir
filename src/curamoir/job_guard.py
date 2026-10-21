@@ -20,8 +20,10 @@ line written anywhere else is spend the next run's ceiling never sees.
 
 **Which guards, in E10-R1's order** (kill switch, lock, budget), then the cap:
 
-- `KillSwitch`: the PAUSE file only. The `curamoir:paused` label needs a
-  `gh` call, which is cm-fkd.4's to supply alongside the open-PR listing.
+- `KillSwitch`: the PAUSE file, and the `curamoir:paused` label when
+  `repo_labels` is given. The label needs a `gh` call, which is cm-fkd.4's
+  to supply alongside the open-PR listing (guards.kill_switch's docstring:
+  a callable that raises degrades the label check, it does not pause).
 - `SupervisorLock`: CHECK ONLY. A live lock refuses; nothing here acquires or
   releases one. Acquisition and release belong to cm-x5a.6 (E0-R2's
   "maintain" half), and until it lands this guard sees only locks a human
@@ -36,13 +38,14 @@ line written anywhere else is spend the next run's ceiling never sees.
   it shares with idempotence.sweep_decision (guards.pr_cap's docstring holds
   the contract).
 
-**The config is read strictly.** No `curamoir.yaml` means the defaults, the
-normal case. One that exists but cannot be loaded (invalid, unreadable, not
-a file) REFUSES, with `guard_error` and the problems named, in place of the
-budget and the cap. WHY not `repo_config.effective_config`, which falls back
-to the defaults: a `monthly_ceiling_usd: 5` beside an unrelated typo would
-then run under the default $15 ceiling, a guard loosened without anybody
-being told (lint's `_configured_threshold` refuses the same thing).
+**The config is read strictly** (`repo_config.strict_config`). No
+`curamoir.yaml` means the defaults, the normal case. One that exists but
+cannot be loaded (invalid, unreadable, not a regular file) REFUSES, with
+`guard_error` and the problems named, in place of the budget and the cap.
+WHY not `repo_config.effective_config`, which falls back to the defaults:
+a `monthly_ceiling_usd: 5` beside an unrelated typo would then run under
+the default $15 ceiling, a guard loosened without anybody being told
+(lint's `_configured_threshold` refuses the same thing).
 
 **Not `DefaultBranchGuard`.** It inspects the CURRENT branch of
 `context.repo`, and the sweep starts from the developer's checkout, which is
@@ -62,10 +65,10 @@ the same spend, and each can overshoot the cap or the ceiling by one run.
 # `curamoir.budget` imports `curamoir.guards.context`, which runs
 # `guards/__init__`, which imports `Budget` back from the half-loaded
 # `curamoir.budget` (cm-g3c). Sorted, this module cannot be imported first.
-import os  # noqa: I001
-import sys
-from copy import deepcopy
+import sys  # noqa: I001
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Any, Optional
 
 from curamoir.guards import (
     Budget,
@@ -79,22 +82,43 @@ from curamoir.guards import (
     unusable_repo,
 )
 from curamoir.budget import PriceTable
-from curamoir.config import DEFAULTS, ConfigError, load_config_text
+from curamoir.config import ConfigError
 from curamoir.job_run import JobRun
 from curamoir.ledger import repo_ledger
+from curamoir.repo_config import strict_config
 
-CONFIG_PATH = (".curamoir", "curamoir.yaml")
+UNUSABLE_ROOT = "unusable_root"
 
 
-def job_gateway(repo, open_pr_listing, *, now=None):
+@dataclass(frozen=True)
+class GuardedRun:
+    """What `run_guarded` did, for the runner to map to an exit code.
+
+    `outcome` is the job line's outcome as JobRun recorded it ("success",
+    "refused", "failure" or "unknown"), or UNUSABLE_ROOT when the repo root
+    could not be inspected, the job did not run and no line was written.
+    `reason` is the refusal's Reason when `outcome` is "refused", whether a
+    guard refused or the body did, else None. `value` is what the body
+    returned, None when it never ran: a Refusal there is the body's own,
+    never a guard's.
+    """
+
+    outcome: str
+    reason: Optional[Reason] = None
+    value: Any = None
+
+
+def job_gateway(repo, open_pr_listing, *, now=None, repo_labels=None):
     """The gateway a job passes before it starts, built from `repo`'s config.
 
     `repo` must be an inspectable root (run_guarded checks it first). Guard
     lines go to the repo's own ledger. `open_pr_listing` is the open-PR
     callable (guards.pr_cap's contract). `now` is the budget's clock,
-    injectable so month attribution is testable.
+    injectable so month attribution is testable. `repo_labels` is the
+    kill switch's label callable (guards.kill_switch); None checks the
+    PAUSE file alone.
     """
-    kill_switch_and_lock = [KillSwitch(), SupervisorLock()]
+    kill_switch_and_lock = [KillSwitch(repo_labels), SupervisorLock()]
     try:
         config = strict_config(repo)
     except ConfigError as invalid:
@@ -123,35 +147,12 @@ def job_gateway(repo, open_pr_listing, *, now=None):
     )
 
 
-def strict_config(repo):
-    """`repo`'s config merged over the defaults; the defaults when there is
-    no config file. ConfigError when there is one that cannot be loaded."""
-    path = Path(repo).joinpath(*CONFIG_PATH)
-    if not os.path.lexists(path):
-        return deepcopy(DEFAULTS)
-    try:
-        text = path.read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError) as unreadable:
-        # A directory, a dangling symlink, bytes that are not UTF-8: something
-        # is there, and whatever limits it was meant to set cannot be read.
-        raise ConfigError([f"{path} cannot be read: {unreadable}"]) from None
-    try:
-        return load_config_text(text)
-    except ConfigError:
-        raise
-    except Exception as error:  # a YAML syntax error is PyYAML's own type
-        # Caught here so it reaches the gateway as a ConfigError, refused
-        # after the kill switch and the lock like any other invalid config,
-        # rather than escaping run_guarded as a failure with no reason.
-        raise ConfigError([f"{path}: not valid YAML: {error}"]) from None
-
-
 def _refuse_invalid_config(invalid):
     def invalid_config(_context):
         return Refusal(
             reason=Reason.GUARD_ERROR,
             message=(
-                "invalid curamoir.yaml: " + "; ".join(invalid.problems)
+                "; ".join(invalid.problems)
                 + ". The budget and the open-PR cap cannot be configured from it, "
                 "so the job does not run. Fix it, or run /curamoir:doctor."
             ),
@@ -160,33 +161,37 @@ def _refuse_invalid_config(invalid):
     return invalid_config
 
 
-def run_guarded(repo, job, open_pr_listing, body, *, now=None):
+def run_guarded(repo, job, open_pr_listing, body, *, now=None, repo_labels=None):
     """Run `body(run)` for `job` behind `job_gateway(repo, ...)`, inside one
-    `JobRun` writing to the repo's own ledger.
+    `JobRun` writing to the repo's own ledger, and return a GuardedRun.
 
-    `body` receives the `JobRun` and reports its own outcome on it. When a
-    guard refuses, `body` is never called and the job line is `refused` with
-    the guard's reason. Returns the refusal, whatever `body` returned, or
-    None when the repo root cannot be inspected. A body may return None too,
-    so a None return does not say the root was unusable; the stderr line
-    below is the signal.
+    `body` receives the `JobRun`, reports its own outcome on it, and reads
+    the ledger's history through `run.ledger`. When a guard refuses, `body`
+    is never called and the job line is `refused` with the guard's reason.
+    `now` is the run's one clock: the budget's month and the job line's
+    `started` and `ended` (the ledger's own `at` stays the wall clock). It
+    must return an aware UTC datetime and must not raise: a raise as the
+    run starts writes no job line, and a naive value is not checked.
+    `repo_labels` is passed to the kill switch (job_gateway).
 
     A repo root that cannot be inspected stops the job here rather than
-    running it: every repo-reading guard would only degrade, and the job
-    would then start with the kill switch, the lock and the ceiling all
-    unchecked. `JobContext`'s docstring makes this the caller's duty. There
-    is no ledger to write to without a root (and writing one would recreate
-    a moved repository's directory), so it is said on stderr.
+    running it (outcome UNUSABLE_ROOT): every repo-reading guard would only
+    degrade, and the job would then start with the kill switch, the lock and
+    the ceiling all unchecked. `JobContext`'s docstring makes this the
+    caller's duty. There is no ledger to write to without a root (and
+    writing one would recreate a moved repository's directory), so it is
+    said on stderr.
     """
     context = JobContext(job=job, repo=None if repo is None else Path(repo))
     unusable = unusable_repo(context)
     if unusable is not None:
         print(f"cúramóir did not run {job!r}: {unusable}, so its guards cannot look "
               "and there is no ledger to record it in.", file=sys.stderr)
-        return None
+        return GuardedRun(outcome=UNUSABLE_ROOT)
 
-    with JobRun(repo_ledger(context.repo), job) as run:
-        gateway = job_gateway(context.repo, open_pr_listing, now=now)
+    with JobRun(repo_ledger(context.repo), job, now=now) as run:
+        gateway = job_gateway(context.repo, open_pr_listing, now=now,
+                              repo_labels=repo_labels)
         body_ran = False
 
         def action():
@@ -194,9 +199,15 @@ def run_guarded(repo, job, open_pr_listing, body, *, now=None):
             body_ran = True
             return body(run)
 
-        outcome = gateway.perform(context, action)
+        performed = gateway.perform(context, action)
         if not body_ran:
             # Decided by whether the body ran, not by the type of what came
             # back: a body may return anything, including a Refusal of its own.
-            run.refused(outcome)
-        return outcome
+            run.refused(performed)
+    # Read after the block: a body that reported nothing is "unknown" only
+    # once JobRun has exited.
+    return GuardedRun(
+        outcome=run.outcome,
+        reason=run.reason if run.outcome == "refused" else None,
+        value=performed if body_ran else None,
+    )

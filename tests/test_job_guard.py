@@ -21,10 +21,13 @@ import subprocess
 import sys
 from datetime import datetime, timezone
 
-from curamoir.config import DEFAULTS
-from curamoir.guards import Reason
+import pytest
+
+from curamoir.config import DEFAULTS, ConfigError
+from curamoir.guards import Reason, Refusal
 from curamoir.idempotence import sweep_marker, sweep_pr_listing
-from curamoir.job_guard import run_guarded
+from curamoir.job_guard import UNUSABLE_ROOT, GuardedRun, run_guarded
+from curamoir.repo_config import strict_config
 
 BASE = "3f9c2a1b7e5d4c6a8b0e1f2d3c4b5a6978877665"
 CHEAP = DEFAULTS["models"]["cheap"]
@@ -81,8 +84,8 @@ class Spy:
 def sweep(harness, open_prs):
     """Run the sweep's entry point over the harness repo with a spy body."""
     body = Spy()
-    outcome = run_guarded(harness.repo, "sweep", open_prs, body, now=october)
-    return outcome, body, harness.ledger()
+    result = run_guarded(harness.repo, "sweep", open_prs, body, now=october)
+    return result, body, harness.ledger()
 
 
 def this_run(ledger):
@@ -98,10 +101,10 @@ def test_three_open_curamoir_prs_refuse_the_sweep_with_reason_pr_cap(harness):
         gh_item(47, "curamoir/sweep-2026-09-28"),
     )
 
-    outcome, body, ledger = sweep(harness, open_prs)
+    result, body, ledger = sweep(harness, open_prs)
 
     assert body.calls == 0
-    assert outcome.reason is Reason.PR_CAP
+    assert (result.outcome, result.reason, result.value) == ("refused", Reason.PR_CAP, None)
     line = this_run(ledger)
     assert (line["outcome"], line["reason"]) == ("refused", "pr_cap")
     assert "curamoir/sweep-2026-09-28" in line["message"]
@@ -110,10 +113,10 @@ def test_three_open_curamoir_prs_refuse_the_sweep_with_reason_pr_cap(harness):
 def test_a_ledger_at_95_percent_of_the_ceiling_refuses_the_sweep_with_reason_budget(harness):
     seed_spend(harness.ledger(), 0.95 * CEILING)
 
-    outcome, body, ledger = sweep(harness, listing())
+    result, body, ledger = sweep(harness, listing())
 
     assert body.calls == 0
-    assert outcome.reason is Reason.BUDGET
+    assert result.reason is Reason.BUDGET
     line = this_run(ledger)
     assert (line["outcome"], line["reason"]) == ("refused", "budget")
     assert f"{0.95 * CEILING:.2f}" in line["message"]
@@ -129,11 +132,11 @@ def test_under_the_cap_and_the_ceiling_the_sweep_runs_from_the_default_branch(ha
         gh_item(44, "curamoir/sweep-2026-09-21"),
     )
 
-    outcome, body, ledger = sweep(harness, open_prs)
+    result, body, ledger = sweep(harness, open_prs)
 
     assert harness.current_branch() == "main"
     assert body.calls == 1
-    assert outcome == "swept"
+    assert (result.outcome, result.value) == ("success", "swept")
     assert this_run(ledger)["outcome"] == "success"
     assert [e for e in ledger.entries() if e["kind"] == "guard"] == []
 
@@ -147,10 +150,10 @@ def test_a_developers_pr_and_a_forks_curamoir_pr_do_not_count_towards_the_cap(ha
         gh_item(46, "curamoir/sweep-2026-09-25", cross_repository=True),
     )
 
-    outcome, body, ledger = sweep(harness, open_prs)
+    result, body, ledger = sweep(harness, open_prs)
 
     assert body.calls == 1
-    assert outcome == "swept"
+    assert (result.outcome, result.value) == ("success", "swept")
     assert this_run(ledger)["outcome"] == "success"
     assert [e for e in ledger.entries() if e["kind"] == "guard"] == []
 
@@ -158,10 +161,10 @@ def test_a_developers_pr_and_a_forks_curamoir_pr_do_not_count_towards_the_cap(ha
 def test_the_configured_cap_is_the_one_enforced(harness):
     harness.write(".curamoir/curamoir.yaml", "version: 1\nsweep:\n  max_open_prs: 1\n")
 
-    outcome, body, ledger = sweep(harness, listing(gh_item(41, "curamoir/sweep-2026-09-14")))
+    result, body, ledger = sweep(harness, listing(gh_item(41, "curamoir/sweep-2026-09-14")))
 
     assert body.calls == 0
-    assert outcome.reason is Reason.PR_CAP
+    assert result.reason is Reason.PR_CAP
     assert this_run(ledger)["reason"] == "pr_cap"
 
 
@@ -171,10 +174,10 @@ def test_the_configured_ceiling_is_the_one_enforced(harness):
     harness.write(".curamoir/curamoir.yaml", "version: 1\nbudget:\n  monthly_ceiling_usd: 5\n")
     seed_spend(harness.ledger(), 4.00)
 
-    outcome, body, ledger = sweep(harness, listing())
+    result, body, ledger = sweep(harness, listing())
 
     assert body.calls == 0
-    assert outcome.reason is Reason.BUDGET
+    assert result.reason is Reason.BUDGET
     assert (this_run(ledger)["outcome"], this_run(ledger)["reason"]) == ("refused", "budget")
 
 
@@ -186,10 +189,10 @@ def test_the_configured_prices_are_the_ones_spend_is_computed_from(harness):
         f"    {CHEAP}: {{input: 2.00, output: {2 * OUTPUT_PRICE:.2f}}}\n"))
     seed_spend(harness.ledger(), 7.00)
 
-    outcome, body, ledger = sweep(harness, listing())
+    result, body, ledger = sweep(harness, listing())
 
     assert body.calls == 0
-    assert outcome.reason is Reason.BUDGET
+    assert result.reason is Reason.BUDGET
     assert this_run(ledger)["reason"] == "budget"
 
 
@@ -197,10 +200,10 @@ def test_on_ceiling_warn_records_a_degraded_budget_check_and_the_sweep_runs(harn
     harness.write(".curamoir/curamoir.yaml", "version: 1\nbudget:\n  on_ceiling: warn\n")
     seed_spend(harness.ledger(), 0.95 * CEILING)
 
-    outcome, body, ledger = sweep(harness, listing())
+    result, body, ledger = sweep(harness, listing())
 
     assert body.calls == 1
-    assert outcome == "swept"
+    assert (result.outcome, result.value) == ("success", "swept")
     guard_lines = [e for e in ledger.entries() if e["kind"] == "guard"]
     assert [(e["reason"], e["severity"]) for e in guard_lines] == [("budget", "degraded")]
 
@@ -210,10 +213,10 @@ def test_the_configured_branch_prefix_is_the_one_counted(harness):
     open_prs = listing(gh_item(41, "bot/sweep-1"), gh_item(44, "bot/sweep-2"),
                        gh_item(47, "bot/sweep-3"))
 
-    outcome, body, ledger = sweep(harness, open_prs)
+    result, body, ledger = sweep(harness, open_prs)
 
     assert body.calls == 0
-    assert outcome.reason is Reason.PR_CAP
+    assert result.reason is Reason.PR_CAP
     assert this_run(ledger)["reason"] == "pr_cap"
 
 
@@ -228,20 +231,20 @@ def test_the_kill_switch_is_checked_before_the_budget_and_the_cap(harness):
         gh_item(47, "curamoir/sweep-2026-09-28"),
     )
 
-    outcome, body, ledger = sweep(harness, open_prs)
+    result, body, ledger = sweep(harness, open_prs)
 
     assert body.calls == 0
-    assert outcome.reason is Reason.PAUSED
+    assert result.reason is Reason.PAUSED
     assert this_run(ledger)["reason"] == "paused"
 
 
 def test_a_pause_file_refuses_the_sweep_with_reason_paused(harness):
     harness.write(".curamoir/PAUSE", "")
 
-    outcome, body, ledger = sweep(harness, listing())
+    result, body, ledger = sweep(harness, listing())
 
     assert body.calls == 0
-    assert outcome.reason is Reason.PAUSED
+    assert result.reason is Reason.PAUSED
     assert (this_run(ledger)["outcome"], this_run(ledger)["reason"]) == ("refused", "paused")
 
 
@@ -252,10 +255,10 @@ def test_a_live_lock_refuses_the_sweep_with_reason_locked(harness):
         "started": datetime.now(timezone.utc).isoformat(),
     }))
 
-    outcome, body, ledger = sweep(harness, listing())
+    result, body, ledger = sweep(harness, listing())
 
     assert body.calls == 0
-    assert outcome.reason is Reason.LOCKED
+    assert result.reason is Reason.LOCKED
     assert (this_run(ledger)["outcome"], this_run(ledger)["reason"]) == ("refused", "locked")
 
 
@@ -265,12 +268,33 @@ def test_open_prs_that_cannot_be_listed_degrade_the_cap_and_the_sweep_runs(harne
     def gh_outage():
         raise OSError("gh: could not resolve host api.github.com")
 
-    outcome, body, ledger = sweep(harness, gh_outage)
+    result, body, ledger = sweep(harness, gh_outage)
 
     assert body.calls == 1
-    assert outcome == "swept"
+    assert (result.outcome, result.value) == ("success", "swept")
     guard_lines = [e for e in ledger.entries() if e["kind"] == "guard"]
     assert [(e["reason"], e["severity"]) for e in guard_lines] == [("pr_cap", "degraded")]
+    assert this_run(ledger)["outcome"] == "success"
+
+
+def test_a_label_source_that_raises_degrades_the_kill_switch_and_the_sweep_runs(harness):
+    """fix_scope step 0 (ii): the label callable must time out and raise.
+    A raise is this: the PAUSE file still checked, a degraded `paused`
+    guard line, and the job runs and writes its line. A hang the scheduler
+    then kills would write nothing at all."""
+    def gh_timeout():
+        raise TimeoutError("gh label list timed out after 30s")
+
+    body = Spy()
+    result = run_guarded(harness.repo, "sweep", listing(), body, now=october,
+                         repo_labels=gh_timeout)
+    ledger = harness.ledger()
+
+    assert body.calls == 1
+    assert (result.outcome, result.value) == ("success", "swept")
+    guard_lines = [e for e in ledger.entries() if e["kind"] == "guard"]
+    assert [(e["reason"], e["severity"]) for e in guard_lines] == [("paused", "degraded")]
+    assert "timed out" in guard_lines[0]["message"]
     assert this_run(ledger)["outcome"] == "success"
 
 
@@ -282,10 +306,10 @@ def test_an_invalid_config_refuses_rather_than_falling_back_to_the_default_ceili
                   "version: 1\nbudget:\n  monthly_ceiling_usd: 5\nsweeep:\n  max_open_prs: 1\n")
     seed_spend(harness.ledger(), 10.00)
 
-    outcome, body, ledger = sweep(harness, listing())
+    result, body, ledger = sweep(harness, listing())
 
     assert body.calls == 0
-    assert outcome.reason is Reason.GUARD_ERROR
+    assert result.reason is Reason.GUARD_ERROR
     line = this_run(ledger)
     assert (line["outcome"], line["reason"]) == ("refused", "guard_error")
     assert "sweeep" in line["message"]
@@ -294,10 +318,10 @@ def test_an_invalid_config_refuses_rather_than_falling_back_to_the_default_ceili
 def test_a_config_that_is_not_valid_yaml_refuses_with_guard_error(harness):
     harness.write(".curamoir/curamoir.yaml", "version: 1\nbudget: [unclosed\n")
 
-    outcome, body, ledger = sweep(harness, listing())
+    result, body, ledger = sweep(harness, listing())
 
     assert body.calls == 0
-    assert outcome.reason is Reason.GUARD_ERROR
+    assert result.reason is Reason.GUARD_ERROR
     line = this_run(ledger)
     assert (line["outcome"], line["reason"]) == ("refused", "guard_error")
     assert "not valid YAML" in line["message"]
@@ -310,20 +334,20 @@ def test_a_paused_repo_with_a_broken_config_is_refused_as_paused(harness):
     harness.write(".curamoir/curamoir.yaml", "version: 1\nbudget: [unclosed\n")
     harness.write(".curamoir/PAUSE", "")
 
-    outcome, body, ledger = sweep(harness, listing())
+    result, body, ledger = sweep(harness, listing())
 
     assert body.calls == 0
-    assert outcome.reason is Reason.PAUSED
+    assert result.reason is Reason.PAUSED
     assert this_run(ledger)["reason"] == "paused"
 
 
 def test_a_config_path_that_is_a_directory_refuses_with_guard_error(harness):
     (harness.repo / ".curamoir" / "curamoir.yaml").mkdir(parents=True)
 
-    outcome, body, ledger = sweep(harness, listing())
+    result, body, ledger = sweep(harness, listing())
 
     assert body.calls == 0
-    assert outcome.reason is Reason.GUARD_ERROR
+    assert result.reason is Reason.GUARD_ERROR
     assert (this_run(ledger)["outcome"], this_run(ledger)["reason"]) == ("refused", "guard_error")
     assert "cannot be read" in this_run(ledger)["message"]
 
@@ -332,10 +356,10 @@ def test_a_config_that_is_a_dangling_symlink_refuses_with_guard_error(harness):
     (harness.repo / ".curamoir").mkdir(exist_ok=True)
     (harness.repo / ".curamoir" / "curamoir.yaml").symlink_to(harness.repo / "gone.yaml")
 
-    outcome, body, ledger = sweep(harness, listing())
+    result, body, ledger = sweep(harness, listing())
 
     assert body.calls == 0
-    assert outcome.reason is Reason.GUARD_ERROR
+    assert result.reason is Reason.GUARD_ERROR
     assert (this_run(ledger)["outcome"], this_run(ledger)["reason"]) == ("refused", "guard_error")
 
 
@@ -343,9 +367,10 @@ def test_a_repo_root_that_cannot_be_inspected_runs_nothing_and_creates_nothing(t
     missing = tmp_path / "moved-away"
     body = Spy()
 
-    outcome = run_guarded(missing, "sweep", listing(), body)
+    result = run_guarded(missing, "sweep", listing(), body)
 
-    assert (outcome, body.calls) == (None, 0)
+    assert result == GuardedRun(outcome=UNUSABLE_ROOT, reason=None, value=None)
+    assert body.calls == 0
     assert not missing.exists()
     assert "moved-away is not a directory" in capsys.readouterr().err
 
@@ -353,10 +378,130 @@ def test_a_repo_root_that_cannot_be_inspected_runs_nothing_and_creates_nothing(t
 def test_a_repo_root_of_none_runs_nothing(capsys):
     body = Spy()
 
-    outcome = run_guarded(None, "sweep", listing(), body)
+    result = run_guarded(None, "sweep", listing(), body)
 
-    assert (outcome, body.calls) == (None, 0)
+    assert result == GuardedRun(outcome=UNUSABLE_ROOT, reason=None, value=None)
+    assert body.calls == 0
     assert "the repo root is unknown" in capsys.readouterr().err
+
+
+def test_a_paused_label_refuses_the_sweep_with_reason_paused(harness):
+    """The label half of the kill switch: cm-fkd.4 supplies the `gh` call."""
+    body = Spy()
+
+    result = run_guarded(harness.repo, "sweep", listing(), body, now=october,
+                         repo_labels=lambda: ["curamoir:paused"])
+
+    assert body.calls == 0
+    assert (result.outcome, result.reason) == ("refused", Reason.PAUSED)
+    line = this_run(harness.ledger())
+    assert (line["outcome"], line["reason"]) == ("refused", "paused")
+    assert "curamoir:paused" in line["message"]
+
+
+def test_the_body_reads_history_from_the_ledger_its_line_is_written_to(harness):
+    """Step 2b's `ledger.entries()` is `run.ledger.entries()`: the repo's own
+    ledger, the one the budget reads and the job line goes to."""
+    seed_spend(harness.ledger(), 1.00)
+    seen = []
+
+    def body(run):
+        seen.extend(run.ledger.entries())
+        run.succeeded("read the history")
+
+    run_guarded(harness.repo, "sweep", listing(), body, now=october)
+
+    assert [entry["run_id"] for entry in seen] == ["a1b2c3d4e5f6"]
+    assert this_run(harness.ledger())["outcome"] == "success"
+
+
+def test_a_config_that_is_a_fifo_refuses_rather_than_hanging(harness):
+    """Opening a FIFO blocks until something writes to it, which unattended
+    is never: the sweep would hang until the scheduler killed it, unrecorded."""
+    (harness.repo / ".curamoir").mkdir(exist_ok=True)
+    os.mkfifo(harness.repo / ".curamoir" / "curamoir.yaml")
+
+    result, body, ledger = sweep(harness, listing())
+
+    assert body.calls == 0
+    assert (result.outcome, result.reason) == ("refused", Reason.GUARD_ERROR)
+    assert "not a regular file" in this_run(ledger)["message"]
+
+
+def test_a_config_whose_bytes_are_not_utf8_refuses_with_guard_error(harness):
+    """A decode failure is a ValueError, not an OSError; it must reach the
+    sweep as a refusal with a reason, not escape run_guarded as a crash."""
+    (harness.repo / ".curamoir").mkdir(exist_ok=True)
+    (harness.repo / ".curamoir" / "curamoir.yaml").write_bytes(b"\xff\xfe")
+
+    result, body, ledger = sweep(harness, listing())
+
+    assert body.calls == 0
+    assert (result.outcome, result.reason) == ("refused", Reason.GUARD_ERROR)
+    assert (this_run(ledger)["outcome"], this_run(ledger)["reason"]) == ("refused", "guard_error")
+    assert "cannot be read" in this_run(ledger)["message"]
+
+
+@pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0,
+                    reason="root reads a directory whatever its mode")
+def test_a_config_symlinked_into_an_unreadable_directory_refuses_with_guard_error(harness):
+    """The link itself is there, so the config is not absent; asking whether
+    its target is a regular file raises EACCES (pathlib re-raises it on
+    3.12), which must still reach the caller as a refusal with a reason."""
+    locked = harness.repo.parent / "locked"
+    locked.mkdir()
+    (locked / "curamoir.yaml").write_text("version: 1\n", encoding="utf-8")
+    (harness.repo / ".curamoir").mkdir(exist_ok=True)
+    (harness.repo / ".curamoir" / "curamoir.yaml").symlink_to(locked / "curamoir.yaml")
+    locked.chmod(0)
+    try:
+        with pytest.raises(ConfigError, match="not a regular file"):
+            strict_config(harness.repo)
+        result, body, ledger = sweep(harness, listing())
+    finally:
+        locked.chmod(0o755)
+
+    assert body.calls == 0
+    assert (result.outcome, result.reason) == ("refused", Reason.GUARD_ERROR)
+    assert (this_run(ledger)["outcome"], this_run(ledger)["reason"]) == ("refused", "guard_error")
+
+
+def test_a_refusal_the_body_returns_is_its_value_not_a_guard_refusal(harness):
+    """A Refusal can come from a guard or from the body; the result says which."""
+    def body(run):
+        refusal = Refusal(reason=Reason.IDEMPOTENCE, message="open sweep PRs unknown")
+        run.refused(refusal)
+        return refusal
+
+    result = run_guarded(harness.repo, "sweep", listing(), body, now=october)
+
+    assert (result.outcome, result.reason) == ("refused", Reason.IDEMPOTENCE)
+    assert result.value == Refusal(reason=Reason.IDEMPOTENCE, message="open sweep PRs unknown")
+
+
+def test_a_body_that_returns_none_is_told_apart_from_an_unusable_root(harness):
+    def body(run):
+        run.succeeded("nothing to return")
+
+    result = run_guarded(harness.repo, "sweep", listing(), body, now=october)
+
+    assert result == GuardedRun(outcome="success", reason=None, value=None)
+
+
+def test_a_body_that_reports_nothing_returns_the_unknown_outcome(harness):
+    result = run_guarded(harness.repo, "sweep", listing(), lambda run: None, now=october)
+
+    assert (result.outcome, result.reason) == ("unknown", None)
+    assert this_run(harness.ledger())["outcome"] == "unknown"
+
+
+def test_the_injected_clock_dates_the_job_line_as_well_as_the_budget(harness):
+    """One clock for the run: the line's start and end are the budget's now."""
+    result, _body, ledger = sweep(harness, listing())
+
+    line = this_run(ledger)
+    assert result.outcome == "success"
+    assert (line["started"], line["ended"]) == (october().isoformat(),) * 2
 
 
 def test_job_guard_imports_first_in_a_fresh_interpreter():

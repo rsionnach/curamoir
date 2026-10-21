@@ -80,8 +80,9 @@ from pathlib import Path
 from typing import Optional
 
 from curamoir import __version__
-from curamoir.config import DEFAULTS, ConfigError, load_config_text, one_line, printable
+from curamoir.config import ConfigError, one_line, printable
 from curamoir.principles import PrincipleError, anchor, load_principles
+from curamoir.repo_config import strict_config
 
 # AST_GREP_LANGUAGES lives in `rules` because `parse_rule` refuses an ast-grep
 # rule over a language it lacks; the run uses it to pick each file's `--lang`.
@@ -796,26 +797,16 @@ def _configured_threshold(repo):
 
     Strict where `repo_config.effective_config` is tolerant: a hook should keep
     working on a broken config, but a gate silently reverting to the default
-    threshold is a gate loosened without anybody being told.
+    threshold is a gate loosened without anybody being told. No config file
+    is the default; one that cannot be loaded (invalid, unreadable, not a
+    regular file) is a LintError naming the path and the problems.
     """
-    path = repo / ".curamoir" / "curamoir.yaml"
-    if not os.path.lexists(path):
-        return DEFAULTS["rules"]["fail_on"]
-    if not path.is_file():
-        # A directory, a FIFO or a dangling symlink: something is there, and
-        # whatever threshold it was meant to set cannot be read.
-        raise LintError(f"{path} exists but is not a readable file, so the threshold "
-                        "it may set cannot be read")
     try:
-        config = load_config_text(path.read_text(encoding="utf-8"))
+        config = strict_config(repo)
     except ConfigError as invalid:
         # One line, like every stderr note; ConfigError's own str lists the
         # problems one per line.
-        raise LintError(f"{path}: invalid: " + "; ".join(invalid.problems)) from invalid
-    except OSError as invalid:
-        raise LintError(f"{path}: {invalid}") from invalid
-    except Exception as invalid:  # a YAML syntax error is PyYAML's own type
-        raise LintError(f"{path}: not valid YAML: {invalid}") from invalid
+        raise LintError("; ".join(invalid.problems)) from invalid
     return config["rules"]["fail_on"]
 
 

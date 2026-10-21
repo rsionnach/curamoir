@@ -14,7 +14,14 @@ from datetime import datetime, timezone
 
 
 class JobRun:
-    """A context manager that cannot leave without writing its ledger line."""
+    """A context manager that cannot leave without writing its ledger line.
+
+    `now` (default: the wall clock) dates the line's `started` and `ended`.
+    It must return an aware UTC datetime and must not raise. A raise in
+    `__enter__` happens before there is anything to exit, so no line is
+    written; a naive value is not checked, and would be written without an
+    offset.
+    """
 
     def __init__(self, ledger, job, run_id=None, now=None):
         self._ledger = ledger
@@ -27,6 +34,25 @@ class JobRun:
         self._message = ""
         self._extra = {}
 
+    @property
+    def ledger(self):
+        """The ledger this run's line goes to, for reading history from
+        (`ledger.entries()`). Read-only, so a job cannot point its line
+        somewhere other than where the history it read came from."""
+        return self._ledger
+
+    @property
+    def outcome(self):
+        """What the run recorded: "success", "refused", "failure", or
+        "unknown" once it exited without reporting; None until then."""
+        return self._outcome
+
+    @property
+    def reason(self):
+        """The reason `refused` recorded, or None if it was never called
+        or a later outcome replaced the refusal."""
+        return self._reason
+
     def __enter__(self):
         self._started = self._now()
         return self
@@ -36,6 +62,7 @@ class JobRun:
             # Record the crash, then let it propagate. Swallowing it here would
             # turn a failed run into a clean one.
             self._outcome = "failure"
+            self._reason = None
             self._message = f"{exc_type.__name__}: {exc}"
         elif self._outcome is None:
             # Nobody reported anything. That is a bug in the job, not a success.
@@ -48,7 +75,12 @@ class JobRun:
         return False
 
     def succeeded(self, summary="", **fields):
+        # The line carries the outcome last recorded, and a reason only when
+        # that outcome is a refusal. Left over from an earlier `refused`, the
+        # reason would write `success` with reason `budget`, a line that
+        # contradicts itself in the brief.
         self._outcome = "success"
+        self._reason = None
         self._message = summary
         self._extra.update(fields)
 
@@ -59,7 +91,9 @@ class JobRun:
         self._extra.update(fields)
 
     def failed(self, message, **fields):
+        # As in `succeeded`: a failure has no refusal reason.
         self._outcome = "failure"
+        self._reason = None
         self._message = message
         self._extra.update(fields)
 

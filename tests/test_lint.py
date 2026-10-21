@@ -1629,6 +1629,57 @@ def test_a_config_path_that_is_a_directory_is_a_runner_error(tmp_path, capsys):
 
     assert code == EXIT_ERROR
     assert "curamoir.yaml" in err
+    # main's catch-all also exits EXIT_ERROR, so the code alone cannot tell a
+    # config refusal from a crash; the absence of "internal error" pins the
+    # ConfigError to LintError mapping in _configured_threshold.
+    assert "internal error" not in err
+
+
+def test_a_config_that_is_a_fifo_is_a_runner_error_not_a_hang(tmp_path, capsys):
+    """Opening a FIFO blocks until something writes to it, which in CI is
+    never: the job would sit until the runner's timeout killed it, with no
+    word of why. It is refused before it is opened."""
+    repo = sample_repo(tmp_path, *ALL_REGEX_RULES)
+    os.mkfifo(repo / ".curamoir" / "curamoir.yaml")
+
+    code, _, err = lint(repo, capsys=capsys)
+
+    assert code == EXIT_ERROR
+    assert "not a regular file" in err
+    assert "internal error" not in err
+
+
+def test_a_config_that_is_a_dangling_symlink_is_a_runner_error(tmp_path, capsys):
+    """The link is there, so somebody meant a config; that it points nowhere
+    does not make the default threshold the one they set."""
+    repo = sample_repo(tmp_path, *ALL_REGEX_RULES)
+    (repo / ".curamoir" / "curamoir.yaml").symlink_to(tmp_path / "gone.yaml")
+
+    code, _, err = lint(repo, capsys=capsys)
+
+    assert code == EXIT_ERROR
+    assert "curamoir.yaml" in err
+    assert "internal error" not in err
+
+
+@pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0,
+                    reason="root searches a directory whatever its mode")
+def test_a_config_directory_that_cannot_be_searched_is_a_runner_error(tmp_path, capsys):
+    """A deliberate tightening. Lint used to treat a .curamoir/ it could not
+    search as holding no config and gate at the default threshold; but the
+    config may well be in there, setting a stricter one, so a gate that
+    cannot see it now says so rather than loosening itself."""
+    repo = sample_repo(tmp_path, *ALL_REGEX_RULES, config="version: 1\n")
+    config_dir = repo / ".curamoir"
+    config_dir.chmod(0o600)
+    try:
+        code, _, err = lint(repo, capsys=capsys)
+    finally:
+        config_dir.chmod(0o755)
+
+    assert code == EXIT_ERROR
+    assert "cannot be read" in err
+    assert "internal error" not in err
 
 
 def test_ast_grep_is_not_found_through_a_relative_path_entry(tmp_path, capsys, monkeypatch):
