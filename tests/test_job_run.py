@@ -163,3 +163,43 @@ def test_the_outcomes_are_exported_with_the_values_the_ledger_holds(tmp_path):
     with JobRun(ledger, job="sweep"):
         pass
     assert job_lines(ledger)[0]["outcome"] == job_run.UNKNOWN
+
+
+@pytest.mark.parametrize("report", [
+    lambda run: run.note(message="shadowed"),
+    lambda run: run.succeeded("done", outcome="failure"),
+    lambda run: run.refused(Refusal(reason=Reason.BUDGET, message="over"), run_id="x"),
+    lambda run: run.failed("broke", started="2026-10-05T03:00:00+00:00"),
+])
+def test_a_field_the_line_writes_itself_is_refused_where_it_is_given(tmp_path, report):
+    """Passed through, it would raise as the line is written: the run would
+    report its outcome with no line on disk."""
+    ledger = Ledger(tmp_path / "ledger.jsonl")
+
+    with JobRun(ledger, job="sweep") as run:
+        with pytest.raises(ValueError, match="writes these itself"):
+            report(run)
+        run.succeeded("still recorded", sync="skipped")
+
+    line, = job_lines(ledger)
+    assert (line["outcome"], line["message"], line["sync"]) == (
+        "success", "still recorded", "skipped")
+
+
+@pytest.mark.parametrize("report", [
+    lambda run: run.succeeded("x", sync="done"),
+    lambda run: run.refused(Refusal(reason=Reason.BUDGET, message="x"), sync="done"),
+    lambda run: run.failed("x", sync="done"),
+])
+def test_an_outcomes_field_wins_over_a_noted_field_of_the_same_name(tmp_path, report):
+    """job_guard.skip_sync notes `sync` before the job reports; a job that
+    then reports its own `sync` (the real step, once cm-eqp.3 lands) is the
+    one the line keeps."""
+    ledger = Ledger(tmp_path / "ledger.jsonl")
+
+    with JobRun(ledger, job="sweep") as run:
+        run.note(sync="skipped")
+        report(run)
+
+    line, = job_lines(ledger)
+    assert line["sync"] == "done"

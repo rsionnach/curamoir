@@ -13,6 +13,7 @@ from pathlib import Path
 from curamoir.brief import due_for_brief_from_config, write_brief
 from curamoir.doctor import diagnose, render_report
 from curamoir.handoff import write_handoff
+from curamoir.runner import run_job
 from curamoir.scaffold import (
     AlreadyInitialised,
     TemplateDrift,
@@ -53,6 +54,13 @@ def main(argv=None):
     sweep = subcommands.add_parser(
         "sweep-work-list", help="run curamoir-lint and print the sweep's work list (E3-R1)")
     sweep.add_argument("--repo", default=".", help="repository root (default: cwd)")
+
+    run = subcommands.add_parser(
+        "run", help="run a scheduled job behind the guards, in E10-R1's order")
+    # A free string, not argparse `choices`: a job not built yet must exit
+    # naming the bead that builds it, which a usage error cannot say.
+    run.add_argument("job", help="the job to run (curamoir.runner.JOBS)")
+    run.add_argument("--repo", default=".", help="repository root (default: cwd)")
 
     arguments = parser.parse_args(argv)
     try:
@@ -99,6 +107,13 @@ def _run(arguments):
         print(f"Wrote {path}")
         print(path.read_text(encoding="utf-8"))
         return 0
+    if arguments.command == "run":
+        ran = run_job(arguments.repo, arguments.job)
+        # As UTF-8 bytes (_write_utf8): print() under an ASCII locale raises
+        # on the "ú" in every sentence, and main() would turn each outcome
+        # into exit 1, breaking the exit codes a scheduler reads.
+        _write_utf8(ran.sentence + "\n")
+        return ran.exit_code
     if arguments.command == "sweep-work-list":
         return _sweep_work_list(arguments.repo)
     if arguments.command == "doctor":
@@ -128,22 +143,11 @@ def _sweep_work_list(repo):
               file=sys.stderr)
         return 2
     text = json.dumps(work_list_document(result), indent=2, ensure_ascii=False) + "\n"
-    # UTF-8 bytes whatever the locale: printed through stdout's own encoding,
-    # a non-ASCII path or message under an ASCII locale raises
-    # UnicodeEncodeError, which main() does not catch, and the skill would see
-    # a traceback and exit 1. The whole document is built before anything is
-    # written, so every failure above leaves stdout empty.
+    # UTF-8 bytes whatever the locale (_write_utf8). The whole document is
+    # built before anything is written, so every failure above leaves stdout
+    # empty.
     try:
-        buffer = getattr(sys.stdout, "buffer", None)
-        if buffer is None:
-            # An in-memory text stream (a test's capture) takes str whatever
-            # the locale.
-            sys.stdout.write(text)
-            sys.stdout.flush()
-        else:
-            sys.stdout.flush()
-            buffer.write(text.encode("utf-8"))
-            buffer.flush()
+        _write_utf8(text)
     except OSError as failure:
         # A closed pipe or full disk mid-write: stdout may hold part of the
         # document, which the skill treats as not the work list. Exit 2 so it
@@ -152,6 +156,30 @@ def _sweep_work_list(repo):
               "The sweep must stop here: do not edit anything.", file=sys.stderr)
         return 2
     return 0
+
+
+def _write_utf8(text):
+    """Write `text` to stdout as UTF-8 bytes whatever the locale.
+
+    Printed through stdout's own encoding, a non-ASCII path or message under
+    an ASCII locale raises UnicodeEncodeError, which main() does not catch:
+    the caller would see a traceback and exit 1. An OSError (a closed pipe,
+    a full disk) is the caller's to handle.
+    """
+    if sys.stdout is None:
+        # stdout closed (`>&-`): nowhere to write, and print()'s own silent
+        # no-op, rather than an AttributeError that costs the exit code.
+        return
+    buffer = getattr(sys.stdout, "buffer", None)
+    if buffer is None:
+        # An in-memory text stream (a test's capture) takes str whatever
+        # the locale.
+        sys.stdout.write(text)
+        sys.stdout.flush()
+    else:
+        sys.stdout.flush()
+        buffer.write(text.encode("utf-8"))
+        buffer.flush()
 
 
 def _uninitialised(repo):

@@ -504,7 +504,8 @@ def test_a_body_that_returns_none_is_told_apart_from_an_unusable_root(harness):
 
     result = run_guarded(harness.repo, "sweep", listing(), body, now=october)
 
-    assert result == GuardedRun(outcome="success", reason=None, value=None)
+    assert result == GuardedRun(outcome="success", reason=None, value=None,
+                                message="nothing to return")
 
 
 def test_a_body_that_reports_nothing_returns_the_unknown_outcome(harness):
@@ -561,3 +562,12 @@ def test_a_config_error_naming_no_problem_still_says_the_config_is_invalid():
 
     message = _refuse_invalid_config(ConfigError([]))(None).message
     assert message.startswith("the config is invalid. ")
+
+
+def test_job_gateway_requires_the_lock_slot_its_caller_will_release(harness):
+    """A slot the gateway made for itself is one nobody releases: once
+    cm-x5a.6 makes it acquire, that is a held lock leaked."""
+    from curamoir.job_guard import job_gateway
+
+    with pytest.raises(TypeError, match="lock"):
+        job_gateway(harness.repo, listing())

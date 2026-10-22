@@ -27,6 +27,24 @@ FAILURE = "failure"
 UNKNOWN = "unknown"
 
 
+#: Fields the line writes itself (`_write_line` and `Ledger.record`). Passed
+#: again through `**fields` they raise "multiple values for keyword argument"
+#: as the line is written, which `_write` reports on stderr while the run
+#: still reports its outcome: a job with no line. So they are refused when
+#: given, where the mistake is. `at` is not here: `record` lets a field
+#: replace it, and that is used.
+RESERVED_FIELDS = frozenset(
+    {"kind", "job", "reason", "message", "run_id", "outcome", "started", "ended"})
+
+
+def _checked(fields):
+    reserved = sorted(RESERVED_FIELDS.intersection(fields))
+    if reserved:
+        raise ValueError(f"{', '.join(reserved)}: the job line writes these itself, "
+                         "so a job cannot set them as fields")
+    return fields
+
+
 class JobRun:
     """A context manager that cannot leave without writing its ledger line.
 
@@ -67,6 +85,12 @@ class JobRun:
         or a later outcome replaced the refusal."""
         return self._reason
 
+    @property
+    def message(self):
+        """The message the line carries (or will): the refusal's, the
+        summary, the failure, the crash, or the unknown-outcome warning."""
+        return self._message
+
     def __enter__(self):
         self._started = self._now()
         return self
@@ -88,17 +112,26 @@ class JobRun:
         self._write()
         return False
 
+    def note(self, **fields):
+        """Fields for the line that are not an outcome, from a step that
+        runs before the job reports one (job_guard.skip_sync). Kept whatever
+        outcome follows; an outcome's own fields of the same name win.
+        ValueError for a RESERVED_FIELDS key, as for the outcomes."""
+        self._extra.update(_checked(fields))
+
     def succeeded(self, summary="", **fields):
         # The line carries the outcome last recorded, and a reason only when
         # that outcome is a refusal. Left over from an earlier `refused`, the
         # reason would write `success` with reason `budget`, a line that
         # contradicts itself in the brief.
+        _checked(fields)
         self._outcome = SUCCESS
         self._reason = None
         self._message = summary
         self._extra.update(fields)
 
     def refused(self, refusal, **fields):
+        _checked(fields)
         self._outcome = REFUSED
         self._reason = refusal.reason
         self._message = refusal.message
@@ -106,6 +139,7 @@ class JobRun:
 
     def failed(self, message, **fields):
         # As in `succeeded`: a failure has no refusal reason.
+        _checked(fields)
         self._outcome = FAILURE
         self._reason = None
         self._message = message
