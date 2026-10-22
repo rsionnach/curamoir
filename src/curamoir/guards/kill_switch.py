@@ -25,8 +25,10 @@ class KillSwitch:
     nor `gh repo view`'s `{labels: [...]}`). It is injected rather than
     reached for directly so this guard stays testable without the network —
     and so a `gh` outage cannot be mistaken for a pause. It must time out
-    and raise rather than hang. (Labels only: a GitHub topic cannot contain
-    ':', so `curamoir:paused` can never be one.)
+    and raise rather than hang. The `gh` command that feeds it, and why
+    its `--limit` and `--json` matter (each fails open without it), are in
+    curamoir.fix_scope's runner steps, step 0 (ii). (Labels only: a GitHub
+    topic cannot contain ':', so `curamoir:paused` can never be one.)
 
     A callable that raises, or returns anything other than an iterable of
     str that is not itself a str, bytes or mapping, degrades the check: the

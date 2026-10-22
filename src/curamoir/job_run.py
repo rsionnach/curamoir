@@ -12,6 +12,20 @@ import sys
 import uuid
 from datetime import datetime, timezone
 
+# The job line's `outcome` values, exactly as the ledger holds them: other
+# modules compare ledger lines against these (fix_counts, tier1) and the
+# runner maps them to exit codes (job_guard.GuardedRun), so they never
+# change. job_guard.UNUSABLE_ROOT is a GuardedRun outcome, never a line's.
+
+#: The job reported success (JobRun.succeeded).
+SUCCESS = "success"
+#: The job declined to act, with a reason (JobRun.refused).
+REFUSED = "refused"
+#: The job reported a failure (JobRun.failed), or raised.
+FAILURE = "failure"
+#: The job exited without reporting an outcome: a bug in the job.
+UNKNOWN = "unknown"
+
 
 class JobRun:
     """A context manager that cannot leave without writing its ledger line.
@@ -43,8 +57,8 @@ class JobRun:
 
     @property
     def outcome(self):
-        """What the run recorded: "success", "refused", "failure", or
-        "unknown" once it exited without reporting; None until then."""
+        """What the run recorded: SUCCESS, REFUSED, FAILURE, or UNKNOWN
+        once it exited without reporting; None until then."""
         return self._outcome
 
     @property
@@ -61,12 +75,12 @@ class JobRun:
         if exc is not None:
             # Record the crash, then let it propagate. Swallowing it here would
             # turn a failed run into a clean one.
-            self._outcome = "failure"
+            self._outcome = FAILURE
             self._reason = None
             self._message = f"{exc_type.__name__}: {exc}"
         elif self._outcome is None:
             # Nobody reported anything. That is a bug in the job, not a success.
-            self._outcome = "unknown"
+            self._outcome = UNKNOWN
             self._message = (
                 "job finished without reporting an outcome; "
                 "this is a bug in the job, not a successful run"
@@ -79,20 +93,20 @@ class JobRun:
         # that outcome is a refusal. Left over from an earlier `refused`, the
         # reason would write `success` with reason `budget`, a line that
         # contradicts itself in the brief.
-        self._outcome = "success"
+        self._outcome = SUCCESS
         self._reason = None
         self._message = summary
         self._extra.update(fields)
 
     def refused(self, refusal, **fields):
-        self._outcome = "refused"
+        self._outcome = REFUSED
         self._reason = refusal.reason
         self._message = refusal.message
         self._extra.update(fields)
 
     def failed(self, message, **fields):
         # As in `succeeded`: a failure has no refusal reason.
-        self._outcome = "failure"
+        self._outcome = FAILURE
         self._reason = None
         self._message = message
         self._extra.update(fields)

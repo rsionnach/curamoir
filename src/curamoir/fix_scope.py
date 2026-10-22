@@ -47,7 +47,14 @@ Two layers, so the rules can be tested without git:
    (ii) `repo_labels`: the `gh`-backed callable returning the repository's
        labels, for the `curamoir:paused` kill switch (guards.kill_switch),
        as an iterable of label-name strings (not gh's `{name: ...}`
-       objects; any other shape degrades the check). Like (iii)'s, it must
+       objects; any other shape degrades the check). Run exactly
+       `gh label list --limit <high> --json name --jq '.[].name'`, with
+       <high> well above any repository's label count, and return its
+       output's lines. WHY: gh lists 30 labels by default, so without a
+       high `--limit` `curamoir:paused` can be cut off and the job runs
+       although paused, with nothing recorded: the check fails open. And
+       gh's text output is `name<TAB>description<TAB>color`, a line that
+       never equals the label, which fails open too. Like (iii)'s, it must
        time out and raise: a raise degrades the check (a degraded `guard`
        line, and the job still runs), but a hang the scheduler then kills
        writes no line at all.
@@ -56,21 +63,19 @@ Two layers, so the rules can be tested without git:
        line at all. It is called twice per sweep, once by the cap here and
        once by step 2b's decision, so it must not cache across the two:
        the second call must see what was opened or closed in between.
-   (iv) The result. Nothing in the repository yet fixes a job's exit codes
-       (lint's EXIT_CLEAN, EXIT_VIOLATIONS and EXIT_ERROR, documented in
-       docs/curamoir-lint.md, are the lint gate's, not a job's, and
-       cli.py has no convention of its own), so the codes are cm-fkd.4's
-       to choose. What
-       they must tell apart is the returned job_guard.GuardedRun:
-       - `outcome` "success": the body recorded a success (a sweep, or a
+   (iv) The result. The exit codes are the runner's to choose (lint's
+       EXIT_CLEAN, EXIT_VIOLATIONS and EXIT_ERROR, docs/curamoir-lint.md,
+       are the lint gate's, not a job's); they must tell apart the
+       returned job_guard.GuardedRun's `outcome`s (job_run's constants):
+       - job_run.SUCCESS: the body recorded a success (a sweep, or a
          terminal NO_WORK or DUPLICATE_OPEN_PR decision); `value` is what
          `body` returned.
-       - `outcome` "refused": a guard or the body refused; `reason` is the
+       - job_run.REFUSED: a guard or the body refused; `reason` is the
          refusal's Reason (`pr_cap`, `budget`, `idempotence`, ...).
-       - `outcome` "failure": the body recorded a failure.
-       - `outcome` "unknown": the body returned without recording an
+       - job_run.FAILURE: the body recorded a failure.
+       - job_run.UNKNOWN: the body returned without recording an
          outcome, which is a bug in the runner, not a success.
-       - `outcome` `job_guard.UNUSABLE_ROOT`: the repo root could not be
+       - job_guard.UNUSABLE_ROOT: the repo root could not be
          inspected, so the job did not run and no line was written (the
          reason is on stderr). A ledger write that fails is NOT this: the
          outcome is still the one the body recorded, and JobRun reports
@@ -105,7 +110,8 @@ Two layers, so the rules can be tested without git:
    step 3 (the remedies are fixes too, and nothing has edited the sandbox
    yet), in four sub-steps:
    (i) Plan tier 1 (E3-R1b, curamoir.tier1) on the still-pristine
-       sandbox: `plan = tier1.plan_scan(sandbox, run.ledger.entries())`.
+       sandbox: `plan = tier1.plan_scan(sandbox, run.ledger.entries())`,
+       and `tier1_state = plan` (the tier1 field note below).
    (ii) Decide: `decision = idempotence.sweep_decision(
        sandbox.work_list, sandbox.base, run.ledger.entries(), open_sweep_prs,
        tier1=plan.will_scan)`. cm-fkd.4 supplies `open_sweep_prs`, the
@@ -118,11 +124,11 @@ Two layers, so the rules can be tested without git:
        line of the sweep PR's body, so a fresh CI checkout whose ledger
        lacks this line still knows the PR's base.
    (iii) If `decision.terminal` (NO_WORK, DUPLICATE_OPEN_PR, or UNKNOWN):
-       `decision.record(run, delta, **tier1_fields)` (the tier1 field
-       note below says which), which writes a success with `work` and
-       `found_delta` or, for UNKNOWN, a refusal (Reason.IDEMPOTENCE,
-       without them); then the snapshot (step 2a) unless it was the
-       refusal; and stop: no fix step, no PR.
+       `decision.record(run, delta, **tier1_state.ledger_fields())`,
+       which writes a success with `work` and `found_delta` or, for
+       UNKNOWN, a refusal (Reason.IDEMPOTENCE, without them); then the
+       snapshot (step 2a) unless it was the refusal; and stop: no fix
+       step, no PR.
    (iv) Otherwise `decision.apply_to(sandbox)`, which narrows
        `sandbox.work_list` to the violations in files no open sweep PR
        changes, so steps 3 to 8 see only those and the scope check
@@ -131,41 +137,95 @@ Two layers, so the rules can be tested without git:
        whatever its outcome.
 2c. Tier 1 (E3-R1b), only when `plan.will_scan`, still before anything
    edits the sandbox. First scan: `scan = tier1.run_tier1_scan(sandbox,
-   plan, decision.held_paths, run.ledger.entries())`, which runs the read-only
-   scan call on `models.cheap` (bounded by tier1.SCAN_MAX_TURNS, inside
-   the run's one `per_run_ceiling_usd` estimate) and returns the findings
-   it accepted; its tier1.ScanRefused (a ScopeCheckError: the scan changed
-   the sandbox) is a refusal, as in step 6, whose line carries
-   `**error.ledger_fields()` (the tier1 field note). Then install the findings: `sandbox.work_list =
+   plan, decision.held_paths, run.ledger.entries())`, which runs the
+   read-only scan call on `models.cheap` (bounded by tier1.SCAN_MAX_TURNS,
+   inside the run's one `per_run_ceiling_usd` estimate) and returns the
+   findings it accepted; then `tier1_state = scan`. Its tier1.ScanRefused
+   (a ScopeCheckError: the scan changed the sandbox) is a refusal, as in
+   step 6: `except tier1.ScanRefused as error: tier1_state = error`,
+   record the refusal with its field, and stop (the findings are not
+   installed). Otherwise install the findings: `sandbox.work_list =
    tier1.with_findings(sandbox.work_list, scan)`. Then settle the
    decision: `decision = decision.after_tier1(sandbox.work_list, scan)`.
    If that is terminal (TIER1_FAILED, which `record` writes as a failure,
    DUPLICATE_OPEN_PR, or NO_WORK): `decision.record(run, delta,
-   **scan.ledger_fields())`, the snapshot (step 2a), and stop. Otherwise
-   go on, with the scan's `cost_usd` added to the fix step's for the
-   line's cost.
+   **tier1_state.ledger_fields())`, the snapshot (step 2a), and stop.
+   Otherwise go on.
 
-   **The tier1 field.** The tier-1 field goes on lines so that the
-   once-per-base rule and the attempt cap (curamoir.tier1, "Once per
-   base") can read them back, and so the scan's spend (`cost_usd`) is on
-   record:
-   - before step 2c, every non-refusal line carries
-     `plan.skipped().ledger_fields()` when the plan does not scan (OFF,
-     NO_ELIGIBLE, ALREADY_SCANNED, ATTEMPTS_EXHAUSTED), and nothing when it
-     is READY (a READY plan whose sweep ended at 2b never scanned, and a
+   **The tier1 field.** Every line from step 2b(iii) on, refusals
+   included, carries `**tier1_state.ledger_fields()`, whatever it holds
+   by then (steps 2b(iii), 2c, 6, 7, 8 and 9), except UNKNOWN's refusal
+   at step 2b(iii): Decision.record drops the field there, because that
+   line carries no fields and no scan has run by then. Steps 2b(i) and
+   2b(ii) write no line. The field is there so that the once-per-base
+   rule and the attempt cap (curamoir.tier1, "Once per base") can read
+   it back, and so the scan's spend is on record. The runner holds ONE
+   object, `tier1_state`: the Tier1Plan from step 2b(i), replaced in
+   step 2c by the Tier1Scan run_tier1_scan returns or the ScanRefused it
+   raises. All three have `ledger_fields()`:
+   - a plan that does not scan (OFF, NO_ELIGIBLE, ALREADY_SCANNED,
+     ATTEMPTS_EXHAUSTED) gives its skipped scan's field; a READY plan
+     gives {} (a READY plan whose sweep ended at 2b never scanned, and a
      line must not say it did);
-   - from step 2c on, EVERY line, refusals included, carries
-     `scan.ledger_fields()` (or the skipped plan's): the refusals of steps
-     6, 7 and 8 as `run.refused(refusal, **scan.ledger_fields())`, and
-     step 2c's own ScanRefused as `**error.ledger_fields()`. WHY refusals
-     too: a refusal after the scan is an attempt that did not end the
-     matter, and without the field the attempt cap never sees it (retries
-     without bound) and the scan's cost goes unrecorded.
-   A line carrying `scanned: true` counts as "already scanned" only if it
-   is a success or carries `pr`; any other (a failure, a refusal) counts as
-   an attempt, and the next sweep at that base scans again, up to
-   MAX_SCAN_ATTEMPTS. Steps 2b(iii), 2c, 6, 7, 8 and 9 write lines that
-   carry it.
+   - a scan gives its own field;
+   - a ScanRefused gives its scan's field (`.scan`, status
+     SANDBOX_CHANGED).
+   WHY refusals too: a refusal after the scan (the ScanRefused of step
+   2c, and the refusals of steps 6, 7 and 8, written as
+   `run.refused(refusal, **tier1_state.ledger_fields())`) is an attempt
+   that did not end the matter, and without the field the attempt cap
+   never sees it (so the scan retries without bound) and the scan's
+   cost goes unrecorded. A line carrying `scanned: true` counts as
+   "already scanned" only if it is a success or carries `pr`; any other
+   (a failure, a refusal) counts as an attempt, and the next sweep at
+   that base scans again, up to MAX_SCAN_ATTEMPTS.
+
+   **The line's cost.** Spend is derived at read time from recorded
+   tokens, never from a stored dollar figure (budget.py): the
+   authoritative spend of a sweep line is its top-level `input_tokens`
+   and `output_tokens`, priced at its top-level `model`. That is what
+   budget.month_to_date reads (the E0-R4 ceiling and /curamoir:status),
+   and what E11-R2 re-prices when a price changes; it reads nothing
+   inside `tier1`. So the runner writes those two counts as TOTALS: the
+   fix step's usage plus, once step 2c ran the scan, the scan's
+   (Tier1Scan.usage, or a ScanRefused's `.scan.usage`); a line with no
+   fix step has the scan's alone. Without the scan's share the ceiling
+   never sees what the scan spent.
+   A call that ran spent money even when it reported no usage, so the
+   line must not read as $0. That is a scan whose status is in tier1's
+   `_CALLED` (SCANNED, FAILED, SANDBOX_CHANGED), or a fix step that was
+   invoked, whose usage is None (it timed out, crashed or printed
+   something that is not JSON) or lacks a numeric `input_tokens` or
+   `output_tokens`. If any call on the line is such a call, the runner
+   writes BOTH top-level counts as budget.UNRECORDED, with `model` as
+   usual: not the other call's counts alone, and never 0.
+   budget.month_to_date counts that line as `unrecorded` (apart from
+   unreadable lines, since it is not damage), so the month's total is a
+   stated lower bound and never a silent zero. The other call's known
+   tokens leave the total with it; one count per line cannot say "this
+   much, and more", and the hedge is the safer error (cm-kpz.1's
+   per-call record would keep them).
+   A line on which no model call ran (no scan ran, and no fix step)
+   omits `input_tokens`, `output_tokens` and `model` entirely, and never
+   writes zeros. month_to_date is defensive about it (a 0/0 line costs
+   $0 without being priced, so it cannot raise UnknownModel and turn
+   the ceiling off), but zeros would claim a call that never happened.
+   The top-level `cost_usd` is the CLI's reported figure (the fix step's
+   `total_cost_usd` plus the scan's `tier1_state.cost_usd`), kept for
+   the record, not for the ceiling. `tier1.cost_usd` is a COMPONENT of
+   it, kept to attribute the scan's share: any reader that sums
+   `cost_usd` sums the top-level figure and never adds `tier1.cost_usd`
+   to it.
+   Known limit: one top-level `model` prices both calls correctly only
+   while both run on the same model (today both run on `models.cheap`).
+   If the fix step and the scan ever run on different models, that
+   single `model` misprices one of them, and the line will need a token
+   record per call (cm-kpz.1, E11-R1: every model call attributed with
+   its own tokens). A second known limit: the counts leave out the
+   cache tokens (the usage's `cache_creation_input_tokens` and
+   `cache_read_input_tokens`), so a call that used the prompt cache is
+   under-priced until cm-2ui counts them. No line carries the top-level
+   fields yet (E11-R1); the runner adds them.
 3. Apply the file-level remedies, still before anything else edits it:
    `remedies.apply_file_remedies(sandbox)`, which deletes each file whose
    violation's rule says `remedy: delete_file` and nothing at the base
@@ -180,17 +240,17 @@ Two layers, so the rules can be tested without git:
 5. Review it: `verify_fix(sandbox, git_state=run.git_state)`. Same sandbox,
    same snapshot, same base: there is nothing else to pass.
 6. Treat git_guard.GitGuardError (ScopeCheckError is one) as a refusal
-   (with the tier1 field, step 2c's note): no
-   verdict is not a verdict, and an unverified fix is not a fix.
+   (with `**tier1_state.ledger_fields()`, step 2c's note): no verdict is
+   not a verdict, and an unverified fix is not a fix.
 7. On an ok verdict with paths (not `nothing_changed`), test it (E3-R4).
    Trim to `sweep.max_files_per_pr` BEFORE this, so the tree tested is the
    PR's, with the lint's paths first (`trimmed = tier1.trim_pr_paths(
    verdict.paths, sandbox.work_list, max_files_per_pr)`: rule fixes take
    precedence over tier-1 fixes; every line from here carries the tier1
    field, step 2c's note): `gate = green_gate.run_test_gate(sandbox,
-   verdict, paths=trimmed)`,
-   which runs the base's test command in the sandbox and, on red, drops
-   fixed paths until the rest is green. Then, by outcome:
+   verdict, paths=trimmed)`, which runs the base's test command in the
+   sandbox and, on red, drops fixed paths until the rest is green. Then,
+   by outcome:
    - strategy `green` or `reduced`: compute `fix_fields` (step 8), patch
      and open the PR (step 9), then `run.succeeded(...,
      **gate.ledger_fields(), **fix_fields)`; then the snapshot (step 2a);
@@ -208,13 +268,12 @@ Two layers, so the rules can be tested without git:
    gate, fix_run)` (`fix_run` is step 4's FixStepRun, whose reply says
    which findings the agent fixed), then `fix_fields =
    fix_counts.ledger_fields(records, delta)`, beside the tier1 field
-   (step 2c's note). They are written with the
-   sweep's success line, once the PR is opened, so a sweep whose PR failed
-   to open records no fixes (its failure line carries `found_delta=delta`
-   and step 2b's fields, no `fixes`). record_fixes' ScopeCheckError,
-   GateError or sweep.LintUntrusted is a refusal, as in step 6: a PR
-   whose fixes cannot be counted would starve the promotion ladder
-   silently.
+   (step 2c's note). They are written with the sweep's success line, once
+   the PR is opened, so a sweep whose PR failed to open records no fixes
+   (its failure line carries `found_delta=delta` and step 2b's fields, no
+   `fixes`). record_fixes' ScopeCheckError, GateError or
+   sweep.LintUntrusted is a refusal, as in step 6: a PR whose fixes
+   cannot be counted would starve the promotion ladder silently.
 9. Take exactly `gate.paths_for_pr` out: `gate.patch(sandbox)`, the
    patch of those paths built from the bytes the green run tested (what
    `sandbox.patch(gate.paths_for_pr)` gives when nothing changed since),

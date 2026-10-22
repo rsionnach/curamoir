@@ -113,8 +113,9 @@ sweep:
   # Tier 1 (E3-R1): also look for violations of principles that have no rule
   # yet, on models.cheap, and tag each fix with its principle id so the
   # promotion ladder can count it. Only principles at `tier: principle` that
-  # no rule cites are scanned, at most once per commit, in at most
-  # max_files_per_pr files (the lint's files first). false = lint output only.
+  # no rule cites are scanned, at most once per commit (twice if the first
+  # does not end in a PR or a clean result), in at most max_files_per_pr
+  # files (the lint's files first). false = lint output only.
   tier1_scan: true
 
 promotion:

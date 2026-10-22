@@ -92,13 +92,14 @@ findings were neither fixed nor proposed, and taking it as "scanned" would
 let the next sweep log `no_work` over them. That sweep scans again instead;
 no PR exists, so E3-R7 is not at stake, and it costs one more scan.
 
-Scans that do not end the matter are capped: FAILED and refused scans, and
-scans whose sweep then failed or was refused without a PR, count against
-MAX_SCAN_ATTEMPTS per base (scan_attempts). This needs every line after
-the scan to carry its field, refusals included. Past it, plan_scan says
-ATTEMPTS_EXHAUSTED: no model call, the lint alone, and a `no_work` line
-then carries `tier1.status: attempts_exhausted`, so the ledger never claims
-tier 1 found that base clean. Which lines carry the field: fix_scope, "The
+Scans that do not end the matter are capped: FAILED scans, scans that
+changed the sandbox (SANDBOX_CHANGED), and scans whose sweep then failed
+or was refused without a PR, count against MAX_SCAN_ATTEMPTS per base
+(scan_attempts). This needs every line after the scan to carry its field,
+refusals included. Past it, plan_scan says ATTEMPTS_EXHAUSTED: no model
+call, the lint alone, and a `no_work` line then carries `tier1.status:
+attempts_exhausted`, so the ledger never claims tier 1 found that base
+clean. Which lines carry the field: fix_scope, "The
 tier1 field".
 
 Limit: in CI mode the ledger reaches the repository through the runner's
@@ -117,9 +118,14 @@ scan's `tier1` field (fix_scope, "The tier1 field").
 `budget.per_run_ceiling_usd` (job_guard); the scan is bounded by
 SCAN_MAX_TURNS and SCAN_TIMEOUT. No principle eligible, no candidate file
 (`max_files_per_pr: 0` among the ways), or attempts exhausted, means no
-call and no spend. The call's cost is on every line that carries the
-`tier1` field (`cost_usd`), and on the refusal of a scan that changed the
-sandbox (ScanRefused).
+call and no spend. The spend that counts is derived from tokens
+(budget.py): the runner adds the scan's `usage` into the line's top-level
+`input_tokens` and `output_tokens`, which the ceiling prices. The call's
+reported dollar figure is also kept, as `tier1.cost_usd`, on every line
+that carries the `tier1` field, the refusal of a scan that changed the
+sandbox (ScanRefused) included. It is a component of the line's top-level
+`cost_usd`, kept to attribute the scan's share, never to be added to it
+(fix_scope, "The line's cost").
 
 Syntax that imports on 3.9, like sweep.py.
 """
@@ -148,6 +154,7 @@ from curamoir.fix_scope import (
 )
 from curamoir.fix_step import run_fix_step
 from curamoir.git_guard import git, require_sandbox, tree_changes, verify_git_state
+from curamoir.job_run import SUCCESS
 from curamoir.repo_config import config_value
 
 #: The scan's whole toolset: it reads; it never edits.
@@ -178,7 +185,7 @@ REFUSED_CAP = 20
 TIER1_FIELD = "tier1"
 
 #: How many scans one base gets that did not end the matter: FAILED and
-#: SCAN_REFUSED scans, and scans whose sweep then failed without a PR
+#: SANDBOX_CHANGED scans, and scans whose sweep then failed without a PR
 #: (scan_attempts). After that, ATTEMPTS_EXHAUSTED: no more model calls
 #: for this base, and the sweep runs on the lint alone.
 MAX_SCAN_ATTEMPTS = 2
@@ -186,15 +193,15 @@ MAX_SCAN_ATTEMPTS = 2
 # Status constants. A Tier1Plan's `status` is READY or one of OFF,
 # NO_ELIGIBLE, ALREADY_SCANNED, ATTEMPTS_EXHAUSTED; a Tier1Scan's is one of
 # those four (from Tier1Plan.skipped) or SCANNED, NO_CANDIDATES, FAILED
-# (from run_tier1_scan), or SCAN_REFUSED (on ScanRefused). Never READY on a
-# scan, never SCANNED on a plan.
+# (from run_tier1_scan), or SANDBOX_CHANGED (on ScanRefused). Never READY on
+# a scan, never SCANNED on a plan.
 SCANNED = "scanned"                 # the scan ran and its reply was read
 OFF = "off"                         # sweep.tier1_scan is false
 NO_ELIGIBLE = "no_eligible"         # every principle has a rule, or none exists
 ALREADY_SCANNED = "already_scanned"  # a sweep line already scanned this base
 NO_CANDIDATES = "no_candidates"     # no file to scan within max_files_per_pr
 FAILED = "failed"                   # the call failed, or its reply was not the document
-SCAN_REFUSED = "refused"            # the call changed the sandbox (ScanRefused)
+SANDBOX_CHANGED = "sandbox_changed"  # the call changed the sandbox (ScanRefused)
 ATTEMPTS_EXHAUSTED = "attempts_exhausted"  # MAX_SCAN_ATTEMPTS used up at this base
 READY = "ready"                     # a plan's status only: the scan is to run
 
@@ -285,8 +292,9 @@ class Refused:
 @dataclass(frozen=True)
 class Tier1Plan:
     """Whether tier 1 runs at `base` (plan_scan): `status` is READY or the
-    reason it does not (OFF, NO_ELIGIBLE, ALREADY_SCANNED); `eligible` the
-    eligible Principles, in file order."""
+    reason it does not (OFF, NO_ELIGIBLE, ALREADY_SCANNED,
+    ATTEMPTS_EXHAUSTED); `eligible` the eligible Principles, in file
+    order."""
 
     status: str
     base: str
@@ -303,6 +311,15 @@ class Tier1Plan:
             raise ValueError("a ready plan scans; call run_tier1_scan")
         return Tier1Scan(self.status, self.base, eligible=_ids(self.eligible))
 
+    def ledger_fields(self):
+        """The `tier1` field for a line written before any scan ran: the
+        skipped scan's for a plan that does not scan, and {} for READY (its
+        sweep has not scanned yet, and a line must not say it did). Like
+        Tier1Scan.ledger_fields and ScanRefused.ledger_fields, so the runner
+        holds one of the three and writes `**tier1_state.ledger_fields()`
+        on every line (fix_scope, "The tier1 field")."""
+        return {} if self.will_scan else self.skipped().ledger_fields()
+
 
 @dataclass(frozen=True)
 class Tier1Scan:
@@ -311,11 +328,12 @@ class Tier1Scan:
     scan was given, in the order given; `cursor` the rotation's position
     after it (scan_candidates), and `cursor_from` and `changed_from` where
     it started (rotation_origin), so a retry at this base rereads the same
-    files; `reason` why a FAILED scan failed; `cost_usd`
-    the call's `total_cost_usd`, when it reported one; `model` the model it
-    ran on and `usage` the payload's `usage` object, when there was one
-    (kept for the runner's own cost line; the ledger field carries the
-    cost)."""
+    files; `reason` why a FAILED scan failed; `cost_usd` the call's
+    `total_cost_usd`, when it reported one; `model` the model it ran on and
+    `usage` the payload's `usage` object, when there was one. The runner
+    adds `usage` into the line's top-level token counts, from which the
+    spend is derived (fix_scope, "The line's cost"); the ledger field
+    carries the reported cost, not the usage."""
 
     status: str
     base: str
@@ -342,7 +360,11 @@ class Tier1Scan:
         once the idempotence decision was made (fix_counts, "The ledger
         line"). The findings are counted, not listed: what was fixed is in
         `fixes`; what was refused is listed up to REFUSED_CAP. `cost_usd`
-        is the scan call's spend, on every line that carries the field."""
+        is the scan call's reported cost, on every line that carries the
+        field, kept for attribution: a component of the line's top-level
+        `cost_usd`, which already includes it, never added to it. The
+        spend the ceiling counts comes from the scan's `usage`, in the
+        line's top-level token counts (fix_scope, "The line's cost")."""
         return {TIER1_FIELD: {
             "status": self.status,
             "scanned": self.scanned,
@@ -362,7 +384,7 @@ class Tier1Scan:
 
 class ScanRefused(ScopeCheckError):
     """The scan call changed the sandbox: a refusal (fix_scope's step 6).
-    `scan` is its Tier1Scan (status SCAN_REFUSED), so the refusal line
+    `scan` is its Tier1Scan (status SANDBOX_CHANGED), so the refusal line
     records what the call cost and the attempt counts (scan_attempts)."""
 
     def __init__(self, message, scan):
@@ -398,7 +420,7 @@ def already_scanned(entries, base):
 
 
 #: The statuses of a scan that made the model call (an attempt with an origin).
-_CALLED = frozenset({SCANNED, FAILED, SCAN_REFUSED})
+_CALLED = frozenset({SCANNED, FAILED, SANDBOX_CHANGED})
 
 
 def rotation_origin(entries, base):
@@ -433,13 +455,13 @@ def _text_or_none(value):
 
 def scan_attempts(entries, base):
     """How many scans at `base` did not end the matter (MAX_SCAN_ATTEMPTS):
-    lines whose scan FAILED or was refused (SCAN_REFUSED), and lines whose
-    scan ran but which failed without a PR."""
+    lines whose scan FAILED or changed the sandbox (SANDBOX_CHANGED), and
+    lines whose scan ran but which failed without a PR."""
     count = 0
     for entry, record in _tier1_records(entries):
         if record.get("base") != base:
             continue
-        if record.get("status") in (FAILED, SCAN_REFUSED) or (
+        if record.get("status") in (FAILED, SANDBOX_CHANGED) or (
                 record.get("scanned") is True and not _ended(entry)):
             count += 1
     return count
@@ -452,7 +474,7 @@ def _done_scans(entries):
 
 
 def _ended(entry):
-    return entry.get("outcome") == "success" or entry.get("pr") is not None
+    return entry.get("outcome") == SUCCESS or entry.get("pr") is not None
 
 
 def _tier1_records(entries):
@@ -471,8 +493,9 @@ def plan_scan(sandbox, entries):
     true, NO_ELIGIBLE when no principle at the base is eligible,
     ALREADY_SCANNED when ledger `entries` hold a scan of this base that
     ended the matter (already_scanned), ATTEMPTS_EXHAUSTED when
-    MAX_SCAN_ATTEMPTS scans of it did not, else READY. Reads the config and principles at the base (the sandbox is
-    still pristine) and the rules lint_sandbox recorded."""
+    MAX_SCAN_ATTEMPTS scans of it did not, else READY. Reads the config and
+    principles at the base (the sandbox is still pristine) and the rules
+    lint_sandbox recorded."""
     require_sandbox(sandbox, ScopeCheckError)
     if sandbox.rules is None:
         raise ScopeCheckError("no rules were loaded in this sandbox at its base "
@@ -560,7 +583,7 @@ def choose_candidates(lint_paths, universe, changed, cursor, cap, reserved=()):
     return tuple(lint_paths + picked), cursor
 
 
-def scan_candidates(sandbox, held_paths, entries, cap):
+def scan_candidates(sandbox, held_paths, entries, cap, *, _origin=None):
     """The files the scan is given, and the rotation's cursor after it:
     choose_candidates over the work list's paths (the sandbox's, narrowed
     by the idempotence decision) and every scannable file tracked at the
@@ -568,14 +591,19 @@ def scan_candidates(sandbox, held_paths, entries, cap):
     The rotation starts from rotation_origin: `changed` is what differs
     between its `changed_from` and this base (none when there is none, or
     git cannot compare the two: a rewritten history), and its `cursor_from`
-    is where the rotation resumes."""
+    is where the rotation resumes. `_origin` is internal, for
+    run_tier1_scan, which has rotation_origin(entries, sandbox.base)
+    already and must use the same pair it records; it is trusted as given,
+    not validated, so no other caller passes it."""
     held = {nfc(path) for path in held_paths}
     unheld = [path for path in sandbox.work_list.paths if nfc(path) not in held]
     lint_paths = [path for path in unheld if scannable(path)]
     lint_set = {nfc(path) for path in unheld}
     universe = [path for path in _tracked_scannable(sandbox)
                 if nfc(path) not in held and nfc(path) not in lint_set]
-    changed_from, cursor = rotation_origin(entries, sandbox.base)
+    if _origin is None:
+        _origin = rotation_origin(entries, sandbox.base)
+    changed_from, cursor = _origin
     changed = _changed_between(sandbox, changed_from) if changed_from else []
     return choose_candidates(lint_paths, universe, changed, cursor, cap, reserved=unheld)
 
@@ -831,7 +859,8 @@ def run_tier1_scan(sandbox, plan, held_paths, entries, *, cap=None, model=None,
         cap = config_value(str(sandbox.path), "sweep", "max_files_per_pr")
     eligible = _ids(plan.eligible)
     changed_from, cursor_from = rotation_origin(entries, sandbox.base)
-    candidates, cursor = scan_candidates(sandbox, held_paths, entries, cap)
+    candidates, cursor = scan_candidates(sandbox, held_paths, entries, cap,
+                                         _origin=(changed_from, cursor_from))
     origin = dict(cursor_from=cursor_from, changed_from=changed_from)
     if not candidates:
         return Tier1Scan(NO_CANDIDATES, sandbox.base, eligible=eligible, cursor=cursor, **origin)
@@ -844,7 +873,7 @@ def run_tier1_scan(sandbox, plan, held_paths, entries, *, cap=None, model=None,
     spent = dict(base=sandbox.base, eligible=eligible, candidates=candidates, cursor=cursor,
                  **origin, cost_usd=cost, model=run.argv[run.argv.index("--model") + 1], usage=usage)
     if changed:
-        raise ScanRefused(changed, Tier1Scan(SCAN_REFUSED, reason=changed, **spent))
+        raise ScanRefused(changed, Tier1Scan(SANDBOX_CHANGED, reason=changed, **spent))
     failed = dict(status=FAILED, **spent)
     if run.timed_out or run.exit_code != 0 or payload.get("is_error") is True:
         why = "timed out" if run.timed_out else f"exited {run.exit_code}"
@@ -964,9 +993,17 @@ def record_tier1_fixes(sandbox, gate, fix_run):
 def trim_pr_paths(paths, work, cap):
     """At most `cap` of `paths` (the verdict's), the lint's paths first:
     rule fixes take precedence over tier-1 fixes when the PR is trimmed to
-    `max_files_per_pr` (E3-R3). Sorted."""
-    lint = {item.path for item in work.items}
-    ordered = sorted(paths, key=lambda path: (path not in lint, path))
+    `max_files_per_pr` (E3-R3). Sorted, in `paths`' own spelling. Paths are
+    compared in NFC (fix_scope.nfc): the verdict's come from the work tree,
+    the lint's from git. One file is one cap slot: a path listed twice, or
+    in both its NFC and its NFD spelling, is kept once, in the first
+    spelling `paths` gives it, so a second copy cannot push a real file
+    out of the PR."""
+    lint = {nfc(item.path) for item in work.items}
+    first = {}
+    for path in paths:
+        first.setdefault(nfc(path), path)
+    ordered = sorted(first.values(), key=lambda path: (nfc(path) not in lint, path))
     return tuple(sorted(ordered[:max(0, cap)]))
 
 

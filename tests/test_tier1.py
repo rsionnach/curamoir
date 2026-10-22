@@ -20,7 +20,11 @@ fixture's own `errors-carry-context` principle has no rule, so it is tier
 handlers.py:31) are what the stand-in scan reports, quoted from the files.
 """
 
+import contextlib
 import json
+import os
+import pathlib
+import signal
 import subprocess
 import sys
 from datetime import datetime
@@ -84,12 +88,13 @@ from curamoir.tier1 import (
     OVERLAPS_FINDING,
     QUOTE_MISMATCH,
     READY,
-    SCAN_REFUSED,
+    SANDBOX_CHANGED,
     SCAN_TOOLS,
     SCANNED,
     SPAN_TOO_LONG,
     UNKNOWN_PRINCIPLE,
     Tier1Finding,
+    Tier1Plan,
     Tier1ReplyError,
     Tier1Scan,
     already_scanned,
@@ -310,7 +315,6 @@ def test_with_tier1_off_the_sweep_runs_on_the_lint_alone(tmp_path):
         decision = sweep_decision(work, sandbox.base, ledger.entries(), lambda: [],
                                   tier1=plan.will_scan)
         decision.apply_to(sandbox)
-        scan = plan.skipped()
         remedies = apply_file_remedies(sandbox)
         agent_work = remedies.for_agent(sandbox.work_list)
         assert agent_work.tier1 == () and work_list_document(agent_work)["tier1"] == []
@@ -326,7 +330,7 @@ def test_with_tier1_off_the_sweep_runs_on_the_lint_alone(tmp_path):
             run.succeeded("opened one PR",
                           **ledger_fields(records, found_delta(None, found_set(work,
                                                                                sandbox.base))),
-                          **scan.ledger_fields())
+                          **plan.ledger_fields())
     (line,) = ledger.entries()
     assert {fix["source"] for fix in line["fixes"]} == {"rule"}
     assert line["tier1"]["status"] == OFF and line["tier1"]["scanned"] is False
@@ -335,6 +339,19 @@ def test_with_tier1_off_the_sweep_runs_on_the_lint_alone(tmp_path):
 
 
 # --- the plan --------------------------------------------------------------------------
+
+@pytest.mark.parametrize("status", [OFF, NO_ELIGIBLE, ALREADY_SCANNED, ATTEMPTS_EXHAUSTED])
+def test_a_plan_that_does_not_scan_gives_its_skipped_scan_s_ledger_fields(status):
+    plan = Tier1Plan(status, "b" * 40)
+    assert plan.ledger_fields() == plan.skipped().ledger_fields()
+    assert plan.ledger_fields()["tier1"]["status"] == status
+
+
+def test_a_ready_plan_gives_no_ledger_fields():
+    """A READY plan whose sweep ended before step 2c never scanned, and its
+    line must not say it did: no `tier1` field at all."""
+    assert Tier1Plan(READY, "b" * 40).ledger_fields() == {}
+
 
 def test_tier1_scanning_is_on_by_default_and_a_boolean():
     assert load_config({})["sweep"]["tier1_scan"] is True
@@ -527,7 +544,7 @@ def test_scan_attempts_per_base_are_capped(tmp_path):
         assert decision.kind == NO_WORK
         with JobRun(ledger, "sweep") as run:
             decision.record(run, found_delta(None, found_set(work, sandbox.base)),
-                            **plan.skipped().ledger_fields())
+                            **plan.ledger_fields())
     line = ledger.entries()[-1]
     assert line["work"] == NO_WORK
     assert line["tier1"]["status"] == ATTEMPTS_EXHAUSTED and line["tier1"]["scanned"] is False
@@ -623,12 +640,23 @@ def test_a_skipped_plan_line_does_not_shadow_the_attempt_before_it():
     assert rotation_origin([other, exhausted], base) == (b0, "src/z.py")
 
 
+def test_a_scan_that_changed_the_sandbox_still_gives_its_base_the_origin():
+    """A SANDBOX_CHANGED scan made the model call, so it started somewhere:
+    a retry at its base restarts from its `changed_from` and `cursor_from`,
+    not from the cursor a scan at another base left."""
+    base, b0 = "b" * 40, "a" * 40
+    other = seed(SCANNED, b0, "failure", cursor="src/z.py")
+    changed = seed(SANDBOX_CHANGED, base, "refused", changed_from=b0,
+                   cursor_from="src/m.py", cursor="src/p.py")
+    assert rotation_origin([other, changed], base) == (b0, "src/m.py")
+
+
 def test_failed_refused_and_unfinished_scans_all_count_as_attempts(tmp_path):
     repo = tier1_repo(tmp_path)
     with prepare_sandbox(repo, "HEAD", parent=tmp_path) as sandbox:
         lint_sandbox(sandbox)
         failed = seed(FAILED, sandbox.base, "failure")
-        refused = seed(SCAN_REFUSED, sandbox.base, "refused")
+        refused = seed(SANDBOX_CHANGED, sandbox.base, "refused")
         unfinished = seed(SCANNED, sandbox.base, "failure")
         for pair in ((failed, refused), (refused, unfinished), (unfinished, failed)):
             assert plan_scan(sandbox, list(pair)).status == ATTEMPTS_EXHAUSTED
@@ -648,7 +676,10 @@ def test_a_scan_that_changes_the_sandbox_is_refused(tmp_path):
             run_tier1_scan(sandbox, plan, (), [], claude=claude)
     assert raised.value.cost_usd == 0.02
     fields = raised.value.ledger_fields()["tier1"]
-    assert fields["status"] == SCAN_REFUSED and fields["cost_usd"] == 0.02
+    assert fields["status"] == SANDBOX_CHANGED and fields["cost_usd"] == 0.02
+    # WHY not "refused": that word is the field's list of rejected findings,
+    # and a status spelled the same would read as one of them.
+    assert fields["status"] == "sandbox_changed" and fields["refused"] == []
 
 
 @pytest.mark.parametrize("result, exit_code", [
@@ -681,6 +712,59 @@ def test_a_scan_the_cli_reports_as_an_error_failed(tmp_path, payload):
         scan = run_tier1_scan(sandbox, plan_scan(sandbox, []), (), [], claude=claude)
     assert scan.status == FAILED and scan.findings == ()
     assert scan.cost_usd == 0.02
+
+
+def test_a_scan_with_no_payload_failed_with_no_usage_or_cost(tmp_path):
+    """A scan that crashed and printed something that is not JSON has no
+    payload, so it reports neither usage nor cost: both are None, not 0,
+    and the scan is FAILED (a status in _CALLED, so the call ran). The
+    runner then writes budget.UNRECORDED for the line's token counts
+    (fix_scope, "The line's cost"), so the month's total says it is a
+    lower bound rather than reading this call as $0."""
+    repo = tier1_repo(tmp_path)
+    claude, _ = fake_claude(tmp_path, "scan", None)
+    pathlib.Path(claude).write_text(
+        f"#!{sys.executable}\n"
+        "import sys\n"
+        "print('Segmentation fault: the CLI fell over')\n"
+        "sys.exit(139)\n",
+        encoding="utf-8")
+    with prepare_sandbox(repo, "HEAD", parent=tmp_path) as sandbox:
+        lint_sandbox(sandbox)
+        scan = run_tier1_scan(sandbox, plan_scan(sandbox, []), (), [], claude=claude)
+    assert scan.status == FAILED and scan.status in tier1._CALLED
+    assert scan.usage is None and scan.cost_usd is None
+
+
+def test_a_scan_that_hangs_is_stopped_at_the_timeout_and_failed(tmp_path):
+    """A stand-in that never answers is killed at the timeout: the scan is
+    FAILED because it timed out, and as it printed nothing it reports
+    neither usage nor cost. The stand-in writes its pid, so the test can
+    check it did not outlive the scan (and kill it if it did)."""
+    repo = tier1_repo(tmp_path)
+    claude, _ = fake_claude(tmp_path, "scan", None)
+    pid_file = tmp_path / "scan.pid"
+    pathlib.Path(claude).write_text(
+        f"#!{sys.executable}\n"
+        "import os, time\n"
+        f"open({str(pid_file)!r}, 'w').write(str(os.getpid()))\n"
+        "time.sleep(60)\n",
+        encoding="utf-8")
+    try:
+        with prepare_sandbox(repo, "HEAD", parent=tmp_path) as sandbox:
+            lint_sandbox(sandbox)
+            scan = run_tier1_scan(sandbox, plan_scan(sandbox, []), (), [], timeout=1,
+                                  claude=claude)
+        assert scan.status == FAILED and scan.findings == ()
+        assert scan.reason == "the tier-1 scan timed out"
+        assert scan.usage is None and scan.cost_usd is None
+        pid = int(pid_file.read_text())
+        with pytest.raises(ProcessLookupError):
+            os.kill(pid, 0)
+    finally:
+        if pid_file.exists():
+            with contextlib.suppress(ProcessLookupError, ValueError):
+                os.kill(int(pid_file.read_text()), signal.SIGKILL)
 
 
 def test_the_payloads_usage_is_kept_on_the_scan(tmp_path):
@@ -915,6 +999,29 @@ def test_files_changed_since_the_previous_scan_come_first(tmp_path):
     assert scan.candidates == (BILLING, HANDLERS, VARIANT, "src/sample/zzz.py")
 
 
+def test_scan_candidates_works_out_the_origin_from_the_ledger_when_none_is_given(tmp_path):
+    """Without `_origin`, scan_candidates finds the rotation's origin itself
+    (rotation_origin), so it chooses what run_tier1_scan's explicit pair
+    chooses; and the origin matters here, as with no origin at all the
+    file changed since the previous scan is not chosen."""
+    repo = tier1_repo(tmp_path)
+    previous = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo, check=True,
+                              capture_output=True, text=True).stdout.strip()
+    (repo / "src" / "sample" / "zzz.py").write_text("X = 1\n", encoding="utf-8")
+    subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-qm", "new"], cwd=repo, check=True)
+    entries = [seed(SCANNED, previous)]
+    with prepare_sandbox(repo, "HEAD", parent=tmp_path) as sandbox:
+        lint_sandbox(sandbox)
+        worked_out = tier1.scan_candidates(sandbox, (), entries, 4)
+        given = tier1.scan_candidates(sandbox, (), entries, 4,
+                                      _origin=rotation_origin(entries, sandbox.base))
+        without = tier1.scan_candidates(sandbox, (), entries, 4, _origin=(None, None))
+    assert worked_out == given
+    assert "src/sample/zzz.py" in worked_out[0]
+    assert worked_out != without
+
+
 # --- the scope check -------------------------------------------------------------------
 
 def test_a_tier1_span_admits_an_edit_inside_it_and_nothing_far_from_it():
@@ -1016,6 +1123,38 @@ def test_rule_fixes_take_precedence_when_the_pr_is_trimmed(swept):
     paths = ["a_tier1.py", *lint_paths]
     assert trim_pr_paths(paths, work, len(lint_paths)) == tuple(lint_paths)
     assert trim_pr_paths(paths, work, 99) == tuple(sorted(paths))
+
+
+def test_trimming_matches_the_lint_paths_in_nfc():
+    """The verdict's path is the work tree's spelling, which macOS can hand
+    back decomposed (NFD); the lint's is git's (NFC). One file, so it is
+    the lint's path, and goes first, whichever form each side uses."""
+    nfc_name, nfd_name = "caf\u00e9.py", "cafe\u0301.py"
+    work = SimpleNamespace(items=(SimpleNamespace(path=nfc_name),))
+    assert trim_pr_paths(["a_tier1.py", nfd_name], work, 1) == (nfd_name,)
+
+
+def test_trimming_matches_a_decomposed_lint_path_to_the_verdicts_composed_one():
+    """The mirror of the test above: here the lint's path is the NFD
+    spelling and the verdict's is NFC. Still one file, so it is the lint's
+    path and goes first, kept in the verdict's own spelling."""
+    nfc_name, nfd_name = "caf\u00e9.py", "cafe\u0301.py"
+    work = SimpleNamespace(items=(SimpleNamespace(path=nfd_name),))
+    assert trim_pr_paths(["a_tier1.py", nfc_name], work, 1) == (nfc_name,)
+
+
+@pytest.mark.parametrize("paths, expected", [
+    (["a.py", "a.py", "b.py"], ("a.py", "b.py")),
+    (["caf\u00e9.py", "cafe\u0301.py", "d.py"], ("caf\u00e9.py", "d.py")),
+], ids=["duplicate", "nfc_and_nfd"])
+def test_trimming_spends_one_cap_slot_per_file(paths, expected):
+    """A path the verdict lists twice, or in both its NFC and its NFD
+    spelling, is one file, so it takes one of the `cap` slots, not two:
+    otherwise the second copy pushes a real file out of the PR. The first
+    spelling in `paths` is the one kept."""
+    work = SimpleNamespace(items=())
+    assert trim_pr_paths(paths, work, 2) == expected
+    assert trim_pr_paths(paths, work, 99) == expected
 
 
 def test_the_decision_waits_for_the_scan_when_the_lint_is_clean(swept):

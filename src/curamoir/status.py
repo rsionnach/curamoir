@@ -18,7 +18,13 @@ from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
 
-from curamoir.budget import PriceTable, UnknownModel, combined_shortfall, month_to_date
+from curamoir.budget import (
+    PriceTable,
+    UnknownModel,
+    combined_shortfall,
+    lower_bound_causes,
+    month_to_date,
+)
 from curamoir.cadence import scheduled_jobs
 from curamoir.config import DEFAULTS, ConfigError, load_config_text
 from curamoir.grades import graded_modules
@@ -156,22 +162,23 @@ def _read_spend(base, config, now):
     except UnknownModel as unknown:
         return {
             "unavailable": True, "month_to_date_usd": None, "ceiling_usd": ceiling,
-            "unreadable_lines": ledger.unreadable_lines(),
+            "unreadable_lines": ledger.unreadable_lines(), "unrecorded_calls": None,
             "detail": f"ledger names unpriced model {unknown.args[0]!r}",
         }
 
     # Lines that would not parse PLUS entries that could not be attributed:
     # both mean some of the file did not reach the total, which is the one
     # thing the caveat below has to say.
+    # Calls with no usage are a lower bound too, but readable lines, so they
+    # are counted and worded apart (budget.lower_bound_causes).
     unreadable = combined_shortfall(ledger.unreadable_lines(), spend.unaccounted)
+    causes = lower_bound_causes(unreadable, spend.unrecorded)
     return {
         "unavailable": False, "month_to_date_usd": round(spend.usd, 2),
         "ceiling_usd": ceiling,
         "unreadable_lines": unreadable,
-        "detail": (
-            f"{unreadable} unreadable ledger line(s): this total is a lower bound"
-            if unreadable else None
-        ),
+        "unrecorded_calls": spend.unrecorded,
+        "detail": f"{causes}: this total is a lower bound" if causes else None,
     }
 
 

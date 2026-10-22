@@ -146,3 +146,20 @@ def test_a_crash_after_a_refusal_clears_the_reason_it_recorded(tmp_path):
     assert line["outcome"] == "failure"
     assert line["reason"] is None
     assert run.reason is None
+
+
+def test_the_outcomes_are_exported_with_the_values_the_ledger_holds(tmp_path):
+    """The constants other modules compare ledger lines against; their
+    values are the ledger's, so they must never change."""
+    from curamoir import fix_counts, job_guard, job_run
+
+    assert (job_run.SUCCESS, job_run.REFUSED, job_run.FAILURE, job_run.UNKNOWN) == (
+        "success", "refused", "failure", "unknown")
+    assert fix_counts.SUCCESS is job_run.SUCCESS
+    assert job_guard.UNUSABLE_ROOT not in (job_run.SUCCESS, job_run.REFUSED,
+                                           job_run.FAILURE, job_run.UNKNOWN)
+
+    ledger = Ledger(tmp_path / "ledger.jsonl")
+    with JobRun(ledger, job="sweep"):
+        pass
+    assert job_lines(ledger)[0]["outcome"] == job_run.UNKNOWN

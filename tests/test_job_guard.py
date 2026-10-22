@@ -511,3 +511,34 @@ def test_job_guard_imports_first_in_a_fresh_interpreter():
                             capture_output=True, text=True, check=False)
 
     assert result.returncode == 0, result.stderr
+
+
+def test_a_long_list_of_config_problems_is_capped_in_the_message():
+    """The guard_error message lands on a ledger line and in a terminal, so
+    it is bounded: the first 20 problems, then how many more there were.
+    A short list is given in full."""
+    from types import SimpleNamespace
+
+    from curamoir.job_guard import _refuse_invalid_config
+
+    many = SimpleNamespace(problems=[f"problem {n}" for n in range(25)])
+    message = _refuse_invalid_config(many)(None).message
+    assert "problem 19" in message and "problem 20" not in message
+    assert message.count("problem ") == 20
+    assert "(+5 more)" in message
+
+    few = SimpleNamespace(problems=["sweep.max_open_prs: not a number",
+                                    "budget.on_ceiling: not one of pause, ignore"])
+    message = _refuse_invalid_config(few)(None).message
+    assert message.startswith("; ".join(few.problems) + ".")
+    assert "more)" not in message
+
+
+def test_a_config_error_naming_no_problem_still_says_the_config_is_invalid():
+    """A ConfigError with an empty list of problems still gives a message
+    that says what is wrong, rather than one that opens on a bare full
+    stop."""
+    from curamoir.job_guard import _refuse_invalid_config
+
+    message = _refuse_invalid_config(ConfigError([]))(None).message
+    assert message.startswith("the config is invalid. ")

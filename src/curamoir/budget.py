@@ -19,14 +19,28 @@ from curamoir.ledger import parse_ledger_timestamp, repo_ledger
 
 PER_MILLION = 1_000_000
 
+#: The token count a writer records for a model call that ran but reported
+#: no usage (it timed out, crashed, or printed something that was not JSON).
+#: Such a call still spent money, so it must not read as $0: month_to_date
+#: counts a line carrying this marker as `unrecorded`, which makes the
+#: month's total a stated lower bound. A named marker, not any non-number,
+#: so the rule does not rest on an accident of type checking, and kept
+#: apart from `unaccounted`: a writer bug that emits "1000" is damage worth
+#: inspecting the ledger for, but this line is exactly what was meant.
+UNRECORDED = "unrecorded"
+
 
 @dataclass(frozen=True)
 class Spend:
     """What a month's ledger read came to, and how much of it was unusable.
 
-    Two numbers, because one of them is a caveat on the other: `unaccounted`
-    counts entries that carried token counts but could not be priced or dated,
-    which makes `usd` a LOWER BOUND rather than a total.
+    Three numbers, because two of them are caveats on the first: either
+    makes `usd` a LOWER BOUND rather than a total. `unaccounted` counts
+    entries that carried token counts but could not be priced or dated,
+    which is damage someone should look for in the ledger. `unrecorded`
+    counts entries whose counts are UNRECORDED: a model call that ran but
+    reported no usage. That line reads perfectly well, so it is kept apart,
+    and the caveat for it must not send anyone hunting for corruption.
 
     Returned rather than recorded on the ledger. It was briefly stored there,
     which gave one field two producers with different lifecycles and no correct
@@ -37,6 +51,7 @@ class Spend:
 
     usd: float
     unaccounted: int = 0
+    unrecorded: int = 0
 
 
 def month_to_date(ledger, prices, now):
@@ -48,6 +63,7 @@ def month_to_date(ledger, prices, now):
     """
     total = 0.0
     unaccounted = 0
+    unrecorded = 0
     for entry in ledger.entries():
         if entry.get("input_tokens") is None and entry.get("output_tokens") is None:
             continue
@@ -60,12 +76,22 @@ def month_to_date(ledger, prices, now):
             continue
         if (when.year, when.month) != (now.year, now.month):
             continue
+        if UNRECORDED in (entry.get("input_tokens"), entry.get("output_tokens")):
+            unrecorded += 1
+            continue
         tokens = _token_counts(entry)
         if tokens is None:
             unaccounted += 1
             continue
+        if tokens == (0, 0):
+            # No model call ran, so there is nothing to price, whatever the
+            # line names as its model (or none). Pricing it would raise
+            # UnknownModel for a line with no model, and the guard would
+            # then stop enforcing the ceiling for the rest of the month
+            # over a line that spent nothing.
+            continue
         total += prices.cost(entry.get("model"), *tokens)
-    return Spend(usd=total, unaccounted=unaccounted)
+    return Spend(usd=total, unaccounted=unaccounted, unrecorded=unrecorded)
 
 
 def combined_shortfall(unreadable, unaccounted):
@@ -81,12 +107,29 @@ def combined_shortfall(unreadable, unaccounted):
     return unreadable + unaccounted
 
 
+def lower_bound_causes(unreadable, unrecorded):
+    """Why a month's total is a lower bound, in words, or "" if it is not.
+
+    The two causes are named apart because they ask different things of the
+    reader: an unreadable line is damage to inspect the ledger for; a call
+    with no usage is a readable record of spend nobody measured. Shared by
+    the budget guard and `/curamoir:status`, so both word it alike.
+    """
+    causes = []
+    if unreadable:
+        causes.append(f"{unreadable} unreadable ledger line(s)")
+    if unrecorded:
+        causes.append(f"{unrecorded} ledger line(s) record a model call with no usage")
+    return " and ".join(causes)
+
+
 def _token_counts(entry):
     """`(input, output)` as numbers, or None if either is not one.
 
-    A writer emitting "1000" for 1000 is a plausible hook bug, and a str reaches
-    the price table as a TypeError from multiplication rather than as anything
-    the degraded path recognises.
+    A writer emitting "1000" for 1000 is a plausible hook bug, and a str
+    reaches the price table as a TypeError from multiplication rather than
+    as anything the degraded path recognises. (UNRECORDED never gets here:
+    month_to_date counts it first, as `unrecorded`.)
     """
     counts = []
     for key in ("input_tokens", "output_tokens"):
@@ -172,6 +215,9 @@ class Budget:
             # entry could not be attributed" mean the same thing here — some of
             # this file did not reach the total, so the total is a lower bound.
             unreadable = combined_shortfall(ledger.unreadable_lines(), spend.unaccounted)
+            # Kept apart from `unreadable`: also a lower bound, but a readable
+            # line, so its wording must not point at the ledger as damaged.
+            unrecorded = spend.unrecorded
         except UnknownModel as unknown:
             # Do NOT treat an unpriced model as $0. Undercounting is the one
             # failure this guard exists to prevent, so say the cap is unenforced
@@ -202,11 +248,9 @@ class Budget:
         # bound that already exceeds the ceiling is PROOF of a breach, not
         # uncertainty about one, so on_ceiling must still be honoured.
         projected = spent + self._per_run
+        causes = lower_bound_causes(unreadable, unrecorded)
         if projected > self._ceiling:
-            suffix = (
-                f" (and {unreadable} unreadable ledger line(s), so the real total "
-                "is higher still)" if unreadable else ""
-            )
+            suffix = f" (and {causes}, so the real total is higher still)" if causes else ""
             message = (
                 f"month-to-date spend ${spent:.2f} plus an estimated "
                 f"${self._per_run:.2f} for this run would reach ${projected:.2f}, "
@@ -217,17 +261,18 @@ class Budget:
                                 message=message + " Configured to warn, so proceeding.")
             return Refusal(reason=Reason.BUDGET, message=message)
 
-        if unreadable:
+        if causes:
             # Under the ceiling on what we could read, but a skipped line could
-            # have recorded any amount, so say the ceiling is UNCONFIRMED rather
-            # than claiming it was enforced.
+            # have recorded any amount, and a call with no usage spent an amount
+            # nobody measured, so say the ceiling is UNCONFIRMED rather than
+            # claiming it was enforced. Only damage is worth inspecting for.
+            inspect = " Inspect .curamoir/state/ledger.jsonl." if unreadable else ""
             return Degraded(
                 reason=Reason.BUDGET,
                 message=(
-                    f"{unreadable} unreadable ledger line(s); month-to-date spend "
-                    f"of ${spent:.2f} is a lower bound, so the ${self._ceiling:.2f} "
-                    "ceiling could not be confirmed. Inspect "
-                    ".curamoir/state/ledger.jsonl."
+                    f"{causes}; month-to-date spend of ${spent:.2f} is a lower "
+                    f"bound, so the ${self._ceiling:.2f} ceiling could not be "
+                    f"confirmed.{inspect}"
                 ),
             )
 

@@ -289,6 +289,84 @@ def test_a_lower_bound_under_the_ceiling_degrades_and_says_it_is_unconfirmed(tmp
     assert "was enforced" not in outcome.message.lower(), "the message still overclaims"
 
 
+def _guard_ledger(repo, *lines):
+    (repo / ".curamoir" / "state" / "ledger.jsonl").write_text(
+        "".join((line if isinstance(line, str) else json.dumps(line)) + "\n"
+                for line in lines),
+        encoding="utf-8")
+
+
+def _october_budget(ceiling, **kwargs):
+    from datetime import datetime
+
+    return Budget(prices=PRICES, monthly_ceiling_usd=ceiling,
+                  now=lambda: datetime(2026, 10, 9, tzinfo=timezone.utc), **kwargs)
+
+
+_SPENT = {"kind": "job", "job": "sweep", "model": "claude-sonnet-5",
+          "input_tokens": 1000, "output_tokens": 100, "at": "2026-10-08T10:00:00+00:00"}
+
+
+def _no_usage():
+    from curamoir.budget import UNRECORDED
+
+    return dict(_SPENT, input_tokens=UNRECORDED, output_tokens=UNRECORDED)
+
+
+def test_a_call_with_no_usage_degrades_without_calling_the_ledger_unreadable(tmp_path):
+    """After a scan times out its line records a call with no usage. That
+    makes the month's total a lower bound, so the guard still degrades,
+    but the line is perfectly readable: saying "unreadable ledger line"
+    and "Inspect ledger.jsonl" sends the operator hunting for corruption
+    that is not there, every job for the rest of the month."""
+    from curamoir.guards import Degraded, Refusal
+
+    repo = initialised(tmp_path)
+    _guard_ledger(repo, _SPENT, _no_usage())
+
+    outcome = _october_budget(15.0)(JobContext(job="sweep", repo=repo))
+
+    assert isinstance(outcome, Degraded), outcome
+    message = outcome.message
+    assert "1 ledger line(s) record a model call with no usage" in message
+    assert "lower bound" in message and "could not be confirmed" in message
+    assert "unreadable" not in message and "Inspect" not in message
+
+    # A proven breach still refuses first, in the same wording.
+    outcome = _october_budget(0.001, on_ceiling="pause")(JobContext(job="sweep", repo=repo))
+    assert isinstance(outcome, Refusal), outcome
+    assert "record a model call with no usage" in outcome.message
+    assert "unreadable" not in outcome.message
+
+
+def test_unreadable_lines_and_calls_with_no_usage_are_named_apart(tmp_path):
+    from curamoir.guards import Degraded
+
+    repo = initialised(tmp_path)
+    _guard_ledger(repo, _SPENT, _no_usage(), _no_usage(), "{broken")
+
+    outcome = _october_budget(15.0)(JobContext(job="sweep", repo=repo))
+
+    assert isinstance(outcome, Degraded), outcome
+    assert "1 unreadable ledger line(s)" in outcome.message
+    assert "2 ledger line(s) record a model call with no usage" in outcome.message
+    assert "Inspect .curamoir/state/ledger.jsonl" in outcome.message
+
+
+def test_status_names_a_call_with_no_usage_apart_from_unreadable_lines(tmp_path):
+    from datetime import datetime
+
+    repo = initialised(tmp_path)
+    _guard_ledger(repo, _SPENT, _no_usage())
+
+    status = collect_status(repo, now=lambda: datetime(2026, 10, 9, tzinfo=timezone.utc))
+
+    spend = status["spend"]
+    assert spend["unreadable_lines"] == 0 and spend["unrecorded_calls"] == 1
+    assert "record a model call with no usage" in spend["detail"]
+    assert "lower bound" in spend["detail"] and "unreadable" not in spend["detail"]
+
+
 def test_infinite_and_nan_prices_are_rejected():
     """YAML parses .inf, .nan and 1e400 to exactly these. They passed validation,
     then made every job refuse with a message reading "would reach $inf" — and
@@ -396,6 +474,60 @@ def test_an_entry_with_an_unusable_timestamp_is_not_counted_as_zero(tmp_path):
     assert spend.unaccounted == 1, (
         "$12 of real spend contributed $0 with no signal that anything was missed"
     )
+
+
+def _one_line_ledger(tmp_path, **fields):
+    ledger = Ledger(tmp_path / "ledger.jsonl")
+    ledger._path.write_text(
+        json.dumps({"kind": "job", "job": "sweep", "at": "2026-10-08T09:00:00Z",
+                    **fields}) + "\n",
+        encoding="utf-8")
+    return ledger
+
+
+@pytest.mark.parametrize("model", ["claude-sonnet-5", None],
+                         ids=["priced_model", "no_model"])
+def test_a_call_that_ran_with_no_usage_is_unrecorded_not_zero(tmp_path, model):
+    """A scan or fix step that timed out, crashed or printed non-JSON still
+    ran and still spent money, but it reported no usage. The runner writes
+    budget.UNRECORDED for its token counts, and that must reach the total
+    as a caveat (`unrecorded`), never as a silent $0, whatever `model`
+    the line names. It is not `unaccounted`: the line reads perfectly
+    well, and must not send anyone hunting for corruption."""
+    from datetime import datetime
+
+    from curamoir.budget import UNRECORDED, month_to_date
+
+    fields = {"input_tokens": UNRECORDED, "output_tokens": UNRECORDED}
+    if model:
+        fields["model"] = model
+    ledger = _one_line_ledger(tmp_path, **fields)
+
+    spend = month_to_date(ledger, PRICES, datetime(2026, 10, 8, tzinfo=timezone.utc))
+
+    assert spend.usd == 0.0
+    assert spend.unrecorded == 1, "a call that ran was counted as costing nothing"
+    assert spend.unaccounted == 0, "a readable line is not an unreadable one"
+
+
+@pytest.mark.parametrize("model", [None, "no-such-model"], ids=["no_model", "unpriced_model"])
+def test_a_line_with_zero_tokens_costs_nothing_without_pricing(tmp_path, model):
+    """A line on which no model call ran should omit its token counts, but
+    a writer that puts zeros there instead must not turn the budget off:
+    pricing 0 tokens at no model raised UnknownModel, and the guard then
+    degraded to "ceiling NOT enforced" for the rest of the month."""
+    from datetime import datetime
+
+    from curamoir.budget import month_to_date
+
+    fields = {"input_tokens": 0, "output_tokens": 0}
+    if model:
+        fields["model"] = model
+    ledger = _one_line_ledger(tmp_path, **fields)
+
+    spend = month_to_date(ledger, PRICES, datetime(2026, 10, 8, tzinfo=timezone.utc))
+
+    assert spend.usd == 0.0 and spend.unaccounted == 0
 
 
 # --- a ceiling that is not a usable number ---------------------------------

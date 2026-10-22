@@ -83,7 +83,7 @@ from curamoir.guards import (
 )
 from curamoir.budget import PriceTable
 from curamoir.config import ConfigError
-from curamoir.job_run import JobRun
+from curamoir.job_run import REFUSED, JobRun
 from curamoir.ledger import repo_ledger
 from curamoir.repo_config import strict_config
 
@@ -94,13 +94,13 @@ UNUSABLE_ROOT = "unusable_root"
 class GuardedRun:
     """What `run_guarded` did, for the runner to map to an exit code.
 
-    `outcome` is the job line's outcome as JobRun recorded it ("success",
-    "refused", "failure" or "unknown"), or UNUSABLE_ROOT when the repo root
-    could not be inspected, the job did not run and no line was written.
-    `reason` is the refusal's Reason when `outcome` is "refused", whether a
-    guard refused or the body did, else None. `value` is what the body
-    returned, None when it never ran: a Refusal there is the body's own,
-    never a guard's.
+    `outcome` is the job line's outcome as JobRun recorded it
+    (job_run.SUCCESS, REFUSED, FAILURE or UNKNOWN), or UNUSABLE_ROOT when
+    the repo root could not be inspected, the job did not run and no line
+    was written. `reason` is the refusal's Reason when `outcome` is
+    REFUSED, whether a guard refused or the body did, else None. `value`
+    is what the body returned, None when it never ran: a Refusal there is
+    the body's own, never a guard's.
     """
 
     outcome: str
@@ -147,12 +147,24 @@ def job_gateway(repo, open_pr_listing, *, now=None, repo_labels=None):
     )
 
 
+#: The most config problems one guard_error message names. The message
+#: lands on a ledger line and in a terminal, and a config that is wrong in
+#: hundreds of places must not make either unreadable; /curamoir:doctor
+#: lists them all.
+MAX_PROBLEMS_SHOWN = 20
+
+
 def _refuse_invalid_config(invalid):
+    shown = list(invalid.problems[:MAX_PROBLEMS_SHOWN])
+    hidden = len(invalid.problems) - len(shown)
+    problems = "; ".join(shown) + (f" (+{hidden} more)" if hidden > 0 else "")
+    problems = problems or "the config is invalid"
+
     def invalid_config(_context):
         return Refusal(
             reason=Reason.GUARD_ERROR,
             message=(
-                "; ".join(invalid.problems)
+                problems
                 + ". The budget and the open-PR cap cannot be configured from it, "
                 "so the job does not run. Fix it, or run /curamoir:doctor."
             ),
@@ -204,10 +216,10 @@ def run_guarded(repo, job, open_pr_listing, body, *, now=None, repo_labels=None)
             # Decided by whether the body ran, not by the type of what came
             # back: a body may return anything, including a Refusal of its own.
             run.refused(performed)
-    # Read after the block: a body that reported nothing is "unknown" only
+    # Read after the block: a body that reported nothing is UNKNOWN only
     # once JobRun has exited.
     return GuardedRun(
         outcome=run.outcome,
-        reason=run.reason if run.outcome == "refused" else None,
+        reason=run.reason if run.outcome == REFUSED else None,
         value=performed if body_ran else None,
     )

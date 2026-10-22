@@ -60,3 +60,20 @@ def test_a_config_whose_bytes_are_not_utf8_refuses(harness):
 
     with pytest.raises(ConfigError, match="cannot be read"):
         strict_config(harness.repo)
+
+
+def test_each_schema_problem_is_its_own_entry_naming_the_path(harness):
+    """One ConfigError entry per problem, each naming the file: a reader
+    that lists `problems` one per line shows every one with where it is."""
+    harness.write(".curamoir/curamoir.yaml",
+                  "version: 1\nbudget:\n  monthly_ceiling_usd: -1\n"
+                  "sweep:\n  max_files_per_pr: -5\n")
+
+    with pytest.raises(ConfigError) as raised:
+        strict_config(harness.repo)
+
+    problems = raised.value.problems
+    path = str(harness.repo / ".curamoir" / "curamoir.yaml")
+    assert len(problems) == 2
+    assert all(problem.startswith(f"{path}: invalid: ") for problem in problems)
+    assert "monthly_ceiling_usd" in problems[0] and "max_files_per_pr" in problems[1]

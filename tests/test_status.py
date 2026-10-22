@@ -227,6 +227,32 @@ def test_an_unreadable_ledger_line_is_reported_as_a_lower_bound(tmp_path):
     assert "lower bound" in render_status(status)
 
 
+def test_a_ledger_naming_an_unpriced_model_makes_the_spend_unavailable(tmp_path):
+    """With a model the price table does not know, no total can be given,
+    so the count of calls with no usage is unknown too: None, not 0, which
+    would claim every call was measured."""
+    repo = initialised(tmp_path)
+    (repo / ".curamoir" / "state" / "ledger.jsonl").write_text(
+        json.dumps({"kind": "job", "job": "s", "model": "claude-unpriced-9",
+                    "input_tokens": 1_000, "output_tokens": 0,
+                    "at": datetime.now(timezone.utc).isoformat()}) + "\n",
+        encoding="utf-8")
+
+    spend = collect_status(repo)["spend"]
+
+    assert spend["unavailable"] is True and spend["month_to_date_usd"] is None
+    assert spend["unrecorded_calls"] is None
+    assert "claude-unpriced-9" in spend["detail"]
+
+
+def test_an_unreadable_line_is_named_before_a_call_with_no_usage():
+    from curamoir.budget import lower_bound_causes
+
+    assert lower_bound_causes(2, 3) == (
+        "2 unreadable ledger line(s) and "
+        "3 ledger line(s) record a model call with no usage")
+
+
 def test_the_defaults_handed_out_on_a_missing_config_cannot_be_mutated(tmp_path):
     """A shared mutable DEFAULTS is one careless write away from poisoning every
     later load_config in the process."""

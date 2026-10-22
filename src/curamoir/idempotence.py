@@ -218,7 +218,8 @@ PR_FIELD = "pr"
 DUPLICATE_OPEN_PR = "duplicate_open_pr"
 
 #: The open PRs could not be known: a decision kind, never a `work` value
-#: (the line is a refusal, with Reason.IDEMPOTENCE).
+#: (the line is a refusal, with Reason.IDEMPOTENCE). Not job_run.UNKNOWN,
+#: the outcome of a job that reported no outcome: same word, another thing.
 UNKNOWN = "unknown"
 
 #: The tier-1 scan failed and nothing else is left to fix: a decision kind,

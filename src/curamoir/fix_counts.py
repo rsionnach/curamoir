@@ -175,6 +175,11 @@ it saw).
   edit above it moves its lines.
   A tier-1 record without a span is skipped by the reader; none was ever
   written, since `span` and the first tier-1 writer landed together.
+- A principle stops getting tier-1 credit once any rule at the base cites
+  it (tier1.eligible_principles), even a rule copied from examples/ that
+  left its tier at `principle`: from then on only what that rule matches
+  is counted, as rule fixes, and a violation it does not match counts for
+  nothing.
 - The ledger is not redacted (E0-R7 covers briefs, handoffs, issues and PR
   bodies): paths, rule ids and hex fingerprints are not secrets, and the
   ledger never leaves the repository (E11-R3).
@@ -197,6 +202,7 @@ from typing import Optional
 
 from curamoir.fix_scope import ScopeCheckError
 from curamoir.git_guard import GitGuardError, git, require_sandbox
+from curamoir.job_run import SUCCESS
 from curamoir.ledger import parse_ledger_timestamp
 from curamoir.sweep import work_list
 
@@ -223,10 +229,9 @@ LINT_INPUTS = ".curamoir"
 #: window until then.
 FUTURE_TOLERANCE = timedelta(days=1)
 
-#: JobRun's outcome for a job that succeeded. Only such sweep lines count:
-#: a failed or refused sweep opened no PR, so whatever it records fixed
-#: nothing.
-SUCCESS = "success"
+# SUCCESS (job_run's, imported above and still importable from here) is
+# the only sweep outcome whose lines count: a failed or refused sweep
+# opened no PR, so whatever it records fixed nothing.
 
 #: The rolling found-set snapshot, beside `ledger.jsonl`.
 SNAPSHOT = Path(".curamoir") / "state" / "found.json"

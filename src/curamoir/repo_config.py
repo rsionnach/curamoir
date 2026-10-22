@@ -82,7 +82,10 @@ def strict_config(repo):
     try:
         return load_config_text(text)
     except ConfigError as invalid:
-        raise ConfigError([f"{path}: invalid: " + "; ".join(invalid.problems)]) from None
+        # One entry per problem, each naming the file, so a reader listing
+        # them one per line (ConfigError's own str) loses neither.
+        raise ConfigError([f"{path}: invalid: {problem}"
+                           for problem in invalid.problems]) from None
     except Exception as error:  # a YAML syntax error is PyYAML's own type
         # Caught here so every failure reaches the caller as a ConfigError:
         # job_guard refuses it after the kill switch and the lock like any
