@@ -181,6 +181,25 @@ def test_the_configured_ceiling_is_the_one_enforced(harness):
     assert (this_run(ledger)["outcome"], this_run(ledger)["reason"]) == ("refused", "budget")
 
 
+@pytest.mark.parametrize(("per_run_ceiling", "outcome", "calls"), [
+    (0.99, "success", 1),
+    (1.01, "refused", 0),
+])
+def test_the_configured_per_run_ceiling_is_the_projected_cost_of_this_run(
+        harness, per_run_ceiling, outcome, calls):
+    """cm-7ck: $14 spent leaves $1 under the default $15 ceiling, so the
+    configured budget.per_run_ceiling_usd alone decides the run, a cent
+    either side of the boundary."""
+    harness.write(".curamoir/curamoir.yaml",
+                  f"version: 1\nbudget:\n  per_run_ceiling_usd: {per_run_ceiling}\n")
+    seed_spend(harness.ledger(), CEILING - 1.00)
+
+    result, body, ledger = sweep(harness, listing())
+
+    assert body.calls == calls
+    assert result.outcome == this_run(ledger)["outcome"] == outcome
+
+
 def test_the_configured_prices_are_the_ones_spend_is_computed_from(harness):
     """Tokens worth $7 at the default price are $14 at a configured double
     price: $14 plus the $2 estimate breaches the default $15 ceiling."""
