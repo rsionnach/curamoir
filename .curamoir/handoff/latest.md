@@ -1,16 +1,18 @@
 # cúramóir handoff
 
-> Epic 3 (cm-fkd) is 9/11. This session closed cm-4pu (7ed9006: run_guarded returns GuardedRun; repo_labels with a strict, casefolded KillSwitch label check; read-only JobRun.ledger; strict_config in repo_config fails closed on every OSError) and cm-v5p (2240fac: tier-1 runner contract; the line's cost is derived from top-level tokens; budget.UNRECORDED for a call with no usage; a (0,0) line can no longer switch the ceiling off; status sandbox_changed). cm-fkd.4 (runner + PR) is still blocked on cm-x5a.6 (runner lock, behind cm-x5a.1 'curamoir run <job>'); its notes now list the gh label adapter rules (--limit, --json name, time out), adding the scan's usage to the top-level tokens, and an end-to-end UNRECORDED test. Next: cm-x5a.1 -> cm-x5a.6 -> cm-fkd.4, or the new P1 cm-2ui (budget ignores …
+> Epic 3 (cm-fkd) is 9/11. Last session closed cm-4pu (7ed9006) and cm-v5p (2240fac); everything is pushed and the tree is clean. cm-4pu:
+- run_guarded returns GuardedRun(outcome, reason, value), with UNUSABLE_ROOT for a root that cannot be inspected. - repo_labels feeds a strict KillSwitch label check: an iterable of str, stripped and casefolded. Any other shape degrades the check. - JobRun gains read-only ledger/outcome/reason, and a later outcome clears a stale reason. …
 
-- **when:** 2026-10-22T13:23:23+00:00
+- **when:** 2026-10-22T13:44:46+00:00
 - **branch:** feat/e0-r0-guard-layer
 - **uncommitted:** clean
 - **in progress:** nothing claimed
 
 ## Intended next step
 
-Run cm-fkd.7 (E3-R6: open-PR cap and budget) through epic-executor, then cm-fkd.2 (tier-1 scan). cm-fkd.4 is blocked on cm-x5a.6 (runner lock); its bead notes list every obligation from .3, .5, .6 and .8.
+Pick one: (a) cm-x5a.1 ('curamoir run <job>'), then cm-x5a.6 (runner lock, P0), then cm-fkd.4 (sweep runner + PR, whose bead notes list every obligation, including the gh label adapter rules and folding the scan's tokens into the top-level counts), run through epic-executor; or (b) cm-2ui (P1, the budget ignores cache tokens), which needs a pricing decision from the user first. Before either, check whether cm-7ck is already satisfied by job_guard (it passes per_run_ceiling_usd as the Budget estimate) and close it if so.
 
 ## Last decision
 
-Epic 3 (cm-fkd) is 9/11; cm-fkd.7 (ef6dfee, job_guard.run_guarded: cap+budget before any work) and cm-fkd.2 (28fc42d, tier-1 scan) are done. The rest is blocked: cm-fkd.4 (runner + PR) waits on cm-x5a.6 (runner lock, P0, itself behind cm-x5a.1 'curamoir run <job>') and on two small ready beads, cm-4pu and cm-v5p (API/contract gaps the excellence reads found); cm-fkd.9 waits on cm-fkd.4. Next step: …
+Epic 3 (cm-fkd) is 9/11. Last session closed cm-4pu (7ed9006) and cm-v5p (2240fac); everything is pushed and the tree is clean. cm-4pu:
+- run_guarded returns GuardedRun(outcome, reason, value), with UNUSABLE_ROOT for a root that cannot be inspected. …
