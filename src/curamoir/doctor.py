@@ -12,11 +12,6 @@ Three levels, and the distinction matters:
 with a ledger note. `ast-grep` absent is a warning: AST rules skip while regex
 rules still run (DEC-3). Reporting either as a failure teaches the developer to
 ignore the output, which costs more than the check is worth.
-
-One warning is currently unconditional: the denylist's job-detection fallback is
-not implemented (E10-LOCK), and an undisclosed silent-failure mode is worse than
-a declared one. So a healthy repo reports WARNINGS rather than OK until that
-lands — see `_check_job_detection`.
 """
 
 import json
@@ -28,7 +23,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from curamoir.config import ConfigError, load_config_text
-from curamoir.guards.lock import LOCK_PATH
 from curamoir.repo_config import CONFIG_PATH
 from curamoir.rules import AST_GREP_INSTALL
 from curamoir.scaffold import detect_languages, detect_modules
@@ -71,7 +65,6 @@ def diagnose(repo, tools=None):
     findings.extend(_check_modules(repo))
     findings.append(_check_pause(base))
     findings.extend(_check_hooks(repo))
-    findings.append(_check_job_detection())
     findings.append(_check_writable(base))
     findings.append(_check_gitignore(base))
     findings.extend(_check_tools(tools, repo=repo))
@@ -540,40 +533,6 @@ def _can_create_a_file_in(directory):
     os.close(handle)
     os.unlink(probe)
     return True
-
-
-def _check_job_detection():
-    """Disclose the denylist's current silent-failure mode.
-
-    The denylist enforces only inside a cúramóir job. DEC-5 established two
-    detection signals: the CURAMOIR_JOB environment variable, with the supervisor
-    lock as a fallback precisely because CLAUDE_CODE_SUBPROCESS_ENV_SCRUB can
-    strip env vars from hook processes.
-
-    The fallback does not work yet, because nothing acquires or writes the lock
-    (E0-R2's unmet half, tracked as E10-LOCK). So if the env var is stripped, the
-    denylist stops enforcing and says nothing.
-
-    This check exists because a guardrail with an undisclosed silent-failure mode
-    is worse than an absent one: the absent one does not invite reliance. Remove
-    it when E10-LOCK lands and the fallback becomes real.
-    """
-    return Finding(
-        check="job detection",
-        level="warning",
-        detail=(
-            "the destructive-command denylist enforces only inside a cúramóir "
-            "job, detected from the CURAMOIR_JOB env var with the supervisor lock "
-            "as fallback. Nothing writes the lock yet, so if the env var is "
-            "stripped (CLAUDE_CODE_SUBPROCESS_ENV_SCRUB) the denylist stops "
-            "enforcing silently"
-        ),
-        fix=(
-            "Until E10-LOCK lands: do not rely on the denylist as a safety "
-            "boundary, and keep CLAUDE_CODE_SUBPROCESS_ENV_SCRUB unset so the "
-            f"primary signal survives. The fallback reads .curamoir/{'/'.join(LOCK_PATH)}."
-        ),
-    )
 
 
 def _probe_marker(repo, probe):

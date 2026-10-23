@@ -33,13 +33,14 @@ what every scheduled run gets.
   `repo_labels` is given. The label needs a `gh` call, which is cm-fkd.4's
   to supply alongside the open-PR listing (guards.kill_switch's docstring:
   a callable that raises degrades the label check, it does not pause).
-- `LockSlot`: the lock's place in the order, after the kill switch (a
+- `LockSlot`: E0-R2's supervisor lock, acquired after the kill switch (a
   paused repo never takes a lock it will not use) and before the budget.
-  Today it is CHECK ONLY: it runs `SupervisorLock`, a live or stale lock refuses,
-  and nothing acquires or releases one. `run_guarded` calls its `release`
-  after the job line is written, on every exit path, so cm-x5a.6 (E0-R2's
-  "maintain" half) fills in `LockSlot` and nothing else. Until it lands,
-  the check sees only locks a human or a test wrote.
+  It runs `SupervisorLock` (a live, stale or unreadable lock refuses, and a
+  stale one is reported, never overridden), then writes
+  `.curamoir/state/lock` with `guards.lock.create_lock`, whose atomic
+  create refuses the loser of two runs that both found the repository free.
+  `run_guarded` releases it after the job line is written, on every exit
+  path (below, "Released on every exit path").
 - `Budget`: month-to-date spend plus `budget.per_run_ceiling_usd`, the run's
   estimate, against `budget.monthly_ceiling_usd`. WHY the per-run ceiling and
   not 0: with no estimate, a ledger at 95% of the ceiling is still under it,
@@ -75,10 +76,22 @@ writes there; it edits a disposable clone and pushes a `curamoir/sweep-...`
 branch. cm-fkd.4 applies `DefaultBranchGuard` at push/PR time, against that
 branch, which is where E0-R1's write happens.
 
-**Check, then act.** Until cm-x5a.6 makes `LockSlot` acquire the lock before these checks
-and holds it until the body returns, the cap and the budget are
-check-then-act: two sweeps started together each see the same open PRs and
-the same spend, and each can overshoot the cap or the ceiling by one run.
+**Held across check and act.** The lock is taken before the budget and the
+cap and held until the body has returned and the job line is written, so
+those two checks and the work they admit happen under one lock: two sweeps
+started together cannot both see the same open PRs or the same spend. The
+run's own lock is never checked again after it is taken, so it cannot
+refuse its own run.
+
+**Released on every exit path.** Success, a refusal by any later guard,
+and a body that raises (SystemExit and KeyboardInterrupt included) all
+reach `run_guarded`'s `finally`. So do SIGTERM and SIGHUP:
+`curamoir.termination` makes them raise `Terminated` during the run. It
+also defers them, and SIGINT (^C), while the line is written and the lock
+released, then sends the first again so the process still dies by it.
+SIGKILL and a power cut run no code. The lock then stays, and E0-R2's
+liveness check is the backstop: the lock's pid and host let the next run
+judge it stale, and it is reported, not overridden.
 """
 
 # Unsorted on purpose, so I001 is silenced for this block: `curamoir.guards`
@@ -86,10 +99,11 @@ the same spend, and each can overshoot the cap or the ceiling by one run.
 # `curamoir.budget` imports `curamoir.guards.context`, which runs
 # `guards/__init__`, which imports `Budget` back from the half-loaded
 # `curamoir.budget` (cm-g3c). Sorted, this module cannot be imported first.
-import sys  # noqa: I001
+import os  # noqa: I001
+import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, NamedTuple, Optional
 
 from curamoir.guards import (
     Budget,
@@ -102,11 +116,15 @@ from curamoir.guards import (
     SupervisorLock,
     unusable_repo,
 )
+from curamoir.guards.lock import create_lock, forget_lock, lock_bytes, lock_file
 from curamoir.budget import PriceTable
 from curamoir.config import ConfigError
 from curamoir.job_run import REFUSED, JobRun
 from curamoir.ledger import repo_ledger
 from curamoir.repo_config import strict_config
+# `Terminated as Terminated`: re-exported, for the runner to catch from here.
+from curamoir.termination import HoldOnExit, TerminationSignals
+from curamoir.termination import Terminated as Terminated
 
 UNUSABLE_ROOT = "unusable_root"
 
@@ -131,26 +149,126 @@ class GuardedRun:
     message: str = ""
 
 
+class _Held(NamedTuple):
+    """What a LockSlot is holding, or was about to: the lock's path, the
+    bytes it writes there, whether create_lock has returned, and the pid
+    that took it (a forked child is not the holder)."""
+
+    path: Path
+    written: bytes
+    created: bool
+    pid: int
+
+
 class LockSlot:
     """The supervisor lock's slot in E10-R1's order: acquired (as a guard,
     after the kill switch and before the budget) and released (after the
     job line, on every exit path).
 
-    CHECK ONLY until cm-x5a.6: calling it runs `SupervisorLock`, so a live
-    or stale lock refuses, and `release` has nothing to release. cm-x5a.6
-    makes the call write the lock and `release` remove the lock this slot
-    wrote, and no other: `release` runs even when the slot was never
-    called (a paused repo) or refused (someone else's lock).
+    Calling it runs `SupervisorLock`, so a live, stale or unreadable lock
+    refuses with `locked`, and otherwise takes the lock with
+    `guards.lock.create_lock`. A create that finds a lock after all (another
+    run took it between the check and the create) refuses `locked` too, as
+    does a lock that cannot be written: a job does not run unlocked. A slot
+    interrupted mid-create (a signal raising Terminated) still knows the
+    bytes it was writing, so `release` removes the file if it got that far.
+
+    `release` removes the lock this slot wrote, and no other: it runs even
+    when the slot was never called (a paused repo) or refused (someone
+    else's lock), and then does nothing; and it leaves a lock that is no
+    longer the one it wrote (deleted by hand and taken by another run).
+    It never raises, so it cannot mask the body's own exception in
+    `run_guarded`'s `finally`: a release that fails says so on stderr. In
+    a forked child of the run it does nothing: the lock is the parent's.
     """
 
     def __init__(self):
         self._check = SupervisorLock()
+        #: A _Held from just before the create until release: set BEFORE the
+        #: file can exist, so a signal at any point after the create still
+        #: leaves the slot knowing what to release.
+        self._held = None
 
     def __call__(self, context):
-        return self._check(context)
+        verdict = self._check(context)
+        if verdict is not None:
+            return verdict
+        path = lock_file(context.repo)
+        written = lock_bytes(context.job)
+        self._held = _Held(path, written, created=False, pid=os.getpid())
+        try:
+            create_lock(context.repo, written)
+        except FileExistsError:
+            self._held = None
+            holder = self._check(context)
+            if holder is None:
+                # The create found a file the check could not see or read as
+                # a lock: not a race, and it will not go away by itself.
+                return Refusal(
+                    reason=Reason.LOCKED,
+                    message=(f"a file at {path} is not a readable lock (a symlink?); "
+                             "delete it if no cúramóir job is running."),
+                )
+            return Refusal(
+                reason=Reason.LOCKED,
+                message=("another cúramóir job took the lock as this one was taking it: "
+                         f"{holder.message}"),
+            )
+        except OSError as error:
+            self._held = None
+            return Refusal(
+                reason=Reason.LOCKED,
+                message=(f"could not write the supervisor lock at {path} ({error}); "
+                         "refusing rather than running unlocked."),
+            )
+        self._held = _Held(path, written, created=True, pid=os.getpid())
+        return None
 
     def release(self):
-        """Nothing to release: this slot has never acquired (cm-x5a.6)."""
+        """Remove the lock this slot wrote, if it is still that lock."""
+        held, self._held = self._held, None
+        if held is None:
+            return
+        path, written, created, pid = held
+        if pid != os.getpid():
+            # A forked child unwinding through run_guarded: the lock is its
+            # parent's, which is still running and will release it.
+            return
+        forget_lock(written)
+        try:
+            try:
+                current = path.read_bytes()
+            except FileNotFoundError:
+                if not created:
+                    # Interrupted before the create finished: there may never
+                    # have been a file, and if there was, create_lock removed it.
+                    return
+                _warn(f"the supervisor lock at {path} was already gone when this run "
+                      "finished; something else removed it.")
+                return
+            if current != written:
+                if not created:
+                    # Interrupted before this slot's create: the lock there is
+                    # another run's, and this slot has nothing to say about it.
+                    return
+                _warn(f"left {path} in place: it is not the lock this run wrote, so "
+                      "another run may hold it.")
+                return
+            # Between the read and the unlink another process could replace the
+            # file only by deleting this run's live lock first, by hand.
+            path.unlink(missing_ok=True)
+        except Exception as failure:
+            # `except Exception`: release runs in a `finally`, where any raise
+            # would replace the body's own exception.
+            _warn(f"could not release the supervisor lock at {path} ({failure}). "
+                  "Delete it once no cúramóir job is running; until then every job "
+                  "refuses with `locked`.")
+
+
+def _warn(message):
+    """A lock problem nobody else will report: stderr, as JobRun's ledger
+    failures are, because the job line is already written."""
+    print(f"cúramóir: {message}", file=sys.stderr)
 
 
 #: What `skip_sync` writes on the job line, in the line's own fields.
@@ -176,9 +294,8 @@ def job_gateway(repo, open_pr_listing, *, lock, now=None, repo_labels=None,
     the budget's clock, injectable so month attribution is testable.
     `repo_labels` is the kill switch's label callable (guards.kill_switch);
     None checks the PAUSE file alone. `lock` is the run's LockSlot, and is
-    required: the caller must release the slot the gateway acquires (once
-    cm-x5a.6 makes it acquire), so the gateway never makes one of its own
-    that nobody would release.
+    required: the caller must release the slot the gateway acquires, so the
+    gateway never makes one of its own that nobody would release.
     """
     kill_switch_and_lock = [KillSwitch(repo_labels), lock]
     try:
@@ -272,36 +389,52 @@ def run_guarded(repo, job, open_pr_listing, body, *, now=None, repo_labels=None,
               "and there is no ledger to record it in.", file=sys.stderr)
         return GuardedRun(outcome=UNUSABLE_ROOT)
 
+    # Ordering (do not reorder):
+    # 1. TerminationSignals is outermost, so the replaced handlers come back,
+    #    and a pending signal is sent again, only after the release.
+    # 2. HoldOnExit is listed after JobRun in one `with`, so it exits first:
+    #    the held phase starts before JobRun's exit writes the job line.
+    # 3. The release is in the `finally` outside the JobRun block, so the
+    #    line is written before the lock goes.
+    # 4. hold() and release() are a nested try/finally, so a signal landing
+    #    before hold() takes effect still reaches the release.
     lock = LockSlot()
-    try:
-        with JobRun(repo_ledger(context.repo), job, now=now) as run:
-            gateway = job_gateway(context.repo, open_pr_listing, now=now,
-                                  repo_labels=repo_labels, lock=lock,
-                                  opens_prs=opens_prs)
-            body_ran = False
+    with TerminationSignals() as signals:
+        try:
+            # HoldOnExit AFTER JobRun: it exits first (Ordering 2).
+            with JobRun(repo_ledger(context.repo), job, now=now) as run, \
+                    HoldOnExit(signals):
+                gateway = job_gateway(context.repo, open_pr_listing, now=now,
+                                      repo_labels=repo_labels, lock=lock,
+                                      opens_prs=opens_prs)
+                body_ran = False
 
-            def action():
-                nonlocal body_ran
-                # cm-eqp.3 replaces skip_sync with the real sync at this one
-                # call site; tests patch the module global to observe the step.
-                skip_sync(run)
-                body_ran = True
-                return body(run)
+                def action():
+                    nonlocal body_ran
+                    # cm-eqp.3 replaces skip_sync with the real sync at this one
+                    # call site; tests patch the module global to observe the step.
+                    skip_sync(run)
+                    body_ran = True
+                    return body(run)
 
-            performed = gateway.perform(context, action)
-            if not body_ran:
-                # Decided by whether the body ran, not by the type of what came
-                # back: a body may return anything, including a Refusal of its own.
-                run.refused(performed)
-    finally:
-        # After the JobRun block, so the line is written before the lock is
-        # let go: a crash between the two then leaves a held lock beside a
-        # written line, never a free repository with the run unrecorded.
-        # Not a guarantee the line is on disk: a ledger that cannot be
-        # written does not fail the job (E0-R9, JobRun._write reports it on
-        # stderr), and the release still runs. cm-x5a.6 must not read the
-        # release as proof of a line.
-        lock.release()
+                performed = gateway.perform(context, action)
+                if not body_ran:
+                    # Decided by whether the body ran, not by the type of what
+                    # came back: a body may return anything, including a
+                    # Refusal of its own.
+                    run.refused(performed)
+        finally:
+            # Ordering 3: a crash between line and release leaves a held lock
+            # beside a written line, never a free repository with the run
+            # unrecorded. The release is no proof of a line: a ledger that
+            # cannot be written does not fail the job (E0-R9, JobRun._write
+            # reports it on stderr), and the release still runs.
+            try:
+                # Again (idempotent), for an exit that never reached HoldOnExit.
+                signals.hold()
+            finally:
+                # Ordering 4.
+                lock.release()
     # Read after the block: a body that reported nothing is UNKNOWN only
     # once JobRun has exited.
     return GuardedRun(

@@ -162,11 +162,12 @@ It has three known limits:
   hook that times out fails *open*, so a guard that hangs stops protecting.
 - **Redaction is pattern-based.** It catches the shapes it knows. That reduces
   exposure but doesn't guarantee nothing leaks.
-- **The command denylist can switch off silently.** It enforces only inside a
-  cúramóir job, which it detects from an environment variable, with the
-  supervisor lock as a fallback. Nothing writes that lock yet, so a scrubbed
-  environment disables the denylist without warning. `/curamoir:doctor` reports
-  this until it's fixed.
+- **The command denylist knows a job only by its signals.** It enforces only
+  inside a cúramóir job, which it detects from an environment variable, with
+  the supervisor lock that `curamoir run` holds as a fallback. So while a job
+  runs, every session in that repository is treated as inside it, yours
+  included; and a session in a clone of the repository, where there is no
+  lock, is not treated as inside the job if the variable is scrubbed.
 
 ## What it deliberately does not do
 

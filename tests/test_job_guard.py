@@ -268,9 +268,10 @@ def test_a_pause_file_refuses_the_sweep_with_reason_paused(harness):
 
 
 def test_a_live_lock_refuses_the_sweep_with_reason_locked(harness):
-    """This process, on this host, started now: a lock that is live."""
+    """Another process on this host (the parent, alive), started now: a
+    lock that is live."""
     harness.write(".curamoir/state/lock", json.dumps({
-        "pid": os.getpid(), "host": socket.gethostname(), "job": "review",
+        "pid": os.getppid(), "host": socket.gethostname(), "job": "review",
         "started": datetime.now(timezone.utc).isoformat(),
     }))
 
@@ -565,8 +566,8 @@ def test_a_config_error_naming_no_problem_still_says_the_config_is_invalid():
 
 
 def test_job_gateway_requires_the_lock_slot_its_caller_will_release(harness):
-    """A slot the gateway made for itself is one nobody releases: once
-    cm-x5a.6 makes it acquire, that is a held lock leaked."""
+    """A slot the gateway made for itself is one nobody releases: a held
+    lock leaked."""
     from curamoir.job_guard import job_gateway
 
     with pytest.raises(TypeError, match="lock"):

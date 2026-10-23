@@ -47,12 +47,21 @@ def in_curamoir_job(env, repo=None):
     """Whether we are running inside a cúramóir job.
 
     Two signals, per DEC-5. The env var is primary: hook processes inherit the
-    parent environment, so the runner (E10-R1) exports CURAMOIR_JOB. The
-    supervisor lock is the fallback, because CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1
-    strips extra variables and we would otherwise stop enforcing silently.
+    parent environment, so whatever spawns a job's `claude -p` is to export
+    CURAMOIR_JOB. Nothing does yet; the one `claude -p` cúramóir starts
+    today, the sweep's fix step, has no Bash tool. The supervisor lock is the
+    fallback, because CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1 strips extra
+    variables and we would otherwise stop enforcing silently.
 
-    NOTE: nothing writes the lock yet (E10-LOCK), so the fallback is currently
-    inert and /curamoir:doctor reports that as a warning.
+    The lock is the one `curamoir run` holds for the whole job
+    (job_guard.LockSlot, cm-x5a.6), so the fallback fires for a hook whose
+    `cwd` is the repository the job is running against, while it runs. Two
+    consequences: any session in that repository is treated as inside the
+    job meanwhile, the developer's own included (the denylist errs towards
+    enforcing); and a lock left by a killed run (stale, E0-R2) keeps it
+    enforcing until a human clears it. The lock is machine-local and
+    gitignored, so a clone of the repository (a sweep's sandbox) does not
+    carry it: there the env var is the only signal.
     """
     if env.get("CURAMOIR_JOB"):
         return True

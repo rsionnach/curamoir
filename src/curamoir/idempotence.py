@@ -176,8 +176,9 @@ changes).
   developer's own branch under it is taken for a sweep PR, and, having no
   record and no marker, refuses sweeps until it is merged or closed.
 - Two sweeps deciding at once could each see no open PR and both open
-  one. Nothing here prevents that: it depends on the runner's lock
-  (cm-x5a.6) admitting one sweep per repository at a time.
+  one. Nothing here prevents that: the runner's lock (job_guard.LockSlot,
+  cm-x5a.6) does, admitting one job per repository at a time, so the
+  decision must run inside a `curamoir run`.
 - Tier-1 findings (curamoir.tier1) are held by file too, before they
   exist: the scan may not choose a file in `held_paths`. With the scan to
   run (`tier1=True`), an empty or wholly held lint list is not yet

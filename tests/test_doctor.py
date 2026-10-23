@@ -244,25 +244,6 @@ def test_the_sessionstart_probe_distinguishes_injecting_from_merely_running(tmp_
     assert "inject" in with_handoff.detail.lower()
 
 
-def test_doctor_discloses_that_the_denylist_cannot_detect_a_job_yet(tmp_path):
-    """The denylist enforces only inside a cúramóir job, detected by the
-    CURAMOIR_JOB env var with the supervisor lock as fallback (DEC-5, because
-    CLAUDE_CODE_SUBPROCESS_ENV_SCRUB can strip env). But nothing writes a lock
-    yet (E10-LOCK), so under a scrubbed environment the denylist silently stops
-    enforcing.
-
-    A guardrail with an undisclosed silent-failure mode is worse than an absent
-    one, so doctor must say so until E10-LOCK lands.
-    """
-    findings = diagnose(initialised(tmp_path), tools={"python3": True, "yaml": True})
-
-    disclosure = [f for f in findings if "job detection" in f.check.lower()]
-    assert disclosure, [f.check for f in findings]
-    assert disclosure[0].level == "warning"
-    assert "scrub" in disclosure[0].detail.lower() or "env" in disclosure[0].detail.lower()
-    assert disclosure[0].fix
-
-
 def test_the_writes_probe_distinguishes_wrote_from_did_not_write(tmp_path):
     """The predicate's `after != before` half had NO test.
 

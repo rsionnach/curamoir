@@ -13,18 +13,15 @@ list whatever the code looks like.
 
 import dataclasses
 import io
-import json
 import os
-import socket
 import subprocess
 import sys
-from datetime import datetime, timezone
 
 import pytest
 
 from curamoir import cli, job_guard, runner
 from curamoir.budget import Budget
-from curamoir.guards import KillSwitch, OpenPrCap
+from curamoir.guards import JobContext, KillSwitch, OpenPrCap
 from curamoir.ledger import Ledger
 from curamoir.runner import (
     EXIT_FAILURE,
@@ -63,11 +60,12 @@ def guard_lines(harness):
 
 
 def hold_a_live_lock(harness):
-    """This process, on this host, started now: a lock SupervisorLock calls live."""
-    harness.write(".curamoir/state/lock", json.dumps({
-        "pid": os.getpid(), "host": socket.gethostname(), "job": "review",
-        "started": datetime.now(timezone.utc).isoformat(),
-    }))
+    """Another run's lock, taken by the runner's own writer (LockSlot) for a
+    `review` job in this process: live, and never released by the run
+    under test, which did not write it."""
+    held = job_guard.LockSlot()
+    assert held(JobContext(job="review", repo=harness.repo)) is None
+    return held
 
 
 def observe_steps(monkeypatch, job):
@@ -203,6 +201,9 @@ def test_a_pause_file_refuses_before_the_lock_slot_and_the_budget(repo, monkeypa
     assert steps == ["kill switch", "ledger guard", "ledger job", "lock release"]
     line = job_lines(repo)[-1]
     assert (line["outcome"], line["reason"]) == ("refused", "paused")
+    # The release slot ran and left the other run's lock where it was.
+    assert '"job": "review"' in (repo.repo / ".curamoir" / "state" / "lock").read_text(
+        encoding="utf-8")
 
 
 def test_a_body_that_raises_still_writes_its_line_and_reaches_the_release(

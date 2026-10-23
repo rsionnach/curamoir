@@ -147,3 +147,31 @@ def test_every_refusal_that_reaches_the_agent_names_something_to_do():
         assert decision.alternative in text, (
             f"the agent is told {text!r} and never told what to do instead"
         )
+
+
+def test_the_lock_the_runner_writes_makes_the_fallback_fire(harness, monkeypatch):
+    """cm-x5a.6: the fallback above, from the lock `curamoir run` itself
+    holds rather than a hand-written one. With CURAMOIR_JOB stripped (as
+    CLAUDE_CODE_SUBPROCESS_ENV_SCRUB would), a destructive command in the
+    repository is refused while the run holds its lock, and allowed again
+    once the run has released it."""
+    import dataclasses
+
+    from curamoir.runner import EXIT_SUCCESS, JOBS, run_job
+    from curamoir.scaffold import init_repo
+
+    init_repo(harness.repo)
+    during = {}
+
+    def body(_repo, run):
+        during["result"], during["decision"] = run_hook("rm -rf build/", cwd=harness.repo)
+        run.succeeded("asked the hook")
+
+    monkeypatch.setitem(JOBS, "brief", dataclasses.replace(JOBS["brief"], body=body))
+
+    assert run_job(harness.repo, "brief").exit_code == EXIT_SUCCESS
+
+    assert during["result"].returncode == 0, during["result"].stderr
+    assert during["decision"]["permissionDecision"] == "deny"
+    _, after = run_hook("rm -rf build/", cwd=harness.repo)
+    assert after is None

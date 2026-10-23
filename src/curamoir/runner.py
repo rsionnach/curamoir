@@ -43,7 +43,7 @@ from pathlib import Path
 from typing import Any, NamedTuple, Optional
 
 from curamoir.brief import write_brief
-from curamoir.job_guard import UNUSABLE_ROOT, run_guarded
+from curamoir.job_guard import UNUSABLE_ROOT, Terminated, run_guarded
 from curamoir.job_run import FAILURE, REFUSED, SUCCESS, UNKNOWN
 
 EXIT_SUCCESS = 0
@@ -149,11 +149,20 @@ def run_job(repo, name, *, open_pr_listing=None, repo_labels=None, now=None):
             lambda run: job.body(root, run),
             now=now, repo_labels=repo_labels, opens_prs=job.opens_prs,
         )
-    except (Exception, SystemExit) as crash:
+    except (Exception, SystemExit, Terminated) as crash:
         # SystemExit too: a body calling sys.exit(0) has a `failure` line
-        # from JobRun, and exiting 0 would contradict it. KeyboardInterrupt
-        # is left to propagate (JobRun has recorded it, and run_guarded has
-        # released the slot): an operator's ^C stops the runner.
+        # from JobRun, and exiting 0 would contradict it.
+        #
+        # Terminated reaches here only when the handler that was there before
+        # the run (an embedding program's) returned instead of ending the
+        # process (curamoir.termination): that program decides what a signal
+        # means, so this is EXIT_FAILURE with a sentence, as for any run
+        # stopped part-way, not a traceback.
+        #
+        # KeyboardInterrupt is left to propagate (JobRun has recorded it, and
+        # run_guarded has released the slot): an operator's ^C stops the
+        # runner.
+        #
         # This can fire before JobRun has entered (the clock raised, say),
         # so whether a ledger line was written is not ours to claim: a body
         # that raised has one from JobRun, an earlier raise has none. Either
