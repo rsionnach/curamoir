@@ -30,9 +30,10 @@ what every scheduled run gets.
 **Which guards, in that order:**
 
 - `KillSwitch`: the PAUSE file, and the `curamoir:paused` label when
-  `repo_labels` is given. The label needs a `gh` call, which is cm-fkd.4's
-  to supply alongside the open-PR listing (guards.kill_switch's docstring:
-  a callable that raises degrades the label check, it does not pause).
+  `repo_labels` is given. The label needs a `gh` call:
+  curamoir.github.repo_labels, which `runner.run_job` gives every job
+  (guards.kill_switch's docstring: a callable that raises degrades the
+  label check, it does not pause).
 - `LockSlot`: E0-R2's supervisor lock, acquired after the kill switch (a
   paused repo never takes a lock it will not use) and before the budget.
   It runs `SupervisorLock` (a live, stale or unreadable lock refuses, and a
@@ -50,9 +51,10 @@ what every scheduled run gets.
   for a job that opens PRs (`opens_prs`, true unless the caller says
   otherwise) and for no other: the cap rations PRs, and refusing the brief
   because three sweep PRs are open would withhold the one artefact that
-  tells the developer so. The listing callable is a parameter: cm-fkd.4
-  supplies the `gh`-backed one it shares with idempotence.sweep_decision
-  (guards.pr_cap's docstring holds the contract).
+  tells the developer so. The listing callable is a parameter: the runner
+  passes the `gh`-backed one, curamoir.github.open_sweep_prs, which the
+  sweep shares with idempotence.sweep_decision (guards.pr_cap's docstring
+  holds the contract).
 
 **The sync seam.** E10-R1 puts sync after the budget and before the job.
 Sync is cm-eqp.3's and is not built, so `skip_sync` stands in its place and

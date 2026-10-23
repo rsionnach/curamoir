@@ -36,6 +36,22 @@ def test_an_unknown_brief_cadence_is_rejected(value):
     assert "cadence.brief" in str(caught.value)
 
 
+@pytest.mark.parametrize("value", ["", "   ", 3, " curamoir/ ", " curamoir/", "curamoir/\t"])
+def test_an_empty_or_padded_branch_prefix_is_rejected(value):
+    """cm-fkd.10: `""` made the open-PR cap count every open PR as cúramóir's,
+    and the sweep's decision refuse the prefix outright; a padded prefix
+    matches none of cúramóir's branches."""
+    with pytest.raises(ConfigError) as caught:
+        load_config({"guardrails": {"branch_prefix": value}})
+
+    assert "guardrails.branch_prefix" in str(caught.value)
+
+
+def test_a_configured_branch_prefix_is_accepted():
+    assert load_config({"guardrails": {"branch_prefix": "bot/"}})["guardrails"][
+        "branch_prefix"] == "bot/"
+
+
 def test_the_documented_cadences_are_accepted():
     """The vocabulary must not be so tight it rejects what the template ships."""
     for value in ("on_return", "weekly"):

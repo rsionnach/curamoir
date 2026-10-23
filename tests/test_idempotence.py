@@ -36,7 +36,7 @@ from curamoir.fix_counts import (
 from curamoir.fix_scope import FILE_NOT_IN_WORK_LIST, lint_sandbox, verify_fix
 from curamoir.git_guard import prepare_sandbox, snapshot_git_state
 from curamoir.green_gate import run_test_gate
-from curamoir.guards.pr_cap import OpenPrCap
+from curamoir.guards.pr_cap import DEFAULT_PREFIX, OpenPrCap
 from curamoir.guards.reasons import Reason
 from curamoir.guards.result import Degraded, Refusal
 from curamoir.idempotence import (
@@ -101,6 +101,15 @@ def pr_line(number=7, branch=BRANCH, base=BASE, paths=("src/a.py",), outcome="su
     return line
 
 
+def decide_under_default_prefix(*args, **kwargs):
+    """idempotence.sweep_decision under the default guardrails.branch_prefix,
+    for the tests that are not about the prefix. The prefix is a required
+    keyword there (idempotence, "The configured prefix"); tests/test_github.py
+    proves a configured one is followed."""
+    kwargs.setdefault("branch_prefix", DEFAULT_PREFIX)
+    return sweep_decision(*args, **kwargs)
+
+
 def never_called():
     raise AssertionError("the open-PR list was asked for when it did not matter")
 
@@ -129,7 +138,7 @@ def test_the_pr_field_holds_its_shape():
 # --- nothing to fix (AC 1) --------------------------------------------------------------
 
 def test_an_empty_work_list_is_no_work_without_asking_for_open_prs():
-    decision = sweep_decision(work_of(), BASE, [pr_line()], never_called)
+    decision = decide_under_default_prefix(work_of(), BASE, [pr_line()], never_called)
     assert decision.kind == NO_WORK and decision.terminal
     assert decision.ledger_fields() == {"work": "no_work"}
 
@@ -141,7 +150,7 @@ def test_an_open_sweep_pr_at_the_same_base_is_a_duplicate_whatever_it_left():
     Its leftovers (a cap or a red test dropped them) wait for it, so the
     second sweep opens nothing even for a file the first PR does not touch."""
     work = work_of(violation("f1", "src/a.py"), violation("f2", "src/left.py"))
-    decision = sweep_decision(work, BASE, [pr_line()], lambda: [BRANCH, "feature/x"])
+    decision = decide_under_default_prefix(work, BASE, [pr_line()], lambda: [BRANCH, "feature/x"])
     assert decision.kind == DUPLICATE_OPEN_PR and decision.terminal
     fields = decision.ledger_fields()
     assert fields["work"] == "duplicate_open_pr"
@@ -154,7 +163,7 @@ def test_an_open_pr_at_an_older_base_covering_every_file_is_a_duplicate():
     violations are the same at the newer base; the decision goes by path,
     which the open PR's fixes are all within."""
     work = work_of(violation("f1", "src/a.py"), violation("f2", "src/b.py"))
-    decision = sweep_decision(work, NEWER, [pr_line(paths=("src/a.py", "src/b.py"))],
+    decision = decide_under_default_prefix(work, NEWER, [pr_line(paths=("src/a.py", "src/b.py"))],
                               lambda: [BRANCH])
     assert decision.kind == DUPLICATE_OPEN_PR
     assert decision.ledger_fields()["held_for_open_prs"] == 2
@@ -164,7 +173,7 @@ def test_partial_overlap_at_a_newer_base_proceeds_with_only_the_files_no_open_pr
     a1, a2, b1 = (violation("f1", "src/a.py"), violation("f2", "src/a.py", rule_id="r2"),
                   violation("f3", "src/b.py"))
     work = work_of(a1, a2, b1)
-    decision = sweep_decision(work, NEWER, [pr_line(paths=("src/a.py",))], lambda: [BRANCH])
+    decision = decide_under_default_prefix(work, NEWER, [pr_line(paths=("src/a.py",))], lambda: [BRANCH])
     assert decision.kind == WORK and not decision.terminal
     assert decision.work_list.items == (b1,)
     assert decision.work_list.report is work.report
@@ -180,7 +189,7 @@ def test_two_open_sweep_prs_both_hold_their_files():
     other = SWEEP_BRANCH_PREFIX + "2026-10-12"
     entries = [pr_line(7, paths=("src/a.py",)),
                pr_line(8, branch=other, base="c" * 40, paths=("src/b.py",))]
-    decision = sweep_decision(work, NEWER, entries, lambda: [other, BRANCH])
+    decision = decide_under_default_prefix(work, NEWER, entries, lambda: [other, BRANCH])
     assert decision.kind == WORK
     assert [item.path for item in decision.work_list.items] == ["src/c.py"]
     assert [pr["number"] for pr in decision.ledger_fields()["open_sweep_prs"]] == [7, 8]
@@ -194,7 +203,7 @@ def test_a_pr_no_longer_open_frees_its_files_merged_or_closed():
     so whatever is still listed is new. Closed unmerged: its fixes were never
     applied, and are free to be proposed again."""
     work = work_of(violation("f1", "src/a.py"))
-    decision = sweep_decision(work, BASE, [pr_line()], lambda: [])
+    decision = decide_under_default_prefix(work, BASE, [pr_line()], lambda: [])
     assert decision.kind == WORK
     assert decision.work_list.items == work.items
     assert decision.ledger_fields() == {"work": "work", "held_for_open_prs": 0,
@@ -203,7 +212,7 @@ def test_a_pr_no_longer_open_frees_its_files_merged_or_closed():
 
 def test_with_no_sweep_pr_ever_and_none_open_the_whole_list_proceeds():
     work = work_of(violation("f1"))
-    decision = sweep_decision(work, BASE, [], lambda: ["feature/x", "curamoir/promote-y"])
+    decision = decide_under_default_prefix(work, BASE, [], lambda: ["feature/x", "curamoir/promote-y"])
     assert decision.kind == WORK and decision.work_list.items == work.items
 
 
@@ -215,7 +224,7 @@ def test_with_no_sweep_pr_ever_and_none_open_the_whole_list_proceeds():
     lambda: [BRANCH, 5],
 ])
 def test_open_prs_that_cannot_be_listed_refuse_rather_than_risk_a_duplicate(listing):
-    decision = sweep_decision(work_of(violation("f1")), BASE, [pr_line()], listing)
+    decision = decide_under_default_prefix(work_of(violation("f1")), BASE, [pr_line()], listing)
     assert decision.kind == UNKNOWN and decision.terminal
     refusal = decision.refusal()
     assert refusal.reason == Reason.IDEMPOTENCE
@@ -227,7 +236,7 @@ def test_open_prs_that_cannot_be_listed_refuse_rather_than_risk_a_duplicate(list
 def test_an_open_sweep_pr_the_ledger_has_no_record_of_refuses():
     """A ledger that lost the line (or a checkout that never had it) cannot say
     which files the open PR touches, so no file is known to be free."""
-    decision = sweep_decision(work_of(violation("f1")), NEWER,
+    decision = decide_under_default_prefix(work_of(violation("f1")), NEWER,
                               [pr_line(branch=SWEEP_BRANCH_PREFIX + "other")],
                               lambda: [BRANCH])
     assert decision.kind == UNKNOWN
@@ -236,7 +245,7 @@ def test_an_open_sweep_pr_the_ledger_has_no_record_of_refuses():
 
 def test_a_non_unknown_decision_has_no_refusal():
     with pytest.raises(ValueError):
-        sweep_decision(work_of(), BASE, [], never_called).refusal()
+        decide_under_default_prefix(work_of(), BASE, [], never_called).refusal()
 
 
 # --- reading the ledger -----------------------------------------------------------------
@@ -259,7 +268,7 @@ def test_a_pr_recorded_on_a_failed_line_still_counts_as_opened():
     """A runner that opened the PR and then crashed writes a failure line; the
     PR exists all the same, so its files are held."""
     work = work_of(violation("f1", "src/a.py"))
-    decision = sweep_decision(work, NEWER, [pr_line(outcome="failure")], lambda: [BRANCH])
+    decision = decide_under_default_prefix(work, NEWER, [pr_line(outcome="failure")], lambda: [BRANCH])
     assert decision.kind == DUPLICATE_OPEN_PR
 
 
@@ -268,10 +277,10 @@ def test_a_pr_recorded_on_a_failed_line_still_counts_as_opened():
 def test_terminal_decisions_record_a_success_with_work_or_a_refusal(tmp_path):
     ledger = Ledger(tmp_path / "ledger.jsonl")
     delta = {"base": BASE}
-    for decision in (sweep_decision(work_of(), BASE, [], never_called),
-                     sweep_decision(work_of(violation("f1")), BASE, [pr_line()],
+    for decision in (decide_under_default_prefix(work_of(), BASE, [], never_called),
+                     decide_under_default_prefix(work_of(violation("f1")), BASE, [pr_line()],
                                     lambda: [BRANCH]),
-                     sweep_decision(work_of(violation("f1")), BASE, [pr_line()],
+                     decide_under_default_prefix(work_of(violation("f1")), BASE, [pr_line()],
                                     lambda: 1 / 0)):
         with JobRun(ledger, "sweep") as run:
             decision.record(run, delta)
@@ -288,7 +297,7 @@ def test_terminal_decisions_record_a_success_with_work_or_a_refusal(tmp_path):
 
 
 def test_a_proceed_decision_is_not_recorded_by_itself(tmp_path):
-    decision = sweep_decision(work_of(violation("f1")), BASE, [], lambda: [])
+    decision = decide_under_default_prefix(work_of(violation("f1")), BASE, [], lambda: [])
     with pytest.raises(ValueError), JobRun(Ledger(tmp_path / "l.jsonl"), "sweep") as run:
         decision.record(run, {"base": BASE})
 
@@ -316,7 +325,7 @@ def sweep(repo, tmp_path, ledger, open_branches, edits, number, branch):
         current = found_set(sandbox.work_list, sandbox.base)
         delta = found_delta(snapshot_for(repo, sandbox.base,
                                          read_snapshot(snapshot_path(repo))), current)
-        decision = sweep_decision(sandbox.work_list, sandbox.base,             # step 2b
+        decision = decide_under_default_prefix(sandbox.work_list, sandbox.base,             # step 2b
                                   ledger.entries(), open_branches)
         if decision.terminal:
             decision.record(run, delta)
@@ -418,7 +427,7 @@ def test_after_an_unrelated_change_only_files_the_open_pr_does_not_touch_are_swe
 
     with prepare_sandbox(repo, "HEAD", parent=tmp_path) as sandbox:
         lint_sandbox(sandbox)
-        sweep_decision(sandbox.work_list, sandbox.base, ledger.entries(),
+        decide_under_default_prefix(sandbox.work_list, sandbox.base, ledger.entries(),
                        lambda: [BRANCH]).apply_to(sandbox)
         state = snapshot_git_state(sandbox)
         edit(sandbox.path, *HANDLERS_PRINT)
@@ -431,13 +440,13 @@ def test_apply_to_refuses_a_sandbox_the_decision_was_not_made_for(tmp_path):
     repo, _ledger = fixture(tmp_path)
     with prepare_sandbox(repo, "HEAD", parent=tmp_path) as sandbox:
         lint_sandbox(sandbox)
-        elsewhere = sweep_decision(sandbox.work_list, NEWER, [], lambda: [])
+        elsewhere = decide_under_default_prefix(sandbox.work_list, NEWER, [], lambda: [])
         with pytest.raises(ValueError):
             elsewhere.apply_to(sandbox)
-        foreign = sweep_decision(work_of(violation("f1")), sandbox.base, [], lambda: [])
+        foreign = decide_under_default_prefix(work_of(violation("f1")), sandbox.base, [], lambda: [])
         with pytest.raises(ValueError):
             foreign.apply_to(sandbox)
-        terminal = sweep_decision(work_of(), sandbox.base, [], never_called)
+        terminal = decide_under_default_prefix(work_of(), sandbox.base, [], never_called)
         with pytest.raises(ValueError):
             terminal.apply_to(sandbox)
 
@@ -455,7 +464,7 @@ def test_ci_mode_without_the_ledger_line_falls_back_to_the_listings_base_and_pat
     """CI mode: a fresh checkout's ledger lacks sweep 1's line until the state
     PR merges; GitHub's listing (the PR body's marker, its files) says it."""
     work = work_of(violation("f1", "src/a.py"), violation("f2", "src/b.py"))
-    decision = sweep_decision(work, NEWER, [], lambda: [gh_record()])
+    decision = decide_under_default_prefix(work, NEWER, [], lambda: [gh_record()])
     assert decision.kind == WORK
     assert [i.path for i in decision.work_list.items] == ["src/b.py"]
     assert [i.path for i in decision.held] == ["src/a.py"]
@@ -465,7 +474,7 @@ def test_ci_mode_without_the_ledger_line_falls_back_to_the_listings_base_and_pat
 
 def test_a_listed_base_alone_is_enough_to_see_a_same_base_duplicate():
     work = work_of(violation("f1", "src/a.py"))
-    decision = sweep_decision(work, BASE, [], lambda: [gh_record(paths=None)])
+    decision = decide_under_default_prefix(work, BASE, [], lambda: [gh_record(paths=None)])
     assert decision.kind == DUPLICATE_OPEN_PR
     assert "same base commit" in decision.message
     assert "leftovers wait for the next base" in decision.message
@@ -476,7 +485,7 @@ def test_neither_source_knowing_the_files_refuses_and_says_when_it_clears():
     work = work_of(violation("f1", "src/a.py"))
     for listing in ([BRANCH], [gh_record(paths=None)], [gh_record(base=None)],
                     [gh_record(paths=["ok.py", ""])], [gh_record(base="A" * 40)]):
-        decision = sweep_decision(work, NEWER, [], lambda listing=listing: listing)
+        decision = decide_under_default_prefix(work, NEWER, [], lambda listing=listing: listing)
         message = decision.refusal().message
         assert decision.kind == UNKNOWN, listing
         assert BRANCH in message and "neither the ledger nor GitHub" in message
@@ -488,13 +497,13 @@ def test_neither_source_knowing_the_files_refuses_and_says_when_it_clears():
 def test_a_transient_listing_failure_keeps_the_try_again_wording():
     def gh_down():
         raise OSError("gh: command not found")
-    decision = sweep_decision(work_of(violation("f1")), NEWER, [], gh_down)
+    decision = decide_under_default_prefix(work_of(violation("f1")), NEWER, [], gh_down)
     assert "next sweep will try again" in decision.refusal().message
 
 
 def test_the_ledger_record_is_primary_over_the_listing():
     work = work_of(violation("f1", "src/a.py"), violation("f2", "src/b.py"))
-    decision = sweep_decision(work, NEWER, [pr_line(7, paths=("src/a.py",))],
+    decision = decide_under_default_prefix(work, NEWER, [pr_line(7, paths=("src/a.py",))],
                               lambda: [gh_record(paths=("src/b.py",))])
     assert [i.path for i in decision.held] == ["src/a.py"]
 
@@ -502,9 +511,9 @@ def test_the_ledger_record_is_primary_over_the_listing():
 def test_a_ledger_record_for_an_older_pr_on_a_reused_branch_is_not_used():
     work = work_of(violation("f1", "src/a.py"), violation("f2", "src/b.py"))
     stale = [pr_line(5, paths=("src/a.py",))]
-    assert sweep_decision(work, NEWER, stale,
+    assert decide_under_default_prefix(work, NEWER, stale,
                           lambda: [gh_record(number=9, base=None)]).kind == UNKNOWN
-    decision = sweep_decision(work, NEWER, stale,
+    decision = decide_under_default_prefix(work, NEWER, stale,
                               lambda: [gh_record(number=9, paths=("src/b.py",))])
     assert [i.path for i in decision.held] == ["src/b.py"]
 
@@ -513,14 +522,14 @@ def test_a_malformed_newest_ledger_record_falls_back_to_the_listing_else_refuses
     work = work_of(violation("f1", "src/a.py"), violation("f2", "src/b.py"))
     broken = dict(pr_line(9), pr={"number": 9, "branch": BRANCH, "paths": "src/b.py"})
     entries = [pr_line(5, paths=("src/a.py",)), broken]
-    assert sweep_decision(work, NEWER, entries, lambda: [BRANCH]).kind == UNKNOWN
-    decision = sweep_decision(work, NEWER, entries,
+    assert decide_under_default_prefix(work, NEWER, entries, lambda: [BRANCH]).kind == UNKNOWN
+    decision = decide_under_default_prefix(work, NEWER, entries,
                               lambda: [gh_record(number=9, paths=("src/b.py",))])
     assert [i.path for i in decision.held] == ["src/b.py"]
 
 
 def test_a_huge_listing_is_clipped_in_the_message():
-    decision = sweep_decision(work_of(violation("f1")), NEWER, [], lambda: "x" * 5000)
+    decision = decide_under_default_prefix(work_of(violation("f1")), NEWER, [], lambda: "x" * 5000)
     assert decision.kind == UNKNOWN and len(decision.message) < 600
 
 
@@ -570,7 +579,7 @@ SHAPES = {
 @pytest.mark.parametrize("shape", sorted(SHAPES))
 def test_one_contract_any_iterable_of_names_or_records_for_cap_and_decision(shape):
     work = work_of(violation("f1", "src/a.py"), violation("f2", "src/b.py"))
-    decision = sweep_decision(work, NEWER, [pr_line()], SHAPES[shape])
+    decision = decide_under_default_prefix(work, NEWER, [pr_line()], SHAPES[shape])
     assert decision.kind == WORK and [i.path for i in decision.held] == ["src/a.py"]
     assert isinstance(OpenPrCap(SHAPES[shape], max_open_prs=1)(None), Refusal)
     assert OpenPrCap(SHAPES[shape], max_open_prs=2)(None) is None
@@ -583,7 +592,7 @@ def _raises():
 @pytest.mark.parametrize("listing", [lambda: None, _raises, lambda: "curamoir/sweep-x",
                                      lambda: [BRANCH, 5], lambda: {"branch": BRANCH}])
 def test_one_contract_none_or_garbage_is_could_not_list_for_cap_and_decision(listing):
-    assert sweep_decision(work_of(violation("f1")), NEWER, [], listing).kind == UNKNOWN
+    assert decide_under_default_prefix(work_of(violation("f1")), NEWER, [], listing).kind == UNKNOWN
     assert isinstance(OpenPrCap(listing)(None), Degraded)
 
 
@@ -591,18 +600,18 @@ def test_a_held_delete_file_remedy_survives_apply_to(tmp_path):
     repo, _ledger = fixture(tmp_path)
     with prepare_sandbox(repo, "HEAD", parent=tmp_path) as sandbox:
         lint_sandbox(sandbox)
-        free = sweep_decision(sandbox.work_list, sandbox.base, [], lambda: [])
+        free = decide_under_default_prefix(sandbox.work_list, sandbox.base, [], lambda: [])
         assert VARIANT in [i.path for i in free.work_list.items]
     with prepare_sandbox(repo, "HEAD", parent=tmp_path) as sandbox:
         lint_sandbox(sandbox)
-        held = sweep_decision(sandbox.work_list, sandbox.base, [pr_line(base=NEWER,
+        held = decide_under_default_prefix(sandbox.work_list, sandbox.base, [pr_line(base=NEWER,
                               paths=(VARIANT,))], lambda: [BRANCH])
         held.apply_to(sandbox)
         apply_file_remedies(sandbox)
         assert (sandbox.path / VARIANT).is_file()
     with prepare_sandbox(repo, "HEAD", parent=tmp_path) as sandbox:
         lint_sandbox(sandbox)  # control: unheld, the same remedy deletes it
-        sweep_decision(sandbox.work_list, sandbox.base, [], lambda: []).apply_to(sandbox)
+        decide_under_default_prefix(sandbox.work_list, sandbox.base, [], lambda: []).apply_to(sandbox)
         apply_file_remedies(sandbox)
         assert not (sandbox.path / VARIANT).exists()
 
@@ -636,11 +645,11 @@ def test_a_fork_pr_shadowing_our_branch_is_dropped_and_ours_is_still_a_duplicate
     fork = sweep_pr_listing(gh_item(99, NEWER, ["zzz.py"], cross=True))
     listing = [fork, ours] if fork_first else [ours, fork]
     entries = [pr_line(7, paths=("x.py",))]
-    decision = sweep_decision(work_of(*SHADOW_WORK), BASE, entries, lambda: listing)
+    decision = decide_under_default_prefix(work_of(*SHADOW_WORK), BASE, entries, lambda: listing)
     assert decision.kind == DUPLICATE_OPEN_PR
     assert [pr["number"] for pr in decision.open_prs] == [7]
     # The same at a newer base: x.py stays held by our #7, only y.py is work.
-    decision = sweep_decision(work_of(*SHADOW_WORK), NEWER, entries, lambda: listing)
+    decision = decide_under_default_prefix(work_of(*SHADOW_WORK), NEWER, entries, lambda: listing)
     assert decision.kind == WORK and [i.path for i in decision.work_list.items] == ["y.py"]
 
 
@@ -652,9 +661,9 @@ def test_the_probes_listing_without_provenance_never_yields_a_second_pr(fork_fir
     fork = sweep_pr_listing(gh_item(99, NEWER, ["zzz.py"]))
     listing = [fork, ours] if fork_first else [ours, fork]
     entries = [pr_line(7, paths=("x.py",))]
-    assert sweep_decision(work_of(*SHADOW_WORK), BASE, entries,
+    assert decide_under_default_prefix(work_of(*SHADOW_WORK), BASE, entries,
                           lambda: listing).kind == DUPLICATE_OPEN_PR
-    assert sweep_decision(work_of(*SHADOW_WORK), NEWER, entries,
+    assert decide_under_default_prefix(work_of(*SHADOW_WORK), NEWER, entries,
                           lambda: listing).kind == UNKNOWN
 
 
@@ -662,7 +671,7 @@ def test_a_fork_pr_with_a_current_base_marker_holds_nothing_and_refuses_nothing(
     work = work_of(*SHADOW_WORK)
     for item in (gh_item(99, BASE, ["x.py"], cross=True),
                  dict(gh_item(99, BASE, ["x.py"], cross=True), body="no marker")):
-        decision = sweep_decision(work, BASE, [], lambda item=item: [sweep_pr_listing(item)])
+        decision = decide_under_default_prefix(work, BASE, [], lambda item=item: [sweep_pr_listing(item)])
         assert decision.kind == WORK, item
         assert decision.open_prs == () and decision.held == ()
 
@@ -673,16 +682,16 @@ def test_unknown_provenance_is_never_used_as_the_fallback():
         same_base = dict(gh_record(paths=("x.py",)), cross_repository=cross)
         older = dict(gh_record(base=NEWER, paths=("x.py",)), cross_repository=cross)
         for record in (same_base, older):
-            decision = sweep_decision(work, BASE, [], lambda record=record: [record])
+            decision = decide_under_default_prefix(work, BASE, [], lambda record=record: [record])
             assert decision.kind == UNKNOWN, (cross, record["base"])
             assert "neither the ledger nor GitHub" in decision.refusal().message
     unknown = dict(gh_record(paths=("x.py",)), cross_repository=None)
     del unknown["cross_repository"]
-    assert sweep_decision(work, NEWER, [], lambda: [unknown]).kind == UNKNOWN
+    assert decide_under_default_prefix(work, NEWER, [], lambda: [unknown]).kind == UNKNOWN
     # ...but the ledger still knows its own PR, provenance or not (plain names too).
     entries = [pr_line(7, paths=("x.py",))]
     for listing in ([unknown], [BRANCH]):
-        decision = sweep_decision(work, NEWER, entries, lambda listing=listing: listing)
+        decision = decide_under_default_prefix(work, NEWER, entries, lambda listing=listing: listing)
         assert decision.kind == WORK and [i.path for i in decision.held] == ["x.py"]
 
 
@@ -690,14 +699,14 @@ def test_two_same_repo_prs_on_one_branch_pair_with_the_ledger_by_number_else_ref
     work = work_of(*SHADOW_WORK)
     first = gh_record(number=8, base=NEWER, paths=("y.py",))
     second = gh_record(number=7, base=NEWER, paths=("zzz.py",))
-    decision = sweep_decision(work, BASE, [], lambda: [first, second])
+    decision = decide_under_default_prefix(work, BASE, [], lambda: [first, second])
     assert decision.kind == UNKNOWN
-    assert sweep_decision(work, BASE, [], lambda: [second, first]).kind == UNKNOWN
+    assert decide_under_default_prefix(work, BASE, [], lambda: [second, first]).kind == UNKNOWN
     # The ledger knows #7: it is paired by number, whatever the order, and
     # #8 (same repository, base and paths listed) is known by its listing.
     entries = [pr_line(7, base=NEWER, paths=("x.py",))]
     for listing in ([first, second], [second, first]):
-        decision = sweep_decision(work, BASE, entries, lambda listing=listing: listing)
+        decision = decide_under_default_prefix(work, BASE, entries, lambda listing=listing: listing)
         assert decision.kind == DUPLICATE_OPEN_PR, listing
         assert {pr["number"]: pr["paths"] for pr in decision.open_prs} == {
             7: ["x.py"], 8: ["y.py"]}

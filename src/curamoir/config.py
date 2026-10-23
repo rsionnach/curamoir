@@ -43,6 +43,15 @@ NUMBER = "number"
 #: are legitimately fractional.
 COUNT = "whole number of 0 or more"
 STRING = "string"
+#: A non-empty string with no whitespace at either end. WHY for
+#: guardrails.branch_prefix: as a plain STRING, `""` would pass, and then
+#: the open-PR cap would count every open PR in the repository as
+#: cúramóir's while the sweep's idempotence decision
+#: (idempotence.sweep_branch_prefix) would refuse it; and `" curamoir/ "`
+#: would match no branch git allows, so the cap and the decision would see
+#: none of cúramóir's own PRs. idempotence.sweep_branch_prefix applies the
+#: same rule.
+NON_EMPTY_TRIMMED_STRING = "non-empty string with no leading or trailing whitespace"
 BOOLEAN = "boolean"
 STRING_LIST = "list of strings"
 MAPPING = "mapping"
@@ -213,7 +222,7 @@ SCHEMA = {
         # DefaultBranchGuard unconditionally refuses — admitting an `allow` the
         # code does not implement would be a promise the schema cannot keep.
         "default_branch_writes": ("never",),
-        "branch_prefix": STRING,
+        "branch_prefix": NON_EMPTY_TRIMMED_STRING,
         "command_denylist": STRING,
         "use_dcg_if_present": BOOLEAN,
     },
@@ -467,6 +476,11 @@ def _check_scalar(path, given, expected, problems):
     elif expected is STRING:
         if not isinstance(given, str):
             problems.append(f"{path}: expected a {STRING}, got {_type_name(given)}")
+    elif expected is NON_EMPTY_TRIMMED_STRING:
+        if not isinstance(given, str):
+            problems.append(f"{path}: expected a {NON_EMPTY_TRIMMED_STRING}, got {_type_name(given)}")
+        elif not given or given != given.strip():
+            problems.append(f"{path}: must be a {NON_EMPTY_TRIMMED_STRING} (got {given!r})")
     elif expected is BOOLEAN:
         if not isinstance(given, bool):
             problems.append(f"{path}: expected a {BOOLEAN}, got {_type_name(given)}")

@@ -41,7 +41,8 @@ docstring, "The ledger line".
    returns something outside the listing contract, guards.pr_cap's
    docstring): UNKNOWN, refuse; the message says the next sweep will try
    again, because a `gh` outage passes.
-3. Each open sweep PR (branch under SWEEP_BRANCH_PREFIX, in this
+3. Each open sweep PR (branch under the sweep prefix,
+   sweep_branch_prefix(guardrails.branch_prefix as configured), in this
    repository: a fork's PR was already dropped, "The trust boundary"
    below) is known by its ledger `pr` record when there is one (primary:
    it is what the sweep that opened it wrote), paired by PR NUMBER, else
@@ -114,7 +115,7 @@ not the listed PR's number is an older PR on a reused branch name and is
 not used. Which PRs are open, and GitHub's account of them, comes from
 the open-PR callable.
 
-**Open PRs on GitHub** (what cm-fkd.4 supplies). The ledger reaches the
+**Open PRs on GitHub** (curamoir.github supplies them). The ledger reaches the
 repository only through the runner's state PR (spec section 6.1, E11-R3),
 so in CI mode (a fresh checkout per run, E10-R2) sweep 1's `pr` line is
 not visible to sweep 2 until that PR is merged. Without a second source
@@ -123,9 +124,10 @@ GitHub: its body has the line `sweep_marker(base)`, exactly
 `<!-- curamoir-sweep base=<full lowercase commit SHA> -->` on a line of
 its own (an HTML comment, invisible when rendered), which
 parse_sweep_marker reads back strictly (anything else is None). Its paths
-are GitHub's own list of the PR's files. cm-fkd.4's callable runs `gh pr
-list --state open --json headRefName,number,url,body,files` (bounded by
-its own timeout: nothing here can interrupt it) and returns
+are GitHub's own list of the PR's files. The callable,
+curamoir.github.open_sweep_prs, runs `gh pr list --state open --limit
+<high> --json headRefName,number,url,body,files,isCrossRepository`
+(bounded by its own timeout: nothing here can interrupt it) and returns
 `[sweep_pr_listing(item) for item in ...]`, the listing contract's
 records. `isCrossRepository` is part of that query and MUST stay in it
 (next paragraph): without it every listed record is of unknown provenance,
@@ -172,9 +174,10 @@ changes).
   `cross_repository: false`) refuses every sweep
   with work until it is merged or closed: safe, and the message says which
   branch.
-- The `curamoir/sweep-` branch prefix is reserved for cúramóir: a
-  developer's own branch under it is taken for a sweep PR, and, having no
-  record and no marker, refuses sweeps until it is merged or closed.
+- The sweep prefix (`curamoir/sweep-` by default; "The configured
+  prefix" below) is reserved for cúramóir: a developer's own branch
+  under it is taken for a sweep PR, and, having no record and no marker,
+  refuses sweeps until it is merged or closed.
 - Two sweeps deciding at once could each see no open PR and both open
   one. Nothing here prevents that: the runner's lock (job_guard.LockSlot,
   cm-x5a.6) does, admitting one job per repository at a time, so the
@@ -188,6 +191,16 @@ changes).
 - Tier 1 and E3-R7: see curamoir.tier1, "Once per base" and "Limits".
 - Open PRs on other `curamoir/` branches (promote, review) are not sweep
   PRs and hold nothing here; the cap still counts them.
+
+**The configured prefix** (a user decision, 2026-10-23). Sweep PRs are
+opened on `<guardrails.branch_prefix>sweep-<date>-<base[:8]>`, so the
+prefix that marks a sweep PR is sweep_branch_prefix of the CONFIGURED
+`guardrails.branch_prefix`, the same setting the open-PR cap counts by
+(job_guard.job_gateway). sweep_decision takes it as a required keyword,
+with no default: a default would be a prefix nobody configured, and with
+`branch_prefix: bot/` the decision would then see none of the sweep's own
+PRs and open a duplicate of each. SWEEP_BRANCH_PREFIX is the sweep prefix
+under the default configuration, and nothing more.
 
 Syntax that imports on 3.9, like sweep.py: the runner reaches this through
 `scripts/curamoir`, whose interpreter may be the fallback `python3`.
@@ -206,7 +219,7 @@ from curamoir.tier1 import FAILED as SCAN_FAILED
 
 __all__ = ["WORK_FIELD", "PR_FIELD", "WORK", "NO_WORK", "DUPLICATE_OPEN_PR", "UNKNOWN",
            "TIER1_FAILED", "SWEEP_BRANCH_PREFIX", "GH_FILES_CAP", "Decision", "pr_field",
-           "sweep_prs", "sweep_decision", "sweep_marker", "parse_sweep_marker",
+           "sweep_branch_prefix", "sweep_prs", "sweep_decision", "sweep_marker", "parse_sweep_marker",
            "sweep_pr_listing"]
 
 #: The ledger field that says what kind of sweep line this is (module docstring).
@@ -228,8 +241,10 @@ UNKNOWN = "unknown"
 #: NO_WORK: nothing was shown clean (Decision.after_tier1).
 TIER1_FAILED = "tier1_failed"
 
-#: The branches sweep PRs are opened on (E3-R3: `curamoir/sweep-<date>`).
-#: Reserved for cúramóir (module docstring, Limits).
+#: The sweep prefix under the DEFAULT guardrails.branch_prefix (E3-R3:
+#: `curamoir/sweep-<date>`). A repository may configure another, so the
+#: decision never reads this: it takes the configured prefix (module
+#: docstring, "The configured prefix"). Reserved for cúramóir (Limits).
 SWEEP_BRANCH_PREFIX = DEFAULT_PREFIX + "sweep-"
 
 #: A full commit SHA (SHA-1 or SHA-256).
@@ -247,6 +262,20 @@ _MARKER_WORD = "curamoir-sweep"
 
 #: How much of an error a message quotes.
 _CLIP = 200
+
+
+def sweep_branch_prefix(branch_prefix):
+    """The prefix of every sweep PR's branch under the configured
+    `guardrails.branch_prefix` (`branch_prefix`): it with `sweep-` after.
+    ValueError unless `branch_prefix` is a non-empty string with no
+    whitespace at either end (config's NON_EMPTY_TRIMMED_STRING): an empty
+    one would make every `sweep-...` branch in the repository cúramóir's,
+    and a padded one would match none of them. Kept in step with
+    config's NON_EMPTY_TRIMMED_STRING check: change both or neither."""
+    if not (_text(branch_prefix) and branch_prefix == branch_prefix.strip()):
+        raise ValueError(f"guardrails.branch_prefix must be a non-empty string with no "
+                         f"leading or trailing whitespace, not {clipped_repr(branch_prefix)}")
+    return branch_prefix + "sweep-"
 
 
 def pr_field(number, branch, url, base, paths):
@@ -328,7 +357,8 @@ def sweep_pr_listing(item):
     None when there are GH_FILES_CAP or more (possibly cut short), none, or
     any is malformed; `cross_repository` is `isCrossRepository` as given
     (missing is None: unknown provenance, module docstring, "The trust
-    boundary"). Pure: cm-fkd.4 runs `gh` and maps its items through this."""
+    boundary"). Pure: curamoir.github.open_sweep_prs runs `gh` and maps its
+    items through this."""
     files = item.get("files")
     paths = None
     if isinstance(files, list) and 0 < len(files) < GH_FILES_CAP:
@@ -459,8 +489,7 @@ class Decision:
         sandbox.work_list = self.work_list
 
 
-def sweep_decision(work, base, entries, open_sweep_prs,
-                   branch_prefix=SWEEP_BRANCH_PREFIX, tier1=False):
+def sweep_decision(work, base, entries, open_sweep_prs, *, branch_prefix, tier1=False):
     """The Decision for a sweep whose base `base` linted to `work` (a
     sweep.WorkList, the sandbox's, before any remedy). `entries` are the
     ledger's (Ledger.entries()); `open_sweep_prs` is the open-PR callable
@@ -468,18 +497,24 @@ def sweep_decision(work, base, entries, open_sweep_prs,
     or records), called at most once and only when there is work. The rules:
     the module docstring.
 
+    `branch_prefix` is `guardrails.branch_prefix` AS CONFIGURED, required
+    (module docstring, "The configured prefix"): a sweep PR is one whose
+    branch starts with sweep_branch_prefix(branch_prefix). ValueError,
+    before anything is listed, when it is not a non-empty string.
+
     `tier1` is True when the tier-1 scan will run at this base
     (curamoir.tier1.plan_scan): the lint's work is then not all the work
     there may be, so an empty or wholly held lint list is WORK (with the
     narrowed list, possibly empty), not terminal, and the runner settles it
     after the scan with Decision.after_tier1. A PR already opened from this
     base is DUPLICATE_OPEN_PR either way, before any scan is paid for."""
+    sweep_prefix = sweep_branch_prefix(branch_prefix)
     if not work.items and not tier1:
         return Decision(NO_WORK, "no work: the lint found nothing to fix at this base", base)
     try:
         records = open_pr_records(open_sweep_prs())
     except Exception as error:
-        # WHY so broad: the callable is injected (cm-fkd.4's `gh` query), and
+        # WHY so broad: the callable is injected (curamoir.github's query), and
         # whatever it raises, or a listing of the wrong shape, the open PRs
         # are unknown.
         return Decision(UNKNOWN, _unknown(f"could not list open pull requests ("
@@ -488,7 +523,7 @@ def sweep_decision(work, base, entries, open_sweep_prs,
     # sees only this repository's PRs and those of unknown provenance.
     listed = {}
     for record in records:
-        if record["branch"].startswith(branch_prefix):
+        if record["branch"].startswith(sweep_prefix):
             listed.setdefault(record["branch"], []).append(
                 (_listed(record), record.get("cross_repository") is False))
     ledger = sweep_prs(entries)

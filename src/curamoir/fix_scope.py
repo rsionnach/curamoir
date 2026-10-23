@@ -34,22 +34,30 @@ Two layers, so the rules can be tested without git:
 
 0. Wrap the whole pipeline, steps 1 to 10, in the guards (E3-R6), in four
    parts:
-   (i) The wrap: `job_guard.run_guarded(repo, "sweep", open_sweep_prs,
-       body, repo_labels=repo_labels)`, where `body(run)` is everything
-       below and records its outcome on `run`, the `JobRun` writing to the
-       repo's own ledger. Use `run`, not a ledger of your own, for every
-       line below, and read history as `run.ledger.entries()`, the same
-       ledger. A refusal (`paused`, `locked`, `budget`, `pr_cap`,
-       `guard_error`) then writes the job's one `job` line, beside the
-       gateway's `guard` line, before any clone, fix step or spend.
+   (i) The wrap: replace the placeholder BODY of `runner.JOBS["sweep"]`
+       (`Job(body=..., opens_prs=True, open_pr_listing_for=...)`) with
+       `body(repo, run)`, everything below, which records its outcome on
+       `run`, the `JobRun` writing to the repo's own ledger. Do NOT call
+       `job_guard.run_guarded` yourself: `curamoir run sweep` reaches it
+       through `runner.run_job`, which runs every job behind the guards in
+       E10-R1's order and gives the gateway the gh defaults of (ii) and
+       (iii). Use `run`, not a ledger of your own, for every line below,
+       and read history as `run.ledger.entries()`, the same ledger. A
+       refusal (`paused`, `locked`, `budget`, `pr_cap`, `guard_error`)
+       then writes the job's one `job` line, beside the gateway's `guard`
+       line, before the body starts: before any clone, fix step or spend.
        `DefaultBranchGuard` is not among those guards: apply it at push/PR
-       time, on the `curamoir/sweep-...` branch (job_guard's docstring).
-   (ii) `repo_labels`: the `gh`-backed callable returning the repository's
+       time, on the `<guardrails.branch_prefix>sweep-...` branch
+       (job_guard's docstring).
+   (ii) `repo_labels` (done, cm-fkd.10: curamoir.github.repo_labels, which
+       `runner.run_job` binds to the root for EVERY job, the kill switch
+       being per run): the `gh`-backed callable returning the repository's
        labels, for the `curamoir:paused` kill switch (guards.kill_switch),
        as an iterable of label-name strings (not gh's `{name: ...}`
        objects; any other shape degrades the check). Run exactly
        `gh label list --limit <high> --json name --jq '.[].name'`, with
-       <high> well above any repository's label count, and return its
+       <high> well above any repository's label count (github.LABEL_LIMIT,
+       1000), and return its
        output's lines. WHY: gh lists 30 labels by default, so without a
        high `--limit` `curamoir:paused` can be cut off and the job runs
        although paused, with nothing recorded: the check fails open. And
@@ -58,15 +66,30 @@ Two layers, so the rules can be tested without git:
        time out and raise: a raise degrades the check (a degraded `guard`
        line, and the job still runs), but a hang the scheduler then kills
        writes no line at all.
-   (iii) `open_sweep_prs`: the same callable as step 2b's, and it must time
-       out and raise, because a hang the scheduler then kills writes no
-       line at all. It is called twice per sweep, once by the cap here and
-       once by step 2b's decision, so it must not cache across the two:
-       the second call must see what was opened or closed in between.
-   (iv) The result. The exit codes are the runner's to choose (lint's
-       EXIT_CLEAN, EXIT_VIOLATIONS and EXIT_ERROR, docs/curamoir-lint.md,
-       are the lint gate's, not a job's); they must tell apart the
-       returned job_guard.GuardedRun's `outcome`s (job_run's constants):
+   (iii) `open_sweep_prs` (done, cm-fkd.10: curamoir.github.open_sweep_prs,
+       registered as `runner.JOBS["sweep"].open_pr_listing_for` and bound
+       to the root by `runner.run_job`): the same callable as step 2b's,
+       and it must time out and raise, because a hang the scheduler then
+       kills writes no line at all. It is called twice per sweep, once by
+       the cap here and once by step 2b's decision, so it must not cache
+       across the two: the second call must see what was opened or closed
+       in between. github.open_sweep_prs caches nothing. The body gets no
+       parameter for it and builds its own: `open_sweep_prs =
+       functools.partial(github.open_sweep_prs, repo)`, the same binding
+       as runner._gh_open_prs. Never the bare function (it needs the
+       repo) and never its result (a list, not a callable): sweep_decision
+       calls it with no arguments, and either mistake raises inside its
+       broad `except`, so every sweep would be refused as UNKNOWN with
+       nothing else said. `run_job(open_pr_listing=...)` replaces only the
+       cap's listing, so a test that must feed both the same PRs points
+       `github.GH` at a fake gh (tests/fake_gh.py) instead.
+   (iv) The result: `runner.run_job` maps the job_guard.GuardedRun's
+       `outcome` to the process's exit code through `runner._EXIT_CODES`
+       (EXIT_SUCCESS, EXIT_FAILURE, EXIT_REFUSED, EXIT_UNUSABLE_ROOT), and
+       a crash to EXIT_FAILURE with one sentence; the body adds nothing
+       here. Lint's EXIT_CLEAN, EXIT_VIOLATIONS and EXIT_ERROR
+       (docs/curamoir-lint.md) are the lint gate's, not a job's. What
+       each `outcome` (job_run's constants) means for the sweep:
        - job_run.SUCCESS: the body recorded a success (a sweep, or a
          terminal NO_WORK or DUPLICATE_OPEN_PR decision); `value` is what
          `body` returned.
@@ -82,7 +105,8 @@ Two layers, so the rules can be tested without git:
          the failed write on stderr.
        A body that raises does not return a GuardedRun at all: JobRun
        writes a `failure` line and the exception propagates out of
-       run_guarded, for the runner to report as a crash.
+       run_guarded, and `runner.run_job` reports it as a crash
+       (EXIT_FAILURE).
 1. Make a sandbox: `git_guard.prepare_sandbox(repo, base_ref)`, and use it
    as a context manager so it is removed whatever happens.
 2. Lint it before anything edits it: `lint_sandbox(sandbox)`, which records
@@ -114,15 +138,23 @@ Two layers, so the rules can be tested without git:
        and `tier1_state = plan` (the tier1 field note below).
    (ii) Decide: `decision = idempotence.sweep_decision(
        sandbox.work_list, sandbox.base, run.ledger.entries(), open_sweep_prs,
-       tier1=plan.will_scan)`. cm-fkd.4 supplies `open_sweep_prs`, the
-       `gh`-backed callable (`gh pr list --state open --json
+       branch_prefix=repo_config.strict_config(repo)["guardrails"]
+       ["branch_prefix"], tier1=plan.will_scan)`. The prefix is required
+       and is read exactly as job_guard.job_gateway reads it for the cap,
+       so the decision and the cap read one setting and see the same sweep
+       PRs (idempotence, "The configured prefix"). `open_sweep_prs` is
+       `functools.partial(github.open_sweep_prs, repo)`, step 0 (iii)'s
+       binding, never the bare function or its result: the `gh`-backed
+       callable curamoir.github.open_sweep_prs (`gh pr list --state open
+       --limit 1000 --json
        headRefName,number,url,body,files,isCrossRepository`, each item
-       mapped through idempotence.sweep_pr_listing; `isCrossRepository`
-       is the trust boundary, guards.pr_cap's docstring) shared with the
-       open-PR cap (guards.pr_cap, whose docstring holds the listing
-       contract), and puts `idempotence.sweep_marker(sandbox.base)` on a
-       line of the sweep PR's body, so a fresh CI checkout whose ledger
-       lacks this line still knows the PR's base.
+       mapped through idempotence.sweep_pr_listing;
+       `isCrossRepository` is the trust boundary, guards.pr_cap's
+       docstring), the one the open-PR cap also counts with (guards.pr_cap,
+       whose docstring holds the listing contract). The sweep puts
+       `idempotence.sweep_marker(sandbox.base)` on a line of the sweep PR's
+       body, so a fresh CI checkout whose ledger lacks this line still
+       knows the PR's base.
    (iii) If `decision.terminal` (NO_WORK, DUPLICATE_OPEN_PR, or UNKNOWN):
        `decision.record(run, delta, **tier1_state.ledger_fields())`,
        which writes a success with `work` and `found_delta` or, for

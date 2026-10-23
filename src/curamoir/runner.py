@@ -19,9 +19,18 @@ line, even a failure, would let a scheduler's log read as if the job ran.
 pipeline and needs the name now. Until then `curamoir run sweep` writes a
 `failure` line naming cm-fkd.4 and exits EXIT_FAILURE: never success, so a
 scheduled sweep that does nothing cannot pass for one that found nothing.
-Its open-PR listing is the same kind of placeholder, one that raises, so the
-cap degrades with a guard line saying it was not enforced; cm-fkd.4 replaces
-both with the `gh`-backed listing and the real body.
+Its open-PR listing is the real one already: `gh pr list`, through
+curamoir.github.open_sweep_prs, bound to the run's root.
+
+**gh, by default** (cm-fkd.10). With no arguments, `run_job` gives every job
+the `curamoir:paused` label check (github.repo_labels, bound to the root):
+the kill switch is per run, not per job, so the brief is paused by the label
+as the sweep is. A job that opens PRs gets its registered listing, a factory
+the runner binds to the root (`Job.open_pr_listing_for`). Both are plain
+callables called when the guard runs, never cached, and both raise when gh
+cannot answer, which degrades the check with a guard line saying so
+(guards.kill_switch, guards.pr_cap). `run_job`'s `repo_labels` and
+`open_pr_listing` replace them (tests; a caller with its own source).
 
 **Exit codes**, one per GuardedRun outcome a scheduler must tell apart:
 EXIT_SUCCESS, EXIT_FAILURE (the body failed, crashed, or reported nothing,
@@ -39,9 +48,11 @@ and nothing is written.
 
 from collections.abc import Callable
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 from typing import Any, NamedTuple, Optional
 
+from curamoir import github
 from curamoir.brief import write_brief
 from curamoir.job_guard import UNUSABLE_ROOT, Terminated, run_guarded
 from curamoir.job_run import FAILURE, REFUSED, SUCCESS, UNKNOWN
@@ -69,15 +80,17 @@ class Job:
 
     `body(repo, run)` does the work and reports its outcome on `run` (the
     JobRun writing the job's line). `opens_prs` subjects the job to the
-    open-PR cap; `open_pr_listing` is then the listing callable the cap
-    counts with (guards.pr_cap's contract).
+    open-PR cap; `open_pr_listing_for(root)` then returns the listing
+    callable the cap counts with (guards.pr_cap's contract: no arguments),
+    for the repository at `root`. A factory, because the registry is built
+    before any run knows its repository.
     """
 
     body: Callable[[Path, Any], Any]
     #: Required, with no default: a PR-opening job registered without saying
     #: so would skip the cap by omission.
     opens_prs: bool
-    open_pr_listing: Optional[Callable[[], Any]] = None
+    open_pr_listing_for: Optional[Callable[[Path], Callable[[], Any]]] = None
 
 
 class Ran(NamedTuple):
@@ -101,14 +114,15 @@ def _sweep_not_built(_repo, run):
                "swept; this run did no work")
 
 
-def _open_prs_not_listed_yet():
-    raise NotImplementedError("the gh-backed open-PR listing is not built until cm-fkd.4")
+def _gh_open_prs(root):
+    """The open-PR listing for the repository at `root`: gh's, asked afresh
+    on every call (curamoir.github)."""
+    return partial(github.open_sweep_prs, root)
 
 
 JOBS = {
     "brief": Job(body=_brief, opens_prs=False),
-    "sweep": Job(body=_sweep_not_built, opens_prs=True,
-                 open_pr_listing=_open_prs_not_listed_yet),
+    "sweep": Job(body=_sweep_not_built, opens_prs=True, open_pr_listing_for=_gh_open_prs),
 }
 
 #: E10-R1's other jobs, with the bead that builds each; cm-x5a.1 registers
@@ -125,9 +139,11 @@ def run_job(repo, name, *, open_pr_listing=None, repo_labels=None, now=None):
     """Run the job registered as `name` against `repo` and return a Ran.
 
     `open_pr_listing`, when given, replaces the job's registered listing
-    (tests; cm-fkd.4 registers the real one). It is ignored for a job that
-    opens no PRs, which the cap does not apply to. `repo_labels` and `now`
-    are run_guarded's.
+    (`Job.open_pr_listing_for`, bound to `repo`). It is ignored for a job
+    that opens no PRs, which the cap does not apply to. `repo_labels`, when
+    given, replaces the default label check, github.repo_labels bound to
+    `repo`, which every job gets (module docstring, "gh, by default").
+    `now` is run_guarded's.
     """
     job = JOBS.get(name)
     if job is None:
@@ -142,10 +158,14 @@ def run_job(repo, name, *, open_pr_listing=None, repo_labels=None, now=None):
                    f"at {root}, so there is no ledger to record the run in. Point "
                    "--repo at the repository root, or run /curamoir:init.")
 
+    if open_pr_listing is None and job.open_pr_listing_for is not None:
+        open_pr_listing = job.open_pr_listing_for(root)
+    if repo_labels is None:
+        repo_labels = partial(github.repo_labels, root)
+
     try:
         result = run_guarded(
-            root, name,
-            job.open_pr_listing if open_pr_listing is None else open_pr_listing,
+            root, name, open_pr_listing,
             lambda run: job.body(root, run),
             now=now, repo_labels=repo_labels, opens_prs=job.opens_prs,
         )

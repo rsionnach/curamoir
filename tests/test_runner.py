@@ -19,7 +19,7 @@ import sys
 
 import pytest
 
-from curamoir import cli, job_guard, runner
+from curamoir import cli, github, job_guard, runner
 from curamoir.budget import Budget
 from curamoir.guards import JobContext, KillSwitch, OpenPrCap
 from curamoir.ledger import Ledger
@@ -34,6 +34,7 @@ from curamoir.runner import (
     run_job,
 )
 from curamoir.scaffold import init_repo
+from tests.fake_gh import FakeGh
 from tests.test_job_guard import CEILING, gh_item, listing, october, seed_spend
 
 #: Three open sweep PRs: at the default cap of three.
@@ -246,14 +247,19 @@ def test_the_sweep_is_refused_by_the_open_pr_cap(repo):
     assert ran.sentence.startswith("cúramóir ran 'sweep': refused (pr_cap). 3 open curamoir/*")
 
 
-def test_the_sweep_without_a_listing_says_the_cap_was_not_enforced(repo):
-    """Until cm-fkd.4 supplies the gh-backed listing the cap cannot count,
-    and that is a degraded pr_cap line, never a silent pass."""
-    run_job(repo.repo, "sweep", now=october)
+def test_the_sweep_without_a_listing_says_when_gh_could_not_list(repo, tmp_path, monkeypatch):
+    """With no listing passed, the cap counts with gh's (cm-fkd.10); a gh that
+    cannot list is a degraded pr_cap line, never a silent pass. (The labels
+    come from tests: this is about the listing.)"""
+    gh = FakeGh(tmp_path / "gh")
+    gh.feed(fail="gh: To get started with GitHub CLI, please run:  gh auth login")
+    monkeypatch.setattr(github, "GH", str(gh.path))
+
+    run_job(repo.repo, "sweep", repo_labels=lambda: [], now=october)
 
     lines = guard_lines(repo)
     assert [(e["reason"], e["severity"]) for e in lines] == [("pr_cap", "degraded")]
-    assert "cm-fkd.4" in lines[0]["message"]
+    assert "gh auth login" in lines[0]["message"]
 
 
 # The sync seam.

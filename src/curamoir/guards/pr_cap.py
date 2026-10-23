@@ -8,8 +8,9 @@ is testable without the network, and so a `gh` outage is reported as an
 unenforced cap rather than mistaken for either a full queue or an empty one.
 
 **The open-PR listing contract** (one contract, defined here, for every reader:
-this cap, the sweep's idempotence decision and `/curamoir:status`; cm-fkd.4
-supplies the `gh`-backed callable, `gh pr list --state open --json
+this cap, the sweep's idempotence decision and `/curamoir:status`;
+curamoir.github.open_sweep_prs is the `gh`-backed callable, `gh pr list
+--state open --limit 1000 --json
 headRefName,number,url,body,files,isCrossRepository`, mapped item by item
 with idempotence.sweep_pr_listing; `isCrossRepository` MUST be requested,
 see "The trust boundary"). The callable takes no arguments and returns:
@@ -33,7 +34,7 @@ see "The trust boundary"). The callable takes no arguments and returns:
 Anything else (a str, a mapping as the whole listing, an item that is neither
 a name nor a record with a non-empty `branch`) is also "could not list": a
 listing that is wrong in shape cannot be trusted in its count. A timeout is
-the callable's own (cm-fkd.4 bounds its `gh` call and raises); nothing here
+the callable's own (curamoir.github bounds its `gh` call and raises); nothing here
 can interrupt it.
 
 **The trust boundary** (one rule for every reader, applied here in

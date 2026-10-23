@@ -62,7 +62,6 @@ from curamoir.idempotence import (
     TIER1_FAILED,
     WORK,
     pr_field,
-    sweep_decision,
 )
 from curamoir.job_run import JobRun
 from curamoir.ledger import Ledger
@@ -115,6 +114,7 @@ from curamoir.tier1 import (
 )
 from tests import claude_payloads
 from tests.conftest import committed_sample
+from tests.test_idempotence import decide_under_default_prefix
 from tests.test_lint import FIXTURE, NO_BARE_PRINT, NO_VARIANT_MODULE
 
 BILLING = "src/sample/core/billing.py"
@@ -249,7 +249,7 @@ def test_a_tier1_fix_is_tagged_in_the_ledger_and_the_pr_and_counted(tmp_path):
             "structured-logging", "no-file-variant-proliferation"}
         plan = plan_scan(sandbox, ledger.entries())
         assert plan.status == READY and [p.id for p in plan.eligible] == [ECC]
-        decision = sweep_decision(work, sandbox.base, ledger.entries(), lambda: [],
+        decision = decide_under_default_prefix(work, sandbox.base, ledger.entries(), lambda: [],
                                   tier1=plan.will_scan)
         decision.apply_to(sandbox)
         scan = run_tier1_scan(sandbox, plan, decision.held_paths, ledger.entries(),
@@ -312,7 +312,7 @@ def test_with_tier1_off_the_sweep_runs_on_the_lint_alone(tmp_path):
         assert plan.status == OFF and not plan.will_scan
         with pytest.raises(ValueError):
             run_tier1_scan(sandbox, plan, (), ledger.entries(), claude="/nonexistent")
-        decision = sweep_decision(work, sandbox.base, ledger.entries(), lambda: [],
+        decision = decide_under_default_prefix(work, sandbox.base, ledger.entries(), lambda: [],
                                   tier1=plan.will_scan)
         decision.apply_to(sandbox)
         remedies = apply_file_remedies(sandbox)
@@ -396,7 +396,7 @@ def test_a_clean_base_scanned_once_is_no_work_and_not_scanned_again(tmp_path):
         assert work.items == ()
         plan = plan_scan(sandbox, ledger.entries())
         assert plan.status == READY
-        decision = sweep_decision(work, sandbox.base, ledger.entries(), lambda: [],
+        decision = decide_under_default_prefix(work, sandbox.base, ledger.entries(), lambda: [],
                                   tier1=plan.will_scan)
         assert decision.kind == WORK
         decision.apply_to(sandbox)
@@ -423,7 +423,7 @@ def test_a_clean_base_scanned_once_is_no_work_and_not_scanned_again(tmp_path):
         def must_not_list():
             raise AssertionError("a clean, already scanned base needs no PR listing")
 
-        assert sweep_decision(work, again.base, ledger.entries(), must_not_list,
+        assert decide_under_default_prefix(work, again.base, ledger.entries(), must_not_list,
                               tier1=plan.will_scan).kind == NO_WORK
 
 
@@ -437,7 +437,7 @@ def test_a_failed_scan_with_no_lint_work_is_a_failure_never_no_work(tmp_path):
     with prepare_sandbox(repo, "HEAD", parent=tmp_path) as sandbox:
         work = lint_sandbox(sandbox)
         plan = plan_scan(sandbox, ledger.entries())
-        decision = sweep_decision(work, sandbox.base, ledger.entries(), lambda: [],
+        decision = decide_under_default_prefix(work, sandbox.base, ledger.entries(), lambda: [],
                                   tier1=plan.will_scan)
         decision.apply_to(sandbox)
         scan = run_tier1_scan(sandbox, plan, decision.held_paths, ledger.entries(),
@@ -457,7 +457,7 @@ def test_a_failed_scan_with_no_lint_work_is_a_failure_never_no_work(tmp_path):
 
 def test_a_failed_scan_with_lint_work_lets_the_sweep_go_on(swept):
     _repo, work = swept
-    decision = sweep_decision(work, "a" * 40, [], lambda: [], tier1=True)
+    decision = decide_under_default_prefix(work, "a" * 40, [], lambda: [], tier1=True)
     failed = Tier1Scan(FAILED, "a" * 40, reason="the tier-1 scan exited 1")
     assert decision.after_tier1(decision.work_list, failed) is decision
 
@@ -494,7 +494,7 @@ def test_a_scan_whose_sweep_failed_without_a_pr_is_scanned_again(tmp_path):
     with prepare_sandbox(repo, "HEAD", parent=tmp_path) as sandbox:
         work = lint_sandbox(sandbox)
         plan = plan_scan(sandbox, ledger.entries())
-        decision = sweep_decision(work, sandbox.base, ledger.entries(), lambda: [],
+        decision = decide_under_default_prefix(work, sandbox.base, ledger.entries(), lambda: [],
                                   tier1=plan.will_scan)
         decision.apply_to(sandbox)
         scan = run_tier1_scan(sandbox, plan, decision.held_paths, ledger.entries(),
@@ -508,7 +508,7 @@ def test_a_scan_whose_sweep_failed_without_a_pr_is_scanned_again(tmp_path):
         work = lint_sandbox(again)
         plan = plan_scan(again, ledger.entries())
         assert plan.status == READY
-        assert sweep_decision(work, again.base, ledger.entries(), lambda: [],
+        assert decide_under_default_prefix(work, again.base, ledger.entries(), lambda: [],
                               tier1=plan.will_scan).kind == WORK
 
 
@@ -525,7 +525,7 @@ def test_scan_attempts_per_base_are_capped(tmp_path):
             work = lint_sandbox(sandbox)
             plan = plan_scan(sandbox, ledger.entries())
             assert plan.status == READY
-            decision = sweep_decision(work, sandbox.base, ledger.entries(), lambda: [],
+            decision = decide_under_default_prefix(work, sandbox.base, ledger.entries(), lambda: [],
                                       tier1=True)
             decision.apply_to(sandbox)
             scan = run_tier1_scan(sandbox, plan, (), ledger.entries(), claude=claude)
@@ -539,7 +539,7 @@ def test_scan_attempts_per_base_are_capped(tmp_path):
         assert plan.status == ATTEMPTS_EXHAUSTED and not plan.will_scan
         with pytest.raises(ValueError):
             run_tier1_scan(sandbox, plan, (), ledger.entries(), claude="/nonexistent")
-        decision = sweep_decision(work, sandbox.base, ledger.entries(), lambda: [],
+        decision = decide_under_default_prefix(work, sandbox.base, ledger.entries(), lambda: [],
                                   tier1=plan.will_scan)
         assert decision.kind == NO_WORK
         with JobRun(ledger, "sweep") as run:
@@ -561,7 +561,7 @@ def scanned_then(tmp_path, repo, ledger, record, *, cap=None, reply=None, name="
         work = lint_sandbox(sandbox)
         plan = plan_scan(sandbox, ledger.entries())
         assert plan.status == READY
-        decision = sweep_decision(work, sandbox.base, ledger.entries(), lambda: [], tier1=True)
+        decision = decide_under_default_prefix(work, sandbox.base, ledger.entries(), lambda: [], tier1=True)
         decision.apply_to(sandbox)
         scan = run_tier1_scan(sandbox, plan, decision.held_paths, ledger.entries(), cap=cap,
                               claude=claude)
@@ -1170,8 +1170,8 @@ def test_the_decision_waits_for_the_scan_when_the_lint_is_clean(swept):
         listed.append(True)
         return []
 
-    assert sweep_decision(empty, base, [], open_prs).kind == NO_WORK and not listed
-    decision = sweep_decision(empty, base, [], open_prs, tier1=True)
+    assert decide_under_default_prefix(empty, base, [], open_prs).kind == NO_WORK and not listed
+    decision = decide_under_default_prefix(empty, base, [], open_prs, tier1=True)
     assert decision.kind == WORK and listed
     scanned = Tier1Scan(SCANNED, base)
     assert decision.after_tier1(empty, scanned).kind == NO_WORK
@@ -1179,9 +1179,9 @@ def test_the_decision_waits_for_the_scan_when_the_lint_is_clean(swept):
     assert decision.after_tier1(found, scanned) is decision
     same_base = [{"branch": "curamoir/sweep-2026-10-12", "number": 7, "url": "u",
                   "base": base, "paths": ["x.py"], "cross_repository": False}]
-    assert sweep_decision(empty, base, [], lambda: same_base, tier1=True).kind == \
+    assert decide_under_default_prefix(empty, base, [], lambda: same_base, tier1=True).kind == \
         DUPLICATE_OPEN_PR
-    held = sweep_decision(work, base, [], lambda: [{**same_base[0], "base": "c" * 40,
+    held = decide_under_default_prefix(work, base, [], lambda: [{**same_base[0], "base": "c" * 40,
                                                     "paths": list(work.paths)}], tier1=True)
     assert held.kind == WORK and held.held_paths == tuple(sorted(work.paths))
     assert held.after_tier1(held.work_list, scanned).kind == DUPLICATE_OPEN_PR
