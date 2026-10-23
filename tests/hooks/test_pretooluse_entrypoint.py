@@ -17,6 +17,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
@@ -56,6 +58,16 @@ def test_an_ordinary_command_produces_no_decision():
 
     assert result.returncode == 0, result.stderr
     assert decision is None
+
+
+@pytest.mark.parametrize("value", ["0", "false"])
+def test_any_non_empty_job_variable_counts_as_inside_a_job(value):
+    """Pinned so a change is deliberate: the hook tests CURAMOIR_JOB for being
+    non-empty, not for meaning yes, so "0" and "false" enforce too (the
+    README tells developers not to export it)."""
+    _, decision = run_hook("git reset --hard", env={"CURAMOIR_JOB": value})
+
+    assert decision is not None and decision["permissionDecision"] == "deny"
 
 
 def test_outside_a_job_nothing_is_denied():

@@ -163,11 +163,16 @@ It has three known limits:
 - **Redaction is pattern-based.** It catches the shapes it knows. That reduces
   exposure but doesn't guarantee nothing leaks.
 - **The command denylist knows a job only by its signals.** It enforces only
-  inside a cúramóir job, which it detects from an environment variable, with
-  the supervisor lock that `curamoir run` holds as a fallback. So while a job
-  runs, every session in that repository is treated as inside it, yours
-  included; and a session in a clone of the repository, where there is no
-  lock, is not treated as inside the job if the variable is scrubbed.
+  inside a cúramóir job, which it detects from the `CURAMOIR_JOB` environment
+  variable that `curamoir run` sets for the job and everything it starts, with
+  the supervisor lock that `curamoir run` holds as a fallback. Because the
+  lock is per-repository, while a job runs every session in that repository
+  is treated as inside it, yours included. In a clone of the repository,
+  where there is no lock, the variable is the only signal, so anything that
+  drops it from a process's environment stops enforcement there. The sweep's
+  fix step does not load the denylist hook yet; it has no Bash tool. Any
+  non-empty `CURAMOIR_JOB` counts, `0` and `false` included, so do not export
+  it in your own shell.
 
 ## What it deliberately does not do
 

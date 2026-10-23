@@ -75,7 +75,9 @@ the result as if the prompt had said nothing.
   `additionalDirectories` still load and could re-widen the fence above —
   and a project's settings are text in the very repository being swept.
   It also drops the user's hooks and plugins from this run, so cúramóir's
-  own Stop hook does not write into the sandbox. It "Requires
+  own Stop hook does not write into the sandbox, and its PreToolUse
+  denylist hook is not loaded either (cm-60c; harmless while the toolset
+  has no Bash, below). It "Requires
   Claude Code v2.1.248 or later"; an older CLI rejects the flag and the
   step fails loudly rather than running unfenced.
 - `--disable-slash-commands` ("Disable all skills and commands for this
@@ -101,7 +103,11 @@ the result as if the prompt had said nothing.
   requests are denied either way".
 
 The process runs in a session of its own with the inherited `GIT_*`
-variables dropped, and at the timeout its whole process group is killed
+variables dropped and the rest kept, CURAMOIR_JOB included (set by
+job_guard.run_guarded for the run: the E0-R5 denylist's signal in a clone
+that has no lock, cm-a2s). It is carried for when the denylist hook is
+loaded into this run, which `--restricted` (above) prevents today
+(cm-60c). At the timeout its whole process group is killed
 (git_guard.run_in_group), so nothing it started goes on editing the sandbox
 while the review reads it.
 

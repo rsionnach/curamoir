@@ -92,6 +92,31 @@ released, then sends the first again so the process still dies by it.
 SIGKILL and a power cut run no code. The lock then stays, and E0-R2's
 liveness check is the backstop: the lock's pid and host let the next run
 judge it stale, and it is reported, not overridden.
+
+**CURAMOIR_JOB for the run (cm-a2s).** The E0-R5 denylist hook knows a job
+by this variable, falling back to the lock (hooks/_entry.in_curamoir_job).
+The lock is gitignored, so a sandbox clone has none, and there the variable
+is the only signal. `run_guarded` is the one place every job passes, so it
+sets `CURAMOIR_JOB=<job>` in this process's environment for the run.
+
+It puts back what was there before, a previous value or nothing, on every
+exit path the lock is released on, after the release (`run_guarded`'s
+Ordering 5a and 5b).
+
+Every process the job starts inherits it: the fix step's `claude -p` gets
+git_guard.scrubbed_environment, which drops only GIT_*, and Claude Code
+passes its environment on to the hooks it runs ("A hook process inherits
+the parent environment", https://code.claude.com/docs/en/hooks). The fix
+step's own run is `--restricted`, though, and loads no cúramóir hook today
+(cm-60c): there the variable is carried for when the hook is loaded.
+CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1 does not take it away: it removes
+"credentials", recognised "by its variable
+name or by the shape of its value" (https://code.claude.com/docs/en/env-vars,
+"What the subprocess environment scrub removes"), and a job's name is
+neither. That is the docs' word; no test here runs a real `claude`. WHY the
+process environment and not each spawner's: a later spawner cannot forget
+it, and this CLI runs one job per process (a nested run restores the outer
+job's name).
 """
 
 # Unsorted on purpose, so I001 is silenced for this block: `curamoir.guards`
@@ -271,6 +296,35 @@ def _warn(message):
     print(f"cúramóir: {message}", file=sys.stderr)
 
 
+#: The E0-R5 denylist's primary signal (hooks/_entry.in_curamoir_job):
+#: `run_guarded` sets it to the job's name for the run. hooks/_entry.py
+#: keeps its own copy of the name (_JOB_VARIABLE), so the hook stays
+#: stdlib-only.
+JOB_VARIABLE = "CURAMOIR_JOB"
+
+
+def _require_job_name(job):
+    """Raise unless `job` can be JOB_VARIABLE's value and still mean "in a
+    job" to the hook: a non-empty str with no NUL (run_guarded's docstring)."""
+    if not isinstance(job, str):
+        raise TypeError(f"a job's name must be a str, not {type(job).__name__}: {job!r}")
+    if not job or "\0" in job:
+        raise ValueError(f"a job's name must be non-empty and contain no NUL: {job!r}")
+
+
+def _restore_job_variable(before):
+    """Put JOB_VARIABLE back as `run_guarded` found it: `before`, or absent
+    when it was None. Never raises (it runs in a `finally`)."""
+    if before is None:
+        os.environ.pop(JOB_VARIABLE, None)
+        # A signal inside the set can land after its putenv() and before
+        # os.environ records the key; pop() then never calls unsetenv(), and
+        # a child started with env=None would still inherit the job's name.
+        os.unsetenv(JOB_VARIABLE)
+    else:
+        os.environ[JOB_VARIABLE] = before
+
+
 #: What `skip_sync` writes on the job line, in the line's own fields.
 SYNC_SKIPPED = "skipped"
 SYNC_NOT_BUILT = ("sync is not built yet (cm-eqp.3), so the job ran on the "
@@ -374,6 +428,12 @@ def run_guarded(repo, job, open_pr_listing, body, *, now=None, repo_labels=None,
     run starts writes no job line, and a naive value is not checked.
     `repo_labels` is passed to the kill switch (job_gateway).
 
+    `job` must be a non-empty str with no NUL: it becomes CURAMOIR_JOB, and
+    the denylist hook takes an empty value for "not in a job" while
+    os.environ refuses a NUL. Anything else is a caller's error (runner.JOBS
+    cannot produce one): TypeError or ValueError, raised before anything
+    runs, so no signal handler, lock, variable or job line is touched.
+
     A repo root that cannot be inspected stops the job here rather than
     running it (outcome UNUSABLE_ROOT): every repo-reading guard would only
     degrade, and the job would then start with the kill switch, the lock and
@@ -382,6 +442,7 @@ def run_guarded(repo, job, open_pr_listing, body, *, now=None, repo_labels=None,
     writing one would recreate a moved repository's directory), so it is
     said on stderr.
     """
+    _require_job_name(job)
     context = JobContext(job=job, repo=None if repo is None else Path(repo))
     unusable = unusable_repo(context)
     if unusable is not None:
@@ -398,9 +459,24 @@ def run_guarded(repo, job, open_pr_listing, body, *, now=None, repo_labels=None,
     #    line is written before the lock goes.
     # 4. hold() and release() are a nested try/finally, so a signal landing
     #    before hold() takes effect still reaches the release.
+    # 5a. CURAMOIR_JOB (JOB_VARIABLE) is set as the first statement of the
+    #     `try`, before the guards: their callables (the kill switch's label
+    #     lookup, the open-PR listing) are the first things that can start a
+    #     process, and every `claude -p` comes after them. Its previous value
+    #     is read BEFORE the `try`, so a signal landing at any point after
+    #     leaves the finally something true to put back.
+    # 5b. It is restored in a `finally` nested inside the release's, so after
+    #     the lock is gone and still in the held phase: for the whole run the
+    #     denylist hook sees at least one of its two signals
+    #     (hooks/_entry.in_curamoir_job), and a signal cannot cut the restore
+    #     short.
     lock = LockSlot()
+    # Ordering 5a.
+    before = os.environ.get(JOB_VARIABLE)
     with TerminationSignals() as signals:
         try:
+            # Ordering 5a.
+            os.environ[JOB_VARIABLE] = job
             # HoldOnExit AFTER JobRun: it exits first (Ordering 2).
             with JobRun(repo_ledger(context.repo), job, now=now) as run, \
                     HoldOnExit(signals):
@@ -434,7 +510,11 @@ def run_guarded(repo, job, open_pr_listing, body, *, now=None, repo_labels=None,
                 signals.hold()
             finally:
                 # Ordering 4.
-                lock.release()
+                try:
+                    lock.release()
+                finally:
+                    # Ordering 5b.
+                    _restore_job_variable(before)
     # Read after the block: a body that reported nothing is UNKNOWN only
     # once JobRun has exited.
     return GuardedRun(
