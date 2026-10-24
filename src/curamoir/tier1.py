@@ -155,6 +155,7 @@ from curamoir.fix_scope import (
 from curamoir.fix_step import run_fix_step
 from curamoir.git_guard import git, require_sandbox, tree_changes, verify_git_state
 from curamoir.job_run import SUCCESS
+from curamoir.pr_markdown import code_span, location, plain_text
 from curamoir.repo_config import config_value
 
 #: The scan's whole toolset: it reads; it never edits.
@@ -1011,16 +1012,18 @@ def tier1_pr_lines(records, findings):
     """The PR body's line for each TIER1 record of `records` (E3-R3: each
     fix with its principle id): principle, that it is tier 1, where, and
     the scan's note. cm-fkd.4 puts them in the body, which it redacts
-    (E0-R7). The note is the agent's text, kept on one line and without
-    backticks."""
+    (E0-R7). The note is the agent's text: pr_markdown.plain_text
+    (redacted, kept on one line, no HTML) and without backticks. The
+    principle and the place are pr_markdown.code_span and
+    pr_markdown.location: never `path:N`, which redaction can erase."""
     by_place = {(f.path, f.span): f for f in findings}
     lines = []
     for record in records:
         if record.source != TIER1:
             continue
         finding = by_place.get((record.path, record.span))
-        note = finding.note.replace("`", "'") if finding else ""
-        lines.append(f"- `{record.principle_id}` (tier 1: no rule yet) "
-                     f"`{record.path}:{record.span[0]}-{record.span[1]}`"
+        note = plain_text(finding.note.replace("`", "'")) if finding else ""
+        lines.append(f"- {code_span(record.principle_id)} (tier 1: no rule yet) "
+                     f"{location(record.path, record.span[0], record.span[1])}"
                      + (f": {note}" if note else ""))
     return lines

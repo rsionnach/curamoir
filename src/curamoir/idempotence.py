@@ -218,9 +218,9 @@ from curamoir.sweep import NO_WORK, WORK
 from curamoir.tier1 import FAILED as SCAN_FAILED
 
 __all__ = ["WORK_FIELD", "PR_FIELD", "WORK", "NO_WORK", "DUPLICATE_OPEN_PR", "UNKNOWN",
-           "TIER1_FAILED", "SWEEP_BRANCH_PREFIX", "GH_FILES_CAP", "Decision", "pr_field",
-           "sweep_branch_prefix", "sweep_prs", "sweep_decision", "sweep_marker", "parse_sweep_marker",
-           "sweep_pr_listing"]
+           "TIER1_FAILED", "SWEEP_BRANCH_PREFIX", "GH_FILES_CAP", "MARKER_WORD", "Decision",
+           "pr_field", "sweep_branch_prefix", "sweep_prs", "sweep_decision", "sweep_marker",
+           "parse_sweep_marker", "sweep_pr_listing"]
 
 #: The ledger field that says what kind of sweep line this is (module docstring).
 WORK_FIELD = "work"
@@ -258,7 +258,10 @@ GH_FILES_CAP = 100
 #: WHY the same SHA pattern as pr_field (40 or 64): a SHA-256 repository's
 #: sweep PRs must be readable too, and both are lowercase hex only.
 _MARKER = re.compile(r"<!-- curamoir-sweep base=([0-9a-f]{40}|[0-9a-f]{64}) -->")
-_MARKER_WORD = "curamoir-sweep"
+#: The word that makes a body line a marker line: parse_sweep_marker reads
+#: any line naming it as a marker (or a forged one). A sweep PR body keeps it
+#: out of every other line (curamoir.sweep_pr).
+MARKER_WORD = "curamoir-sweep"
 
 #: How much of an error a message quotes.
 _CLIP = 200
@@ -341,7 +344,7 @@ def parse_sweep_marker(body):
         return None
     bases = set()
     for line in body.splitlines():
-        if _MARKER_WORD not in line:
+        if MARKER_WORD not in line:
             continue
         match = _MARKER.fullmatch(line)
         if match is None:

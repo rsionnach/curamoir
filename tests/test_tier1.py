@@ -289,9 +289,9 @@ def test_a_tier1_fix_is_tagged_in_the_ledger_and_the_pr_and_counted(tmp_path):
     counts = fix_counts(ledger.entries(), now=_at(line), window_days=90)
     assert counts == {ECC: 2, "no-file-variant-proliferation": 1, "structured-logging": 2}
     assert body == [
-        f"- `{ECC}` (tier 1: no rule yet) `{BILLING}:37-37`: re-raise drops the cause and "
+        f"- `{ECC}` (tier 1: no rule yet) `{BILLING}` line 37: re-raise drops the cause and "
         "the path",
-        f"- `{ECC}` (tier 1: no rule yet) `{HANDLERS}:31-31`: re-raise drops the cause"]
+        f"- `{ECC}` (tier 1: no rule yet) `{HANDLERS}` line 31: re-raise drops the cause"]
     # The scan was read-only and saw the lint's paths first.
     argv = json.loads(scan_log.read_text())["argv"]
     assert argv[argv.index("--tools") + 1] == "Read,Grep,Glob"
