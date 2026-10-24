@@ -20,6 +20,7 @@ ReportedViolation, GateResult), never parallel dicts.
 """
 
 import dataclasses
+import html
 import json
 import re
 import unicodedata
@@ -72,9 +73,20 @@ DAY = date(2026, 10, 23)
 TOKEN = "ghp_" + "0123456789abcdefghijklmnopqrstuvwxyz"
 
 
+#: Every entity pr_markdown.plain_text writes and its character: the
+#: test's own copy of sweep_pr._ENTITIES, so a missing entry there is caught.
+ENTITIES = {"&amp;": "&", "&lt;": "<", "&#91;": "[", "&#58;": ":", "&#46;": ".",
+            "&#8203;": ""}
+
+
 def rendered(body):
-    """The body as GitHub shows it: plain_text's entities read back."""
-    return body.replace("&lt;", "<").replace("&#91;", "[")
+    """The body as GitHub shows it: plain_text's entities read back, in one
+    pass."""
+    return re.sub("|".join(map(re.escape, ENTITIES)), lambda m: ENTITIES[m.group()], body)
+
+
+#: `https://evil.example` as plain_text writes it: no autolink.
+EVIL = "https&#58;//evil.example"
 
 
 @pytest.fixture(scope="module")
@@ -426,7 +438,7 @@ def test_redaction_that_lengthens_the_body_is_still_held_under_the_cap(green):
     body = body_of(green, left_out=left_out, grade_section=grade, limit=limit)
 
     assert github_size(body) <= limit
-    assert section(body, "Grade") == ["token=[REDACTED]"] * 50
+    assert section(body, "Grade") == ["token=&#91;REDACTED]"] * 50
     assert section(body, "Files left for the next run")[-1].startswith("- ... and ")
     assert parse_sweep_marker(body) == green.base
 
@@ -547,7 +559,7 @@ def test_an_html_comment_opener_in_repository_text_cannot_hide_the_body(green):
     assert body.count("<!--") == 1 and body.startswith("<!-- curamoir-sweep base=")
     assert section(body, "Remedies skipped") == [
         "- `src/a.py` (`r`, remedy `delete_file`): see &lt;!-- hidden"]
-    assert section(body, "Grade") == ["< !-- grade"]
+    assert section(body, "Grade") == ["&lt;!-- grade"]
     assert parse_sweep_marker(body) == green.base
 
 
@@ -678,8 +690,8 @@ def test_a_markdown_link_or_image_in_agent_text_is_not_live(green, reduced, wher
     body = secret_body(green, reduced, where,
                        " [click](https://evil.example) ![x](https://evil.example/p.png)")
 
-    assert "&#91;click](https://evil.example)" in body
-    assert "!&#91;x](https://evil.example/p.png)" in body
+    assert f"&#91;click]({EVIL})" in body
+    assert f"!&#91;x]({EVIL}/p.png)" in body
     assert "[click](" not in body and "[x](" not in body
 
 
@@ -817,7 +829,7 @@ def test_a_green_gate_line_is_plain_text(green, monkeypatch):
     body = body_of(green)
 
     assert section(body, "Test gate")[0] == (
-        "tests green &lt;h3>x&lt;/h3> &#91;x](https://evil.example)")
+        f"tests green &lt;h3>x&lt;/h3> &#91;x]({EVIL})")
     assert "<h3>" not in body
 
 
@@ -837,9 +849,9 @@ LIVE_PLACEHOLDER_LINK = re.compile(r"\[REDACTED\]\(")
 
 @pytest.mark.parametrize(("note", "shown"), [
     ("Bearer abcdefgh12345678(https://evil.example)",
-     "Bearer &#91;REDACTED](https://evil.example)"),
+     f"Bearer &#91;REDACTED]({EVIL})"),
     ('token: abcdefgh12345678"(https://evil.example)',
-     "token: &#91;REDACTED](https://evil.example)"),
+     f"token: &#91;REDACTED]({EVIL})"),
     ("token=abcdefgh12345678", "token=&#91;REDACTED]"),
 ])
 def test_a_redacted_note_keeps_its_escape_and_opens_no_link(green, note, shown):
@@ -877,8 +889,175 @@ def test_a_backslash_before_a_bracket_opens_no_link(green, reduced):
     that backslash and the link would be live; the entity cannot be."""
     body = secret_body(green, reduced, "tier1-note", r" x \[click](https://evil.example)")
 
-    assert r"\&#91;click](https://evil.example)" in body
+    assert rf"\&#91;click]({EVIL})" in body
     assert "[click](" not in body
+
+
+# --- autolinks and mentions are not live; the grade is escaped too ------------------
+
+PING = "ping @octocat see https://evil.example and WWW.evil.example or me@corp.example"
+PING_SHOWN = ("ping @&#8203;octocat see https&#58;//evil.example and WWW&#46;evil.example "
+              "or me@&#8203;corp.example")
+
+
+@pytest.mark.parametrize("where", ["tier1-note", "skip-reason"])
+def test_a_mention_a_bare_url_or_an_email_in_agent_text_is_not_live(green, reduced, where):
+    """GitHub autolinks a bare URL, a `www.` host and an e-mail address, and
+    `@name` NOTIFIES that user: model text must do none of it. Each is
+    written with an entity, and reads back as the original text."""
+    body = secret_body(green, reduced, where, f" {PING}")
+
+    for raw in ("@octocat", "https://", "WWW.evil", "@corp", "://"):
+        assert raw not in body.split("\n", 1)[1]  # the marker line is the body's own
+    assert PING_SHOWN in body
+    assert PING in rendered(body)
+
+
+def test_only_a_colon_before_two_slashes_is_escaped(green):
+    """`token: x` and `a:b` read as written; `www` keeps its case."""
+    body = body_of(green, skipped=(SkippedRemedy(
+        "src/a.py", "r", "delete_file", "token: x, a:b, Www.x and awww.y"),))
+
+    assert section(body, "Remedies skipped")[0].endswith(
+        ": token: x, a:b, Www&#46;x and awww&#46;y")
+
+
+@pytest.mark.parametrize(("note", "shown"), [
+    ("token=ab://cd", "token=ab&#58;//cd"),
+    ("token=ab@cd", "token=ab@&#8203;cd"),
+    ("token=www.cd", "token=www&#46;cd"),
+    ("token=<abcd", "token=&lt;abcd"),
+    ("token=[abcd", "token=&#91;abcd"),
+    ("token=ab&cd", "token=ab&amp;cd"),
+    ("token=a#1", "token=a#&#8203;1"),
+], ids=["colon", "at", "dot", "lt", "bracket", "amp", "hash"])
+def test_every_entity_is_read_back_before_the_redaction_check(green, note, shown):
+    """The value is under redaction's 8-character floor as a reader sees it,
+    and over it as escaped (`ab&#58;//cd`): the check must decode every
+    entity plain_text writes (sweep_pr._ENTITIES) or refuse an innocent
+    PR."""
+    assert redact(note) == note and redact(shown) != shown
+    finding, record = tier1_record(green.base, note=note)
+    work = dataclasses.replace(green.work, tier1=(finding,))
+
+    body = body_of(green, records=(*green.records, record), work=work)
+
+    assert fix_lines(body)[-1].endswith(f": {shown}")
+    assert note in rendered(body)
+
+
+@pytest.mark.parametrize("where", ["tier1-note", "skip-reason"])
+@pytest.mark.parametrize(("text", "escaped"), [
+    ("hi &#64;octocat", "hi &amp;#&#8203;64;octocat"),  # `#6`: a `#` before a digit
+    ("hi &commat;octocat", "hi &amp;commat;octocat"),
+    ("hi &#x40;octocat", "hi &amp;#x40;octocat"),
+    ("me&#64;x.y", "me&amp;#&#8203;64;x.y"),
+], ids=["dec", "named", "hex", "email"])
+def test_an_entity_already_in_agent_text_cannot_decode_to_a_mention(green, reduced, where,
+                                                                    text, escaped):
+    """GitHub decodes entities before it looks for mentions and links, so
+    `&` is escaped first: `&#64;octocat` is shown as that text, never as
+    `@octocat`. html.unescape stands in for GitHub's decoding."""
+    body = secret_body(green, reduced, where, f" {text}")
+
+    assert escaped in body
+    shown = html.unescape(body.split("\n", 1)[1])
+    assert "@octocat" not in shown and "@x.y" not in shown
+    assert text in rendered(body)
+
+
+ISSUE_REFS = "see #123, org/repo#45 and GH-7 or gh-8, C# and #x; sha 0123abc"
+
+
+@pytest.mark.parametrize("where", ["tier1-note", "skip-reason"])
+def test_an_issue_or_pr_url_in_agent_text_is_not_live(green, reduced, where):
+    """GitHub links `org/repo/issues/N` and an issue URL after decoding
+    entities, so the `://` escape alone left them live."""
+    text = " see https://github.com/cli/cli/issues/1 and cli/cli/pull/2 or a/b/discussions/3"
+    body = secret_body(green, reduced, where, text)
+
+    shown = html.unescape(body.split("\n", 1)[1])
+    for raw in ("issues/1", "pull/2", "discussions/3"):
+        assert raw not in shown
+    assert text.strip() in rendered(body)
+
+
+@pytest.mark.parametrize("where", ["tier1-note", "skip-reason"])
+def test_an_issue_reference_in_agent_text_is_not_live(green, reduced, where):
+    """`#123`, `org/repo#45` and `GH-7` would link (and backlink this PR
+    from another repository's timeline); a `#` not before a digit and a
+    commit SHA are left as they are."""
+    body = secret_body(green, reduced, where, f" {ISSUE_REFS}")
+
+    assert ("see #&#8203;123, org/repo#&#8203;45 and GH&#8203;-7 or gh&#8203;-8, C# and #x; "
+            "sha 0123abc") in body
+    shown = html.unescape(body.split("\n", 1)[1])
+    for raw in ("#123", "#45", "GH-7", "gh-8"):
+        assert raw not in shown
+    assert ISSUE_REFS in rendered(body)
+
+
+GRADE = ("B to A\n<h3>x</h3>\n<details>open\n[x](https://evil.example)\n"
+         "thanks @octocat\nsee https://evil.example")
+
+
+def test_the_grade_section_is_escaped_line_by_line(green):
+    """grade_section is caller text: no HTML, link, autolink or mention, and
+    its lines stay lines."""
+    body = body_of(green, grade_section=GRADE)
+
+    assert section(body, "Grade") == [
+        "B to A", "&lt;h3>x&lt;/h3>", "&lt;details>open", f"&#91;x]({EVIL})",
+        "thanks @&#8203;octocat", f"see {EVIL}"]
+    grade = body.split("### Grade\n", 1)[1]
+    for raw in ("<h3>", "<details>", "[x](", "@octocat", "https://"):
+        assert raw not in grade
+    assert rendered(grade) == GRADE + "\n"
+
+
+@pytest.mark.parametrize("grade", ["### x", "B\n### x", "B\r\n#\tx", "B\r### x"],
+                         ids=["first", "second", "crlf-tab", "lone-cr"])
+def test_a_grade_heading_is_refused_before_it_is_escaped(green, grade):
+    """The heading check sees the grade as given: escaping turns `#` then a
+    tab into `#\\t`, no heading, but such a grade broke E7-R5's contract
+    all the same."""
+    with pytest.raises(SweepBodyError, match="headings"):
+        body_of(green, grade_section=grade)
+
+
+def test_a_refused_grade_heading_does_not_quote_a_secret(green):
+    """The error is recorded (cm-fkd.14), and the grade is not redacted yet
+    when its headings are checked: the error names line numbers only."""
+    with pytest.raises(SweepBodyError, match="headings") as error:
+        body_of(green, grade_section=f"B\n# token={TOKEN}")
+
+    assert TOKEN not in str(error.value) and "ghp_" not in str(error.value)
+    assert "[2]" in str(error.value)
+
+
+@pytest.mark.parametrize("grade", ["A\n===", "B\n---", "x\n  -  ", "y\nz\n=\t"],
+                         ids=["h1", "h2", "indented-dash", "tab"])
+def test_a_setext_grade_heading_is_refused(green, grade):
+    """A `===` or `---` line under a non-blank line makes it a heading no
+    `#` check sees."""
+    with pytest.raises(SweepBodyError, match="headings"):
+        body_of(green, grade_section=grade)
+
+
+def test_a_rule_or_a_list_in_the_grade_is_not_a_heading(green):
+    """`---` after a blank line is a thematic break, and `- x` a list item:
+    neither makes a heading, so neither is refused."""
+    body = body_of(green, grade_section="A\n\n---\n- x\nB = C")
+
+    assert section(body, "Grade") == ["A", "---", "- x", "B = C"]
+
+
+def test_a_marker_word_or_comment_in_an_escaped_grade_is_still_neutralised(green):
+    body = body_of(green, grade_section="curamoir-sweep\n<!-- x")
+
+    assert parse_sweep_marker(body) == green.base
+    assert body.count("curamoir-sweep") == 1
+    assert section(body, "Grade") == ["curamoir\u2011sweep", "&lt;!-- x"]
 
 
 def test_a_bracketed_route_in_a_skip_reason_passes(green):
@@ -905,7 +1084,8 @@ def test_a_secret_in_the_grade_section_is_redacted(green):
     body = body_of(green, grade_section=f"B\nuses {TOKEN}\napi_key = 'abcdefgh1234'")
 
     assert TOKEN not in body and "abcdefgh1234" not in body
-    assert section(body, "Grade") == ["B", f"uses {PLACEHOLDER}", f"api_key = {PLACEHOLDER}"]
+    shown = "&#91;" + PLACEHOLDER[1:]
+    assert section(body, "Grade") == ["B", f"uses {shown}", f"api_key = {shown}"]
 
 
 # --- headings, escapes, Unicode, sizes ------------------------------------------------

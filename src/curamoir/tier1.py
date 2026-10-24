@@ -1011,9 +1011,10 @@ def trim_pr_paths(paths, work, cap):
 def tier1_pr_lines(records, findings):
     """The PR body's line for each TIER1 record of `records` (E3-R3: each
     fix with its principle id): principle, that it is tier 1, where, and
-    the scan's note. cm-fkd.4 puts them in the body, which it redacts
-    (E0-R7). The note is the agent's text: pr_markdown.plain_text
-    (redacted, kept on one line, no HTML) and without backticks. The
+    the scan's note. sweep_pr puts them in the body; redaction (E0-R7) is
+    per piece, here, not of the body. The note is the agent's text:
+    pr_markdown.plain_text (redacted, kept on one line, no HTML, link,
+    autolink or mention) and without backticks. The
     principle and the place are pr_markdown.code_span and
     pr_markdown.location: never `path:N`, which redaction can erase."""
     by_place = {(f.path, f.span): f for f in findings}
@@ -1022,6 +1023,8 @@ def tier1_pr_lines(records, findings):
         if record.source != TIER1:
             continue
         finding = by_place.get((record.path, record.span))
+        # A backtick in plain text could open a code span that swallows the
+        # rest of the line (plain_text leaves backticks alone).
         note = plain_text(finding.note.replace("`", "'")) if finding else ""
         lines.append(f"- {code_span(record.principle_id)} (tier 1: no rule yet) "
                      f"{location(record.path, record.span[0], record.span[1])}"

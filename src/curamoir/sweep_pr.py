@@ -24,19 +24,19 @@ in order:
 4. `### Test gate`: GateResult.render() for a green gate; for a reduced
    one its summary without the dropped paths (render() lists them all on
    a line that is never cut), then each dropped file with its reason.
-
-A PR whose files carry no fix (paths_for_pr not empty, pr_records empty)
-has no body or title: ValueError, and cm-fkd.14 records a failure with no
-PR. So do contradictory inputs: a path both left out and in the PR, two
-rule records of one fingerprint.
 5. `### Files left for the next run`: those trimmed past
    `max_files_per_pr` and those the gate dropped (E3-R3's "rest", which the
    next sweep, at the next base, picks up).
 6. `### Remedies skipped`: each remedy not applied, with its reason.
 7. `### Promotion candidates`: PROMOTION_PENDING (E4-R1/E4-R2 have not
    landed).
-8. `### Grade`: the E7-R5 hook, the caller's `grade_section`, else
-   GRADE_PENDING.
+8. `### Grade`: the E7-R5 hook, the caller's `grade_section` (escaped
+   line by line, pr_markdown.plain_lines), else GRADE_PENDING.
+
+A PR whose files carry no fix (paths_for_pr not empty, pr_records empty)
+has no body or title: ValueError, and cm-fkd.14 records a failure with no
+PR. So do contradictory inputs: a path both left out and in the PR, two
+rule records of one fingerprint.
 
 **The marker** (idempotence.sweep_marker, cm-fkd.8) is the body's FIRST
 line, on its own. WHY first: redaction's private-key rule replaces a key
@@ -56,9 +56,21 @@ redacted first, then a line break (git allows one in a file name), a
 control or a format character (a bidi override) is shown as a visible
 escape, so no text can start a line, a section or a forged marker of its
 own. Text outside a code span (reasons, notes, the gate line) is
-pr_markdown.plain_text besides: `<` is written `&lt;`, so it can open no
-HTML element (`<h3>` would render as a heading no `#` check sees). Behind that,
-final_body checks the body's headings are exactly its own (_check_headings).
+pr_markdown.plain_text besides, and the grade section pr_markdown.plain_lines
+(the same, line by line): Markdown's live syntax is written as an HTML
+entity, so it reads the same and does nothing. `&` is `&amp;` first (an
+entity already in the text, `&#64;name`, would be decoded into a live
+mention), `<` is `&lt;` (`<h3>` would render as a heading no `#` check
+sees), `[` is `&#91;` (no link or image), and GitHub's autolinks, mentions
+and references are broken: `://` is `&#58;//`, `www.` is `www&#46;`, `@`
+is `@&#8203;`, `#` before a digit is `#&#8203;`, `GH-` before a digit is
+`GH&#8203;-` (a bare URL or e-mail address would be a live link, `@name`
+would notify that user, and `org/repo#123` would backlink this PR from
+another repository: a tier-1 note is model text the repository steers; a
+zero-width space, not `&#64;`, because GitHub finds mentions after
+decoding entities). Behind that, final_body checks the body's headings are
+exactly its own (_check_headings), and the grade's, ATX and setext, before
+it is escaped (_check_grade_headings).
 
 **The cap.** GitHub refuses a body over 65,536 characters. MAX_BODY_SIZE
 is a little under it, measured by github_size: UTF-8 bytes, which are never
@@ -76,22 +88,23 @@ SweepBodyError, naming the largest of them.
 **Redaction** (E0-R7) happens piece by piece, before composing: every
 piece of repository or agent text goes through pr_markdown.one_line (via
 code_span, location or plain_text), which redacts it first, and the
-caller's `grade_section`, which is multi-line, is redacted whole in
-_parts. The rest of the body is this module's own text. So the composed
+caller's `grade_section`, which is multi-line, is redacted whole by
+pr_markdown.plain_lines before its lines are escaped. The rest of the body is this module's own text. So the composed
 body is the text GitHub receives, and the cap is checked on it (redaction
 can lengthen text: `token=abc12345` becomes `token=[REDACTED]`).
 
 final_body does NOT redact the composed body again: that is not
-idempotent after plain_text, which writes a placeholder's `[` as `\\[` so it
-opens no link. Whole-body redaction reads `token=\\[REDACTED]` as a fresh
-value and rewrites it to `token=[REDACTED]`, undoing the escape, and an
+idempotent after plain_text, which writes a placeholder's `[` as `&#91;` so
+it opens no link. Whole-body redaction would read the escaped placeholder
+as a fresh value and rewrite it to `[REDACTED]`, undoing the escape, and an
 escape can lengthen a sub-floor value past redaction's 8-character floor
 (`token=ab\\x01cd"(https://...)` became the live link
 `token=[REDACTED](https://...)`). Instead the backstop VERIFIES
-(_check_redacted): with each escaped placeholder `\\[REDACTED]` read as
-`[REDACTED]`, redacting the body must change nothing; otherwise
-SweepBodyError (fail closed: a piece that escaped redaction, or text an
-escape turned into something redaction would match, is not sent). Then
+(_check_redacted): with the body read as GitHub shows it (_rendered: every
+entity plain_text writes read back as its character), redacting it must
+change nothing; otherwise SweepBodyError (fail closed: a piece that
+escaped redaction, or text an escape turned into something redaction would
+match, is not sent). Then
 final_body refuses (SweepBodyError) unless parse_sweep_marker of the body
 is the base, and checks its headings. render_pr_body is the same body
 without those checks, for tests and inspection only.
@@ -130,7 +143,7 @@ from curamoir.idempotence import (
     sweep_branch_prefix,
     sweep_marker,
 )
-from curamoir.pr_markdown import code_span, inert_comments, location, plain_text
+from curamoir.pr_markdown import code_span, inert_comments, location, plain_lines, plain_text
 from curamoir.redaction import redact
 from curamoir.tier1 import tier1_pr_lines
 
@@ -233,11 +246,14 @@ def final_body(records, work_list, gate, base, skipped_remedies, left_out_paths,
         skipped_remedies: remedies.RemedyResult.skipped.
         left_out_paths: the verdict's paths trim_pr_paths did not keep
             (past `max_files_per_pr`).
-        grade_section: E7-R5's text, or None for GRADE_PENDING. Neutralised
-            like every other line (module docstring, "The marker"). The
-            E7-R5 contract: plain text, with no Markdown headings and no
-            fenced block holding `#` lines; a grade with a heading of its
-            own is refused (_check_headings).
+        grade_section: E7-R5's text, or None for GRADE_PENDING. Redacted
+            whole, then each line escaped as plain_text escapes it
+            (pr_markdown.plain_lines: no HTML, links, autolinks or
+            mentions), then neutralised like every other line (module
+            docstring, "The marker"). The E7-R5 contract: plain text, with
+            no Markdown headings and no fenced block holding `#` lines; a
+            grade with a heading of its own is refused
+            (_check_grade_headings, _check_headings).
         limit: the cap, by github_size. A test seam; the runner leaves it.
 
     Raises:
@@ -251,11 +267,12 @@ def final_body(records, work_list, gate, base, skipped_remedies, left_out_paths,
         SweepBodyError (a ValueError): redacting the body would still
             change it (_check_redacted; module docstring, "Redaction");
             the marker does not read back as `base`, or the body's headings are not exactly
-            its own (_check_headings: a redaction that ate sections, or a
-            `grade_section` with headings of its own); or the parts that
+            its own (_check_headings: a redaction that ate sections), or
+            `grade_section` has headings of its own (_check_grade_headings); or the parts that
             are never cut do not fit under `limit` (the message names the
             largest).
     """
+    _check_grade_headings(grade_section)
     parts = _parts(records, work_list, gate, base, skipped_remedies, left_out_paths,
                    grade_section)
     body = _body(parts, lambda text: github_size(text) <= limit)
@@ -267,10 +284,25 @@ def final_body(records, work_list, gate, base, skipped_remedies, left_out_paths,
     return body
 
 
+#: Every HTML entity pr_markdown's plain_text (and plain_lines) writes, and
+#: the character it stands for (the zero-width space after `@`, `#` and
+#: `GH` is read as nothing, as a reader reads it; `&amp;` is read as `&`, and
+#: in one pass, so `&amp;#64;` reads back as `&#64;`, never as `@`). MUST
+#: stay in step with pr_markdown._inline:
+#: an entity missing here makes the check read text longer than a reader
+#: sees (`token=ab&#58;//cd` is over redaction's 8-character floor where
+#: `token=ab://cd` is not), which refuses an innocent PR.
+_ENTITIES = {"&amp;": "&", "&lt;": "<", "&#91;": "[", "&#58;": ":", "&#46;": ".",
+             "&#8203;": ""}
+
+_ENTITY = re.compile("|".join(map(re.escape, _ENTITIES)))
+
+
 def _rendered(body):
-    """`body` as GitHub shows it, as far as redaction can tell: plain_text's
-    entities read back as the characters they stand for."""
-    return body.replace("&lt;", "<").replace("&#91;", "[")
+    """`body` as GitHub shows it, as far as redaction can tell: each entity
+    in _ENTITIES read back as its character, in one pass (so a decoded `&`
+    never starts another entity)."""
+    return _ENTITY.sub(lambda match: _ENTITIES[match.group()], body)
 
 
 def _check_redacted(body):
@@ -293,6 +325,32 @@ _HEADINGS = (f"## {_NAME}", "### Fixes", "### Test gate", "### Files left for th
 
 #: A CommonMark ATX heading line.
 _HEADING = re.compile(r" {0,3}#{1,6}(?:[ \t]|$)")
+
+#: A CommonMark setext heading underline: under a paragraph line, it makes
+#: that line an H1 (`===`) or an H2 (`---`), which no `#` check sees.
+_SETEXT_UNDERLINE = re.compile(r" {0,3}(?:=+|-+)\s*$")
+
+
+def _check_grade_headings(grade_section):
+    """SweepBodyError when `grade_section` holds a Markdown heading (E7-R5's
+    contract: plain text): an ATX line (`### x`), or a setext underline
+    (`===`, `---`) under a non-blank line, which would make that line a
+    heading. Checked on the text as given, BEFORE plain_lines escapes it:
+    an escape can turn a heading into a line that is not one (`#` then a
+    tab becomes `#\\t`), and such a grade broke the contract all the same.
+    _check_headings then checks the composed body (ATX only). The error
+    names line NUMBERS, never the lines: they are not redacted yet, and the
+    runner records the error (cm-fkd.14)."""
+    if grade_section is None:
+        return
+    lines = str(grade_section).splitlines()
+    found = [number for number, line in enumerate(lines, 1)
+             if _HEADING.match(line)
+             or (number > 1 and lines[number - 2].strip() and _SETEXT_UNDERLINE.match(line))]
+    if found:
+        raise SweepBodyError(f"the grade section has headings of its own (line(s) {found}); "
+                             "E7-R5's grade is plain text under the body's `### Grade`, so "
+                             "the body is not sent")
 
 
 def _check_headings(body):
@@ -323,7 +381,7 @@ def _parts(records, work_list, gate, base, skipped_remedies, left_out_paths, gra
     """The body's pieces, a dict _compose assembles: "marker", "header",
     "gate" and "grade" (text never cut), and "lists", {name: _Listed} (the
     lists _fitted may cut). Raises as final_body's docstring says."""
-    marker = _check_base(base)
+    marker = sweep_marker(base)  # ValueError unless `base` is a full lowercase SHA
     if not gate.paths_for_pr:
         raise ValueError(f"the test gate kept no file ({gate.render()}), so there is no PR "
                          "and no body")
@@ -351,6 +409,8 @@ def _parts(records, work_list, gate, base, skipped_remedies, left_out_paths, gra
     fixes += tier1_pr_lines([r for r in carried if r.source == TIER1], work_list.tier1)
     dropped = [f"- {code_span(drop.path)}: {plain_text(drop.reason)}" for drop in gate.dropped]
     left = [f"- {code_span(path)} (past `max_files_per_pr`)" for path in left_out_paths]
+    # A dropped path is listed twice on purpose: under "Test gate" with its
+    # reason, and here, because the next sweep picks it up like the rest.
     left += [f"- {code_span(drop.path)} (dropped by the test gate)" for drop in gate.dropped]
     skipped = [f"- {code_span(s.path)} ({code_span(s.rule_id)}, remedy "
                f"{code_span(s.remedy)}): {plain_text(s.reason)}" for s in skipped_remedies]
@@ -362,9 +422,10 @@ def _parts(records, work_list, gate, base, skipped_remedies, left_out_paths, gra
         "marker": marker,
         "header": header,
         "gate": _gate_line(gate),
-        # Redacted whole (it is multi-line, and a key with no END line must
-        # stop at its end), then neutralised by _compose like every line.
-        "grade": GRADE_PENDING if grade_section is None else redact(grade_section),
+        # Redacted whole (a key with no END line must stop at its end), then
+        # escaped line by line (plain_lines); _compose neutralises it like
+        # every line.
+        "grade": GRADE_PENDING if grade_section is None else plain_lines(grade_section),
         "lists": {
             "fixes": _Listed(fixes, "None.",
                             " (the ledger line lists every fix)"),
@@ -493,6 +554,7 @@ def _day(date):
 
 
 def _check_base(base):
-    """The base's marker line; ValueError unless `base` is a full lowercase
-    SHA (sweep_marker's check)."""
-    return sweep_marker(base)
+    """ValueError unless `base` is a full lowercase SHA. The check is
+    sweep_marker's own, so the branch, the commit message and the marker
+    can never disagree on what a base is; the marker line is discarded."""
+    sweep_marker(base)
