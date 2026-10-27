@@ -68,21 +68,27 @@ Two layers, so the rules can be tested without git:
        writes no line at all.
    (iii) `open_sweep_prs` (done, cm-fkd.10: curamoir.github.open_sweep_prs,
        registered as `runner.JOBS["sweep"].open_pr_listing_for` and bound
-       to the root by `runner.run_job`): the same callable as step 2b's,
+       to the root by `runner.run_job`): the same function as step 2b's
+       (bound differently, below),
        and it must time out and raise, because a hang the scheduler then
        kills writes no line at all. It is called twice per sweep, once by
        the cap here and once by step 2b's decision, so it must not cache
        across the two: the second call must see what was opened or closed
        in between. github.open_sweep_prs caches nothing. The body gets no
        parameter for it and builds its own: `open_sweep_prs =
-       functools.partial(github.open_sweep_prs, repo)`, the same binding
-       as runner._gh_open_prs. Never the bare function (it needs the
-       repo) and never its result (a list, not a callable): sweep_decision
-       calls it with no arguments, and either mistake raises inside its
-       broad `except`, so every sweep would be refused as UNKNOWN with
-       nothing else said. `run_job(open_pr_listing=...)` replaces only the
-       cap's listing, so a test that must feed both the same PRs points
-       `github.GH` at a fake gh (tests/fake_gh.py) instead.
+       functools.partial(github.open_sweep_prs, repo, gh_repo=gh_repo)`,
+       with origin's `gh_repo` from step 1, so the decision lists the PRs
+       of the repository the PR opens on (step 9). The cap's listing,
+       runner._gh_open_prs, is bound to the root alone and passes no
+       `gh_repo` yet, so in a fork's clone gh may answer it for another
+       repository; aligning it is cm-fkd.14's (noted on that bead). Never
+       the bare function (it needs the repo) and never its result (a
+       list, not a callable): sweep_decision calls it with no arguments,
+       and either mistake raises inside its broad `except`, so every
+       sweep would be refused as UNKNOWN with nothing else said.
+       `run_job(open_pr_listing=...)` replaces only the cap's listing,
+       so a test that must feed both the same PRs points `github.GH` at
+       a fake gh (tests/fake_gh.py) instead.
    (iv) The result: `runner.run_job` maps the job_guard.GuardedRun's
        `outcome` to the process's exit code through `runner._EXIT_CODES`
        (EXIT_SUCCESS, EXIT_FAILURE, EXIT_REFUSED, EXIT_UNUSABLE_ROOT), and
@@ -108,7 +114,13 @@ Two layers, so the rules can be tested without git:
        run_guarded, and `runner.run_job` reports it as a crash
        (EXIT_FAILURE).
 1. Make a sandbox: `git_guard.prepare_sandbox(repo, base_ref)`, and use it
-   as a context manager so it is removed whatever happens.
+   as a context manager so it is removed whatever happens. The base is
+   `refs/remotes/origin/<default>` as last fetched, `<default>` being
+   GitHub's answer as publish reads it, resolved once with origin's
+   `gh_repo` and pinned to its commit (curamoir.sweep_job.resolve_sweep_base,
+   "Which default branch"). If that branch or its ref cannot be
+   resolved, the sweep is refused (Reason.SWEEP_BASE) before any sandbox
+   is made.
 2. Lint it before anything edits it: `lint_sandbox(sandbox)`, which records
    the work list of the base, and the rules the lint ran, on the sandbox.
    Then compute what was found (E4-R4, fix_counts' "Introduced vs found"):
@@ -142,9 +154,12 @@ Two layers, so the rules can be tested without git:
        ["branch_prefix"], tier1=plan.will_scan)`. The prefix is required
        and is read exactly as job_guard.job_gateway reads it for the cap,
        so the decision and the cap read one setting and see the same sweep
-       PRs (idempotence, "The configured prefix"). `open_sweep_prs` is
-       `functools.partial(github.open_sweep_prs, repo)`, step 0 (iii)'s
-       binding, never the bare function or its result: the `gh`-backed
+       PRs (idempotence, "The configured prefix"; in a fork's clone they
+       may list different repositories until cm-fkd.14, step 0 (iii)).
+       `open_sweep_prs` is
+       `functools.partial(github.open_sweep_prs, repo, gh_repo=gh_repo)`,
+       step 0 (iii)'s binding with step 1's `gh_repo`, never the bare
+       function or its result: the `gh`-backed
        callable curamoir.github.open_sweep_prs (`gh pr list --state open
        --limit 1000 --json
        headRefName,number,url,body,files,isCrossRepository`, each item
@@ -224,24 +239,42 @@ Two layers, so the rules can be tested without git:
    fix step has the scan's alone. Without the scan's share the ceiling
    never sees what the scan spent.
    A call that ran spent money even when it reported no usage, so the
-   line must not read as $0. That is a scan whose status is in tier1's
-   `_CALLED` (SCANNED, FAILED, SANDBOX_CHANGED), or a fix step that was
-   invoked, whose usage is None (it timed out, crashed or printed
-   something that is not JSON) or lacks a numeric `input_tokens` or
-   `output_tokens`. If any call on the line is such a call, the runner
-   writes BOTH top-level counts as budget.UNRECORDED, with `model` as
-   usual: not the other call's counts alone, and never 0.
+   line must not read as $0. That is a scan that is `called`
+   (Tier1Scan.called: its status is in tier1's `_CALLED`, SCANNED,
+   FAILED or SANDBOX_CHANGED, and its `claude` started), or a fix step
+   that started (FixStepRun.started: it exited or timed out), whose
+   usage is None (it timed out, crashed or printed something that is not
+   JSON) or lacks a numeric `input_tokens` or `output_tokens`. If any
+   call on the line ran and reported no usable usage, the runner writes
+   BOTH top-level counts as budget.UNRECORDED, with `model` as usual: not
+   the other call's counts alone, and never 0.
    budget.month_to_date counts that line as `unrecorded` (apart from
    unreadable lines, since it is not damage), so the month's total is a
    stated lower bound and never a silent zero. The other call's known
    tokens leave the total with it; one count per line cannot say "this
    much, and more", and the hedge is the safer error (cm-kpz.1's
    per-call record would keep them).
-   A line on which no model call ran (no scan ran, and no fix step)
-   omits `input_tokens`, `output_tokens` and `model` entirely, and never
-   writes zeros. month_to_date is defensive about it (a 0/0 line costs
-   $0 without being priced, so it cannot raise UnknownModel and turn
-   the ceiling off), but zeros would claim a call that never happened.
+   A scan or fix step whose `claude` could not start at all (an OSError:
+   no executable) made no call: it spends nothing and adds no counts,
+   though such a scan is FAILED and still counts as an attempt
+   (tier1.scan_attempts).
+   The counts are noted before the call and corrected after it:
+   immediately before a call's `claude` process starts (run_fix_step's
+   and run_tier1_scan's `before_call`, after every step that can fail
+   without a call, so a failure there leaves neither counts nor an
+   attempt), the runner notes both counts as UNRECORDED with `model`
+   (and, for the scan, the FAILED `tier1` field of this call, an
+   attempt), so a run that ends during or right after the call, by a
+   signal, ^C or an exception, still records spend and attempt; once the
+   call's outcome is known they are replaced by its own fields, and
+   removed for a call that never started (curamoir.sweep_job, "The
+   line's cost").
+   A line on which no call started (no scan is
+   `called`, and no fix step `started`) omits `input_tokens`,
+   `output_tokens` and `model` entirely, and never writes zeros.
+   month_to_date is defensive about it (a 0/0 line costs $0 without
+   being priced, so it cannot raise UnknownModel and turn the ceiling
+   off), but zeros would claim a call that never happened.
    The top-level `cost_usd` is the CLI's reported figure (the fix step's
    `total_cost_usd` plus the scan's `tier1_state.cost_usd`), kept for
    the record, not for the ceiling. `tier1.cost_usd` is a COMPONENT of

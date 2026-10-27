@@ -119,6 +119,15 @@ class JobRun:
         ValueError for a RESERVED_FIELDS key, as for the outcomes."""
         self._extra.update(_checked(fields))
 
+    def unnote(self, *names):
+        """Drop fields `note` (or an outcome) set, by name; a name not set is
+        ignored. For a provisional note proved wrong: the sweep notes a
+        model call's cost before the call and corrects it after
+        (curamoir.sweep_job), and a call that never started leaves no
+        cost fields at all."""
+        for name in names:
+            self._extra.pop(name, None)
+
     def succeeded(self, summary="", **fields):
         # The line carries the outcome last recorded, and a reason only when
         # that outcome is a refusal. Left over from an earlier `refused`, the

@@ -28,11 +28,23 @@ class Reason(str, Enum):
     # gateway, so they have no Degraded form.
     IDEMPOTENCE = "idempotence"          # E3-R7: open sweep PRs unknown, so a second PR
                                          # might duplicate one (curamoir.idempotence)
+    SWEEP_BASE = "sweep_base"            # E3 (user decision 2026-10-23): the sweep's base
+                                         # could not be pinned: no GitHub origin,
+                                         # GitHub's default branch unknown, a stale
+                                         # origin/HEAD naming another branch, or no
+                                         # refs/remotes/origin/<default> (curamoir.sweep_job)
+    LINT = "lint"                        # E3-R1a: the lint's report cannot be acted on
+                                         # (sweep.LintUntrusted)
+    SANDBOX = "sandbox"                  # E3-R2: the sandbox could not be made or held to
+                                         # its base, so nothing read or done in it is
+                                         # trusted (git_guard.GitGuardError, its
+                                         # ScopeCheckError and tier1.ScanRefused)
 
     # Guard-layer failures. An unrecorded guard failure is a silent loss of
     # enforcement, so both are ledgered (DEC-5).
     GUARD_ERROR = "guard_error"      # produced here: a guard raised (gateway fails closed);
-                                     # and by job_guard: a curamoir.yaml that cannot be loaded
+                                     # and by job_guard and sweep_job: a curamoir.yaml that
+                                     # cannot be loaded
     GUARD_TIMEOUT = "guard_timeout"  # NOT YET PRODUCED: owned by E0-R5 / E4-R4b, where a
                                      # PreToolUse hook can time out. Claude Code hooks fail
                                      # OPEN on timeout, unlike this gateway, which fails

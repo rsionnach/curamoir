@@ -851,6 +851,21 @@ def test_a_default_branch_never_fetched_is_refused_with_the_fetch_hint(world, no
     no_sweep_branch_and_no_pr(world, no_real_gh)
 
 
+@pytest.mark.parametrize("name", ["main~1", "main^", "main@{1}", "-main"])
+def test_a_default_branch_name_that_is_not_a_branch_name_is_refused(world, no_real_gh, name):
+    """Revision syntax in it would make refs/remotes/origin/<name> another
+    commit than the branch's (with origin/HEAD unset nothing else checks)."""
+    git(world.repo, "remote", "set-head", "origin", "-d")
+    no_real_gh.feed(default_branch=name)
+
+    with pytest.raises(publish.PublishRefused, match="not a valid branch name"):
+        publish.origin_default_branch(world.repo, GH_REPO)
+    with pytest.raises(publish.PublishRefused, match="not a valid branch name"):
+        world.publish()
+
+    nothing_left_the_machine(world, no_real_gh)
+
+
 def test_gh_failing_to_name_the_default_is_refused_before_the_push(world, no_real_gh):
     no_real_gh.feed(fail_on={"repo view": "HTTP 502: Bad Gateway"})
 

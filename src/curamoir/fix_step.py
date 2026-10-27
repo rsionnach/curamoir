@@ -197,6 +197,10 @@ DEFAULT_TIMEOUT = 1800
 #: The fix agent's whole toolset (the module docstring cites the docs).
 FIX_TOOLS = ("Read", "Grep", "Glob", "Edit")
 
+#: What a FixStepRun's `stderr` starts with when its process could not be
+#: started (FixStepRun.started is False); the OSError follows it.
+NOT_STARTED = "the fix step could not start: "
+
 #: The tools Claude Code checks file permission rules for ("checks file
 #: permissions against `Edit(path)` and `Read(path)` rules only"): the
 #: tools the allow and deny rules name.
@@ -360,6 +364,14 @@ class FixStepRun:
     timed_out: bool = False
     git_state: Optional[GitState] = None
 
+    @property
+    def started(self):
+        """False when the process could not be started at all (run_fix_step's
+        OSError: no executable, no permission), so no model call was made
+        and nothing was spent. A timeout is a start: `exit_code` is None
+        then too, but `timed_out` says it ran."""
+        return self.exit_code is not None or self.timed_out
+
     def payload(self):
         """The `--output-format json` result object, or None if stdout is not
         one (a crash, a timeout, an older CLI)."""
@@ -371,7 +383,8 @@ class FixStepRun:
 
 
 def run_fix_step(sandbox, prompt, model=None, timeout=DEFAULT_TIMEOUT,
-                 max_turns=DEFAULT_MAX_TURNS, claude="claude", tools=FIX_TOOLS):
+                 max_turns=DEFAULT_MAX_TURNS, claude="claude", tools=FIX_TOOLS,
+                 before_call=None):
     """Run the fix step in `sandbox` (a git_guard.Sandbox) and return a
     FixStepRun. `model` defaults to `models.cheap` in the sandbox's config,
     which is the base commit's. `claude` is a seam for tests, which pass a
@@ -381,7 +394,13 @@ def run_fix_step(sandbox, prompt, model=None, timeout=DEFAULT_TIMEOUT,
     The sandbox is snapshotted (git_guard.snapshot_git_state) before the
     agent starts; fix_scope.verify_fix needs that snapshot. GitGuardError,
     and no agent started, if `sandbox` is not a Sandbox: the step never runs
-    in a checkout."""
+    in a checkout.
+
+    `before_call`, when given, is called with no arguments after every
+    step that can fail without a call (the config read, the argv, the
+    snapshot) and immediately before the `claude` process is started: the
+    point after which the call may have spent money. The sweep notes the
+    call's provisional cost there (fix_scope, "The line's cost")."""
     require_sandbox(sandbox)
     path = str(sandbox.path)
     if model is None:
@@ -390,13 +409,15 @@ def run_fix_step(sandbox, prompt, model=None, timeout=DEFAULT_TIMEOUT,
     git_state = snapshot_git_state(sandbox)
     environment = scrubbed_environment()
     environment["PWD"] = path
+    if before_call is not None:
+        before_call()
     try:
         result = run_in_group(argv, cwd=path, env=environment, timeout=timeout)
     except subprocess.TimeoutExpired as expired:
         return FixStepRun(tuple(argv), None, _text(expired.output), _text(expired.stderr),
                           timed_out=True, git_state=git_state)
     except OSError as error:
-        return FixStepRun(tuple(argv), None, "", f"the fix step could not start: {error}",
+        return FixStepRun(tuple(argv), None, "", f"{NOT_STARTED}{error}",
                           git_state=git_state)
     return FixStepRun(tuple(argv), result.returncode, _text(result.stdout),
                       _text(result.stderr), git_state=git_state)

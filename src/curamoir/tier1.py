@@ -23,7 +23,14 @@ here, installed on the sandbox's work list (`WorkList.tier1`), and the one
 fix step then works through lint violations and tier-1 findings alike.
 After the scan the sandbox must still be its base, file for file
 (_call_scan): a scan that changed anything is a refusal (ScanRefused,
-which carries the call's cost for the refusal line), never a scan.
+which carries the call's cost for the refusal line), never a scan. A
+scan is refused the same way when git fails while the sandbox is being
+checked after the call: a sandbox that cannot be shown unchanged is
+treated as changed. A git failure later, while the reply is checked
+against the base (the sandbox already shown unchanged), makes a FAILED
+scan instead. Either way the call's spend is on the line and the
+attempt counts; neither is raised past run_tier1_scan as a bare
+GitGuardError, which would record neither.
 
 **What the scan reports, and what Python checks** (check_findings). One
 fenced JSON document in the reply's `result`: `{"findings": [{"principle_id",
@@ -132,6 +139,7 @@ Syntax that imports on 3.9, like sweep.py.
 
 import dataclasses
 import json
+import math
 import re
 from dataclasses import dataclass, field
 from typing import Optional
@@ -152,8 +160,14 @@ from curamoir.fix_scope import (
     require_pristine,
     violation_span,
 )
-from curamoir.fix_step import run_fix_step
-from curamoir.git_guard import git, require_sandbox, tree_changes, verify_git_state
+from curamoir.fix_step import NOT_STARTED, run_fix_step
+from curamoir.git_guard import (
+    GitGuardError,
+    git,
+    require_sandbox,
+    tree_changes,
+    verify_git_state,
+)
 from curamoir.job_run import SUCCESS
 from curamoir.pr_markdown import code_span, location, plain_text
 from curamoir.repo_config import config_value
@@ -349,12 +363,24 @@ class Tier1Scan:
     cost_usd: Optional[float] = None
     model: Optional[str] = None
     usage: Optional[dict] = None
+    #: False only for a FAILED scan whose `claude` could not be started
+    #: (FixStepRun.started): no call was made, so nothing was spent.
+    started: bool = True
 
     @property
     def scanned(self):
         """True when the scan ran and its reply was read. already_scanned
         counts it only on a line that also succeeded or opened a PR."""
         return self.status == SCANNED
+
+    @property
+    def called(self):
+        """True when the scan made its model call (status in _CALLED, and
+        its `claude` started), so it spent money whether or not it reported
+        usage (fix_scope, "The line's cost"). A scan whose `claude` could
+        not start is still FAILED, so it counts as an attempt
+        (scan_attempts) and is never `no_work`, but it spent nothing."""
+        return self.started and self.status in _CALLED
 
     def ledger_fields(self):
         """`{"tier1": {...}}` for the sweep's line, whatever its outcome
@@ -420,7 +446,15 @@ def already_scanned(entries, base):
     return any(record.get("base") == base for record in _done_scans(entries))
 
 
-#: The statuses of a scan that made the model call (an attempt with an origin).
+#: The reason of the provisional FAILED scan the line carries while the call
+#: runs (run_tier1_scan's `before_call`): it stays only if the run ended
+#: before the call's outcome was known.
+PENDING_REASON = ("the tier-1 scan did not finish: the run ended during or after its "
+                  "call, so what it spent is unrecorded")
+
+#: The statuses of a scan that attempted the model call (an attempt with an origin).
+#: The test of whether a scan spent anything is Tier1Scan.called, which adds
+#: that its `claude` started: a FAILED scan may never have started one.
 _CALLED = frozenset({SCANNED, FAILED, SANDBOX_CHANGED})
 
 
@@ -643,24 +677,36 @@ def scan_prompt(eligible, candidates):
 
 
 def _call_scan(sandbox, prompt, model=None, timeout=SCAN_TIMEOUT, max_turns=SCAN_MAX_TURNS,
-             claude="claude"):
+             claude="claude", before_call=None):
     """Run the scan call in `sandbox` (fix_step.run_fix_step with
     SCAN_TOOLS) and return its FixStepRun and why the sandbox is not as it
     was afterwards (its git files, its work tree, its HEAD), or None if it
     is. A read-only call that changed anything is not to be trusted with
     what it read: run_tier1_scan raises ScanRefused. `claude` is the tests'
-    seam."""
+    seam.
+
+    Once the call has run, a GitGuardError from these checks (a git that
+    fails or times out, a file that cannot be read) is returned as the
+    reason too, never raised: the sandbox could not be shown to be its
+    base, which is refused as a change is (fail closed), and the run must
+    reach run_tier1_scan so the refusal carries the call's spend and
+    counts as an attempt (fix_scope, "The line's cost"; scan_attempts).
+    `before_call` is run_fix_step's."""
     run = run_fix_step(sandbox, prompt, model=model, timeout=timeout, max_turns=max_turns,
-                       claude=claude, tools=SCAN_TOOLS)
-    changed = [c.label for c in verify_git_state(run.git_state)]
-    changed += list(tree_changes(run.git_state))
-    if changed:
-        return run, ("the tier-1 scan reads only, but the sandbox changed while it ran ("
-                     + ", ".join(sorted(set(changed))[:10]) + "); nothing it reported is used")
+                       claude=claude, tools=SCAN_TOOLS, before_call=before_call)
     try:
+        changed = [c.label for c in verify_git_state(run.git_state)]
+        changed += list(tree_changes(run.git_state))
+        if changed:
+            return run, ("the tier-1 scan reads only, but the sandbox changed while it ran ("
+                         + ", ".join(sorted(set(changed))[:10])
+                         + "); nothing it reported is used")
         require_pristine(sandbox)
     except ScopeCheckError as error:
         return run, f"the tier-1 scan reads only, but afterwards {error}"
+    except GitGuardError as error:
+        return run, ("the tier-1 scan reads only, but whether the sandbox is still its base "
+                     f"could not be checked ({error}); nothing it reported is used")
     return run, None
 
 
@@ -842,14 +888,26 @@ def _field(entry, name):
 
 
 def run_tier1_scan(sandbox, plan, held_paths, entries, *, cap=None, model=None,
-                   timeout=SCAN_TIMEOUT, max_turns=SCAN_MAX_TURNS, claude="claude"):
+                   timeout=SCAN_TIMEOUT, max_turns=SCAN_MAX_TURNS, claude="claude",
+                   before_call=None):
     """Tier 1 for a READY `plan` (plan_scan) in `sandbox`, after the
     idempotence decision was applied to it (so its work list is the
     narrowed one) and before the remedies: choose the candidates, run the
     scan, check what it reports. Returns a Tier1Scan; install its findings
     with with_findings. `held_paths` is Decision.held_paths; `cap` defaults
     to the base's `sweep.max_files_per_pr`. ScanRefused (a ScopeCheckError,
-    carrying the call's cost) if the scan changed the sandbox."""
+    carrying the call's cost) if the scan changed the sandbox, or if the
+    sandbox could not be shown unchanged after the call (_call_scan).
+
+    `before_call(pending)`, when given, is called immediately before the
+    `claude` process starts (fix_step.run_fix_step's `before_call`), after
+    everything that can fail without a call (the config read, the
+    rotation, the candidates, the prompt, the snapshot), with `pending`:
+    the FAILED Tier1Scan of this call (its candidates, cursor and origin)
+    that the line must carry if the run ends before the call's outcome is
+    known, so it counts as an attempt (scan_attempts) and retries the same
+    files (rotation_origin). A failure before that point makes no call,
+    and the callback is never called."""
     if not plan.will_scan:
         raise ValueError(f"a {plan.status} plan does not scan")
     require_sandbox(sandbox, ScopeCheckError)
@@ -865,17 +923,26 @@ def run_tier1_scan(sandbox, plan, held_paths, entries, *, cap=None, model=None,
     origin = dict(cursor_from=cursor_from, changed_from=changed_from)
     if not candidates:
         return Tier1Scan(NO_CANDIDATES, sandbox.base, eligible=eligible, cursor=cursor, **origin)
-    run, changed = _call_scan(sandbox, scan_prompt(plan.eligible, candidates), model=model,
-                              timeout=timeout, max_turns=max_turns, claude=claude)
+    prompt = scan_prompt(plan.eligible, candidates)
+    pending = Tier1Scan(FAILED, sandbox.base, eligible=eligible, candidates=candidates,
+                        cursor=cursor, **origin, model=model, reason=PENDING_REASON)
+    run, changed = _call_scan(sandbox, prompt, model=model, timeout=timeout,
+                              max_turns=max_turns, claude=claude,
+                              before_call=None if before_call is None
+                              else (lambda: before_call(pending)))
     payload = run.payload() or {}
     cost = payload.get("total_cost_usd")
-    cost = cost if isinstance(cost, (int, float)) and not isinstance(cost, bool) else None
+    cost = cost if _finite_cost(cost) else None
     usage = payload.get("usage") if isinstance(payload.get("usage"), dict) else None
     spent = dict(base=sandbox.base, eligible=eligible, candidates=candidates, cursor=cursor,
                  **origin, cost_usd=cost, model=run.argv[run.argv.index("--model") + 1], usage=usage)
     if changed:
         raise ScanRefused(changed, Tier1Scan(SANDBOX_CHANGED, reason=changed, **spent))
     failed = dict(status=FAILED, **spent)
+    if not run.started:
+        return Tier1Scan(**failed, started=False,
+                         reason="the tier-1 scan could not start: "
+                                + run.stderr.removeprefix(NOT_STARTED).strip())
     if run.timed_out or run.exit_code != 0 or payload.get("is_error") is True:
         why = "timed out" if run.timed_out else f"exited {run.exit_code}"
         return Tier1Scan(**failed, reason=f"the tier-1 scan {why}")
@@ -883,12 +950,35 @@ def run_tier1_scan(sandbox, plan, held_paths, entries, *, cap=None, model=None,
         raw = parse_findings(payload.get("result"))
     except Tier1ReplyError as error:
         return Tier1Scan(**failed, reason=str(error))
-    known = {p.id for p in base_principles(sandbox).principles}
-    findings, refused = check_findings(
-        raw, known=known, eligible=set(eligible), candidates=candidates,
-        base_text=lambda path: _base_text(sandbox, path),
-        lint_items=sandbox.work_list.items)
+    try:
+        known = {p.id for p in base_principles(sandbox).principles}
+        findings, refused = check_findings(
+            raw, known=known, eligible=set(eligible), candidates=candidates,
+            base_text=lambda path: _base_text(sandbox, path),
+            lint_items=sandbox.work_list.items)
+    except GitGuardError as error:
+        # The sandbox was shown to be its base above; what failed is reading
+        # the base to check the reply (a git timeout, principles that do not
+        # parse). Like a reply that cannot be used, that is a FAILED scan:
+        # no finding is accepted, the call's spend is kept, and it counts
+        # as an attempt. Raised, it would leave the line with neither.
+        return Tier1Scan(**failed, reason=f"the tier-1 scan's reply could not be checked "
+                                          f"against the base: {error}")
     return Tier1Scan(SCANNED, findings=findings, refused=refused, **spent)
+
+
+def _finite_cost(value):
+    """True for a reported cost the ledger can hold: an int or float, not a
+    bool, that converts to a finite float. A NaN or infinity would be
+    written as a bare `NaN` or `Infinity`, which is not JSON, and an int
+    too large for a float cannot be priced; either is taken as no cost
+    reported."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    try:
+        return math.isfinite(float(value))
+    except OverflowError:
+        return False
 
 
 def with_findings(work, scan):

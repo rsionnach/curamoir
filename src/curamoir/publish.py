@@ -2,7 +2,9 @@
 commit on one branch and one PR (cm-fkd.12; fix_scope's runner step 9).
 
 **What the runner calls**: `origin_gh_repo(repo)` once per sweep (its value
-also goes to github.open_sweep_prs), then `publish(...)`, which returns a
+also goes to github.open_sweep_prs), and `origin_default_branch(repo,
+gh_repo)` before the sandbox, to pin the sweep's base at that branch's
+remote-tracking ref (curamoir.sweep_job); then `publish(...)`, which returns a
 Published or raises one of the errors in "Errors" below. The other names in
 __all__ are publish's building blocks (check_target, pr_base, user_identity,
 commit_from_patch, push_branch, delete_remote_branch, create_pr,
@@ -224,7 +226,8 @@ __all__ = ["CREATE_TIMEOUT", "LOOKUP_ATTEMPTS", "LOOKUP_DELAY", "PUSH_TIMEOUT",
            "REMOTE_TIMEOUT", "CreateOutputUnreadable", "Identity", "PrCreateFailed",
            "PrOutcomeUnknown", "Published", "PublishError", "PublishRefused", "PushFailed",
            "check_target", "commit_from_patch", "create_pr", "delete_remote_branch",
-           "find_open_pr", "origin_gh_repo", "pr_base", "publish", "push_branch", "user_identity"]
+           "find_open_pr", "origin_default_branch", "origin_gh_repo", "pr_base", "publish",
+           "push_branch", "user_identity"]
 
 #: Seconds `git push` may take: generous, since a pre-push hook may run tests.
 PUSH_TIMEOUT = 600
@@ -425,20 +428,41 @@ def pr_base(repo, gh_repo, branch):
     say, when it is `branch`, when origin/HEAD names another branch, or when
     the checkout has no remote-tracking ref for it."""
     try:
+        default = origin_default_branch(repo, gh_repo)
+    except PublishRefused as refused:
+        raise PublishRefused(f"the PR has no base, and nothing was pushed: "
+                             f"{refused}") from None
+    if default == branch:
+        raise PublishRefused(f"refusing to write on the default branch {default!r}")
+    return default
+
+
+def origin_default_branch(repo, gh_repo):
+    """`gh_repo`'s default branch as GitHub names it, once the checkout
+    agrees: its origin/HEAD, when set, names it, and
+    `refs/remotes/origin/<default>` exists (module docstring, step 2).
+    PublishRefused when gh cannot say, or the checkout disagrees; its
+    message says what is wrong, and the caller says what it stops (pr_base:
+    the PR; curamoir.sweep_job: the sweep's base).
+
+    pr_base's answer without the sweep branch, which is not known before
+    the sweep has a base: curamoir.sweep_job pins the sandbox's base at
+    `refs/remotes/origin/<this>`, so the commit the sweep builds on and the
+    branch its PR opens into are the same branch by one rule."""
+    try:
         printed = github.run_gh(["repo", "view", gh_repo, "--json", "defaultBranchRef"],
                                 cwd=repo)
     except github.GhError as error:
         raise PublishRefused(f"gh could not say which branch is {gh_repo}'s default "
-                             f"({error}), so the PR has no base; nothing was pushed") from None
+                             f"({error})") from None
     try:
         default = json.loads(printed)["defaultBranchRef"]["name"]
     except (ValueError, KeyError, TypeError):
         default = None
     if not (isinstance(default, str) and default):
         raise PublishRefused(f"gh repo view printed {github.quote_output(printed)}, not "
-                             f"{gh_repo}'s default branch, so the PR has no base")
-    if default == branch:
-        raise PublishRefused(f"refusing to write on the default branch {default!r}")
+                             f"{gh_repo}'s default branch")
+    _require_branch_name(repo, default, f"GitHub's default branch for {gh_repo}")
     tracking = f"refs/remotes/origin/{default}"
     try:
         head = git(repo, "symbolic-ref", "--quiet", "refs/remotes/origin/HEAD",
@@ -458,6 +482,22 @@ def pr_base(repo, gh_repo, branch):
                              f"checkout has no {tracking}: run `git fetch origin` (and `git "
                              "remote set-head origin -a`), then sweep again")
     return default
+
+
+def _require_branch_name(repo, name, what):
+    """PublishRefused unless `name` is a branch name git accepts
+    (`git check-ref-format refs/heads/<name>`), not starting with `-`.
+    WHY for the default branch too: it becomes a revision
+    (`refs/remotes/origin/<name>`), and revision syntax in it (`main~1`,
+    `main^`, `main@{1}`) would name another commit than the branch's."""
+    try:
+        valid = _user_git(repo, ["check-ref-format", f"refs/heads/{name}"], REMOTE_TIMEOUT)
+    except (subprocess.TimeoutExpired, OSError, ValueError) as error:
+        # ValueError: a NUL in the name, which no argv can carry.
+        raise PublishRefused(f"{what} {name!r} could not be checked as a branch name: "
+                             f"{error}") from None
+    if name.startswith("-") or valid.returncode != 0:
+        raise PublishRefused(f"{what} {name!r} is not a valid branch name")
 
 
 def _check_pr_text(title, body):

@@ -682,6 +682,76 @@ def test_a_scan_that_changes_the_sandbox_is_refused(tmp_path):
     assert fields["status"] == "sandbox_changed" and fields["refused"] == []
 
 
+def test_a_git_failure_checking_the_sandbox_after_the_call_is_refused_with_its_cost(
+        tmp_path, monkeypatch):
+    """Unverified is refused as changed, and the refusal carries the call's
+    spend (a bare GitGuardError would carry none)."""
+    repo = tier1_repo(tmp_path)
+    claude, _ = fake_claude(tmp_path, "scan", findings_reply(FOUND_BILLING))
+
+    def times_out(*_args):
+        raise tier1.GitGuardError("git status did not finish within 60 seconds")
+
+    with prepare_sandbox(repo, "HEAD", parent=tmp_path) as sandbox:
+        lint_sandbox(sandbox)
+        monkeypatch.setattr(tier1, "tree_changes", times_out)
+        with pytest.raises(tier1.ScanRefused, match="could not be checked") as raised:
+            run_tier1_scan(sandbox, plan_scan(sandbox, []), (), [], claude=claude)
+    scan = raised.value.scan
+    assert scan.status == SANDBOX_CHANGED and scan.called
+    assert scan.cost_usd == 0.02 and scan.usage == claude_payloads.USAGE
+
+
+def test_a_git_failure_checking_the_reply_is_a_failed_scan_with_its_cost(tmp_path,
+                                                                        monkeypatch):
+    repo = tier1_repo(tmp_path)
+    claude, _ = fake_claude(tmp_path, "scan", findings_reply(FOUND_BILLING))
+
+    def times_out(*_args):
+        raise tier1.GitGuardError("git cat-file did not finish within 60 seconds")
+
+    with prepare_sandbox(repo, "HEAD", parent=tmp_path) as sandbox:
+        lint_sandbox(sandbox)
+        monkeypatch.setattr(tier1, "_base_text", times_out)
+        scan = run_tier1_scan(sandbox, plan_scan(sandbox, []), (), [], claude=claude)
+    assert scan.status == FAILED and scan.findings == () and scan.called
+    assert "could not be checked against the base" in scan.reason
+    assert scan.cost_usd == 0.02 and scan.usage == claude_payloads.USAGE
+
+
+@pytest.mark.parametrize("cost", [float("nan"), float("inf"), 10**400],
+                         ids=["nan", "inf", "huge"])
+def test_a_cost_that_is_not_a_finite_number_is_taken_as_none(tmp_path, cost):
+    """A NaN or infinity would reach the ledger as a bare NaN or Infinity,
+    which is not JSON; an int too large for a float cannot be priced."""
+    repo = tier1_repo(tmp_path)
+    claude, _ = fake_claude(tmp_path, "scan", None)
+    # The payload as printed text: json.dumps writes NaN and Infinity as the
+    # bare tokens a JSON parser like Python's reads back (the shape of the
+    # CLI output this guards against).
+    printed = json.dumps(claude_payloads.success(findings_reply(), cost=cost))
+    pathlib.Path(claude).write_text(f"#!{sys.executable}\nprint({printed!r})\n",
+                                    encoding="utf-8")
+    with prepare_sandbox(repo, "HEAD", parent=tmp_path) as sandbox:
+        lint_sandbox(sandbox)
+        scan = run_tier1_scan(sandbox, plan_scan(sandbox, []), (), [], claude=claude)
+    assert scan.status == SCANNED and scan.cost_usd is None
+    json.loads(json.dumps(scan.ledger_fields(), allow_nan=False))
+
+
+def test_a_scan_whose_claude_cannot_start_is_failed_but_not_called(tmp_path):
+    repo = tier1_repo(tmp_path)
+    with prepare_sandbox(repo, "HEAD", parent=tmp_path) as sandbox:
+        lint_sandbox(sandbox)
+        scan = run_tier1_scan(sandbox, plan_scan(sandbox, []), (), [],
+                              claude=str(tmp_path / "no-such-claude"))
+    assert scan.status == FAILED and not scan.started and not scan.called
+    assert scan.reason.startswith("the tier-1 scan could not start")
+    # Still an attempt: a claude that never starts is not retried forever.
+    line = {"kind": "job", "job": "sweep", "outcome": "failure", **scan.ledger_fields()}
+    assert tier1.scan_attempts([line], scan.base) == 1
+
+
 @pytest.mark.parametrize("result, exit_code", [
     ("I could not finish.", 0),
     (findings_reply(FOUND_BILLING) + findings_reply(FOUND_HANDLERS), 0),

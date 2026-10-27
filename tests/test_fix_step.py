@@ -472,3 +472,22 @@ def test_a_permission_the_agent_writes_into_principles_grants_nothing(sandboxed,
     assert "permits" in (sandboxed.path / PRINCIPLES).read_text(encoding="utf-8")
     assert {(b.kind, b.path) for b in result.breaches} == {
         (SIGNATURE_CHANGE, BILLING), (FILE_NOT_IN_WORK_LIST, PRINCIPLES)}
+
+
+
+def test_before_call_runs_only_after_the_snapshot(sandboxed, monkeypatch):
+    """`before_call` marks the point after which the call may have spent:
+    a snapshot that fails first starts no process and must not call it."""
+    from curamoir import fix_step
+
+    called = []
+
+    def snapshot_fails(_sandbox):
+        raise GitGuardError("git status did not finish within 60 seconds")
+
+    monkeypatch.setattr(fix_step, "snapshot_git_state", snapshot_fails)
+
+    with pytest.raises(GitGuardError, match="did not finish"):
+        run_fix_step(sandboxed, "p", model="m", claude="/nonexistent/claude",
+                     before_call=lambda: called.append(True))
+    assert called == []
