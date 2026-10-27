@@ -138,6 +138,7 @@ Syntax that imports on 3.9, like sweep.py.
 """
 
 import json
+import math
 import os
 import subprocess
 from dataclasses import dataclass
@@ -380,6 +381,30 @@ class FixStepRun:
         except ValueError:
             return None
         return document if isinstance(document, dict) else None
+
+
+def usable_number(value):
+    """True for a token count or a dollar figure from a `claude` payload
+    (FixStepRun.payload: `usage`'s counts, `total_cost_usd`) that a ledger
+    line may carry as a measurement: an int or float, not a bool, that
+    converts to a finite float and is not negative. The one rule for both
+    model calls' spend (curamoir.sweep_job's line cost and curamoir.tier1's
+    scan cost), so the two cannot disagree on what was reported. Anything
+    else is "not reported": a count is written as budget.UNRECORDED, a cost
+    is left out.
+
+    WHY each part: a NaN or an infinity would be written as a bare `NaN` or
+    `Infinity`, which is not JSON; an int too large for a float (10**400)
+    makes math.isfinite raise OverflowError, and budget.PriceTable would
+    raise the same OverflowError when it priced the count; and a negative
+    is no spend at all, but would subtract from the month's total (a
+    count) or from the line's summed `cost_usd` (a cost)."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    try:
+        return math.isfinite(float(value)) and value >= 0
+    except OverflowError:
+        return False
 
 
 def run_fix_step(sandbox, prompt, model=None, timeout=DEFAULT_TIMEOUT,

@@ -462,84 +462,145 @@ def test_a_cross_repository_pr_from_the_real_listing_is_dropped(gh, repo):
 
 
 # --- the runner's defaults -----------------------------------------------------------
+#
+# The runner names origin's repository with --repo (runner, "Which repository
+# gh is asked about"), so these repos have a GitHub origin (`hub`). Nothing is
+# fetched or pushed: the URL is only read. The sweep's body is `stub_body`,
+# a failure line, as the placeholder was: what is tested here is the guards'
+# gh calls, not the sweep (tests/test_sweep_publish.py runs the real body).
 
-def test_run_sweep_with_no_arguments_uses_both_gh_defaults(gh, repo, capsys):
-    code = cli.main(["run", "sweep", "--repo", str(repo.repo)])
+GH_REPO = "github.com/acme/widgets"
+#: The runner's two gh calls for a repository whose origin is GH_REPO.
+RUNNER_LABEL_ARGV = [*LABEL_ARGV[:2], "--repo", GH_REPO, *LABEL_ARGV[2:]]
+RUNNER_PR_ARGV = [*PR_ARGV[:2], "--repo", GH_REPO, *PR_ARGV[2:]]
+STUB = "the stub sweep body ran"
 
-    assert gh.calls() == [LABEL_ARGV, PR_ARGV]
-    # Both checks ran and passed: no guard line, and the placeholder body ran.
-    assert lines(repo, "guard") == []
+
+@pytest.fixture
+def hub(repo):
+    """The harness repo with origin naming GH_REPO."""
+    subprocess.run(["git", "remote", "add", "origin", f"https://{GH_REPO}.git"],
+                   cwd=repo.repo, check=True, capture_output=True)
+    return repo
+
+
+@pytest.fixture
+def stub_body(monkeypatch):
+    monkeypatch.setitem(JOBS, "sweep", runner.Job(
+        body=lambda _root, run: run.failed(STUB), opens_prs=True,
+        open_pr_listing_for=JOBS["sweep"].open_pr_listing_for))
+
+
+def test_run_sweep_with_no_arguments_uses_both_gh_defaults(gh, hub, stub_body, capsys):
+    code = cli.main(["run", "sweep", "--repo", str(hub.repo)])
+
+    assert gh.calls() == [RUNNER_LABEL_ARGV, RUNNER_PR_ARGV]
+    # Both checks ran and passed: no guard line, and the body ran.
+    assert lines(hub, "guard") == []
     assert code == EXIT_FAILURE
-    assert "cm-fkd.4" in capsys.readouterr().out
+    assert STUB in capsys.readouterr().out
 
 
-def test_gh_runs_in_the_repo_root_not_the_process_cwd(gh, repo, tmp_path, monkeypatch):
+def test_the_registered_sweep_runs_the_real_body_after_both_defaults(gh, hub):
+    """No stub: run_sweep resolves the base (`gh repo view` on origin's
+    repository) and, with no refs/remotes/origin/main fetched, refuses
+    before any sandbox."""
+    ran = run_job(hub.repo, "sweep", now=october)
+
+    assert gh.calls() == [RUNNER_LABEL_ARGV, RUNNER_PR_ARGV,
+                          ["repo", "view", GH_REPO, "--json", "defaultBranchRef"]]
+    assert ran.exit_code == EXIT_REFUSED
+    assert lines(hub, "job")[-1]["reason"] == "sweep_base"
+
+
+def test_gh_runs_in_the_repo_root_not_the_process_cwd(gh, hub, stub_body, tmp_path,
+                                                       monkeypatch):
     """`--repo` names the repository; a scheduler's cwd may be anywhere, and
     gh run there would read another repository's labels and PRs."""
     elsewhere = tmp_path / "elsewhere"
     elsewhere.mkdir()
     monkeypatch.chdir(elsewhere)
 
-    cli.main(["run", "sweep", "--repo", str(repo.repo)])
+    cli.main(["run", "sweep", "--repo", str(hub.repo)])
 
-    assert gh.calls() == [LABEL_ARGV, PR_ARGV]
-    assert [ran_in(record) for record in gh.call_records()] == [repo.repo.resolve()] * 2
+    assert gh.calls() == [RUNNER_LABEL_ARGV, RUNNER_PR_ARGV]
+    assert [ran_in(record) for record in gh.call_records()] == [hub.repo.resolve()] * 2
 
 
-def test_run_sweep_with_no_arguments_is_paused_by_the_label(gh, repo):
+def test_run_sweep_with_no_arguments_is_paused_by_the_label(gh, hub):
     gh.feed(labels=LABEL_LIST)
 
-    code = cli.main(["run", "sweep", "--repo", str(repo.repo)])
+    code = cli.main(["run", "sweep", "--repo", str(hub.repo)])
 
     assert code == EXIT_REFUSED
-    assert lines(repo, "job")[-1]["reason"] == "paused"
+    assert lines(hub, "job")[-1]["reason"] == "paused"
     # Refused before the cap: the open PRs were never listed.
-    assert gh.calls() == [LABEL_ARGV]
+    assert gh.calls() == [RUNNER_LABEL_ARGV]
 
 
-def test_run_sweep_with_no_arguments_is_capped_by_the_listing(gh, repo):
+def test_run_sweep_with_no_arguments_is_capped_by_the_listing(gh, hub):
     gh.feed(prs=sweep_prs("2026-09-14", "2026-09-21", "2026-09-28"))
 
-    code = cli.main(["run", "sweep", "--repo", str(repo.repo)])
+    code = cli.main(["run", "sweep", "--repo", str(hub.repo)])
 
     assert code == EXIT_REFUSED
-    assert lines(repo, "job")[-1]["reason"] == "pr_cap"
+    assert lines(hub, "job")[-1]["reason"] == "pr_cap"
 
 
-def test_every_job_gets_the_label_check_not_only_the_sweep(gh, repo):
+def test_every_job_gets_the_label_check_not_only_the_sweep(gh, hub):
     """The kill switch is per run: the brief, which opens no PRs, is paused
-    by the label too, and never lists PRs."""
+    by the label too (origin's), and never lists PRs."""
     gh.feed(labels=LABEL_LIST)
 
-    ran = run_job(repo.repo, "brief", now=october)
+    ran = run_job(hub.repo, "brief", now=october)
 
     assert ran.exit_code == EXIT_REFUSED
-    assert lines(repo, "job")[-1]["reason"] == "paused"
+    assert lines(hub, "job")[-1]["reason"] == "paused"
+    assert gh.calls() == [RUNNER_LABEL_ARGV]
+
+
+def test_with_no_github_origin_the_labels_are_gh_resolved_and_the_cap_degrades(gh, repo):
+    """Origin names no GitHub repository (here there is no origin): the
+    label check falls back to gh's own resolution, as before cm-fkd.14, so
+    the brief is checked as it was; the sweep's cap cannot name the
+    repository its PR would open on, so it degrades without asking gh, and
+    the sweep refuses for want of a base."""
+    brief = run_job(repo.repo, "brief", now=october)
+    assert brief.exit_code == EXIT_SUCCESS
     assert gh.calls() == [LABEL_ARGV]
-
-
-def test_a_gh_outage_degrades_both_checks_and_the_job_still_runs(gh, repo):
-    gh.feed(fail="error connecting to api.github.com")
 
     ran = run_job(repo.repo, "sweep", now=october)
 
-    guards = lines(repo, "guard")
+    assert gh.calls() == [LABEL_ARGV, LABEL_ARGV]
+    [cap] = [line for line in lines(repo, "guard") if line["reason"] == "pr_cap"]
+    assert cap["severity"] == "degraded" and "no origin remote" in cap["message"]
+    assert ran.exit_code == EXIT_REFUSED
+    assert lines(repo, "job")[-1]["reason"] == "sweep_base"
+
+
+def test_a_gh_outage_degrades_both_checks_and_the_job_still_runs(gh, hub, stub_body):
+    gh.feed(fail="error connecting to api.github.com")
+
+    ran = run_job(hub.repo, "sweep", now=october)
+
+    guards = lines(hub, "guard")
     assert [(line["reason"], line["severity"]) for line in guards] == [
         ("paused", "degraded"), ("pr_cap", "degraded")]
     assert all("error connecting to api.github.com" in line["message"] for line in guards)
-    # The placeholder body ran: degraded checks allow.
+    # The body ran: degraded checks allow.
     assert ran.exit_code == EXIT_FAILURE
+    assert lines(hub, "job")[-1]["message"] == STUB
 
 
-def test_the_overrides_still_replace_the_defaults(gh, repo):
-    ran = run_job(repo.repo, "sweep", now=october, repo_labels=lambda: [],
+def test_the_overrides_still_replace_the_defaults(gh, hub, stub_body):
+    ran = run_job(hub.repo, "sweep", now=october, repo_labels=lambda: [],
                   open_pr_listing=lambda: [])
 
     assert gh.calls() == []
     assert ran.exit_code == EXIT_FAILURE
 
 
-def test_two_listings_in_one_sweep_run_both_run_gh(gh, repo, monkeypatch):
+def test_two_listings_in_one_sweep_run_both_run_gh(gh, hub, monkeypatch):
     """The cap's listing and the body's (step 2b's decision) in ONE run:
     two gh calls, and the second sees a PR opened in between."""
     seen = []
@@ -552,10 +613,10 @@ def test_two_listings_in_one_sweep_run_both_run_gh(gh, repo, monkeypatch):
     monkeypatch.setitem(JOBS, "sweep", runner.Job(
         body=body, opens_prs=True, open_pr_listing_for=JOBS["sweep"].open_pr_listing_for))
 
-    ran = run_job(repo.repo, "sweep", now=october)
+    ran = run_job(hub.repo, "sweep", now=october)
 
     assert ran.exit_code == EXIT_SUCCESS
-    assert gh.calls() == [LABEL_ARGV, PR_ARGV, PR_ARGV]
+    assert gh.calls() == [RUNNER_LABEL_ARGV, RUNNER_PR_ARGV, PR_ARGV]
     assert seen == ["curamoir/sweep-2026-10-05"]
 
 
@@ -572,24 +633,25 @@ def test_the_sweep_prefix_follows_the_configured_branch_prefix():
             sweep_branch_prefix(bad)
 
 
-def test_sweep_prs_under_a_configured_prefix_are_counted_by_the_cap(gh, repo):
-    repo.write(".curamoir/curamoir.yaml", BOT_YAML)
+def test_sweep_prs_under_a_configured_prefix_are_counted_by_the_cap(gh, hub):
+    hub.write(".curamoir/curamoir.yaml", BOT_YAML)
     gh.feed(prs=sweep_prs("1", "2", "3", prefix="bot/sweep-"))
 
-    ran = run_job(repo.repo, "sweep", now=october)
+    ran = run_job(hub.repo, "sweep", now=october)
 
     assert ran.exit_code == EXIT_REFUSED
-    assert lines(repo, "job")[-1]["reason"] == "pr_cap"
+    assert lines(hub, "job")[-1]["reason"] == "pr_cap"
 
 
 def test_sweep_prs_under_the_default_prefix_are_not_counted_once_another_is_configured(
-        gh, repo):
-    repo.write(".curamoir/curamoir.yaml", BOT_YAML)
+        gh, hub, stub_body):
+    hub.write(".curamoir/curamoir.yaml", BOT_YAML)
     gh.feed(prs=sweep_prs("1", "2", "3"))
 
-    run_job(repo.repo, "sweep", now=october)
+    run_job(hub.repo, "sweep", now=october)
 
-    assert lines(repo, "job")[-1]["reason"] is None
+    assert lines(hub, "job")[-1]["reason"] is None
+    assert lines(hub, "job")[-1]["message"] == STUB
 
 
 def test_sweep_decision_sees_sweep_prs_under_the_configured_prefix(gh, tmp_path):
@@ -632,8 +694,6 @@ def test_sweep_decision_cannot_be_called_without_the_configured_prefix():
 # repository once; both listings take it as `gh_repo` and pass it as
 # `--repo`, after the subcommand (gh accepts it there), so the cap, the
 # decision and the PR all read the repository the branch is pushed to.
-
-GH_REPO = "github.com/acme/widgets"
 
 
 def test_the_label_query_names_the_repository_when_given_one(gh, tmp_path):

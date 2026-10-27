@@ -114,7 +114,10 @@ def test_the_lock_is_held_through_the_budget_and_cap_checks(repo, monkeypatch):
 
     ran = run_job(repo.repo, "sweep", open_pr_listing=listing(), now=october)
 
-    assert ran.exit_code == EXIT_FAILURE  # the placeholder sweep body, not a refusal
+    # The body's own refusal (the harness repo has no origin, so no base),
+    # after every guard passed: not a guard's.
+    assert ran.exit_code == EXIT_REFUSED
+    assert repo.ledger().entries()[-1]["reason"] == "sweep_base"
     assert held_during == [("Budget", True), ("OpenPrCap", True)]
     assert not the_lock(repo).exists()
 

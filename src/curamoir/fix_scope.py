@@ -34,10 +34,11 @@ Two layers, so the rules can be tested without git:
 
 0. Wrap the whole pipeline, steps 1 to 10, in the guards (E3-R6), in four
    parts:
-   (i) The wrap: replace the placeholder BODY of `runner.JOBS["sweep"]`
-       (`Job(body=..., opens_prs=True, open_pr_listing_for=...)`) with
-       `body(repo, run)`, everything below, which records its outcome on
-       `run`, the `JobRun` writing to the repo's own ledger. Do NOT call
+   (i) The wrap (done, cm-fkd.14): `runner.JOBS["sweep"]` is
+       `Job(body=sweep_job.run_sweep, opens_prs=True,
+       open_pr_listing_for=...)`, `body(repo, run)` being everything
+       below, which records its outcome on `run`, the `JobRun` writing to
+       the repo's own ledger. Do NOT call
        `job_guard.run_guarded` yourself: `curamoir run sweep` reaches it
        through `runner.run_job`, which runs every job behind the guards in
        E10-R1's order and gives the gateway the gh defaults of (ii) and
@@ -50,11 +51,14 @@ Two layers, so the rules can be tested without git:
        time, on the `<guardrails.branch_prefix>sweep-...` branch
        (job_guard's docstring), which publish.publish does (step 9).
    (ii) `repo_labels` (done, cm-fkd.10: curamoir.github.repo_labels, which
-       `runner.run_job` binds to the root for EVERY job, the kill switch
-       being per run): the `gh`-backed callable returning the repository's
-       labels, for the `curamoir:paused` kill switch (guards.kill_switch),
-       as an iterable of label-name strings (not gh's `{name: ...}`
-       objects; any other shape degrades the check). Run exactly
+       `runner.run_job` binds to the root and to origin's repository for
+       EVERY job, the kill switch being per run; gh's own resolution when
+       origin names no GitHub repository, runner's "Which repository gh is
+       asked about", cm-fkd.14): the `gh`-backed callable returning the
+       repository's labels, for the `curamoir:paused` kill switch
+       (guards.kill_switch), as an iterable of label-name strings (not
+       gh's `{name: ...}` objects; any other shape degrades the check).
+       Run exactly
        `gh label list --limit <high> --json name --jq '.[].name'`, with
        <high> well above any repository's label count (github.LABEL_LIMIT,
        1000), and return its
@@ -79,9 +83,9 @@ Two layers, so the rules can be tested without git:
        functools.partial(github.open_sweep_prs, repo, gh_repo=gh_repo)`,
        with origin's `gh_repo` from step 1, so the decision lists the PRs
        of the repository the PR opens on (step 9). The cap's listing,
-       runner._gh_open_prs, is bound to the root alone and passes no
-       `gh_repo` yet, so in a fork's clone gh may answer it for another
-       repository; aligning it is cm-fkd.14's (noted on that bead). Never
+       runner._gh_open_prs, passes origin's `gh_repo` too, resolved when
+       the cap calls it (cm-fkd.14), so the cap counts the same
+       repository's PRs. Never
        the bare function (it needs the repo) and never its result (a
        list, not a callable): sweep_decision calls it with no arguments,
        and either mistake raises inside its broad `except`, so every
@@ -154,8 +158,8 @@ Two layers, so the rules can be tested without git:
        ["branch_prefix"], tier1=plan.will_scan)`. The prefix is required
        and is read exactly as job_guard.job_gateway reads it for the cap,
        so the decision and the cap read one setting and see the same sweep
-       PRs (idempotence, "The configured prefix"; in a fork's clone they
-       may list different repositories until cm-fkd.14, step 0 (iii)).
+       PRs (idempotence, "The configured prefix"), of one repository,
+       origin's (step 0 (iii)).
        `open_sweep_prs` is
        `functools.partial(github.open_sweep_prs, repo, gh_repo=gh_repo)`,
        step 0 (iii)'s binding with step 1's `gh_repo`, never the bare
@@ -289,8 +293,16 @@ Two layers, so the rules can be tested without git:
    its own tokens). A second known limit: the counts leave out the
    cache tokens (the usage's `cache_creation_input_tokens` and
    `cache_read_input_tokens`), so a call that used the prompt cache is
-   under-priced until cm-2ui counts them. No line carries the top-level
-   fields yet (E11-R1); the runner adds them.
+   under-priced until cm-2ui counts them. curamoir.sweep_job writes these
+   top-level fields on each sweep line on which a call started.
+
+   **A cap of 0.** `sweep.max_files_per_pr: 0` is a valid count, and
+   means no PR may carry a file. Tier 1 reads it as "no candidate file"
+   (no call, no spend); the sweep reads it the same way for the fix step:
+   before step 3, with no remedy applied and no fix call made, it records
+   a refusal, Reason.FILE_CAP (curamoir.sweep_job). A refusal, as the
+   open-PR cap's `max_open_prs: 0` is one: the configuration declines the
+   work, and no `found_delta` or snapshot is written (step 2a).
 3. Apply the file-level remedies, still before anything else edits it:
    `remedies.apply_file_remedies(sandbox)`, which deletes each file whose
    violation's rule says `remedy: delete_file` and nothing at the base

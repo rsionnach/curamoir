@@ -56,7 +56,6 @@ from curamoir.idempotence import DUPLICATE_OPEN_PR, NO_WORK, TIER1_FAILED, WORK
 from curamoir.job_run import FAILURE, REFUSED, SUCCESS, JobRun
 from curamoir.ledger import repo_ledger
 from curamoir.sweep_job import (
-    NOT_WIRED,
     SweepTools,
     line_cost_fields,
     resolve_sweep_base,
@@ -104,6 +103,26 @@ def isolated_home(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setenv("XDG_CONFIG_HOME", str(home / ".config"))
     return home
+
+
+@pytest.fixture(autouse=True)
+def fix_step_cannot_start(tmp_path, monkeypatch):
+    """Steps 1 to 2c are this file's: past them, the fix step's `claude`
+    cannot start (the real run_fix_step, given an executable that does not
+    exist), so the sweep records a failure starting NOT_STARTED with no
+    call and no cost of its own, and every line here is the scan's alone.
+    tests/test_sweep_publish.py runs steps 3 to 10."""
+    real = sweep_job.run_fix_step
+    missing = str(tmp_path / "no-fix-claude")
+    monkeypatch.setattr(sweep_job, "run_fix_step",
+                        lambda sandbox, prompt, **options: real(
+                            sandbox, prompt, **{**options, "claude": missing}))
+
+
+def past_step_2c(line):
+    """The line of a sweep that got past step 2c: the fix step's failure to
+    start (fix_step_cannot_start)."""
+    return line["outcome"] == FAILURE and line["message"].startswith(NOT_STARTED)
 
 
 def checkout(tmp_path, *rules, config=TIER1_OFF, clean=False):
@@ -229,9 +248,9 @@ def test_a_scan_that_changes_the_sandbox_is_refused_with_its_field_and_cost(tmp_
 
 def test_a_scan_that_times_out_is_unrecorded_spend_never_zero(tmp_path, no_real_gh):
     """The scan is FAILED (timed out, no payload); the lint has work, so the
-    sweep goes on to the step not wired yet, whose failure line carries the
-    scan's cost as UNRECORDED. The same line, read by the budget, is
-    counted as unrecorded, not priced at $0."""
+    sweep goes on to the fix step (which cannot start here), whose failure
+    line carries the scan's cost as UNRECORDED. The same line, read by the
+    budget, is counted as unrecorded, not priced at $0."""
     repo = checkout(tmp_path, NO_BARE_PRINT, NO_VARIANT_MODULE, config=TIER1_ON)
     claude, _ = fake_claude(tmp_path, "scan", None)
     pid_file = tmp_path / "scan.pid"
@@ -248,7 +267,7 @@ def test_a_scan_that_times_out_is_unrecorded_spend_never_zero(tmp_path, no_real_
             with contextlib.suppress(ProcessLookupError, ValueError):
                 os.kill(int(pid_file.read_text()), signal.SIGKILL)
 
-    assert line["outcome"] == FAILURE and line["message"] == NOT_WIRED
+    assert past_step_2c(line)
     assert line["tier1"]["status"] == FAILED
     assert line["tier1"]["reason"] == "the tier-1 scan timed out"
     assert line["input_tokens"] == line["output_tokens"] == UNRECORDED
@@ -316,7 +335,7 @@ def test_a_fetched_origin_ahead_of_every_local_branch_is_the_base(tmp_path, no_r
     line = sweep(repo)
 
     assert line["found_delta"]["base"] == ahead
-    assert line["work"] == WORK and line["message"] == NOT_WIRED
+    assert line["work"] == WORK and past_step_2c(line)
 
 
 def test_the_base_branch_is_githubs_default_as_publish_reads_it(tmp_path, no_real_gh):
@@ -380,17 +399,17 @@ def test_gh_failing_to_name_the_default_is_refused(tmp_path, no_real_gh):
 
 # --- the rest of steps 1 to 2c ---------------------------------------------------------
 
-def test_lint_work_with_no_open_prs_ends_at_the_step_not_wired(tmp_path, no_real_gh):
-    """Past step 2b with tier 1 off: the failure line until cm-fkd.14, with
-    the decision's fields, found_delta and the tier1 field, and the
-    snapshot (step 2a). The sandbox is gone afterwards."""
+def test_lint_work_with_no_open_prs_goes_on_to_the_fix_step(tmp_path, no_real_gh):
+    """Past step 2b with tier 1 off: the fix step's line (here its failure
+    to start), with the decision's fields, found_delta and the tier1 field,
+    and the snapshot (step 2a). The sandbox is gone afterwards."""
     repo = checkout(tmp_path, NO_BARE_PRINT)
     parent = tmp_path / "sandboxes"
     parent.mkdir()
 
     line = sweep(repo, sandbox_parent=str(parent))
 
-    assert line["outcome"] == FAILURE and line["message"] == NOT_WIRED
+    assert past_step_2c(line)
     assert line["work"] == WORK and line["open_sweep_prs"] == []
     assert line["held_for_open_prs"] == 0
     assert line["found_delta"]["added_count"] == 2
@@ -412,14 +431,15 @@ def test_a_second_sweep_reads_the_first_ones_snapshot(tmp_path, no_real_gh):
 
 
 def test_a_scan_that_ran_notes_its_cost_and_field_on_the_line(tmp_path, no_real_gh):
-    """A scan that found nothing, with lint work left: the line (the step
-    not wired yet) carries the scan's usage as its top-level counts."""
+    """A scan that found nothing, with lint work left: the line (the fix
+    step's, which cannot start here) carries the scan's usage as its
+    top-level counts."""
     repo = checkout(tmp_path, NO_BARE_PRINT, NO_VARIANT_MODULE, config=TIER1_ON)
     claude, log = fake_claude(tmp_path, "scan", findings_reply())
 
     line = sweep(repo, claude=claude)
 
-    assert line["outcome"] == FAILURE and line["message"] == NOT_WIRED
+    assert past_step_2c(line)
     assert line["tier1"]["status"] == SCANNED and line["tier1"]["scanned"] is True
     assert (line["input_tokens"], line["output_tokens"], line["model"], line["cost_usd"]) == (
         1200, 340, MODEL, 0.02)
@@ -519,7 +539,7 @@ def git_times_out(*_args, **_kwargs):
 
 @pytest.mark.parametrize("broken, outcome, status, reason", [
     # Reading the base to check the reply: a FAILED scan, and the lint's
-    # work goes on to the step not wired yet.
+    # work goes on to the fix step.
     ("check_findings", FAILURE, FAILED, None),
     # Checking the sandbox is still its base: refused as changed.
     ("verify_git_state", REFUSED, SANDBOX_CHANGED, Reason.SANDBOX.value),
@@ -564,16 +584,17 @@ def test_a_scan_whose_claude_cannot_start_spent_nothing(tmp_path, no_real_gh):
 
     line = sweep(repo, claude=str(tmp_path / "no-such-claude"))
 
-    assert line["outcome"] == FAILURE and line["message"] == NOT_WIRED
+    assert past_step_2c(line)
     assert line["tier1"]["status"] == FAILED
     assert line["tier1"]["reason"].startswith("the tier-1 scan could not start")
     assert no_cost_fields(line)
 
 
-def test_the_body_is_not_registered_until_st5():
+def test_the_body_is_registered_as_the_sweep_job():
     from curamoir import runner
 
-    assert runner.JOBS["sweep"].body is not run_sweep
+    assert runner.JOBS["sweep"].body is run_sweep
+    assert runner.JOBS["sweep"].opens_prs is True
 
 
 # --- the line's cost -------------------------------------------------------------------
@@ -771,7 +792,7 @@ def test_a_huge_token_count_is_unrecorded_never_a_crash(tmp_path, no_real_gh):
 
     [first, _second] = attempts_accumulate(log, lambda: sweep(repo, claude=claude))
 
-    assert first["outcome"] == FAILURE and first["message"] == NOT_WIRED
+    assert past_step_2c(first)
     assert first["input_tokens"] == first["output_tokens"] == UNRECORDED
     assert first["model"] == MODEL and "cost_usd" not in first
     assert first["tier1"]["status"] == SCANNED and first["tier1"]["cost_usd"] is None
@@ -1010,5 +1031,5 @@ def test_the_duplicate_check_follows_the_configured_branch_prefix(tmp_path, no_r
     if duplicate:
         assert line["outcome"] == SUCCESS and line["work"] == DUPLICATE_OPEN_PR
     else:
-        assert line["outcome"] == FAILURE and line["message"] == NOT_WIRED
+        assert past_step_2c(line)
         assert line["work"] == WORK and line["open_sweep_prs"] == []

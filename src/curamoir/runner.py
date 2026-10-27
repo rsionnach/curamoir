@@ -15,22 +15,48 @@ which `NOT_YET_BUILT` names with the bead that builds each. Running one of
 those exits EXIT_NOT_A_JOB, says which bead, and writes nothing: a ledger
 line, even a failure, would let a scheduler's log read as if the job ran.
 
-**The sweep is registered with a body that fails.** cm-fkd.4 builds the
-pipeline and needs the name now. Until then `curamoir run sweep` writes a
-`failure` line naming cm-fkd.4 and exits EXIT_FAILURE: never success, so a
-scheduled sweep that does nothing cannot pass for one that found nothing.
-Its open-PR listing is the real one already: `gh pr list`, through
-curamoir.github.open_sweep_prs, bound to the run's root.
+**The sweep** is curamoir.sweep_job.run_sweep (cm-fkd.14), whose open-PR
+listing is `gh pr list` through curamoir.github.open_sweep_prs, bound to
+the run's root and to origin's repository (_gh_open_prs).
 
-**gh, by default** (cm-fkd.10). With no arguments, `run_job` gives every job
-the `curamoir:paused` label check (github.repo_labels, bound to the root):
-the kill switch is per run, not per job, so the brief is paused by the label
-as the sweep is. A job that opens PRs gets its registered listing, a factory
-the runner binds to the root (`Job.open_pr_listing_for`). Both are plain
-callables called when the guard runs, never cached, and both raise when gh
-cannot answer, which degrades the check with a guard line saying so
-(guards.kill_switch, guards.pr_cap). `run_job`'s `repo_labels` and
-`open_pr_listing` replace them (tests; a caller with its own source).
+**gh, by default** (cm-fkd.10, cm-fkd.14). With no arguments, `run_job`
+gives every job the `curamoir:paused` label check (github.repo_labels,
+_gh_labels): the kill switch is per run, not per job, so the brief is
+paused by the label as the sweep is. A job that opens PRs gets its
+registered listing, a factory the runner binds to the root
+(`Job.open_pr_listing_for`). Both are plain callables called when the
+guard runs, never cached, and both raise when gh cannot answer, which
+degrades the check with a guard line saying so (guards.kill_switch,
+guards.pr_cap). `run_job`'s `repo_labels` and `open_pr_listing` replace
+them (tests; a caller with its own source).
+
+**Which repository gh is asked about** (cm-fkd.14). gh picks a
+repository from its own default or the remotes (upstream first), but the
+sweep pushes to origin and opens its PR there (curamoir.publish, "Which
+repository"). So both defaults name origin's repository with `--repo`,
+publish.origin_gh_repo(root), resolved when the guard calls them (not
+when the run starts: a raise there would end the run before any line).
+The gateway's checks run before the body exists, so they cannot share the
+body's one resolution (sweep_job.resolve_sweep_base, used for the
+decision's listing and for publish). The cap's listing, the label check
+and that resolution all read origin's URL from the same git config, and
+publish refuses to push unless the value it is given is still origin's,
+so they cannot come to name different repositories without the sweep
+refusing.
+- The open-PR cap's listing always names origin's repository: the PRs
+  counted are those of the repository the PR opens on, as the sweep's
+  own decision lists them. An origin that names no GitHub repository
+  raises, and the cap is degraded; the sweep then refuses for want of a
+  base (Reason.SWEEP_BASE) before anything is cloned or spent.
+- The label check reads origin's labels too, so in a fork the fork's
+  owner pauses cúramóir with a label on the fork, the repository the PR
+  opens on, never upstream's. When origin names no GitHub repository at
+  all (publish.PublishRefused: a local path, no origin), it falls back to
+  gh's own resolution, the cm-fkd.10 behaviour, so the brief on such a
+  repository is checked as before. Known cost: an origin URL through an
+  SSH host alias (`git@work:owner/repo`) names a host gh does not know,
+  so the label check degrades there (a guard line says so) where gh's
+  own resolution may have found the repository.
 
 **Exit codes**, one per GuardedRun outcome a scheduler must tell apart:
 EXIT_SUCCESS, EXIT_FAILURE (the body failed, crashed, or reported nothing,
@@ -48,14 +74,14 @@ and nothing is written.
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from functools import partial
 from pathlib import Path
 from typing import Any, NamedTuple, Optional
 
-from curamoir import github
+from curamoir import github, publish
 from curamoir.brief import write_brief
 from curamoir.job_guard import UNUSABLE_ROOT, Terminated, run_guarded
 from curamoir.job_run import FAILURE, REFUSED, SUCCESS, UNKNOWN
+from curamoir.sweep_job import run_sweep
 
 EXIT_SUCCESS = 0
 EXIT_FAILURE = 1
@@ -109,20 +135,36 @@ def _brief(repo, run):
     return path
 
 
-def _sweep_not_built(_repo, run):
-    run.failed("the sweep pipeline is not built until cm-fkd.4, so nothing was "
-               "swept; this run did no work")
-
-
 def _gh_open_prs(root):
-    """The open-PR listing for the repository at `root`: gh's, asked afresh
-    on every call (curamoir.github)."""
-    return partial(github.open_sweep_prs, root)
+    """The open-PR listing for the repository at `root`: gh's, of origin's
+    repository, both asked afresh on every call (module docstring, "Which
+    repository gh is asked about")."""
+
+    def listing():
+        return github.open_sweep_prs(root, gh_repo=publish.origin_gh_repo(root))
+
+    return listing
+
+
+def _gh_labels(root):
+    """The label check's callable for the repository at `root`: gh's labels
+    of origin's repository, or of the repository gh resolves itself when
+    origin names none (module docstring, "Which repository gh is asked
+    about")."""
+
+    def labels():
+        try:
+            gh_repo = publish.origin_gh_repo(root)
+        except publish.PublishRefused:
+            gh_repo = None
+        return github.repo_labels(root, gh_repo=gh_repo)
+
+    return labels
 
 
 JOBS = {
     "brief": Job(body=_brief, opens_prs=False),
-    "sweep": Job(body=_sweep_not_built, opens_prs=True, open_pr_listing_for=_gh_open_prs),
+    "sweep": Job(body=run_sweep, opens_prs=True, open_pr_listing_for=_gh_open_prs),
 }
 
 #: E10-R1's other jobs, with the bead that builds each; cm-x5a.1 registers
@@ -141,8 +183,8 @@ def run_job(repo, name, *, open_pr_listing=None, repo_labels=None, now=None):
     `open_pr_listing`, when given, replaces the job's registered listing
     (`Job.open_pr_listing_for`, bound to `repo`). It is ignored for a job
     that opens no PRs, which the cap does not apply to. `repo_labels`, when
-    given, replaces the default label check, github.repo_labels bound to
-    `repo`, which every job gets (module docstring, "gh, by default").
+    given, replaces the default label check (_gh_labels, bound to `repo`),
+    which every job gets (module docstring, "gh, by default").
     `now` is run_guarded's.
     """
     job = JOBS.get(name)
@@ -161,7 +203,7 @@ def run_job(repo, name, *, open_pr_listing=None, repo_labels=None, now=None):
     if open_pr_listing is None and job.open_pr_listing_for is not None:
         open_pr_listing = job.open_pr_listing_for(root)
     if repo_labels is None:
-        repo_labels = partial(github.repo_labels, root)
+        repo_labels = _gh_labels(root)
 
     try:
         result = run_guarded(

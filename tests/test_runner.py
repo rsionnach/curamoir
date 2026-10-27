@@ -152,15 +152,16 @@ def test_run_brief_writes_the_brief_and_says_so_in_one_sentence(repo, capsys):
     assert out == "cúramóir ran 'brief': success. wrote .curamoir/briefs/latest.md.\n"
 
 
-def test_run_sweep_fails_loudly_as_not_built_and_never_reports_success(repo, capsys):
+def test_run_sweep_runs_the_sweep_and_never_reports_success_without_a_base(repo, capsys):
+    """The registered body is the sweep (cm-fkd.14): with no origin to sweep
+    from it refuses, in one line and one sentence, and never says success."""
     code = cli.main(["run", "sweep", "--repo", str(repo.repo)])
 
-    assert code == EXIT_FAILURE
+    assert code == EXIT_REFUSED
     line, = job_lines(repo)
-    assert line["outcome"] == "failure"
-    assert "cm-fkd.4" in line["message"]
+    assert (line["outcome"], line["reason"]) == ("refused", "sweep_base")
     out = capsys.readouterr().out
-    assert "failure" in out and "cm-fkd.4" in out
+    assert "refused (sweep_base)" in out and "no origin remote" in out
     assert "success" not in out
 
 
@@ -177,12 +178,13 @@ def test_brief_runs_the_steps_in_e10_r1_order(repo, monkeypatch):
 
 def test_sweep_runs_the_steps_in_e10_r1_order_with_the_cap_after_the_budget(
         repo, monkeypatch):
-    """The placeholder body fails, and the line and the release still follow."""
+    """The body refuses (the harness repo has no origin, so no base), and the
+    line and the release still follow."""
     steps = observe_steps(monkeypatch, "sweep")
 
     ran = run_job(repo.repo, "sweep", open_pr_listing=listing(), now=october)
 
-    assert ran.exit_code == EXIT_FAILURE
+    assert ran.exit_code == EXIT_REFUSED
     assert steps == ["kill switch", "lock", "budget", "open-PR cap", "sync", "job",
                      "ledger job", "lock release"]
 
@@ -254,6 +256,10 @@ def test_the_sweep_without_a_listing_says_when_gh_could_not_list(repo, tmp_path,
     gh = FakeGh(tmp_path / "gh")
     gh.feed(fail="gh: To get started with GitHub CLI, please run:  gh auth login")
     monkeypatch.setattr(github, "GH", str(gh.path))
+    # A GitHub origin, so the listing gets as far as asking gh (runner,
+    # "Which repository gh is asked about"); nothing is fetched.
+    subprocess.run(["git", "remote", "add", "origin", "https://github.com/acme/widgets.git"],
+                   cwd=repo.repo, check=True, capture_output=True)
 
     run_job(repo.repo, "sweep", repo_labels=lambda: [], now=october)
 

@@ -78,13 +78,16 @@ github, then origin). In a fork's clone that may not be the remote the
 sweep pushes to, so the labels and PRs read here could be another
 repository's than the one the PR lands in. So both queries take
 `gh_repo`, `[HOST/]OWNER/REPO` as publish.origin_gh_repo names origin's
-repository, and pass it as `--repo`, which gh obeys over every remote:
-the sweep resolves it once and gives the same value to the open-PR
-listing (the cap and the decision) and to publish, which refuses to push
-unless it is still origin's (publish's docstring, "Which repository").
-Without `gh_repo` gh resolves as above (the cm-fkd.10 behaviour, kept for
-the jobs that open no PR). `--repo` goes after the subcommand, where gh
-accepts it like any other flag.
+repository, and pass it as `--repo`, which gh obeys over every remote.
+The sweep resolves it once (sweep_job.resolve_sweep_base) for the
+decision's listing and for publish, which refuses to push unless it is
+still origin's (publish's docstring, "Which repository"). The cap's
+listing and the label check resolve the same origin_gh_repo themselves
+when the guard calls them (curamoir.runner, "Which repository gh is asked
+about"); the label check alone goes without it when origin names no
+GitHub repository, and gh then resolves as above (the cm-fkd.10
+behaviour). `--repo` goes after the subcommand, where gh accepts it like
+any other flag.
 
 `GH` is the executable, a module attribute so tests can point it at a fake
 gh (tests/fake_gh.py).

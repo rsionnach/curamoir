@@ -1,5 +1,7 @@
 import os
 import subprocess
+import sys
+from pathlib import Path
 
 import pytest
 
@@ -40,6 +42,52 @@ def no_real_gh(_quiet_gh, monkeypatch):
     monkeypatch.setenv("PATH", os.pathsep.join(
         [str(_quiet_gh.directory), *filter(None, [os.environ.get("PATH")])]))
     return _quiet_gh
+
+
+#: What the refusing stand-in `claude` prints on stderr (no_real_claude).
+NO_REAL_CLAUDE = "the real claude is not reachable from the tests: pass a stand-in"
+
+
+@pytest.fixture(scope="session")
+def _refusing_claude(tmp_path_factory):
+    """A `claude` that makes no call: it prints NO_REAL_CLAUDE on stderr,
+    nothing on stdout, and exits 97."""
+    script = tmp_path_factory.mktemp("no-claude") / "claude"
+    script.write_text(f"#!{sys.executable}\nimport sys\n"
+                      f"sys.stderr.write({NO_REAL_CLAUDE!r} + '\\n')\nsys.exit(97)\n",
+                      encoding="utf-8")
+    script.chmod(0o755)
+    return script
+
+
+#: The tests that run the real `claude` CLI on purpose (no_real_claude).
+_REAL_CLAUDE_CLI_TESTS = Path(__file__).parent / "plugin"
+
+
+@pytest.fixture(autouse=True)
+def no_real_claude(_refusing_claude, monkeypatch, request):
+    """No test reaches the real `claude` (a model call, on the developer's
+    subscription), in this process or in any it starts. Two seams, as for
+    gh (no_real_gh): sweep_job.CLAUDE, the executable the registered sweep
+    body (runner.JOBS["sweep"], which makes its own SweepTools) runs, and
+    PATH, where the refusing stand-in is first under the name `claude`, for
+    every other caller that runs "claude" by name (fix_step's and tier1's
+    defaults, a child interpreter). A test that means a model call to
+    happen sets sweep_job.CLAUDE, or passes `claude=`, to a stand-in of its
+    own; one that forgets gets this refusal, never a model.
+
+    tests/plugin/ (_REAL_CLAUDE_CLI_TESTS) keeps PATH's `claude`: those
+    tests run the real CLI on purpose, for commands that make no model call
+    (`claude plugin validate`, `claude plugin details`), and skip when it
+    is not installed. sweep_job.CLAUDE is the stand-in there too."""
+    from curamoir import sweep_job
+
+    monkeypatch.setattr(sweep_job, "CLAUDE", str(_refusing_claude))
+    if _REAL_CLAUDE_CLI_TESTS in Path(request.node.path).parents:
+        return _refusing_claude
+    monkeypatch.setenv("PATH", os.pathsep.join(
+        [str(_refusing_claude.parent), *filter(None, [os.environ.get("PATH")])]))
+    return _refusing_claude
 
 
 @pytest.fixture

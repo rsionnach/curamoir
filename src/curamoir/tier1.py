@@ -139,7 +139,6 @@ Syntax that imports on 3.9, like sweep.py.
 
 import dataclasses
 import json
-import math
 import re
 from dataclasses import dataclass, field
 from typing import Optional
@@ -160,7 +159,7 @@ from curamoir.fix_scope import (
     require_pristine,
     violation_span,
 )
-from curamoir.fix_step import NOT_STARTED, run_fix_step
+from curamoir.fix_step import NOT_STARTED, run_fix_step, usable_number
 from curamoir.git_guard import (
     GitGuardError,
     git,
@@ -932,7 +931,9 @@ def run_tier1_scan(sandbox, plan, held_paths, entries, *, cap=None, model=None,
                               else (lambda: before_call(pending)))
     payload = run.payload() or {}
     cost = payload.get("total_cost_usd")
-    cost = cost if _finite_cost(cost) else None
+    # fix_step.usable_number: a NaN, infinite, huge or negative figure is
+    # taken as no cost reported.
+    cost = cost if usable_number(cost) else None
     usage = payload.get("usage") if isinstance(payload.get("usage"), dict) else None
     spent = dict(base=sandbox.base, eligible=eligible, candidates=candidates, cursor=cursor,
                  **origin, cost_usd=cost, model=run.argv[run.argv.index("--model") + 1], usage=usage)
@@ -965,20 +966,6 @@ def run_tier1_scan(sandbox, plan, held_paths, entries, *, cap=None, model=None,
         return Tier1Scan(**failed, reason=f"the tier-1 scan's reply could not be checked "
                                           f"against the base: {error}")
     return Tier1Scan(SCANNED, findings=findings, refused=refused, **spent)
-
-
-def _finite_cost(value):
-    """True for a reported cost the ledger can hold: an int or float, not a
-    bool, that converts to a finite float. A NaN or infinity would be
-    written as a bare `NaN` or `Infinity`, which is not JSON, and an int
-    too large for a float cannot be priced; either is taken as no cost
-    reported."""
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        return False
-    try:
-        return math.isfinite(float(value))
-    except OverflowError:
-        return False
 
 
 def with_findings(work, scan):

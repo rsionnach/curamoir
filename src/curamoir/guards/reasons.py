@@ -39,6 +39,18 @@ class Reason(str, Enum):
                                          # its base, so nothing read or done in it is
                                          # trusted (git_guard.GitGuardError, its
                                          # ScopeCheckError and tier1.ScanRefused)
+    SCOPE = "scope"                      # E3-R2: the fix step's edits breach the scope
+                                         # limits (fix_scope.verify_fix's verdict)
+    TEST_GATE = "test_gate"              # E3-R4: the test gate could not answer, or the
+                                         # tested bytes could not be held for the patch
+                                         # (green_gate.GateError)
+    FIX_RECORDS = "fix_records"          # E3-R5: the PR's fixes could not be counted
+                                         # (fix_counts.record_fixes, tier1.record_tier1_fixes,
+                                         # fix_counts.ledger_fields)
+    FILE_CAP = "file_cap"                # E3-R3: sweep.max_files_per_pr is 0, so no PR may
+                                         # carry a file (curamoir.sweep_job)
+    PUBLISH = "publish"                  # E3-R3: publish refused before anything was
+                                         # pushed (publish.PublishRefused)
 
     # Guard-layer failures. An unrecorded guard failure is a silent loss of
     # enforcement, so both are ledgered (DEC-5).
