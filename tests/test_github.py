@@ -15,6 +15,7 @@ import json
 import subprocess
 import sys
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -39,6 +40,7 @@ from tests.gh_pr_payloads import (
     NO_OPEN_PRS,
     OPEN_PRS,
     SAME_REPOSITORY_PR,
+    STATE_PRS,
     as_sweep_pr,
 )
 from tests.test_idempotence import violation, work_of
@@ -55,6 +57,8 @@ UNPAUSED_LABELS = [{"name": "bug"} if label["name"] == "curamoir:paused" else la
 LABEL_ARGV = ["label", "list", "--limit", "1000", "--json", "name", "--jq", ".[].name"]
 PR_ARGV = ["pr", "list", "--state", "open", "--limit", "1000",
            "--json", "headRefName,number,url,body,files,isCrossRepository"]
+STATE_ARGV = ["pr", "list", "--state", "all", "--limit", "1000",
+              "--json", "headRefName,number,state,mergedAt"]
 
 
 def sweep_prs(*branches, prefix=SWEEP_BRANCH_PREFIX):
@@ -115,6 +119,57 @@ def test_the_pr_query_is_exactly_the_listing_contracts(gh, tmp_path):
     assert ran_in(gh.call_records()[0]) == checkout.resolve()
     assert [record["branch"] for record in listed] == [
         item["headRefName"] for item in OPEN_PRS]
+
+
+def test_the_state_query_maps_each_pr_by_number(gh, tmp_path):
+    """cm-fkd.9: the brief's one gh call, and what it makes of gh's items."""
+    gh.feed(prs=STATE_PRS)
+
+    states = github.pr_states(tmp_path)
+
+    assert gh.calls() == [STATE_ARGV]
+    assert states == {
+        203: {"branch": "open-feature", "state": "OPEN", "merged_at": None},
+        202: {"branch": "merged-feature", "state": "MERGED",
+              "merged_at": datetime(2026, 10, 27, 14, 38, 50, tzinfo=timezone.utc)},
+        201: {"branch": "closed-feature", "state": "CLOSED", "merged_at": None},
+    }
+
+
+def test_the_state_query_names_the_repository_when_given(gh, tmp_path):
+    github.pr_states(tmp_path, gh_repo="github.com/example/repo")
+
+    assert gh.calls() == [[*STATE_ARGV[:2], "--repo", "github.com/example/repo",
+                           *STATE_ARGV[2:]]]
+
+
+@pytest.mark.parametrize("printed", ["not json", '{"number": 1}', '[1, 2]'])
+def test_a_state_listing_that_is_not_a_list_of_prs_raises(gh, tmp_path, printed):
+    gh.feed(raw_stdout=(printed + "\n").encode().hex())
+
+    with pytest.raises(github.GhError):
+        github.pr_states(tmp_path)
+
+
+def test_a_state_listing_at_the_limit_is_read_not_refused(gh, tmp_path):
+    """Unlike the open-PR listing: a cut-short state listing only leaves out
+    the oldest PRs, which the brief then shows as state unknown."""
+    gh.feed(prs=[dict(STATE_PRS[0], number=n) for n in range(1, github.PR_LIMIT + 1)])
+
+    assert len(github.pr_states(tmp_path)) == github.PR_LIMIT
+
+
+def test_a_state_item_without_a_usable_number_or_state_is_left_out(gh, tmp_path):
+    """Left out, not fatal: the brief then reads that PR's state as unknown."""
+    gh.feed(prs=[{"headRefName": "x", "number": True, "state": "OPEN", "mergedAt": None},
+                 {"headRefName": "y", "number": 7, "state": 3, "mergedAt": None},
+                 {"headRefName": "z", "number": 8, "state": "MERGED", "mergedAt": "never"},
+                 STATE_PRS[0]])
+
+    states = github.pr_states(tmp_path)
+
+    assert sorted(states) == [8, 203]
+    assert states[8]["merged_at"] is None
 
 
 def test_no_label_listing_is_cached_either(gh, tmp_path):
@@ -726,3 +781,42 @@ def test_a_timeout_is_its_own_gh_error(gh, tmp_path, monkeypatch):
     with pytest.raises(github.GhError) as refused:
         github.repo_labels(tmp_path)
     assert not isinstance(refused.value, github.GhTimeout)
+
+
+# --- the brief's state lookup (cm-fkd.9) ----------------------------------------------
+
+RUNNER_STATE_ARGV = [*STATE_ARGV[:2], "--repo", GH_REPO, *STATE_ARGV[2:]]
+
+
+def with_merged_sweep_pr(gh, harness):
+    """A sweep PR in the ledger, and gh reporting it merged."""
+    branch = SWEEP_BRANCH_PREFIX + "2026-10-20-aaaaaaaa"
+    line = {"kind": "job", "job": "sweep", "outcome": "success", "at": "2026-10-20T09:00:00Z",
+            "pr": {"number": 41, "branch": branch, "url": "https://github.com/acme/widgets/pull/41",
+                   "base": BASE, "paths": ["a.py"]},
+            "fixes": [{"principle_id": "P1", "path": "a.py"}]}
+    with (harness.repo / ".curamoir" / "state" / "ledger.jsonl").open("a", encoding="utf-8") as ledger:
+        ledger.write(json.dumps(line) + "\n")
+    gh.feed(prs=[{"headRefName": branch, "number": 41, "state": "MERGED",
+                  "mergedAt": "2026-10-21T09:00:00Z"}])
+
+
+@pytest.mark.parametrize("argv", [["brief"], ["run", "brief"]])
+def test_the_brief_asks_gh_about_origins_repository_for_sweep_pr_states(gh, hub, argv):
+    with_merged_sweep_pr(gh, hub)
+
+    cli.main([*argv, "--repo", str(hub.repo)])
+
+    assert RUNNER_STATE_ARGV in gh.calls()
+    written = (hub.repo / ".curamoir" / "briefs" / "latest.md").read_text(encoding="utf-8")
+    assert "#41, merged: 1 fix of 1 principle" in written
+
+
+def test_with_no_github_origin_the_brief_still_lists_the_pr(gh, repo):
+    with_merged_sweep_pr(gh, repo)
+
+    assert cli.main(["brief", "--repo", str(repo.repo)]) == 0
+
+    assert STATE_ARGV[:2] not in [call[:2] for call in gh.calls()]
+    written = (repo.repo / ".curamoir" / "briefs" / "latest.md").read_text(encoding="utf-8")
+    assert "#41, state unknown" in written

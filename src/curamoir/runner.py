@@ -83,7 +83,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from curamoir import github, publish
-from curamoir.brief import write_brief
+from curamoir.brief import gh_pr_states, write_brief
 from curamoir.job_guard import UNUSABLE_ROOT, Terminated, run_guarded
 from curamoir.job_run import FAILURE, REFUSED, SUCCESS, UNKNOWN
 from curamoir.sweep_job import run_sweep
@@ -134,7 +134,7 @@ class RunReport:
 
 def _brief(repo, run):
     """What `curamoir brief` does: write `.curamoir/briefs/latest.md`."""
-    path = write_brief(repo)
+    path = write_brief(repo, pr_states=gh_pr_states(repo))
     # Relative to the root, so the line is the same from a cron checkout
     # and a CI one (E10-R4).
     run.succeeded(f"wrote {Path(path).relative_to(repo).as_posix()}")

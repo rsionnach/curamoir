@@ -16,6 +16,8 @@ output it is fed and the provenance of each behaviour below):
   tests/test_github.py). Any other `--jq` is refused rather than guessed at.
 - `gh pr list --state open ... --json <fields>`: the PR items given, cut to
   `--limit`, each holding ONLY the fields asked for, as gh's `--json` does.
+  An item carrying a `state` other than "OPEN" (gh_pr_payloads.STATE_PRS)
+  is left out; `--state all` lists every item.
   So an adapter that forgets `isCrossRepository` gets items without it.
 - With no `--limit`, at most 30 items: gh's default for both commands
   (`gh label list --help`, `gh pr list --help`: "--limit int ... (default
@@ -184,14 +186,16 @@ if args[:2] == ["label", "list"]:
     else:
         refuse("fake gh: unrecorded --jq " + jq)
 elif args[:2] == ["pr", "list"]:
-    if option("--state") != "open":
-        refuse("fake gh: only --state open is recorded")
+    if option("--state") not in ("open", "all"):
+        refuse("fake gh: only --state open and --state all are recorded")
     items = [item for item in state["prs"] if not item.get("hidden_from_lists")]
     if len(items) != len(state["prs"]):
         for item in state["prs"]:
             if item.get("hidden_from_lists"):
                 item["hidden_from_lists"] -= 1
         (here / "state.json").write_text(json.dumps(state), encoding="utf-8")
+    if option("--state") == "open":
+        items = [item for item in items if item.get("state", "OPEN") == "OPEN"]
     if option("--head") is not None:
         items = [item for item in items if item.get("headRefName") == option("--head")]
     sys.stdout.write(coloured(json.dumps(select(items, {pr_fields!r}))) + "\\n")

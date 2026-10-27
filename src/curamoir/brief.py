@@ -16,11 +16,15 @@ sight.
 """
 
 import json
+from collections.abc import Mapping
 from contextlib import suppress
 from datetime import datetime, timezone
 from pathlib import Path
 
+from curamoir import github, publish
 from curamoir.grades import graded_modules
+from curamoir.idempotence import sweep_prs
+from curamoir.ledger import parse_ledger_timestamp, repo_ledger
 from curamoir.redaction import write_artefact
 from curamoir.repo_config import config_value
 
@@ -32,6 +36,10 @@ NOT_YET = "not available yet"
 # rendered as a number — "Away 10000 day(s)" is a falsehood on the face of the
 # artefact a stranger is most likely to read.
 UNKNOWN_ABSENCE = 10_000
+NO_SWEEP_PRS = "No sweep PRs since you were here."
+#: How "What changed" names a PR's state, from gh's word for it. CLOSED is
+#: absent on purpose: a PR closed without merging changed nothing.
+STATE_WORDS = {"OPEN": "open", "MERGED": "merged"}
 
 
 def due_for_brief(repo, threshold_days=DEFAULT_THRESHOLD_DAYS, cadence="on_return", now=None):
@@ -63,8 +71,12 @@ def due_for_brief_from_config(repo, now=None):
     )
 
 
-def build_brief(repo, now=None):
-    """Everything the brief reports, as plain data."""
+def build_brief(repo, now=None, pr_states=None):
+    """Everything the brief reports, as plain data.
+
+    `pr_states` is gh's PR lookup for "What changed" (`gh_pr_states`), a
+    callable taking no arguments; None, and every PR's state is unknown.
+    """
     repo = Path(repo)
     base = repo / ".curamoir"
     grades = _read_json(base / "state" / "grades.json")
@@ -74,7 +86,7 @@ def build_brief(repo, now=None):
         "absence_days": _absence_days(repo, now),
         "jobs": _read_jobs(base),
         "spend": _read_period_spend(base),
-        "changed": _read_changed(base),
+        "changed": _read_changed(repo, pr_states),
         "findings": _read_findings(base),
         "grades": grades,
         "blocked_on_you": _read_blocked(base),
@@ -98,7 +110,7 @@ def render_brief(brief):
     lines.append(f"- Spend this period: {brief['spend'] if brief['spend'] is not None else NOT_YET}.")
 
     lines += ["", "## What changed", ""]
-    lines += _bullets(brief["changed"], "No sweep PRs — " + NOT_YET + ".")
+    lines += _bullets(brief["changed"], NO_SWEEP_PRS)
 
     lines += ["", "## What was found", ""]
     lines += _bullets(brief["findings"], "No review findings — " + NOT_YET + ".")
@@ -180,13 +192,21 @@ def _choose_first_task(repo):
 
 def _absence_days(repo, now=None):
     moment = now() if now else datetime.now(timezone.utc)
-    handoff = repo / ".curamoir" / "handoff" / "latest.md"
-    if not handoff.is_file():
+    written = _handoff_time(repo)
+    if written is None:
         # No handoff is either a fresh install or a very long absence. Both are
         # exactly when a brief helps, so report an absence that triggers one.
         return UNKNOWN_ABSENCE
-    written = datetime.fromtimestamp(handoff.stat().st_mtime, tz=timezone.utc)
     return max(0, (moment - written).days)
+
+
+def _handoff_time(repo):
+    """When the last handoff was written, or None when there is none: the
+    start of the absence."""
+    handoff = repo / ".curamoir" / "handoff" / "latest.md"
+    if not handoff.is_file():
+        return None
+    return datetime.fromtimestamp(handoff.stat().st_mtime, tz=timezone.utc)
 
 
 def _read_beads(repo):
@@ -227,9 +247,91 @@ def _read_period_spend(base):
     return None
 
 
-def _read_changed(base):
-    """Sweep PRs. None until Epic 3 exists."""
-    return None
+def gh_pr_states(repo):
+    """The `pr_states` lookup for the repository at `repo`: gh's, of
+    origin's repository, as the sweep that opened the PRs asked it."""
+    repo = Path(repo)
+
+    def lookup():
+        return github.pr_states(repo, gh_repo=publish.origin_gh_repo(repo))
+    return lookup
+
+
+def _read_changed(repo, pr_states):
+    """One line per sweep PR from this absence (E9-R2 §2): opened during it,
+    merged during it, or still open. A PR closed without merging is left
+    out, and with no handoff every PR counts.
+
+    The ledger says which PRs the sweep opened (each sweep line's `pr`, as
+    idempotence.sweep_prs reads it, and the `fixes` it recorded); gh says
+    what became of them, asked once and only when there is a PR to ask
+    about. A PR gh does not list, or lists on another branch, has an
+    unknown state, and so does every PR when gh fails: the brief is the
+    deliverable, so a gh failure only costs it the states. A PR of unknown
+    state opened before the absence is left out: nothing says it changed.
+    """
+    prs = _sweep_prs(repo_ledger(repo).entries())
+    if not prs:
+        return []
+    states = {}
+    if pr_states is not None:
+        # Exception, not GhError: the lookup also reads origin's URL
+        # (PublishRefused), and nothing it raises may cost the brief.
+        with suppress(Exception):
+            answered = pr_states()
+            states = answered if isinstance(answered, Mapping) else {}
+    since = _handoff_time(repo)
+    lines = []
+    for pr in prs:
+        known = states.get(pr["number"])
+        if not (isinstance(known, Mapping) and known.get("branch") == pr["branch"]):
+            known = {}
+        state = known.get("state")
+        if state == "CLOSED":
+            continue
+        merged_at = known.get("merged_at")
+        recent = (since is None or state == "OPEN"
+                  or (pr["opened"] is not None and pr["opened"] >= since)
+                  or (isinstance(merged_at, datetime) and merged_at >= since))
+        if recent:
+            lines.append(_changed_line(pr, STATE_WORDS.get(state, "state unknown")))
+    return lines
+
+
+def _sweep_prs(entries):
+    """The sweep's PRs, oldest number first, each as its ledger `pr` record
+    plus `opened` (the earliest `at` of a line carrying it, or None) and
+    `fixes` (the latest such line's `fixes` list, or None: a line written
+    after the PR opened but before its fixes were recorded has none)."""
+    records = {branch: dict(record, opened=None, fixes=None)
+               for branch, record in sweep_prs(entries).items() if record is not None}
+    for entry in entries:
+        if not (isinstance(entry, Mapping) and entry.get("job") == "sweep"
+                and entry.get("kind") == "job" and isinstance(entry.get("pr"), Mapping)):
+            continue
+        record = records.get(entry["pr"].get("branch"))
+        if record is None:
+            continue
+        at = parse_ledger_timestamp(entry.get("at"))
+        if at is not None and (record["opened"] is None or at < record["opened"]):
+            record["opened"] = at
+        if isinstance(entry.get("fixes"), list):
+            record["fixes"] = entry["fixes"]
+    return sorted(records.values(), key=lambda record: record["number"])
+
+
+def _changed_line(pr, state):
+    """`#12, merged: 3 fixes of 2 principles, opened 2026-10-20. <url>`"""
+    fixes = pr["fixes"]
+    if fixes is None:
+        counted = "fixes not recorded"
+    else:
+        principles = {fix.get("principle_id") for fix in fixes if isinstance(fix, Mapping)}
+        counted = (f"{len(fixes)} {'fix' if len(fixes) == 1 else 'fixes'} of "
+                   f"{len(principles)} {'principle' if len(principles) == 1 else 'principles'}")
+    opened = f", opened {pr['opened'].date().isoformat()}" if pr["opened"] else ""
+    url = f" {pr['url']}" if pr["url"] else ""
+    return f"#{pr['number']}, {state}: {counted}{opened}.{url}"
 
 
 def _read_findings(base):
@@ -314,7 +416,7 @@ def _cap_words(text, limit):
     return "\n".join(kept)
 
 
-def write_brief(repo, now=None, post_issue=None, post=False):
+def write_brief(repo, now=None, post_issue=None, post=False, pr_states=None):
     """Write `briefs/latest.md`, and optionally post it as a GitHub issue.
 
     Through E0-R7's redacting write path. This is the artefact where a leak costs
@@ -327,7 +429,7 @@ def write_brief(repo, now=None, post_issue=None, post=False):
     the issue is a convenience.
     """
     repo = Path(repo)
-    brief = build_brief(repo, now=now)
+    brief = build_brief(repo, now=now, pr_states=pr_states)
     rendered = render_brief(brief)
     path = write_artefact(repo / ".curamoir" / "briefs" / "latest.md", rendered)
 

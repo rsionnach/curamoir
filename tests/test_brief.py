@@ -12,6 +12,8 @@ Section 6 is the whole point: exactly ONE suggested first task.
 import json
 from datetime import datetime, timedelta, timezone
 
+import pytest
+
 from curamoir.brief import build_brief, due_for_brief, render_brief
 
 SECTION_TITLES = [
@@ -326,3 +328,180 @@ def test_the_absence_threshold_boundary_is_inclusive(tmp_path):
 
     assert due_for_brief(at_threshold, threshold_days=5) is True
     assert due_for_brief(under, threshold_days=5) is False
+
+
+# --- E9-R2 §2: what changed (cm-fkd.9) ----------------------------------------
+
+SWEEP_BASE = "c" * 40
+
+
+def sweep_line(number, opened_days_ago, fixes=(("P1", "a.py"),), outcome="success"):
+    """A sweep job line as the runner writes it once its PR is open."""
+    at = datetime.now(timezone.utc) - timedelta(days=opened_days_ago)
+    line = {"kind": "job", "job": "sweep", "outcome": outcome, "at": at.isoformat(),
+            "pr": {"number": number, "branch": f"curamoir/sweep-x-{number}",
+                   "url": f"https://github.com/example/repo/pull/{number}",
+                   "base": SWEEP_BASE, "paths": ["a.py"]}}
+    if fixes:
+        line["fixes"] = [{"principle_id": principle, "path": path} for principle, path in fixes]
+    return line
+
+
+def with_ledger(repo, *lines):
+    (repo / ".curamoir" / "state" / "ledger.jsonl").write_text(
+        "".join(json.dumps(line) + "\n" for line in lines), encoding="utf-8")
+    return repo
+
+
+def states(*items):
+    """A pr_states callable answering `items` of (number, state, merged days ago)."""
+    def answer():
+        return {number: {"branch": f"curamoir/sweep-x-{number}", "state": state,
+                         "merged_at": None if merged is None
+                         else datetime.now(timezone.utc) - timedelta(days=merged)}
+                for number, state, merged in items}
+    return answer
+
+
+def changed(repo, pr_states=None):
+    rendered = render_brief(build_brief(repo, pr_states=pr_states))
+    return rendered.split("## What changed", 1)[1].split("##", 1)[0].strip()
+
+
+def test_an_open_sweep_pr_gets_one_line_with_its_fixes_and_link(tmp_path):
+    repo = with_ledger(prepared(tmp_path, handoff_age_days=10), sweep_line(
+        12, 3, fixes=[("P1", "a.py"), ("P1", "b.py"), ("P2", "c.py")]))
+
+    section = changed(repo, states((12, "OPEN", None)))
+
+    assert section == ("- #12, open: 3 fixes of 2 principles, opened "
+                       f"{(datetime.now(timezone.utc) - timedelta(days=3)).date()}. "
+                       "https://github.com/example/repo/pull/12")
+
+
+def test_a_merged_sweep_pr_says_merged(tmp_path):
+    repo = with_ledger(prepared(tmp_path, handoff_age_days=10), sweep_line(12, 3))
+
+    assert "#12, merged: 1 fix of 1 principle" in changed(repo, states((12, "MERGED", 1)))
+
+
+def test_a_sweep_pr_closed_without_merging_changed_nothing(tmp_path):
+    repo = with_ledger(prepared(tmp_path, handoff_age_days=10), sweep_line(12, 3))
+
+    assert changed(repo, states((12, "CLOSED", None))) == "No sweep PRs since you were here."
+
+
+def test_with_no_sweep_prs_the_section_says_so(tmp_path):
+    """Not "not available yet" forever: the sweep exists now."""
+    repo = with_ledger(prepared(tmp_path, handoff_age_days=10),
+                       {"kind": "job", "job": "sweep", "outcome": "success",
+                        "at": datetime.now(timezone.utc).isoformat(), "work": "no_work"})
+
+    assert changed(repo, states()) == "No sweep PRs since you were here."
+
+
+def test_with_no_ledger_at_all_the_section_says_so(tmp_path):
+    assert changed(prepared(tmp_path, handoff_age_days=10)) == (
+        "No sweep PRs since you were here.")
+
+
+def test_gh_is_not_asked_when_the_ledger_has_no_sweep_pr(tmp_path):
+    asked = []
+    repo = prepared(tmp_path, handoff_age_days=10)
+
+    changed(repo, lambda: asked.append(1) or {})
+
+    assert asked == []
+
+
+def test_gh_is_asked_once_however_many_prs(tmp_path):
+    asked = []
+    repo = with_ledger(prepared(tmp_path, handoff_age_days=10),
+                       sweep_line(12, 3), sweep_line(13, 2), sweep_line(14, 1))
+
+    changed(repo, lambda: asked.append(1) or {})
+
+    assert asked == [1]
+
+
+@pytest.mark.parametrize("failure", [RuntimeError("gh exploded"), OSError("no gh")])
+def test_when_gh_fails_the_prs_are_still_listed_with_their_state_unknown(tmp_path, failure):
+    """The brief is the deliverable; a gh failure never costs it."""
+    repo = with_ledger(prepared(tmp_path, handoff_age_days=10), sweep_line(12, 3))
+
+    def broken():
+        raise failure
+
+    assert "#12, state unknown: 1 fix of 1 principle" in changed(repo, broken)
+
+
+def test_without_a_state_lookup_the_state_is_unknown(tmp_path):
+    repo = with_ledger(prepared(tmp_path, handoff_age_days=10), sweep_line(12, 3))
+
+    assert "#12, state unknown" in changed(repo)
+
+
+def test_a_pr_gh_does_not_list_or_lists_on_another_branch_has_an_unknown_state(tmp_path):
+    repo = with_ledger(prepared(tmp_path, handoff_age_days=10),
+                       sweep_line(12, 3), sweep_line(13, 2))
+
+    def answer():
+        return {13: {"branch": "someone-else", "state": "MERGED", "merged_at": None}}
+
+    section = changed(repo, answer)
+
+    assert "#12, state unknown" in section and "#13, state unknown" in section
+
+
+def test_only_prs_from_this_absence_are_listed_unless_still_open_or_merged_during_it(tmp_path):
+    repo = with_ledger(
+        prepared(tmp_path, handoff_age_days=10),
+        sweep_line(1, 30),   # before, merged before: old news
+        sweep_line(2, 30),   # before, still open: still waiting
+        sweep_line(3, 30),   # before, merged during the absence
+        sweep_line(4, 30),   # before, state unknown: cannot say it changed
+        sweep_line(5, 3),    # during, state unknown
+    )
+
+    section = changed(repo, states((1, "MERGED", 20), (2, "OPEN", None), (3, "MERGED", 4)))
+
+    listed = [line.split(",", 1)[0] for line in section.splitlines()]
+    assert listed == ["- #2", "- #3", "- #5"]
+
+
+def test_with_no_handoff_every_sweep_pr_is_listed(tmp_path):
+    repo = with_ledger(prepared(tmp_path), sweep_line(1, 300), sweep_line(2, 3))
+
+    section = changed(repo, states((1, "MERGED", 200), (2, "OPEN", None)))
+
+    assert [line.split(",", 1)[0] for line in section.splitlines()] == ["- #1", "- #2"]
+
+
+def test_a_pr_recorded_on_several_lines_is_one_line_with_the_fixes_counted_once(tmp_path):
+    """A failure line written after the PR opened carries the same pr and no
+    fixes; the PR is still one PR."""
+    repo = with_ledger(prepared(tmp_path, handoff_age_days=10),
+                       sweep_line(12, 3, fixes=[("P1", "a.py"), ("P2", "b.py")]),
+                       sweep_line(12, 3, fixes=(), outcome="failure"))
+
+    section = changed(repo, states((12, "OPEN", None)))
+
+    assert section.count("#12") == 1 and "2 fixes of 2 principles" in section
+
+
+def test_a_pr_line_without_fixes_says_so_rather_than_zero(tmp_path):
+    repo = with_ledger(prepared(tmp_path, handoff_age_days=10),
+                       sweep_line(12, 3, fixes=(), outcome="failure"))
+
+    section = changed(repo, states((12, "OPEN", None)))
+
+    assert section.startswith("- #12, open: fixes not recorded, opened ")
+
+
+def test_malformed_pr_records_are_skipped_not_fatal(tmp_path):
+    repo = with_ledger(prepared(tmp_path, handoff_age_days=10),
+                       {"kind": "job", "job": "sweep", "at": "x", "pr": {"number": "12"}},
+                       {"kind": "job", "job": "sweep", "at": "x", "pr": "nonsense"},
+                       sweep_line(13, 2))
+
+    assert [line.split(",", 1)[0] for line in changed(repo, states()).splitlines()] == ["- #13"]

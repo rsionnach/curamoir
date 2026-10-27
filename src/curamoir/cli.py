@@ -10,7 +10,7 @@ import json
 import sys
 from pathlib import Path
 
-from curamoir.brief import due_for_brief_from_config, write_brief
+from curamoir.brief import due_for_brief_from_config, gh_pr_states, write_brief
 from curamoir.doctor import diagnose, render_report
 from curamoir.handoff import write_handoff
 from curamoir.runner import run_job
@@ -88,7 +88,7 @@ def _run(arguments):
         if arguments.if_due and not due_for_brief_from_config(arguments.repo):
             print("No brief needed: the last handoff is recent.")
             return 0
-        path = write_brief(arguments.repo)
+        path = write_brief(arguments.repo, pr_states=gh_pr_states(arguments.repo))
         print(f"Wrote {path}\n")
         print(path.read_text(encoding="utf-8"))
         return 0

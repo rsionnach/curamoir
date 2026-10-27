@@ -1,6 +1,6 @@
 """The `gh` adapter: the repository's labels and its open pull requests.
 
-Two read-only queries, the two callables the guard layer is given
+Three read-only queries. Two are the callables the guard layer is given
 (cm-fkd.10, discharging fix_scope's runner steps 0 (ii) and (iii)), both
 through `run_gh`, the one way cúramóir runs gh. curamoir.publish
 (cm-fkd.12) uses `run_gh` for its write too (`gh pr create`); there a
@@ -39,6 +39,12 @@ which would fail open. A raise degrades the kill switch's label check and
 the cap (a `degraded` guard line, the job still runs) and refuses the
 sweep's decision (`idempotence`): never silence. WHY a timeout here: a gh
 that hangs until the scheduler kills the run leaves no line at all.
+
+- `pr_states(repo)`, the brief's (cm-fkd.9): which of the sweep PRs the
+  ledger records are open, merged or closed. Unlike the other two it
+  does NOT raise at the limit: gh lists newest first, so a cut-short
+  listing only leaves out old PRs, and a PR it leaves out reads as
+  "state unknown" in the brief, which is true.
 
 **A repository at the limit never sweeps.** One with 1000 or more open PRs
 (PR_LIMIT) has every listing refused as possibly cut short, so the cap
@@ -99,6 +105,7 @@ import subprocess
 
 from curamoir.git_guard import run_in_group, scrubbed_environment
 from curamoir.idempotence import sweep_pr_listing
+from curamoir.ledger import parse_ledger_timestamp
 from curamoir.redaction import redact
 
 #: The gh executable (the seam tests replace).
@@ -118,6 +125,9 @@ PR_LIMIT = 1000
 #: environment").
 _UNSET = ("GH_REPO", "GH_FORCE_TTY")
 _SET = {"CLICOLOR_FORCE": "0", "NO_COLOR": "1", "GH_PROMPT_DISABLED": "1"}
+
+#: The fields pr_states asks for.
+STATE_FIELDS = "headRefName,number,state,mergedAt"
 
 #: The fields every reader of the open-PR listing needs (guards.pr_cap).
 PR_FIELDS = "headRefName,number,url,body,files,isCrossRepository"
@@ -216,6 +226,32 @@ def open_sweep_prs(repo, gh_repo=None):
         raise GhError(f"gh listed {len(items)} open pull requests, its --limit, so the "
                       "list may be cut short")
     return [sweep_pr_listing(item) for item in items]
+
+
+def pr_states(repo, gh_repo=None):
+    """{number: {"branch", "state", "merged_at"}} for the repository's pull
+    requests in any state, newest PR_LIMIT of them (module docstring):
+    `state` as gh gives it ("OPEN", "MERGED", "CLOSED"), `merged_at` an
+    aware datetime or None. An item without a whole `number` or a string
+    `state` is left out; a `mergedAt` that is not a timestamp reads as
+    None. GhError when gh fails or prints something other than a list."""
+    printed = run_gh(["pr", "list", *repo_option(gh_repo), "--state", "all",
+                      "--limit", str(PR_LIMIT), "--json", STATE_FIELDS], cwd=repo)
+    try:
+        items = json.loads(printed)
+    except ValueError as error:
+        raise GhError(f"gh pr list printed something that is not JSON ({error}): "
+                      f"{_clip(printed)}") from None
+    if not (isinstance(items, list) and all(isinstance(item, dict) for item in items)):
+        raise GhError(f"gh pr list printed {_clip(printed)}, not a list of pull requests")
+    states = {}
+    for item in items:
+        number, state = item.get("number"), item.get("state")
+        if isinstance(number, bool) or not isinstance(number, int) or not isinstance(state, str):
+            continue
+        states[number] = {"branch": item.get("headRefName"), "state": state,
+                          "merged_at": parse_ledger_timestamp(item.get("mergedAt"))}
+    return states
 
 
 #: Characters an error message shows escaped: C0 and C1 controls, and the

@@ -37,6 +37,14 @@ sweep marker), and, when it needs several PRs from one item, its `number`
 (and the `url` that ends in it). `files` and `isCrossRepository` stay as
 they are, which is the point: a fork's PR and a same-repository PR each
 keep gh's own value.
+
+**The state listing (cm-fkd.9).** Captured on 2026-10-27 with the same gh,
+read-only: `gh pr list -R cli/cli --state all --limit 40 --json
+number,state,mergedAt,headRefName`, keeping the first item of each state.
+STATE_PRS keeps the keys, every value's type, each item's `state` and
+whether its `mergedAt` is null (OPEN and CLOSED: null; MERGED: a `Z`
+timestamp, its value as captured). `headRefName` and `number` are
+replaced with neutral synthetic values. gh lists newest first.
 """
 
 from curamoir.idempotence import sweep_marker
@@ -63,6 +71,15 @@ OPEN_PRS = [
                {"additions": 4, "deletions": 0, "path": "docs/flags.md"}],
      "headRefName": "same-repo-feature", "isCrossRepository": False,
      "number": 103, "url": "https://github.com/example/repo/pull/103"},
+]
+
+#: `gh pr list --state all --json number,state,mergedAt,headRefName`, one
+#: item per state (module docstring, "The state listing").
+STATE_PRS = [
+    {"headRefName": "open-feature", "mergedAt": None, "number": 203, "state": "OPEN"},
+    {"headRefName": "merged-feature", "mergedAt": "2026-10-27T14:38:50Z", "number": 202,
+     "state": "MERGED"},
+    {"headRefName": "closed-feature", "mergedAt": None, "number": 201, "state": "CLOSED"},
 ]
 
 #: The fork PRs and the same-repository one.
