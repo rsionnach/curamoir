@@ -102,6 +102,13 @@ def isolated_home(tmp_path, monkeypatch):
                                      encoding="utf-8")
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setenv("XDG_CONFIG_HOME", str(home / ".config"))
+    # Moving HOME hides every per-user site-packages (~/Library/Python/X.Y
+    # on macOS), and where that is the only PyYAML on PATH, scripts/curamoir-lint
+    # finds no interpreter that can read the rules and the sweep refuses at lint
+    # (cm-854). The interpreter running the tests has PyYAML (a project
+    # dependency), so its directory goes first on PATH for the lint to find.
+    monkeypatch.setenv("PATH", os.pathsep.join(
+        [str(pathlib.Path(sys.executable).parent), *filter(None, [os.environ.get("PATH")])]))
     return home
 
 
