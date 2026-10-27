@@ -2,9 +2,9 @@
 
 Two read-only queries, the two callables the guard layer is given
 (cm-fkd.10, discharging fix_scope's runner steps 0 (ii) and (iii)), both
-through `run_gh`, the one way cúramóir runs gh. cm-fkd.12 will use
-`run_gh` for its writes too (`gh pr create`); there a GhError from a
-timeout means the outcome is UNKNOWN: the PR may or may not exist.
+through `run_gh`, the one way cúramóir runs gh. curamoir.publish
+(cm-fkd.12) uses `run_gh` for its write too (`gh pr create`); there a
+GhTimeout means the outcome is UNKNOWN: the PR may or may not exist.
 
 - `repo_labels(repo)`, the kill switch's `curamoir:paused` check
   (guards.kill_switch), runs exactly `gh label list --limit 1000 --json
@@ -76,8 +76,15 @@ set it up.
 from `gh repo set-default`, else by remote priority (upstream, then
 github, then origin). In a fork's clone that may not be the remote the
 sweep pushes to, so the labels and PRs read here could be another
-repository's than the one the PR lands in: cm-fkd.12 (publish) must make
-the two agree.
+repository's than the one the PR lands in. So both queries take
+`gh_repo`, `[HOST/]OWNER/REPO` as publish.origin_gh_repo names origin's
+repository, and pass it as `--repo`, which gh obeys over every remote:
+the sweep resolves it once and gives the same value to the open-PR
+listing (the cap and the decision) and to publish, which refuses to push
+unless it is still origin's (publish's docstring, "Which repository").
+Without `gh_repo` gh resolves as above (the cm-fkd.10 behaviour, kept for
+the jobs that open no PR). `--repo` goes after the subcommand, where gh
+accepts it like any other flag.
 
 `GH` is the executable, a module attribute so tests can point it at a fake
 gh (tests/fake_gh.py).
@@ -120,14 +127,23 @@ class GhError(Exception):
     """gh could not answer (module docstring, "Every failure raises")."""
 
 
+class GhTimeout(GhError):
+    """gh did not finish within its timeout and was stopped. For a write
+    the outcome is unknown (run_gh)."""
+
+
 def run_gh(args, *, cwd, timeout=None):
     """Run `GH args` in `cwd` and return its stdout as text. `timeout`
-    defaults to GH_TIMEOUT. GhError on every failure (module docstring).
+    defaults to GH_TIMEOUT. GhError on every failure (module docstring),
+    GhTimeout (a GhError) when the timeout stopped it.
 
-    The entry point for every gh call, cm-fkd.12's writes (`gh pr create`)
-    included. For a write, a GhError from the timeout means the outcome is
-    unknown: gh was stopped, not refused, so the PR may or may not exist
-    and the caller must find out before it records either."""
+    The entry point for every gh call, publish's write (`gh pr create`)
+    included. For a write, a GhTimeout means the outcome is unknown: gh
+    was stopped, not refused, so the PR may or may not exist and the
+    caller must find out before it records either. gh's stdin is
+    /dev/null (run_in_group), so `--body-file -` reads an empty body: pass
+    a file. The command an error shows is the argv joined by spaces,
+    unquoted and unredacted: keep free text out of `args`."""
     timeout = GH_TIMEOUT if timeout is None else timeout
     argv = [GH, *args]
     shown = "gh " + " ".join(args)
@@ -135,8 +151,8 @@ def run_gh(args, *, cwd, timeout=None):
     try:
         completed = run_in_group(argv, cwd=cwd, env=environment, timeout=timeout)
     except subprocess.TimeoutExpired:
-        raise GhError(f"`{shown}` did not finish within {timeout} second(s) and was "
-                      "stopped") from None
+        raise GhTimeout(f"`{shown}` did not finish within {timeout} second(s) and was "
+                        "stopped") from None
     except OSError as error:
         raise GhError(f"could not run `{shown}` ({error}); is the GitHub CLI installed "
                       "and on PATH?") from None
@@ -158,9 +174,16 @@ def gh_environment():
     return environment
 
 
-def repo_labels(repo):
-    """The repository's label names, for guards.kill_switch: a list of str."""
-    printed = run_gh(["label", "list", "--limit", str(LABEL_LIMIT),
+def repo_option(gh_repo):
+    """`--repo gh_repo` as arguments, or none when `gh_repo` is None
+    (module docstring, "Which repository")."""
+    return [] if gh_repo is None else ["--repo", gh_repo]
+
+
+def repo_labels(repo, gh_repo=None):
+    """The repository's label names, for guards.kill_switch: a list of str.
+    `gh_repo` names the repository (module docstring, "Which repository")."""
+    printed = run_gh(["label", "list", *repo_option(gh_repo), "--limit", str(LABEL_LIMIT),
                       "--json", "name", "--jq", ".[].name"], cwd=repo)
     # "\n" only: splitlines() also splits at \x0b, \x0c, U+2028 and others,
     # which can occur inside a label name and could make "curamoir:paused"
@@ -173,11 +196,12 @@ def repo_labels(repo):
     return names
 
 
-def open_sweep_prs(repo):
+def open_sweep_prs(repo, gh_repo=None):
     """The repository's open pull requests as the open-PR listing contract's
-    records (guards.pr_cap), each mapped by idempotence.sweep_pr_listing."""
-    printed = run_gh(["pr", "list", "--state", "open", "--limit", str(PR_LIMIT),
-                      "--json", PR_FIELDS], cwd=repo)
+    records (guards.pr_cap), each mapped by idempotence.sweep_pr_listing.
+    `gh_repo` names the repository (module docstring, "Which repository")."""
+    printed = run_gh(["pr", "list", *repo_option(gh_repo), "--state", "open",
+                      "--limit", str(PR_LIMIT), "--json", PR_FIELDS], cwd=repo)
     try:
         items = json.loads(printed)
     except ValueError as error:
@@ -202,3 +226,8 @@ def _clip(text):
     a token unrecognised."""
     text = _CONTROL.sub(lambda match: repr(match.group())[1:-1], redact(text.strip()))
     return text if len(text) <= _CLIP else text[:_CLIP] + "...(clipped)"
+
+
+#: _clip for other gh callers (curamoir.publish quotes git's stderr the same
+#: way): redacted, controls escaped, cut to _CLIP characters.
+quote_output = _clip

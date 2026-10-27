@@ -623,3 +623,45 @@ def test_sweep_decision_cannot_be_called_without_the_configured_prefix():
     otherwise judge sweep PRs by a prefix nobody configured."""
     with pytest.raises(TypeError):
         sweep_decision(work_of(violation("f1")), NEWER, [], lambda: [])
+
+
+# --- which repository: --repo (cm-fkd.12) ------------------------------------------
+#
+# gh resolves its repository by remote priority (upstream > github > origin)
+# while the sweep pushes to origin. publish.origin_gh_repo names origin's
+# repository once; both listings take it as `gh_repo` and pass it as
+# `--repo`, after the subcommand (gh accepts it there), so the cap, the
+# decision and the PR all read the repository the branch is pushed to.
+
+GH_REPO = "github.com/acme/widgets"
+
+
+def test_the_label_query_names_the_repository_when_given_one(gh, tmp_path):
+    assert github.repo_labels(tmp_path, gh_repo=GH_REPO) == [
+        label["name"] for label in UNPAUSED_LABELS]
+
+    assert gh.calls() == [[*LABEL_ARGV[:2], "--repo", GH_REPO, *LABEL_ARGV[2:]]]
+
+
+def test_the_pr_query_names_the_repository_when_given_one(gh, tmp_path):
+    gh.feed(prs=OPEN_PRS)
+
+    listed = github.open_sweep_prs(tmp_path, gh_repo=GH_REPO)
+
+    assert gh.calls() == [[*PR_ARGV[:2], "--repo", GH_REPO, *PR_ARGV[2:]]]
+    assert len(listed) == len(OPEN_PRS)
+
+
+def test_a_timeout_is_its_own_gh_error(gh, tmp_path, monkeypatch):
+    """A write that timed out has an UNKNOWN outcome (the PR may exist), so
+    the caller must tell a timeout from a refusal: GhTimeout, a GhError."""
+    gh.feed(hang=True)
+    monkeypatch.setattr(github, "GH_TIMEOUT", 1)
+
+    with pytest.raises(github.GhTimeout):
+        github.repo_labels(tmp_path)
+
+    gh.feed(hang=False, fail="HTTP 401")
+    with pytest.raises(github.GhError) as refused:
+        github.repo_labels(tmp_path)
+    assert not isinstance(refused.value, github.GhTimeout)

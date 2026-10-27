@@ -24,11 +24,20 @@ class DefaultBranchGuard:
 
     `detect_default` is injectable so the detection strategy can be replaced
     (and tested) without touching the refusal logic.
+
+    `target_branch`, when given, is the branch judged instead of the one
+    checked out: the sweep never checks its branch out, it pushes a commit
+    to `<prefix>sweep-...` from a checkout that may be on the default
+    branch (curamoir.publish). An empty target is a Refusal, not the
+    Degraded an unknown HEAD gets: HEAD is git's to report and may fail to;
+    a target is what the caller is about to write, and a write to a branch
+    nobody named must not happen.
     """
 
-    def __init__(self, branch_prefix=DEFAULT_PREFIX, detect_default=None):
+    def __init__(self, branch_prefix=DEFAULT_PREFIX, detect_default=None, target_branch=None):
         self._prefix = branch_prefix
         self._detect_default = detect_default or detect_default_branch
+        self._target = target_branch
 
     def __call__(self, context):
         unusable = unusable_repo(context)
@@ -41,7 +50,14 @@ class DefaultBranchGuard:
                 ),
             )
 
-        current = _git(context.repo, "rev-parse", "--abbrev-ref", "HEAD")
+        if self._target is not None and not (isinstance(self._target, str) and self._target):
+            return Refusal(
+                reason=Reason.DEFAULT_BRANCH,
+                message=(f"the target branch {self._target!r} names no branch, so nothing "
+                         "is written to it"),
+            )
+        current = (self._target if self._target is not None
+                   else _git(context.repo, "rev-parse", "--abbrev-ref", "HEAD"))
         default = self._detect_default(context.repo)
 
         if not current:

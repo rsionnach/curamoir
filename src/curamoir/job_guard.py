@@ -76,7 +76,8 @@ the default $15 ceiling, a guard loosened without anybody being told
 usually on the default branch: it would refuse every sweep. The sweep never
 writes there; it edits a disposable clone and pushes a `curamoir/sweep-...`
 branch. cm-fkd.4 applies `DefaultBranchGuard` at push/PR time, against that
-branch, which is where E0-R1's write happens.
+branch (its `target_branch`, in curamoir.publish), which is where E0-R1's
+write happens.
 
 **Held across check and act.** The lock is taken before the budget and the
 cap and held until the body has returned and the job line is written, so

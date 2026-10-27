@@ -48,7 +48,7 @@ Two layers, so the rules can be tested without git:
        line, before the body starts: before any clone, fix step or spend.
        `DefaultBranchGuard` is not among those guards: apply it at push/PR
        time, on the `<guardrails.branch_prefix>sweep-...` branch
-       (job_guard's docstring).
+       (job_guard's docstring), which publish.publish does (step 9).
    (ii) `repo_labels` (done, cm-fkd.10: curamoir.github.repo_labels, which
        `runner.run_job` binds to the root for EVERY job, the kill switch
        being per run): the `gh`-backed callable returning the repository's
@@ -310,8 +310,22 @@ Two layers, so the rules can be tested without git:
    patch of those paths built from the bytes the green run tested (what
    `sandbox.patch(gate.paths_for_pr)` gives when nothing changed since),
    refused with GateError if a kept path no longer holds them (a refusal
-   as in step 6: a process the tests left running rewrote one), applied or
-   pushed by the runner; list only those paths' fixes in the PR body,
+   as in step 6: a process the tests left running rewrote one), and
+   published by `publish.publish(repo, base=sandbox.base, patch=...,
+   paths=gate.paths_for_pr, branch=..., branch_prefix=..., gh_repo=...,
+   message=..., title=..., body=...)` (curamoir.publish, cm-fkd.12): the
+   commit is built from the patch in the checkout's object store (never
+   its work tree or index), the default-branch guard judges the branch,
+   the user's git pushes it (pre-push hooks run), and gh opens the PR on
+   `gh_repo`, which is `publish.origin_gh_repo(repo)` resolved ONCE and
+   also passed to `github.open_sweep_prs(repo, gh_repo=...)` for the cap
+   and step 2b, so all three name origin's repository. What to record for
+   each outcome, and where the branch is, is publish's "Errors" table:
+   PublishRefused is a refusal (nothing pushed); PushFailed,
+   PrCreateFailed and PrOutcomeUnknown are failures with no `pr` (a
+   PrCreateFailed with `branch_deleted=False` may have left the branch on origin,
+   and PrOutcomeUnknown's PR may exist); Published is the success with
+   `pr`. List only those paths' fixes in the PR body,
    each with its principle id (E3-R3); the tier-1 ones as
    `tier1.tier1_pr_lines(records, sandbox.work_list.tier1)` gives them. Once
    the PR exists, its line (success, or a failure after it) carries

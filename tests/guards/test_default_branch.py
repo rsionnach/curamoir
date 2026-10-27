@@ -77,3 +77,50 @@ def test_an_empty_prefix_does_not_disable_default_branch_protection(harness):
 
     result.assert_refused(Reason.DEFAULT_BRANCH)
     assert "default branch" in result.refusal.message
+
+
+# --- a target branch, checked instead of HEAD (cm-fkd.12) -------------------------
+#
+# The sweep never checks out its branch: it pushes a commit to
+# `<prefix>sweep-...` from the user's checkout, which may be on `main`. So at
+# push time the guard judges the branch being written, not the one checked
+# out (fix_scope's runner step 0 (i): DefaultBranchGuard at push/PR time).
+
+
+def test_a_target_branch_is_judged_instead_of_the_checked_out_one(harness):
+    assert harness.current_branch() == "main"
+
+    result = harness.run(DefaultBranchGuard(target_branch="curamoir/sweep-2026-10-05"),
+                         job="sweep")
+
+    result.assert_allowed()
+
+
+def test_a_target_of_the_default_branch_is_refused_from_any_checkout(harness):
+    harness.checkout("curamoir/sweep-2026-10-05")
+
+    result = harness.run(DefaultBranchGuard(target_branch="main"), job="sweep")
+
+    result.assert_refused(Reason.DEFAULT_BRANCH)
+    assert "default branch 'main'" in result.refusal.message
+
+
+def test_a_target_outside_the_prefix_is_refused(harness):
+    harness.checkout("curamoir/sweep-2026-10-05")
+
+    result = harness.run(DefaultBranchGuard(target_branch="feature/x"), job="sweep")
+
+    result.assert_refused(Reason.DEFAULT_BRANCH)
+    assert "'feature/x' is outside the 'curamoir/' prefix" in result.refusal.message
+
+
+def test_an_empty_target_is_refused_not_degraded(harness):
+    """A HEAD git cannot name degrades (the job still runs, on record); a
+    target the caller named as "" is the caller's bug, and the write it
+    guards must not happen."""
+    harness.checkout("curamoir/sweep-2026-10-05")
+
+    result = harness.run(DefaultBranchGuard(target_branch=""), job="sweep")
+
+    result.assert_refused(Reason.DEFAULT_BRANCH)
+    assert result.performed is False
