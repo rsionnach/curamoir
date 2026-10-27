@@ -6,8 +6,8 @@ previous sweep's PR still open and unmerged containing the same fixes (do
 not duplicate it). This is what makes the weekly cadence safe to leave
 running for a month of absence. The module is the decision, made once per
 sweep after the base is linted and before anything edits the sandbox
-(fix_scope's "What the runner (cm-fkd.4) must do", step 2b), and pure apart
-from the one call it makes to list open PRs.
+(fix_scope's "What the runner does", step 2b), and pure apart from the
+one call it makes to list open PRs.
 
 **The convention for the ledger** (decided here, read by the brief,
 cm-fkd.9, and by whoever counts sweeps). A sweep that had nothing to do is

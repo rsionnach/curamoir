@@ -43,7 +43,7 @@ remedy is applied and no fix call made); a clock that gives no UTC day
 every line, refusals included, carries `**tier1_state.ledger_fields()`
 (fix_scope, "The tier1 field"), except UNKNOWN's.
 
-**Steps 3 to 10** (fix_scope's "What the runner must do", in its order):
+**Steps 3 to 10** (fix_scope's "What the runner does", in its order):
 the remedies, then the fix step on what is left for the agent, its review
 (verify_fix with the fix step's own snapshot), the trim to
 `sweep.max_files_per_pr` and the test gate, the fix records, the patch of
@@ -78,13 +78,14 @@ follows it.
   (gate.render() is the message); the PR's text cannot be written
   (sweep_pr's ValueError, its SweepBodyError included: files with no fix,
   a body that will not fit or whose redaction or marker does not check),
-  before any push; publish.PushFailed and publish.PrCreateFailed (no `pr`; the latter says
-  whether the branch was deleted again); publish.PrOutcomeUnknown, whose
-  message starts with PR_MAY_EXIST. While publish runs, the line carries
-  PUBLISH_PENDING (the branch, and that the branch or PR may exist), so a
-  run that ends inside it (SIGTERM's Terminated, a crash) says so; it is
-  dropped once publish returns or raises an outcome that says where the
-  branch is (PublishRefused, PushFailed, PrCreateFailed, Published).
+  before any push; publish.PushFailed and publish.PrCreateFailed (no
+  `pr`; the latter says whether the branch was deleted again);
+  publish.PrOutcomeUnknown, whose message starts with PR_MAY_EXIST.
+  While publish runs, the line carries PUBLISH_PENDING (the branch, and
+  that the branch or PR may exist), so a run that ends inside it
+  (SIGTERM's Terminated, a crash) says so; it is dropped once publish
+  returns or raises an outcome that says where the branch is
+  (PublishRefused, PushFailed, PrCreateFailed, Published).
 - The PR opened (publish.Published): `pr` (idempotence.pr_field) is
   noted on the line at once, so whatever comes next, a crash included,
   the line keeps it and the next sweep holds the PR's files. Then the
@@ -98,6 +99,12 @@ follows it.
 datetime.date, the UTC day of `tools.now()`, read once as the sweep
 starts (sweep_day); a naive clock is refused then (GUARD_ERROR), before
 anything is asked, cloned or spent, rather than read in some time zone.
+When run_sweep makes its own SweepTools (the registered body does),
+`now` is the run's clock (JobRun.now: run_job's and run_guarded's `now`,
+else the wall clock), so the branch, the title and the job line's
+`started` are dated by the same clock. It is read twice (`started` as the
+run opens, the day as the body starts), so near midnight UTC the two can
+fall on different days.
 
 **The line's cost** (fix_scope's section of that name): line_cost_fields,
 pure, gives a line's top-level `input_tokens`, `output_tokens`, `model`
@@ -122,6 +129,8 @@ read when SweepTools is made (as github.GH is read when gh runs), so the
 runner's registered body, which makes its SweepTools itself, can be
 pointed at a stand-in by setting `sweep_job.CLAUDE` (tests/conftest.py
 points it, and PATH's `claude`, at one that refuses for every test).
+`tools.fix_timeout` is read the same way, from FIX_TIMEOUT, so a test of
+the registered body can make the fix step time out in seconds.
 
 Syntax that imports on 3.9, like sweep.py.
 """
@@ -148,7 +157,13 @@ from curamoir.fix_counts import (
 )
 from curamoir.fix_counts import ledger_fields as fix_ledger_fields
 from curamoir.fix_scope import base_principles, lint_sandbox, nfc, verify_fix
-from curamoir.fix_step import FixStepRun, fix_prompt, run_fix_step, usable_number
+from curamoir.fix_step import (
+    DEFAULT_TIMEOUT,
+    FixStepRun,
+    fix_prompt,
+    run_fix_step,
+    usable_number,
+)
 from curamoir.git_guard import GitGuardError, git, prepare_sandbox, snapshot_git_state
 from curamoir.green_gate import ABANDONED, GateError, run_test_gate
 from curamoir.guards.reasons import Reason
@@ -174,6 +189,11 @@ from curamoir.tier1 import (
 #: docstring, "Which `claude`"): the seam the registered body is pointed at
 #: a stand-in through.
 CLAUDE = "claude"
+
+#: The fix step's timeout in seconds a SweepTools made with no
+#: `fix_timeout` uses (module docstring, "Which `claude`"): the seam a test
+#: of the registered body shortens it through.
+FIX_TIMEOUT = DEFAULT_TIMEOUT
 
 #: How the failure line of a PrOutcomeUnknown starts: the PR may be open.
 PR_MAY_EXIST = "the PR may exist"
@@ -209,6 +229,10 @@ def _claude():
     return CLAUDE
 
 
+def _fix_timeout():
+    return FIX_TIMEOUT
+
+
 @dataclass(frozen=True)
 class SweepTools:
     """What run_sweep calls out to, so tests can stand in for each.
@@ -222,16 +246,17 @@ class SweepTools:
     the commit message (sweep_day). `lint_options` are sweep.work_list's
     keyword arguments (`lint`, `timeout`, `grace`), for lint_sandbox and
     the re-lint (fix_counts.record_fixes). `scan_timeout` bounds the tier-1
-    call (tier1.SCAN_TIMEOUT), `fix_timeout` the fix step
-    (fix_step.DEFAULT_TIMEOUT when None). `sandbox_parent` is where the
-    sandbox is made (the system temporary directory when None)."""
+    call (tier1.SCAN_TIMEOUT), `fix_timeout` the fix step (FIX_TIMEOUT
+    when not given, fix_step.DEFAULT_TIMEOUT when None). `sandbox_parent`
+    is where the sandbox is made (the system temporary directory when
+    None)."""
 
     claude: str = field(default_factory=_claude)
     open_sweep_prs: Callable = github.open_sweep_prs
     now: Callable[[], datetime] = _utc_now
     lint_options: dict = field(default_factory=dict)
     scan_timeout: float = SCAN_TIMEOUT
-    fix_timeout: Optional[float] = None
+    fix_timeout: Optional[float] = field(default_factory=_fix_timeout)
     sandbox_parent: Optional[str] = None
 
 
@@ -281,8 +306,10 @@ def run_sweep(repo, run, tools=None):
     """The sweep's body for `repo` (the user's checkout) on `run` (the
     JobRun writing its ledger line): fix_scope's steps 1 to 10 (module
     docstring). Records exactly one outcome on `run`, or raises and
-    job_guard.run_guarded records the crash. `runner.JOBS["sweep"]`."""
-    _Sweep(Path(repo), run, tools or SweepTools()).execute()
+    job_guard.run_guarded records the crash. `runner.JOBS["sweep"]`.
+    With no `tools`, SweepTools() on the run's clock (`run.now`; module
+    docstring, "The date")."""
+    _Sweep(Path(repo), run, tools or SweepTools(now=run.now)).execute()
 
 
 class _Sweep:
@@ -559,21 +586,20 @@ class _Fix:
         except GateError as error:
             owner.refuse(Reason.TEST_GATE, error)
             return
-        self.publish(records, gate, patch, remedies, left_out, fix_fields)
+        self.open_pr(records, gate, patch, remedies, left_out, fix_fields)
 
-    def publish(self, records, gate, patch, remedies, left_out, fix_fields):
+    def open_pr(self, records, gate, patch, remedies, left_out, fix_fields):
         """Step 9's PR: its text, then ONE publish.publish, and the line for
         each of publish's outcomes (publish's "Errors" table)."""
         owner, sandbox, sweep_base = self.owner, self.sandbox, self.owner.sweep_base
         gate_fields = gate.ledger_fields()
         try:
-            # One day for the branch, the title and the message.
-            day = owner.day
+            # One day (owner.day) for the branch, the title and the message.
             body = final_body(records, sandbox.work_list, gate, sandbox.base, remedies.skipped,
                               left_out)
-            branch = sweep_branch(owner.branch_prefix, day, sandbox.base)
-            title = pr_title(records, gate, day)
-            message = commit_message(records, gate, day, sandbox.base)
+            branch = sweep_branch(owner.branch_prefix, owner.day, sandbox.base)
+            title = pr_title(records, gate, owner.day)
+            message = commit_message(records, gate, owner.day, sandbox.base)
         except ValueError as error:
             # sweep_pr's SweepBodyError is a ValueError too.
             self.fail(f"the PR's text could not be written, so nothing was pushed: {error}",
@@ -615,8 +641,8 @@ class _Fix:
                                   sandbox.base, gate.paths_for_pr))
         if published.base_branch != sweep_base.default_branch:
             self.fail(f"{published.url} was opened into {published.base_branch!r}, but the "
-                      f"sweep was built on {sweep_base.default_branch!r} (GitHub's default changed "
-                      "while it ran); check the PR before merging it", **gate_fields)
+                      f"sweep was built on {sweep_base.default_branch!r} (GitHub's default "
+                      "changed while it ran); check the PR before merging it", **gate_fields)
             return
         self.run.succeeded(f"opened {published.url}: {title}", **self.decision.ledger_fields(),
                            **gate_fields, **fix_fields, **owner.tier1_state.ledger_fields())
@@ -628,9 +654,9 @@ def _unfinished(fix_run):
     "What each outcome writes"): it could not start, timed out, exited
     non-zero, or printed no payload, or one whose `is_error` is anything
     but False (absent is False) or whose `subtype` starts with "error" in
-    any case (`error_max_turns`). What it said
-    on stderr is quoted redacted and clipped (github.quote_output), as gh's
-    is: it lands on a ledger line."""
+    any case (`error_max_turns`). What it said on stderr is quoted redacted
+    and clipped (github.quote_output), as gh's is: it lands on a ledger
+    line."""
     if not fix_run.started:
         # run_fix_step's own text: fix_step.NOT_STARTED and the OSError.
         return fix_run.stderr.strip() or "the fix step could not start"

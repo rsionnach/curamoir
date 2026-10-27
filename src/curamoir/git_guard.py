@@ -3,8 +3,7 @@
 fix_scope decides whether a sweep fix is in scope; this module makes sure
 that asking git what the fix changed cannot run anything the fix planted,
 and that the tree being asked about is not the user's. The order the runner
-calls things in is fix_scope's module docstring, "What the runner (cm-fkd.4)
-must do".
+calls things in is fix_scope's module docstring, "What the runner does".
 
 **The sandbox.** The fix step never runs in the user's checkout. It runs in
 a disposable clone of the pinned base commit (prepare_sandbox), made with

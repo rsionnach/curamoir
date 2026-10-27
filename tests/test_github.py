@@ -466,8 +466,9 @@ def test_a_cross_repository_pr_from_the_real_listing_is_dropped(gh, repo):
 # The runner names origin's repository with --repo (runner, "Which repository
 # gh is asked about"), so these repos have a GitHub origin (`hub`). Nothing is
 # fetched or pushed: the URL is only read. The sweep's body is `stub_body`,
-# a failure line, as the placeholder was: what is tested here is the guards'
-# gh calls, not the sweep (tests/test_sweep_publish.py runs the real body).
+# which records a failure line and nothing else: what is tested here is the
+# guards' gh calls, not the sweep (tests/test_sweep_publish.py and
+# tests/test_sweep_acceptance.py run the real body).
 
 GH_REPO = "github.com/acme/widgets"
 #: The runner's two gh calls for a repository whose origin is GH_REPO.

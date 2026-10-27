@@ -233,7 +233,7 @@ def _at(line):
 # --- the acceptance criteria -----------------------------------------------------------
 
 def test_a_tier1_fix_is_tagged_in_the_ledger_and_the_pr_and_counted(tmp_path):
-    """The runner's steps (fix_scope, "What the runner must do"), with tier 1:
+    """The runner's steps (fix_scope, "What the runner does"), with tier 1:
     the scan reports both plants of the rule-less principle, the fix agent
     fixes them and the lint's violations, and the line written when the PR
     opens carries each tier-1 fix under its principle id, which the

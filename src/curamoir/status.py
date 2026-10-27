@@ -9,8 +9,9 @@ later consumers — the away-brief (E9-R2) in particular — can read the same
 structure rather than scraping text.
 
 Sections whose producing epic has not landed report absence rather than erroring
-or inventing a zero. This command ships in M0, before grades (E7), the runner
-(E10) and the sweep (Epic 3).
+or inventing a zero. This command shipped in M0, before grades (E7), the runner
+(E10) and the sweep (Epic 3); grades have still not landed, so their section
+reports absence.
 """
 
 import json

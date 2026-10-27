@@ -82,20 +82,37 @@ cúramóir enforces *your project's own* principles. It is not a general linter.
 
 > **Pre-release, under construction.** These work today: the guardrails, the
 > plugin skeleton, session handoffs, the away-brief, the principles file with
-> its rule format, and `curamoir-lint`, which runs your rules standalone in CI
-> or pre-commit (see [Writing a rule](docs/rules-authoring.md) and
+> its rule format and bundled example rules (`examples/`), and `curamoir-lint`,
+> which runs your rules standalone in CI or pre-commit (see
+> [Writing a rule](docs/rules-authoring.md) and
 > [Running `curamoir-lint`](docs/curamoir-lint.md)). So
 > `/curamoir:init`, `/curamoir:status`, `/curamoir:doctor`, `/curamoir:handoff`
-> and `/curamoir:brief` all do something real, and so does the lint gate. Still
-> to come are the bundled rules, the sweep, the r5 review, grades, the
-> promotion commands and the scheduled runner, which together are most of the
-> reason to want this. **Nothing runs unattended yet.**
+> and `/curamoir:brief` all do something real, and so does the lint gate. The
+> sweep works too: `scripts/curamoir run sweep --repo <root>` runs behind the
+> guardrails, fixes the violations the lint and the tier-1 scan find in a
+> disposable clone, runs your tests, and opens at most one PR. Still to come
+> are the r5 review, grades, the promotion commands and `/curamoir:schedule`,
+> which together are most of the reason to want this. **Nothing is scheduled
+> for you yet:** `curamoir run` is the one entry point a cron entry or CI job
+> calls, but you write that entry yourself.
 
 cúramóir is built with cúramóir. Its own principles are in
 [`.curamoir/principles.md`](.curamoir/principles.md), and its handoffs are in
 [`.curamoir/handoff/`](.curamoir/handoff/).
 
 ## Install
+
+Prerequisites:
+
+- **Python 3.12 or newer** as `python3` (or `python3.12` and up) on PATH,
+  with PyYAML; `/curamoir:doctor` reports either missing.
+- **GitHub's `gh` CLI, authenticated** (`gh auth login`). Every scheduled
+  job asks it whether the repository is paused (the `curamoir:paused`
+  label), and the sweep uses it to count open PRs and to open its own.
+- **The `claude` CLI**, which the sweep's fix step runs headless.
+- **`ast-grep`**, if any of your rules use `matcher: ast-grep`.
+- **`bd` (beads)**, optional: with it, findings are filed as beads too;
+  without it they go to GitHub only, with a ledger note.
 
 ```bash
 claude plugin marketplace add rsionnach/curamoir

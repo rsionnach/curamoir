@@ -17,7 +17,12 @@ line, even a failure, would let a scheduler's log read as if the job ran.
 
 **The sweep** is curamoir.sweep_job.run_sweep (cm-fkd.14), whose open-PR
 listing is `gh pr list` through curamoir.github.open_sweep_prs, bound to
-the run's root and to origin's repository (_gh_open_prs).
+the run's root and to origin's repository (_gh_open_prs). It reads the
+run's clock (JobRun.now, `run_job`'s `now`), so its branch and title are
+dated by the clock that dates its line (read again as the body starts);
+its `claude` and its fix step's timeout are sweep_job.CLAUDE and
+sweep_job.FIX_TIMEOUT, the seams tests point at stand-ins
+(tests/test_sweep_acceptance.py).
 
 **gh, by default** (cm-fkd.10, cm-fkd.14). With no arguments, `run_job`
 gives every job the `curamoir:paused` label check (github.repo_labels,
@@ -75,7 +80,7 @@ and nothing is written.
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, NamedTuple, Optional
+from typing import Any, Optional
 
 from curamoir import github, publish
 from curamoir.brief import write_brief
@@ -119,7 +124,8 @@ class Job:
     open_pr_listing_for: Optional[Callable[[Path], Callable[[], Any]]] = None
 
 
-class Ran(NamedTuple):
+@dataclass(frozen=True)
+class RunReport:
     """What `run_job` did: the process's exit code and the sentence to print."""
 
     exit_code: int
@@ -178,27 +184,28 @@ NOT_YET_BUILT = {
 
 
 def run_job(repo, name, *, open_pr_listing=None, repo_labels=None, now=None):
-    """Run the job registered as `name` against `repo` and return a Ran.
+    """Run the job registered as `name` against `repo` and return a RunReport.
 
     `open_pr_listing`, when given, replaces the job's registered listing
     (`Job.open_pr_listing_for`, bound to `repo`). It is ignored for a job
     that opens no PRs, which the cap does not apply to. `repo_labels`, when
     given, replaces the default label check (_gh_labels, bound to `repo`),
     which every job gets (module docstring, "gh, by default").
-    `now` is run_guarded's.
+    `now` is run_guarded's: the run's one clock, which the sweep's body
+    reads too (module docstring, "The sweep").
     """
     job = JOBS.get(name)
     if job is None:
-        return Ran(EXIT_NOT_A_JOB, _not_a_job(name))
+        return RunReport(EXIT_NOT_A_JOB, _not_a_job(name))
 
     root = Path(repo)
     if root.is_dir() and not (root / ".curamoir").is_dir():
         # Not only "uninitialised": --repo may be a subdirectory of a
         # repository that is, or `.curamoir` may be a regular file.
-        return Ran(EXIT_UNUSABLE_ROOT,
-                   f"cúramóir did not run {name!r}: there is no .curamoir/ directory "
-                   f"at {root}, so there is no ledger to record the run in. Point "
-                   "--repo at the repository root, or run /curamoir:init.")
+        return RunReport(EXIT_UNUSABLE_ROOT,
+                         f"cúramóir did not run {name!r}: there is no .curamoir/ "
+                         f"directory at {root}, so there is no ledger to record the run "
+                         "in. Point --repo at the repository root, or run /curamoir:init.")
 
     if open_pr_listing is None and job.open_pr_listing_for is not None:
         open_pr_listing = job.open_pr_listing_for(root)
@@ -229,8 +236,8 @@ def run_job(repo, name, *, open_pr_listing=None, repo_labels=None, now=None):
         # so whether a ledger line was written is not ours to claim: a body
         # that raised has one from JobRun, an earlier raise has none. Either
         # way a sentence, not a traceback a slash command would relay as is.
-        return Ran(EXIT_FAILURE, f"cúramóir did not complete {name!r}: "
-                                 f"{_sentence(f'{type(crash).__name__}: {crash}')}")
+        return RunReport(EXIT_FAILURE, f"cúramóir did not complete {name!r}: "
+                                       f"{_sentence(f'{type(crash).__name__}: {crash}')}")
 
     if result.outcome == UNUSABLE_ROOT:
         sentence = (f"cúramóir did not run {name!r}: unusable root (the reason is "
@@ -240,7 +247,7 @@ def run_job(repo, name, *, open_pr_listing=None, repo_labels=None, now=None):
         sentence = f"cúramóir ran {name!r}: {result.outcome}{reason}."
         if result.message.strip():
             sentence += f" {_sentence(result.message)}"
-    return Ran(_EXIT_CODES[result.outcome], sentence)
+    return RunReport(_EXIT_CODES[result.outcome], sentence)
 
 
 def _not_a_job(name):

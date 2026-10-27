@@ -66,6 +66,12 @@ class JobRun:
         self._message = ""
         self._extra = {}
 
+    def now(self):
+        """The run's clock, read now: `now` as given, else the wall clock.
+        For a body that dates its work by the clock its line is dated by
+        (sweep_job: the sweep branch's day)."""
+        return self._now()
+
     @property
     def ledger(self):
         """The ledger this run's line goes to, for reading history from

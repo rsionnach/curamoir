@@ -1,16 +1,17 @@
 """E3-R6: the sweep respects the open-PR cap (E0-R6) and the budget (E0-R4).
 
-The guards themselves are proven in tests/guards/. These prove the WIRING at
-the sweep's entry point, `job_guard.run_guarded`: built from the repo's own
-config, a refusal is the job's `job` line in the repo's own ledger with the
-reason, and the body, which is where cm-fkd.4 clones, runs the fix step and
-spends, is never called. A spy stands in for that body. The ledger is read
-back from the canonical path (the harness's), where the budget reads it.
+The guards themselves are proven in tests/guards/. These prove the WIRING in
+`job_guard.run_guarded`, which `curamoir run sweep` reaches through
+runner.run_job: built from the repo's own config, a refusal is the job's
+`job` line in the repo's own ledger with the reason, and the body
+(sweep_job.run_sweep, which clones, runs the fix step and spends) is never
+called. A spy stands in for that body. The ledger is read back from the
+canonical path (the harness's), where the budget reads it.
 
 The open-PR listing is fed the shape `gh pr list --state open --json
 headRefName,number,url,body,files,isCrossRepository` really returns (files
 as {path, additions, deletions}), mapped through idempotence.sweep_pr_listing
-as cm-fkd.4's callable will. The ledger is seeded with job lines in the shape
+as github.open_sweep_prs maps it. The ledger is seeded with job lines in the shape
 JobRun writes, plus E11-R1's token attribution.
 """
 
@@ -54,7 +55,7 @@ def gh_item(number, branch, cross_repository=False):
 
 
 def listing(*items):
-    """The open-PR callable cm-fkd.4 will supply, over canned gh output."""
+    """An open-PR callable as github.open_sweep_prs is, over canned gh output."""
     return lambda: [sweep_pr_listing(item) for item in items]
 
 
@@ -82,7 +83,8 @@ class Spy:
 
 
 def sweep(harness, open_prs):
-    """Run the sweep's entry point over the harness repo with a spy body."""
+    """Run the guard layer (run_guarded) for the sweep job over the harness
+    repo, with a spy body in place of the sweep's."""
     body = Spy()
     result = run_guarded(harness.repo, "sweep", open_prs, body, now=october)
     return result, body, harness.ledger()
@@ -406,7 +408,7 @@ def test_a_repo_root_of_none_runs_nothing(capsys):
 
 
 def test_a_paused_label_refuses_the_sweep_with_reason_paused(harness):
-    """The label half of the kill switch: cm-fkd.4 supplies the `gh` call."""
+    """The label half of the kill switch: github.repo_labels is the `gh` call."""
     body = Spy()
 
     result = run_guarded(harness.repo, "sweep", listing(), body, now=october,

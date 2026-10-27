@@ -5,8 +5,8 @@ cm-fkd.14, pushes and opens what this module writes).
 E3-R3: "Output is exactly one PR per sweep, capped at `max_files_per_pr`,
 on a `curamoir/sweep-<date>` branch. PR body MUST list each fix with its
 principle id, and include a 'promotion candidates' section." The inputs are
-the runner's own objects, as fix_scope's "What the runner (cm-fkd.4) must
-do" names them; final_body's docstring maps each argument to its object.
+the runner's own objects, as fix_scope's "What the runner does" names
+them; final_body's docstring maps each argument to its object.
 
 **What the body holds.** _compose is the source of truth for the layout;
 in order:
@@ -234,7 +234,7 @@ def final_body(records, work_list, gate, base, skipped_remedies, left_out_paths,
     fitted under `limit`, then checked: redaction would change nothing
     (_check_redacted), its marker reads back, its headings are its own.
 
-    Args (fix_scope's "What the runner (cm-fkd.4) must do"):
+    Args (fix_scope's "What the runner does"):
         records: every FixRecord of the sweep, rule (fix_counts.record_fixes)
             and tier-1 (tier1.record_tier1_fixes), unfiltered: pr_records
             keeps those in `gate.paths_for_pr`.

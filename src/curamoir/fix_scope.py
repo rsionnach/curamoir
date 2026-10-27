@@ -30,7 +30,9 @@ Two layers, so the rules can be tested without git:
   and rules (lint_sandbox), the principles at the base commit, and what the
   repository already imports there, and calls the core.
 
-**What the runner (cm-fkd.4) must do.**
+**What the runner does** (curamoir.sweep_job, cm-fkd.4: this list is its
+contract, in its order; sweep_job's "What each outcome writes" says
+which line each path records).
 
 0. Wrap the whole pipeline, steps 1 to 10, in the guards (E3-R6), in four
    parts:
@@ -38,8 +40,8 @@ Two layers, so the rules can be tested without git:
        `Job(body=sweep_job.run_sweep, opens_prs=True,
        open_pr_listing_for=...)`, `body(repo, run)` being everything
        below, which records its outcome on `run`, the `JobRun` writing to
-       the repo's own ledger. Do NOT call
-       `job_guard.run_guarded` yourself: `curamoir run sweep` reaches it
+       the repo's own ledger. The body never calls
+       `job_guard.run_guarded` itself: `curamoir run sweep` reaches it
        through `runner.run_job`, which runs every job behind the guards in
        E10-R1's order and gives the gateway the gh defaults of (ii) and
        (iii). Use `run`, not a ledger of your own, for every line below,
@@ -313,13 +315,21 @@ Two layers, so the rules can be tested without git:
 4. Run the fix step in it: `fix_step.run_fix_step(sandbox, prompt)`, which
    snapshots the sandbox (FixStepRun.git_state) before the agent starts,
    so after the remedies; the review still sees their deletions, because
-   it diffs against the base commit.
+   it diffs against the base commit. A fix step that did not finish (it
+   could not start, timed out, exited non-zero, or its payload is missing
+   or reports an error) is a failure with no review: a stopped agent may
+   have left a file half-written. When the remedies left the agent
+   nothing, no call is made, and the review holds the sandbox to a
+   snapshot taken there instead (git_guard.snapshot_git_state).
 5. Review it: `verify_fix(sandbox, git_state=run.git_state)`. Same sandbox,
    same snapshot, same base: there is nothing else to pass.
 6. Treat git_guard.GitGuardError (ScopeCheckError is one) as a refusal
    (with `**tier1_state.ledger_fields()`, step 2c's note): no verdict is
    not a verdict, and an unverified fix is not a fix.
-7. On an ok verdict with paths (not `nothing_changed`), test it (E3-R4).
+7. A `nothing_changed` verdict is a failure: NOTHING_CHANGED after a fix
+   step, or, when no fix step ran and every remedy was skipped,
+   NOTHING_REMEDIED with `remedies_skipped` (curamoir.sweep_job).
+   On an ok verdict with paths, test it (E3-R4).
    Trim to `sweep.max_files_per_pr` BEFORE this, so the tree tested is the
    PR's, with the lint's paths first (`trimmed = tier1.trim_pr_paths(
    verdict.paths, sandbox.work_list, max_files_per_pr)`: rule fixes take
@@ -362,9 +372,10 @@ Two layers, so the rules can be tested without git:
    commit is built from the patch in the checkout's object store (never
    its work tree or index), the default-branch guard judges the branch,
    the user's git pushes it (pre-push hooks run), and gh opens the PR on
-   `gh_repo`, which is `publish.origin_gh_repo(repo)` resolved ONCE and
-   also passed to `github.open_sweep_prs(repo, gh_repo=...)` for the cap
-   and step 2b, so all three name origin's repository. What to record for
+   `gh_repo`, which is `publish.origin_gh_repo(repo)` resolved once by the
+   body (step 1) and also bound into step 2b's listing; the cap's listing
+   resolves origin's repository itself when it is called (step 0 (iii)),
+   so all three name origin's repository. What to record for
    each outcome, and where the branch is, is publish's "Errors" table:
    PublishRefused is a refusal (nothing pushed); PushFailed,
    PrCreateFailed and PrOutcomeUnknown are failures with no `pr` (a

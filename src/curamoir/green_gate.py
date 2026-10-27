@@ -8,7 +8,7 @@ state or reduce scope, and MUST NOT open a red PR."
 
 The runner calls run_test_gate(sandbox, verdict) after fix_scope.verify_fix
 has accepted the fix and before GateResult.patch (fix_scope's module
-docstring, "What the runner (cm-fkd.4) must do", step 7, gives the order).
+docstring, "What the runner does", step 7, gives the order).
 It returns a GateResult whose `paths_for_pr` is the only thing the runner
 may patch (through GateResult.patch, which builds the patch from the bytes
 that were tested), and whose `strategy` the ledger records

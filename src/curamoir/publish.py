@@ -1,12 +1,14 @@
 """E3-R3's last step: the sweep's accepted change leaves the machine as one
 commit on one branch and one PR (cm-fkd.12; fix_scope's runner step 9).
 
-**What the runner calls**: `origin_gh_repo(repo)` once per sweep (its value
-also goes to github.open_sweep_prs), and `origin_default_branch(repo,
-gh_repo)` before the sandbox, to pin the sweep's base at that branch's
-remote-tracking ref (curamoir.sweep_job); then `publish(...)`, which returns a
-Published or raises one of the errors in "Errors" below. The other names in
-__all__ are publish's building blocks (check_target, pr_base, user_identity,
+**What the runner calls**: `origin_gh_repo(repo)` once per body (its value
+also goes to the body's github.open_sweep_prs; the guards' gh calls resolve
+it themselves, runner's "Which repository gh is asked about"), and
+`origin_default_branch(repo, gh_repo)` before the sandbox, to pin the
+sweep's base at that branch's remote-tracking ref (curamoir.sweep_job);
+then `publish(...)`, which returns a Published or raises one of the
+errors in "Errors" below. The other names in __all__ are publish's
+building blocks (check_target, pr_base, user_identity,
 commit_from_patch, push_branch, delete_remote_branch, create_pr,
 find_open_pr, Identity, CreateOutputUnreadable) and test seams (the
 timeouts and LOOKUP_ATTEMPTS, LOOKUP_DELAY).
@@ -197,6 +199,14 @@ or any branch.
 |                  |         | pr_field(number,  |                    |                        |
 |                  |         | branch, url, base,|                    |                        |
 |                  |         | paths)            |                    |                        |
+| Published, into  | failure | as Published      | the PR's head      | the PR's URL, and to   |
+| another base     |         | (no `fixes`)      |                    | check it before merge  |
+
+The last row is the runner's, not publish's: GitHub opened the PR into a
+branch other than the default the sweep was built on
+(Published.base_branch differs from sweep_job's SweepBase.default_branch,
+as when the default changed while the sweep ran), so the line keeps `pr`
+and records no fixes.
 
 Every quote of git's or gh's output in a message is redacted and clipped
 (github.quote_output).

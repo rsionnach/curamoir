@@ -10,10 +10,10 @@ any work" is therefore structural rather than a promise: the body is what
 makes the sandbox clone, runs the fix step and spends tokens, and a refused
 body is never called.
 
-cm-fkd.4 supplies the sweep's BODY, registered in `runner.JOBS`:
-`curamoir run sweep` reaches `run_guarded` through the runner, and the body
-covers everything from `prepare_sandbox` on (fix_scope's "What the runner
-(cm-fkd.4) must do").
+The sweep's BODY is curamoir.sweep_job.run_sweep (cm-fkd.4), registered
+in `runner.JOBS`: `curamoir run sweep` reaches `run_guarded` through the
+runner, and the body covers everything from `prepare_sandbox` on
+(fix_scope's "What the runner does").
 
 **One repository, one ledger.** `run_guarded` takes the repo and nothing
 else that locates state: the job line, the gateway's guard lines and the
@@ -75,7 +75,7 @@ the default $15 ceiling, a guard loosened without anybody being told
 `context.repo`, and the sweep starts from the developer's checkout, which is
 usually on the default branch: it would refuse every sweep. The sweep never
 writes there; it edits a disposable clone and pushes a `curamoir/sweep-...`
-branch. cm-fkd.4 applies `DefaultBranchGuard` at push/PR time, against that
+branch. The sweep applies `DefaultBranchGuard` at push/PR time, against that
 branch (its `target_branch`, in curamoir.publish), which is where E0-R1's
 write happens.
 

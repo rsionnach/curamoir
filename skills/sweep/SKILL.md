@@ -12,9 +12,9 @@ lint has already found; you never redesign. The runner starts you on the cheap
 model tier (`models.cheap` in `.curamoir/curamoir.yaml`); the model is chosen
 there, not here, so a repository can change it without editing this skill.
 
-Model invocation is disabled on purpose: a sweep edits code and, once it is
-complete, opens a PR, so it runs only when the scheduler or the developer asks
-for it, never because a conversation looked like it wanted one.
+Model invocation is disabled on purpose: a sweep edits code and opens a PR,
+so it runs only when the scheduler or the developer asks for it, never
+because a conversation looked like it wanted one.
 
 ## 1. Get the work list (E3-R1)
 
@@ -95,13 +95,19 @@ that breaks them. The principles it reads `permits` from are the ones
 committed at that commit. This text and that prompt are one text; a test
 fails if they differ.
 
-Until `curamoir run sweep` lands (cm-fkd.4), this skill stops after step 1:
-report the work list (its count, its principle ids, and each violation's
-location) and change nothing. A fix made here would reach no review step.
+This skill stops after step 1: it reports the work list (its count, its
+principle ids, and each violation's location) and changes nothing. A fix
+made here, in your checkout, would reach none of those checks. The fix and
+its PR are `curamoir run sweep`'s, which the developer runs, or puts in
+their own cron entry or CI job (`/curamoir:schedule` is planned), as:
 
-## 3. Still to come
+```bash
+"${CLAUDE_PLUGIN_ROOT}"/scripts/curamoir run sweep --repo "${1:-.}"
+```
 
-Each is its own requirement, and none is done by this skill yet:
+## 3. What `curamoir run sweep` adds
+
+Each is its own requirement, and none is done by this skill:
 
 - Tier-1 findings for principles with no rule (E3-R1b). The scheduled sweep
   scans for them itself (`src/curamoir/tier1.py`) before its fix step; this
@@ -110,9 +116,10 @@ Each is its own requirement, and none is done by this skill yet:
   about principles that have no rule. (The scheduled sweep's `no_work` line
   covers tier 1 too: its `tier1.status` says whether the scan found nothing
   or did not run.)
-- The project's test command before any PR, and no red PR (E3-R4, cm-fkd.5).
-- Exactly one PR, capped at `sweep.max_files_per_pr`, on `curamoir/sweep-<date>`,
-  listing every fix with its principle id (E3-R3, cm-fkd.4).
-- Per-principle fix counts to the ledger (E3-R5, cm-fkd.6).
-- The open-PR cap and the budget (E3-R6, cm-fkd.7), and no second PR from an
-  unchanged tree (E3-R7, cm-fkd.8).
+- The project's test command before any PR, and no red PR (E3-R4).
+- Exactly one PR, capped at `sweep.max_files_per_pr`, on a
+  `curamoir/sweep-<date>-<base>` branch, listing every fix with its
+  principle id; files past the cap are listed for the next run (E3-R3).
+- Per-principle fix counts to the ledger (E3-R5).
+- The open-PR cap and the budget (E3-R6), and no second PR from an
+  unchanged base (E3-R7).
