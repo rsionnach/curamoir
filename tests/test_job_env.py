@@ -11,8 +11,10 @@ git_guard.scrubbed_environment, which drops only GIT_*.
 These prove the variable's lifetime through run_guarded and runner.run_job,
 then the propagation through the fix step's real spawn path, and last the
 whole chain: the real hook, run with the environment the fix step's child
-gets, in a clone with no lock, denying `rm -rf` (through a stand-in `claude`
-that loads the hook; the real `--restricted` run does not yet, cm-60c).
+gets, in a clone with no lock, denying `rm -rf`: first through a stand-in
+`claude` that runs the plugin's hook as a plugin-loading `claude` would,
+then (cm-60c) through one that loads hooks only from the fix step's own
+`--settings`, which is all the real `--restricted` run loads.
 
 One part of run_guarded's ordering is held by review, not by a test:
 Ordering 5a's "read `before` before the `try`". Only a signal landing
@@ -366,7 +368,8 @@ def test_the_fix_steps_child_is_started_with_the_jobs_variable(repo, tmp_path):
 #: CLAUDE_PLUGIN_ROOT set as Claude Code sets it for a plugin hook, and
 #: nothing put on PYTHONPATH (the wrapper does that). It loads the hook the
 #: way a `claude` with cúramóir's plugin would; the real fix step's
-#: `--restricted` run does not load it yet (cm-60c).
+#: `--restricted` run loads it from its `--settings` instead
+#: (SETTINGS_LOADING_CLAUDE below, cm-60c).
 HOOK_RUNNING_CLAUDE = """\
 import json, os, subprocess
 payload = {{"hook_event_name": "PreToolUse", "tool_name": "Bash",
@@ -387,8 +390,8 @@ def test_the_real_hook_denies_rm_rf_inside_the_fix_steps_lockless_clone(repo, tm
     clone that has `.curamoir/` but no lock, and the real hook process.
 
     It proves the signal reaches the hook, not that the hook is loaded: the
-    stand-in runs the hook as a `claude` with cúramóir's plugin would, and
-    the real fix step's `--restricted` run loads no plugin hook yet (cm-60c)."""
+    stand-in runs the hook as a `claude` with cúramóir's plugin would. That
+    the fix step loads it is the next test's (cm-60c)."""
     committed(repo)
     log = tmp_path / "hook.json"
     script = stand_in_claude(tmp_path, HOOK_RUNNING_CLAUDE.format(
@@ -407,3 +410,51 @@ def test_the_real_hook_denies_rm_rf_inside_the_fix_steps_lockless_clone(repo, tm
     assert seen["stdout"].strip(), "the hook allowed rm -rf in the clone: " + seen["stderr"]
     decision = json.loads(seen["stdout"])["hookSpecificOutput"]
     assert decision["permissionDecision"] == "deny"
+
+
+#: A stand-in `claude` that loads PreToolUse hooks the way the real fix
+#: step's `--restricted` run can: ONLY from its `--settings` argument (cm-60c).
+#: For a Bash call it runs each matching entry's command through a shell, as
+#: Claude Code runs a command hook, with its own environment and the
+#: payload's `cwd` as the working directory, and records every answer.
+SETTINGS_LOADING_CLAUDE = """\
+import json, os, re, subprocess, sys
+settings = json.loads(sys.argv[sys.argv.index("--settings") + 1])
+payload = {{"hook_event_name": "PreToolUse", "tool_name": "Bash",
+           "tool_input": {{"command": "rm -rf build/"}}, "cwd": os.getcwd()}}
+answers = []
+for entry in settings.get("hooks", {{}}).get("PreToolUse", []):
+    if re.fullmatch(entry.get("matcher") or ".*", "Bash"):
+        for hook in entry["hooks"]:
+            ran = subprocess.run(["/bin/sh", "-c", hook["command"]], input=json.dumps(payload),
+                                 capture_output=True, text=True, timeout=hook["timeout"])
+            answers.append({{"stdout": ran.stdout, "stderr": ran.stderr,
+                             "returncode": ran.returncode}})
+open({log!r}, "w").write(json.dumps({{"answers": answers, "events": sorted(settings["hooks"])}}))
+"""
+
+
+def test_the_fix_steps_own_settings_load_the_denylist_that_denies_rm_rf(
+        repo, tmp_path, monkeypatch):
+    """cm-60c's acceptance test: through run_guarded and the fix step's real
+    spawn into a lockless clone, the hook the fix step's argv registers (and
+    nothing a plugin would add) denies `rm -rf`. A CLAUDE_PLUGIN_ROOT left in
+    the environment by some other plugin does not send it elsewhere."""
+    committed(repo)
+    monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", str(tmp_path / "some-other-plugin"))
+    log = tmp_path / "hooks.json"
+    script = stand_in_claude(tmp_path, SETTINGS_LOADING_CLAUDE.format(log=str(log)))
+
+    def body(run):
+        with prepare_sandbox(repo.repo, "HEAD", parent=tmp_path) as sandbox:
+            run_fix_step(sandbox, "p", model="m", claude=str(script))
+        run.succeeded("fixed")
+
+    run_guarded(repo.repo, "sweep", listing(), body, now=october)
+
+    seen = json.loads(log.read_text(encoding="utf-8"))
+    assert seen["events"] == ["PreToolUse"]
+    (answer,) = seen["answers"]
+    assert answer["returncode"] == 0, answer["stderr"]
+    assert answer["stdout"].strip(), "the hook allowed rm -rf in the clone: " + answer["stderr"]
+    assert json.loads(answer["stdout"])["hookSpecificOutput"]["permissionDecision"] == "deny"

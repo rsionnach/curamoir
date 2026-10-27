@@ -60,9 +60,10 @@ def in_curamoir_job(env, repo=None):
     repository itself.
 
     The fix step runs `claude -p` with `--restricted`, which loads only
-    managed settings and `--settings` (fix_step's docstring), so cúramóir's
-    plugin hooks are not loaded there at all today (cm-60c); that run has
-    no Bash tool. A change that gives it Bash must also load this hook into it.
+    managed settings and `--settings` (fix_step's docstring), so no plugin
+    hook runs there except this one, which its `--settings` register
+    (fix_step.pretooluse_settings, cm-60c). In its lockless sandbox clone
+    the variable is the only signal.
 
     The lock is the one `curamoir run` holds for the whole job
     (job_guard.LockSlot, cm-x5a.6), so the fallback fires for a hook whose

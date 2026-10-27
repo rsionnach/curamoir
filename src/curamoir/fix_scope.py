@@ -467,8 +467,10 @@ of a function to "fix" one line in it is refused.
 
 - Every path that changed in the sandbox is checked, whoever changed it. The
   fix step runs with `--restricted`, which loads no user hooks or plugins
-  (fix_step), so cúramóir's own hooks do not write there; anything else
-  that does is refused like the agent's own edits (cm-sto).
+  (fix_step), so cúramóir's own hooks do not write there: the one it
+  loads back, the PreToolUse denylist (`--settings`, cm-60c), only prints
+  its decision. Anything else that writes there is refused like the
+  agent's own edits (cm-sto).
 - JS/TS signatures are matched by line shape, not parsed: a parameter edited
   on its own line inside a multi-line parameter list is not seen.
 - New-import detection knows the standard library from the interpreter

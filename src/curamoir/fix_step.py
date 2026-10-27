@@ -75,11 +75,27 @@ the result as if the prompt had said nothing.
   `additionalDirectories` still load and could re-widen the fence above —
   and a project's settings are text in the very repository being swept.
   It also drops the user's hooks and plugins from this run, so cúramóir's
-  own Stop hook does not write into the sandbox, and its PreToolUse
-  denylist hook is not loaded either (cm-60c; harmless while the toolset
-  has no Bash, below). It "Requires
+  own Stop hook does not write into the sandbox; its PreToolUse denylist
+  comes back through `--settings`, next. It "Requires
   Claude Code v2.1.248 or later"; an older CLI rejects the flag and the
   step fails loudly rather than running unfenced.
+- `--settings` with pretooluse_settings (cm-60c): `--restricted` still
+  loads "managed settings and `--settings`" (`claude --help`, 2.1.286), so
+  the E0-R5 denylist is registered there: hooks/hooks.json's PreToolUse
+  entries exactly, with the plugin root written into the command, and no
+  other event. WHY not `--plugin-dir`: it loads the whole plugin, Stop
+  hook included, which `--restricted` keeps out (fix_scope's Limits). WHY
+  now, with no Bash in the toolset: a later change that adds a shell tool
+  gets the denylist without having to remember it. The hook only prints
+  its decision; it writes nothing into the sandbox. CLAUDE_PLUGIN_ROOT is
+  set to the same root in the run's environment, since the hook's
+  launcher prefers it to its own location. Held by a stand-in `claude`
+  that loads hooks only from this flag (tests/test_job_env.py). That the
+  real CLI runs them was checked once by hand (2026-10-27, Claude Code
+  2.1.286, `-p --restricted --tools Bash --permission-mode dontAsk`,
+  CURAMOIR_JOB=sweep): `rm -rf build` ran without these settings and was
+  refused with the denylist's own message with them. No test calls a
+  model, so re-check by hand when Claude Code changes `--restricted`.
 - `--disable-slash-commands` ("Disable all skills and commands for this
   session"): the fix agent is handed its instructions here, so no skill —
   including /curamoir:sweep, which would run the lint itself — can be
@@ -105,9 +121,8 @@ the result as if the prompt had said nothing.
 The process runs in a session of its own with the inherited `GIT_*`
 variables dropped and the rest kept, CURAMOIR_JOB included (set by
 job_guard.run_guarded for the run: the E0-R5 denylist's signal in a clone
-that has no lock, cm-a2s). It is carried for when the denylist hook is
-loaded into this run, which `--restricted` (above) prevents today
-(cm-60c). At the timeout its whole process group is killed
+that has no lock, cm-a2s), which the denylist loaded by `--settings`
+(above) reads, and CLAUDE_PLUGIN_ROOT set to PLUGIN_ROOT. At the timeout its whole process group is killed
 (git_guard.run_in_group), so nothing it started goes on editing the sandbox
 while the review reads it.
 
@@ -140,8 +155,10 @@ Syntax that imports on 3.9, like sweep.py.
 import json
 import math
 import os
+import shlex
 import subprocess
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Optional
 
 from curamoir.fix_scope import SIGNATURE_PERMISSION, WINDOW
@@ -201,6 +218,12 @@ FIX_TOOLS = ("Read", "Grep", "Glob", "Edit")
 #: What a FixStepRun's `stderr` starts with when its process could not be
 #: started (FixStepRun.started is False); the OSError follows it.
 NOT_STARTED = "the fix step could not start: "
+
+#: The plugin's root: hooks/ and scripts/ sit beside src/.
+PLUGIN_ROOT = Path(__file__).resolve().parents[2]
+
+#: How hooks/hooks.json names the plugin root in a hook's command.
+_ROOT_IN_COMMAND = '"${CLAUDE_PLUGIN_ROOT}"'
 
 #: The tools Claude Code checks file permission rules for ("checks file
 #: permissions against `Edit(path)` and `Read(path)` rules only"): the
@@ -323,6 +346,33 @@ def _rule_roots(repo):
             for root in roots]
 
 
+def pretooluse_settings(root=PLUGIN_ROOT):
+    """The `--settings` that load the E0-R5 denylist into the fix step
+    (module docstring, `--settings`): hooks/hooks.json's PreToolUse
+    entries as registered (matcher, timeout and all), each command's
+    `"${CLAUDE_PLUGIN_ROOT}"` replaced by `root`, shell-quoted, and no
+    other event. The entries are read from this plugin's own hooks.json, so
+    the fix step denies what an interactive session denies. OSError or
+    ValueError when they cannot be read or a command does not name the
+    plugin root: a fix step whose denylist could not be loaded never
+    runs."""
+    registered = json.loads((PLUGIN_ROOT / "hooks" / "hooks.json").read_text(encoding="utf-8"))
+    entries = registered["hooks"]["PreToolUse"]
+    loaded = []
+    for entry in entries:
+        hooks = []
+        for hook in entry["hooks"]:
+            command = hook["command"]
+            if not command.startswith(_ROOT_IN_COMMAND):
+                raise ValueError(f"hooks/hooks.json's PreToolUse command {command!r} does not "
+                                 f"start with {_ROOT_IN_COMMAND}, so it cannot be loaded "
+                                 "without the plugin")
+            hooks.append(dict(hook, command=shlex.quote(str(root))
+                              + command[len(_ROOT_IN_COMMAND):]))
+        loaded.append(dict(entry, hooks=hooks))
+    return {"hooks": {"PreToolUse": loaded}}
+
+
 def fix_step_argv(prompt, model, repo, max_turns=DEFAULT_MAX_TURNS, claude="claude",
                   tools=FIX_TOOLS):
     """The `claude -p` command line for the fix step in `repo`. The prompt
@@ -342,6 +392,7 @@ def fix_step_argv(prompt, model, repo, max_turns=DEFAULT_MAX_TURNS, claude="clau
         "--disallowedTools", ",".join(["mcp__*", *repo_deny_rules(repo)]),
         "--strict-mcp-config",
         "--restricted",
+        "--settings", json.dumps(pretooluse_settings()),
         "--permission-mode", "dontAsk",
         "--disable-slash-commands",
         "--no-session-persistence",
@@ -434,6 +485,10 @@ def run_fix_step(sandbox, prompt, model=None, timeout=DEFAULT_TIMEOUT,
     git_state = snapshot_git_state(sandbox)
     environment = scrubbed_environment()
     environment["PWD"] = path
+    # The hook's launcher takes its root from CLAUDE_PLUGIN_ROOT when set,
+    # and one inherited from another plugin would run that plugin's code as
+    # the denylist: the root the --settings name, always.
+    environment["CLAUDE_PLUGIN_ROOT"] = str(PLUGIN_ROOT)
     if before_call is not None:
         before_call()
     try:

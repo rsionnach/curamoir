@@ -20,6 +20,7 @@ list from the real lint over it.
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 import time
@@ -44,6 +45,7 @@ from curamoir.fix_step import (
     FixStepRun,
     fix_prompt,
     fix_step_argv,
+    pretooluse_settings,
     repo_deny_rules,
     repo_rules,
     run_fix_step,
@@ -53,6 +55,7 @@ from curamoir.principles import load_principles, parse_principles
 from curamoir.sweep import work_list, work_list_document
 from tests import claude_payloads
 from tests.conftest import committed_sample
+from tests.hooks.test_pretooluse_entrypoint import REPO_ROOT
 from tests.test_fix_scope import BILLING, PRINCIPLES, V, git_repo
 from tests.test_lint import ROOT
 
@@ -163,6 +166,34 @@ def test_the_fix_step_can_read_and_edit_and_nothing_else(tmp_path):
     assert "--bare" not in argv
     assert "--restricted" in argv
     assert "--add-dir" not in argv
+
+
+def test_the_settings_register_the_plugins_pretooluse_hooks_and_nothing_else(tmp_path):
+    """cm-60c: `--restricted` loads no user or plugin settings, so cúramóir's
+    E0-R5 denylist is loaded through `--settings`: hooks/hooks.json's
+    PreToolUse entries exactly (matcher and timeout included), with the
+    plugin root written in, and no other event. Stop above all, which would
+    write into the sandbox (cm-sto)."""
+    argv = fix_step_argv("the prompt", "m", tmp_path)
+
+    settings = json.loads(argv[argv.index("--settings") + 1])
+    registered = json.loads((REPO_ROOT / "hooks" / "hooks.json").read_text(encoding="utf-8"))
+    assert set(settings) == {"hooks"}
+    assert set(settings["hooks"]) == {"PreToolUse"}
+    (entry,), (plugin_entry,) = settings["hooks"]["PreToolUse"], registered["hooks"]["PreToolUse"]
+    assert entry["matcher"] == plugin_entry["matcher"] == "Bash"
+    (hook,), (plugin_hook,) = entry["hooks"], plugin_entry["hooks"]
+    assert hook["type"] == "command" and hook["timeout"] == plugin_hook["timeout"]
+    assert shlex.split(hook["command"]) == [
+        str(REPO_ROOT / "scripts" / "curamoir-hook-pretooluse")]
+
+
+def test_a_plugin_root_with_spaces_and_quotes_is_one_word_in_the_hook_command(tmp_path):
+    root = tmp_path / "it's a \"plugin\" root"
+
+    command = pretooluse_settings(root)["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
+
+    assert shlex.split(command) == [str(root / "scripts" / "curamoir-hook-pretooluse")]
 
 
 def test_the_allow_rules_reach_only_the_repo(tmp_path):

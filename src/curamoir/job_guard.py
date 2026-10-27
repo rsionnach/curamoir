@@ -110,8 +110,9 @@ Every process the job starts inherits it: the fix step's `claude -p` gets
 git_guard.scrubbed_environment, which drops only GIT_*, and Claude Code
 passes its environment on to the hooks it runs ("A hook process inherits
 the parent environment", https://code.claude.com/docs/en/hooks). The fix
-step's own run is `--restricted`, though, and loads no cúramóir hook today
-(cm-60c): there the variable is carried for when the hook is loaded.
+step's own run is `--restricted`, which loads no plugin, so the denylist
+hook is registered through its `--settings` (fix_step, cm-60c) and reads
+the variable there.
 CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1 does not take it away: it removes
 "credentials", recognised "by its variable
 name or by the shape of its value" (https://code.claude.com/docs/en/env-vars,
