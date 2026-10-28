@@ -100,3 +100,84 @@ def test_an_unknown_model_in_the_ledger_degrades_rather_than_undercounting(harne
 
     assert result.degraded is not None
     assert "some-model-added-later" in result.degraded.message
+
+
+# --- cache tokens (cm-2ui, user decision 2026-10-28) -------------------------------
+#
+# Own rates, defaulted: a cache write at 1.25x the model's input rate and a
+# cache read at 0.1x, Anthropic's standard multipliers, unless the model's
+# entry sets `cache_write` / `cache_read` itself.
+
+import pytest  # noqa: E402
+
+from curamoir.budget import UNRECORDED, UnknownModel, month_to_date  # noqa: E402
+from curamoir.ledger import Ledger  # noqa: E402
+
+
+def test_cache_tokens_default_to_the_standard_multiples_of_the_input_rate():
+    # sonnet input is $2.00/M: a write is $2.50/M, a read $0.20/M.
+    assert PRICES.cost("claude-sonnet-5", 0, 0, cache_write_tokens=1_000_000) == pytest.approx(2.5)
+    assert PRICES.cost("claude-sonnet-5", 0, 0, cache_read_tokens=1_000_000) == pytest.approx(0.2)
+
+
+def test_an_explicit_cache_rate_overrides_the_default():
+    prices = PriceTable({"m": {"input": 2.0, "output": 10.0,
+                               "cache_write": 4.0, "cache_read": 1.0}})
+
+    assert prices.cost("m", 0, 0, cache_write_tokens=1_000_000,
+                       cache_read_tokens=1_000_000) == pytest.approx(5.0)
+
+
+@pytest.mark.parametrize("rate", ["cheap", None, True])
+def test_a_malformed_cache_rate_is_an_unknown_model_not_a_guess(rate):
+    prices = PriceTable({"m": {"input": 2.0, "output": 10.0, "cache_read": rate}})
+
+    with pytest.raises(UnknownModel):
+        prices.cost("m", 1, 1, cache_read_tokens=1)
+
+
+def cache_line(ledger, **fields):
+    ledger.record(kind="job", job="sweep", reason=None, message="", outcome="success",
+                  model="claude-sonnet-5", at="2026-10-02T12:00:00+00:00",
+                  **{"input_tokens": 0, "output_tokens": 0, **fields})
+
+
+def test_month_to_date_prices_a_lines_cache_tokens(harness):
+    ledger = Ledger(harness.repo / ".curamoir" / "state" / "ledger.jsonl")
+    cache_line(ledger, input_tokens=1_000_000, cache_creation_input_tokens=1_000_000,
+               cache_read_input_tokens=10_000_000)
+
+    spend = month_to_date(ledger, PRICES, OCTOBER())
+
+    # $2.00 input + $2.50 write + $2.00 read
+    assert spend.usd == pytest.approx(6.5) and spend.unaccounted == 0
+
+
+def test_a_line_of_only_cache_reads_is_still_priced(harness):
+    ledger = Ledger(harness.repo / ".curamoir" / "state" / "ledger.jsonl")
+    cache_line(ledger, cache_read_input_tokens=1_000_000)
+
+    assert month_to_date(ledger, PRICES, OCTOBER()).usd == pytest.approx(0.2)
+
+
+def test_a_line_from_before_cache_tokens_were_recorded_reads_as_before(harness):
+    ledger = Ledger(harness.repo / ".curamoir" / "state" / "ledger.jsonl")
+    spend(ledger, "claude-sonnet-5", 1_000_000, 100_000)
+
+    assert month_to_date(ledger, PRICES, OCTOBER()).usd == pytest.approx(3.0)
+
+
+def test_a_cache_count_that_is_not_a_number_is_unaccounted_not_zero(harness):
+    ledger = Ledger(harness.repo / ".curamoir" / "state" / "ledger.jsonl")
+    cache_line(ledger, input_tokens=10, cache_read_input_tokens="lots")
+
+    spend_read = month_to_date(ledger, PRICES, OCTOBER())
+
+    assert spend_read.unaccounted == 1 and spend_read.usd == 0
+
+
+def test_an_unrecorded_cache_count_makes_the_line_unrecorded(harness):
+    ledger = Ledger(harness.repo / ".curamoir" / "state" / "ledger.jsonl")
+    cache_line(ledger, input_tokens=10, cache_creation_input_tokens=UNRECORDED)
+
+    assert month_to_date(ledger, PRICES, OCTOBER()).unrecorded == 1

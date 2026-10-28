@@ -495,7 +495,8 @@ def _check_scalar(path, given, expected, problems):
 
 
 def _check_price_table(path, table, problems):
-    """Each price entry needs numeric `input` and `output`.
+    """Each price entry needs numeric `input` and `output`, and may give
+    `cache_write` and `cache_read`.
 
     Validated here rather than discovered at read time: the table is documented
     as editable, so a typo is an ordinary user action, and the error belongs with
@@ -506,7 +507,12 @@ def _check_price_table(path, table, problems):
         if not isinstance(rate, dict):
             problems.append(f"{where}: expected a {MAPPING} with numeric 'input' and 'output'")
             continue
-        for side in ("input", "output"):
+        # `cache_write` and `cache_read` are optional (budget.PriceTable
+        # defaults them from `input`, cm-2ui), but one that is given must be
+        # a price like the other two.
+        for side in ("input", "output", "cache_write", "cache_read"):
+            if side.startswith("cache_") and side not in rate:
+                continue
             value = rate.get(side)
             if isinstance(value, bool) or not isinstance(value, (int, float)):
                 problems.append(

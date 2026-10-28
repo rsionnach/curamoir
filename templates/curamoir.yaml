@@ -45,7 +45,9 @@ budget:
   # VERIFY PRICES. USD per million tokens, verified 2026-10-05. Published prices
   # change, and a stale table silently misreports spend. Cost is derived from
   # recorded tokens at read time, so correcting a price here fixes historical
-  # figures without re-running any job.
+  # figures without re-running any job. Prompt-cache tokens are priced too:
+  # a model may set `cache_write` and `cache_read` (USD per million tokens);
+  # without them a cache write costs 1.25x its input rate and a read 0.1x.
   prices:
     claude-opus-5:
       input: 5.00

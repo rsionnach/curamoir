@@ -543,3 +543,23 @@ def test_non_finite_and_negative_ceilings_are_rejected():
             with pytest.raises(ConfigError) as caught:
                 load_config({"budget": {key: value}})
             assert f"budget.{key}" in str(caught.value), (key, value)
+
+
+@pytest.mark.parametrize("value", ["cheap", -1.0, float("inf"), True])
+def test_a_malformed_cache_rate_is_rejected_by_config_validation(value):
+    """cm-2ui: `cache_write` and `cache_read` are optional, but one that is
+    given is held to the same rule as `input` and `output`."""
+    from curamoir.config import ConfigError, load_config
+
+    with pytest.raises(ConfigError) as caught:
+        load_config({"budget": {"prices": {"m": {"input": 1.0, "output": 1.0,
+                                                 "cache_read": value}}}})
+    assert "budget.prices.m.cache_read" in str(caught.value)
+
+
+def test_explicit_cache_rates_are_accepted_by_config_validation():
+    from curamoir.config import load_config
+
+    config = load_config({"budget": {"prices": {"m": {
+        "input": 1.0, "output": 1.0, "cache_write": 1.25, "cache_read": 0.1}}}})
+    assert config["budget"]["prices"]["m"]["cache_read"] == 0.1

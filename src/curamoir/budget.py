@@ -19,6 +19,23 @@ from curamoir.ledger import parse_ledger_timestamp, repo_ledger
 
 PER_MILLION = 1_000_000
 
+#: The ledger fields a line's prompt-cache tokens are recorded in, named as
+#: in the Messages API's `usage` (cm-2ui). Optional: a line without them
+#: (every line before cm-2ui, and a call that used no cache) has none.
+CACHE_WRITE_FIELD = "cache_creation_input_tokens"
+CACHE_READ_FIELD = "cache_read_input_tokens"
+TOKEN_FIELDS = ("input_tokens", "output_tokens", CACHE_WRITE_FIELD, CACHE_READ_FIELD)
+
+#: A cache write and a cache read priced as multiples of the model's input
+#: rate when its price entry does not set `cache_write` / `cache_read`
+#: (user decision 2026-10-28): Anthropic's standard multipliers, a 5-minute
+#: cache write at 1.25x and a read at 0.1x. A write to the 1-hour cache
+#: costs 2x; the CLI's usage does not tell the two apart in the counts
+#: recorded here, so such writes are under-priced unless the entry sets
+#: `cache_write`.
+CACHE_WRITE_MULTIPLIER = 1.25
+CACHE_READ_MULTIPLIER = 0.1
+
 #: The token count a writer records for a model call that ran but reported
 #: no usage (it timed out, crashed, or printed something that was not JSON).
 #: Such a call still spent money, so it must not read as $0: month_to_date
@@ -65,7 +82,7 @@ def month_to_date(ledger, prices, now):
     unaccounted = 0
     unrecorded = 0
     for entry in ledger.entries():
-        if entry.get("input_tokens") is None and entry.get("output_tokens") is None:
+        if all(entry.get(field) is None for field in TOKEN_FIELDS):
             continue
         when = parse_ledger_timestamp(entry.get("at"))
         if when is None:
@@ -76,14 +93,14 @@ def month_to_date(ledger, prices, now):
             continue
         if (when.year, when.month) != (now.year, now.month):
             continue
-        if UNRECORDED in (entry.get("input_tokens"), entry.get("output_tokens")):
+        if UNRECORDED in (entry.get(field) for field in TOKEN_FIELDS):
             unrecorded += 1
             continue
         tokens = _token_counts(entry)
         if tokens is None:
             unaccounted += 1
             continue
-        if tokens == (0, 0):
+        if not any(tokens):
             # No model call ran, so there is nothing to price, whatever the
             # line names as its model (or none). Pricing it would raise
             # UnknownModel for a line with no model, and the guard would
@@ -124,7 +141,8 @@ def lower_bound_causes(unreadable, unrecorded):
 
 
 def _token_counts(entry):
-    """`(input, output)` as numbers, or None if either is not one.
+    """`(input, output, cache write, cache read)` as numbers, a missing one
+    as 0, or None if any is not a number.
 
     A writer emitting "1000" for 1000 is a plausible hook bug, and a str
     reaches the price table as a TypeError from multiplication rather than
@@ -132,12 +150,20 @@ def _token_counts(entry):
     month_to_date counts it first, as `unrecorded`.)
     """
     counts = []
-    for key in ("input_tokens", "output_tokens"):
+    for key in TOKEN_FIELDS:
         value = entry.get(key) or 0
         if isinstance(value, bool) or not isinstance(value, (int, float)):
             return None
         counts.append(value)
     return tuple(counts)
+
+
+def _rate(value):
+    """A price as a float; TypeError for a bool or None, which float() would
+    take as 1.0 or reject unclearly."""
+    if isinstance(value, bool) or value is None:
+        raise TypeError(f"not a price: {value!r}")
+    return float(value)
 
 
 class UnknownModel(Exception):
@@ -154,24 +180,34 @@ class PriceTable:
     def __init__(self, prices):
         self._prices = dict(prices)
 
-    def cost(self, model, input_tokens, output_tokens):
+    def cost(self, model, input_tokens, output_tokens, cache_write_tokens=0,
+             cache_read_tokens=0):
         """Cost in USD. Raises UnknownModel for an absent or malformed entry.
 
         Malformed, not just absent: a config typo (`ouput`) must surface as
         UnknownModel naming the model, rather than as a KeyError the Gateway
-        turns into GUARD_ERROR with a dict key for a message.
+        turns into GUARD_ERROR with a dict key for a message. A `cache_write`
+        or `cache_read` rate is optional (CACHE_WRITE_MULTIPLIER and
+        CACHE_READ_MULTIPLIER of the input rate when absent), and one that is
+        given but is not a number is malformed too.
         """
-        rate = self._prices.get(model)
-        if not isinstance(rate, dict):
+        entry = self._prices.get(model)
+        if not isinstance(entry, dict):
             raise UnknownModel(model)
         try:
-            rate = {"input": float(rate["input"]), "output": float(rate["output"])}
+            rate = {side: _rate(entry[side]) for side in ("input", "output")}
+            rate["cache_write"] = (_rate(entry["cache_write"]) if "cache_write" in entry
+                                   else rate["input"] * CACHE_WRITE_MULTIPLIER)
+            rate["cache_read"] = (_rate(entry["cache_read"]) if "cache_read" in entry
+                                  else rate["input"] * CACHE_READ_MULTIPLIER)
         except (KeyError, TypeError, ValueError):
             raise UnknownModel(model) from None
         return (
-            input_tokens * rate["input"] / PER_MILLION
-            + output_tokens * rate["output"] / PER_MILLION
-        )
+            input_tokens * rate["input"]
+            + output_tokens * rate["output"]
+            + cache_write_tokens * rate["cache_write"]
+            + cache_read_tokens * rate["cache_read"]
+        ) / PER_MILLION
 
 
 class Budget:

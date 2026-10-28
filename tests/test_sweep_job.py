@@ -1040,3 +1040,41 @@ def test_the_duplicate_check_follows_the_configured_branch_prefix(tmp_path, no_r
     else:
         assert past_step_2c(line)
         assert line["work"] == WORK and line["open_sweep_prs"] == []
+
+
+# --- cache tokens on the line (cm-2ui) -------------------------------------------------
+
+def test_line_cost_fields_sums_both_calls_cache_tokens():
+    scan = scan_of(SCANNED, usage={"input_tokens": 10, "output_tokens": 1,
+                                   "cache_creation_input_tokens": 100,
+                                   "cache_read_input_tokens": 1000})
+    fix = fix_run_of(claude_payloads.success("done", usage={
+        "input_tokens": 20, "output_tokens": 2, "cache_creation_input_tokens": 200,
+        "cache_read_input_tokens": 2000}))
+
+    got = line_cost_fields(MODEL, scan=scan, fix_run=fix)
+
+    assert (got["input_tokens"], got["output_tokens"]) == (30, 3)
+    assert got["cache_creation_input_tokens"] == 300
+    assert got["cache_read_input_tokens"] == 3000
+
+
+def test_line_cost_fields_leaves_out_cache_counts_that_are_zero_or_absent():
+    """A line from a call that used no cache reads as lines always have."""
+    fix = fix_run_of(claude_payloads.success("done", usage={
+        "input_tokens": 20, "output_tokens": 2}))
+
+    got = line_cost_fields(MODEL, fix_run=fix)
+
+    assert "cache_creation_input_tokens" not in got and "cache_read_input_tokens" not in got
+
+
+@pytest.mark.parametrize("value", [-1, "many", float("nan"), True])
+def test_a_cache_count_that_is_not_usable_makes_the_line_unrecorded(value):
+    fix = fix_run_of(claude_payloads.success("done", usage={
+        "input_tokens": 20, "output_tokens": 2, "cache_read_input_tokens": value}))
+
+    got = line_cost_fields(MODEL, fix_run=fix)
+
+    assert got["input_tokens"] == UNRECORDED and got["output_tokens"] == UNRECORDED
+    assert "cache_read_input_tokens" not in got

@@ -144,7 +144,7 @@ from pathlib import Path
 from typing import Optional
 
 from curamoir import github, publish
-from curamoir.budget import UNRECORDED
+from curamoir.budget import CACHE_READ_FIELD, CACHE_WRITE_FIELD, UNRECORDED
 from curamoir.config import ConfigError
 from curamoir.fix_counts import (
     found_delta,
@@ -683,7 +683,8 @@ def _unfinished(fix_run):
 # --- the line's cost -------------------------------------------------------------------
 
 #: Every top-level field line_cost_fields may write.
-COST_FIELDS = frozenset({"input_tokens", "output_tokens", "model", "cost_usd"})
+COST_FIELDS = frozenset({"input_tokens", "output_tokens", CACHE_WRITE_FIELD,
+                         CACHE_READ_FIELD, "model", "cost_usd"})
 
 
 def line_cost_fields(model, scan=None, fix_run=None):
@@ -700,10 +701,14 @@ def line_cost_fields(model, scan=None, fix_run=None):
       `output_tokens` or `model`, never zeros.
     - Every call that ran reported numeric `input_tokens` and
       `output_tokens` in its usage: both counts are the SUM of the calls',
-      with `model`.
+      with `model`. So are the prompt-cache counts,
+      `cache_creation_input_tokens` and `cache_read_input_tokens` (cm-2ui),
+      each written only when its sum is above 0 (a call that used no cache
+      leaves a line as it always was) and read as 0 when a usage lacks it.
     - Any call that ran did not (its usage is missing, as after a timeout
-      or crash, or a count is not fix_step.usable_number): both counts are
-      budget.UNRECORDED, with `model`, whatever the other call reported;
+      or crash, or a count, a cache count included, is not
+      fix_step.usable_number): both counts are budget.UNRECORDED, with
+      `model` and no cache counts, whatever the other call reported;
       budget.month_to_date counts the line as `unrecorded`.
     - `cost_usd` is the sum of the calls' reported dollar figures (the fix
       step's `total_cost_usd` plus the scan's `cost_usd`), and is left out
@@ -732,6 +737,10 @@ def line_cost_fields(model, scan=None, fix_run=None):
     else:
         fields = {"input_tokens": sum(count[0] for count in counts),
                   "output_tokens": sum(count[1] for count in counts)}
+        for position, field in ((2, CACHE_WRITE_FIELD), (3, CACHE_READ_FIELD)):
+            total = sum(count[position] for count in counts)
+            if total > 0:
+                fields[field] = total
     fields["model"] = model
     costs = [cost for _usage, cost in calls]
     if all(usable_number(cost) for cost in costs):
@@ -740,9 +749,14 @@ def line_cost_fields(model, scan=None, fix_run=None):
 
 
 def _counts(usage):
-    """(input, output) tokens from a call's `usage`, or None when it has no
-    usable pair."""
+    """(input, output, cache write, cache read) tokens from a call's
+    `usage`, or None when it has no usable input and output pair or a cache
+    count it gives is not usable. An absent cache count is 0."""
     if not isinstance(usage, dict):
         return None
-    pair = (usage.get("input_tokens"), usage.get("output_tokens"))
-    return pair if all(usable_number(value) for value in pair) else None
+    # A cache count that is absent or null is 0: the API omits or nulls it
+    # for a call that used no cache. Any other non-number is not usable.
+    cache = tuple(0 if usage.get(field) is None else usage.get(field)
+                  for field in (CACHE_WRITE_FIELD, CACHE_READ_FIELD))
+    counts = (usage.get("input_tokens"), usage.get("output_tokens"), *cache)
+    return counts if all(usable_number(value) for value in counts) else None

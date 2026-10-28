@@ -236,7 +236,11 @@ which line each path records).
    **The line's cost.** Spend is derived at read time from recorded
    tokens, never from a stored dollar figure (budget.py): the
    authoritative spend of a sweep line is its top-level `input_tokens`
-   and `output_tokens`, priced at its top-level `model`. That is what
+   and `output_tokens`, with its prompt-cache counts
+   `cache_creation_input_tokens` and `cache_read_input_tokens` when above
+   0 (cm-2ui; priced at the model's `cache_write` / `cache_read` rates,
+   1.25x and 0.1x its input rate by default), priced at its top-level
+   `model`. That is what
    budget.month_to_date reads (the E0-R4 ceiling and /curamoir:status),
    and what E11-R2 re-prices when a price changes; it reads nothing
    inside `tier1`. So the runner writes those two counts as TOTALS: the
@@ -292,11 +296,12 @@ which line each path records).
    If the fix step and the scan ever run on different models, that
    single `model` misprices one of them, and the line will need a token
    record per call (cm-kpz.1, E11-R1: every model call attributed with
-   its own tokens). A second known limit: the counts leave out the
-   cache tokens (the usage's `cache_creation_input_tokens` and
-   `cache_read_input_tokens`), so a call that used the prompt cache is
-   under-priced until cm-2ui counts them. curamoir.sweep_job writes these
-   top-level fields on each sweep line on which a call started.
+   its own tokens). A second known limit: a write to the 1-hour cache
+   costs 2x the input rate, not the default 1.25x, and the counts do not
+   tell the two caches apart, so such writes are under-priced unless the
+   model's price entry sets `cache_write` (budget.CACHE_WRITE_MULTIPLIER).
+   curamoir.sweep_job writes these top-level fields on each sweep line on
+   which a call started.
 
    **A cap of 0.** `sweep.max_files_per_pr: 0` is a valid count, and
    means no PR may carry a file. Tier 1 reads it as "no candidate file"
