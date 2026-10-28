@@ -166,7 +166,7 @@ def test_changing_branch_by_name_is_refused_toward_git_switch():
 
 
 def test_creating_a_branch_is_not_discarding_a_tree():
-    """`-b` and friends take a NEW branch name, so there is nothing to lose."""
-    for command in ("git checkout -b feature/y", "git checkout -B feature/y",
-                    "git checkout --orphan fresh"):
+    """`-b` and friends take a NEW branch name, so there is nothing to lose.
+    Not `-B`: it resets the branch when it exists (round 10, refused there)."""
+    for command in ("git checkout -b feature/y", "git checkout --orphan fresh"):
         assert not judge_command(command, True).deny, command

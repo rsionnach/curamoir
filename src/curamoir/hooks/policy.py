@@ -113,7 +113,7 @@ from curamoir.hooks._shell import (
     strip_redirections,
     unquoted,
 )
-from curamoir.hooks.destructive import judge_destructive
+from curamoir.hooks.destructive import DELETION_ALTERNATIVE, judge_destructive
 from curamoir.hooks.verdict import Category, Decision
 
 # Construction whose effect this guard cannot determine by reading it. Refused
@@ -142,6 +142,9 @@ ALLOWED = {
         # the writes a sweep needs
         "add", "commit", "checkout", "switch", "push", "fetch", "pull", "stash",
         "restore", "init", "merge", "rebase", "cherry-pick", "revert", "apply", "am",
+        # `git rm --cached` untracks, and is the alternative the deletion
+        # refusals name; `git rm` without it is the denylist's (round 10).
+        "rm",
         # Present so the DENYLIST can refine them and name the safe alternative.
         # `reset` and `clean` have legitimate non-destructive forms a job needs
         # (`reset --soft`, `reset <path>` to unstage, `clean -n` to preview), and
@@ -538,6 +541,14 @@ _PROGRAM_CHECKS = {
 }
 
 
+def _wrapped(segment):
+    """The program `segment` (redirections stripped) runs, past assignments."""
+    tokens = list(segment)
+    while tokens and _ASSIGNMENT.match(tokens[0]):
+        tokens = tokens[1:]
+    return tokens[0].strip("\"'").rsplit("/", 1)[-1] if tokens else ""
+
+
 def _runs_a_non_reader(segment):
     """Whether `segment` (redirections stripped) runs a program not on
     _TREE_SAFE, which may change the working tree (round 8, I3). A runner
@@ -547,6 +558,18 @@ def _runs_a_non_reader(segment):
     while tokens and _ASSIGNMENT.match(tokens[0]):
         tokens = tokens[1:]
     return bool(tokens) and tokens[0].strip("\"'").rsplit("/", 1)[-1] not in _TREE_SAFE
+
+
+#: Programs that delete or truncate files: refused with what to do instead
+#: rather than the generic allowlist refusal (round 10). `sed -i` with them.
+_DELETERS = frozenset({"rm", "rmdir", "unlink", "truncate", "shred"})
+
+#: Programs that run the command after them (`timeout 5 git reset --hard`).
+#: When one is refused by the allowlist and the command it wraps breaks a
+#: destructive rule, the rule's refusal is returned instead, since it names
+#: the safe alternative (round 10).
+_WRAPPERS = frozenset({"time", "nice", "timeout", "command", "nohup", "env", "sudo",
+                       "doas", "stdbuf", "ionice", "setsid", "xargs"})
 
 
 def _inline_code_refusal(program):
@@ -681,6 +704,14 @@ def _refusal_for(tokens):
             Category.NOT_ALLOWLISTED,
             f"{program!r} can run arbitrary programs, so allowlisting it would "
             "allowlist everything",
+        )
+
+    if program in _DELETERS or (program == "sed" and any(
+            a == "-i" or a.startswith(("-i", "--in-place")) for a in arguments)):
+        return (
+            Category.NOT_ALLOWLISTED,
+            f"{program} deletes or truncates files, which a job does not do",
+            DELETION_ALTERNATIVE,
         )
 
     if program not in ALLOWED:
@@ -888,6 +919,11 @@ def _judge(command):
 
         if refusal is None:
             refusal = _refusal_for(segment)
+        if refusal is not None and refusal[0] == Category.NOT_ALLOWLISTED and _wrapped(
+                segment) in _WRAPPERS:
+            wrapped = judge_destructive(segment, in_job=True)
+            if wrapped.deny and wrapped.category == Category.DESTRUCTIVE:
+                return wrapped
         if refusal is not None:
             # A refusal may name its own alternative as a third element; the
             # default is the allowlist's own remedy.

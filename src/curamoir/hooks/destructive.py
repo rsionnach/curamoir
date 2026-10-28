@@ -33,9 +33,11 @@ deliberately stdlib-only — see pretooluse.py.
 Stdlib only, and no config read: this runs on every Bash call during a job.
 """
 
+import os
 import re
 from fnmatch import fnmatch
 
+from curamoir.hooks._policy_common import _CWD, _subcommand_at
 from curamoir.hooks._shell import (
     SHELLS,
     lex,
@@ -47,7 +49,24 @@ from curamoir.hooks._shell import (
 from curamoir.hooks.verdict import Category, Decision, Rule, Unverifiable
 
 # Programs whose misuse this list exists to stop.
-_DANGEROUS = ("rm", "git", "find")
+_DANGEROUS = ("rm", "git", "find", "gh", "bd")
+
+#: What a job does instead of deleting or truncating a file (round 10).
+DELETION_ALTERNATIVE = (
+    "a job does not delete or truncate files: put the deletion in the PR's "
+    "description, or `git rm --cached` to untrack"
+)
+
+#: What a job does instead of moving an existing branch (round 10).
+_BRANCH_MOVE_ALTERNATIVE = (
+    "create a new branch (git switch -c <new>) instead of moving an existing one"
+)
+
+#: What a job does instead of deleting something on the remote (round 10).
+_REMOTE_DELETION_ALTERNATIVE = "leave the branch; say in the PR what should be deleted"
+
+#: Redirection operators that TRUNCATE their target (not `>>`, which appends).
+_TRUNCATING = frozenset({">", ">|", "&>"})
 
 #: cúramóir's own state. A job may read it; rewriting or moving it destroys the
 #: ledger, the journal and the handoff — and silences the four hooks that would
@@ -126,6 +145,35 @@ def _abbreviated(flags, option, min_length=4):
                for flag in flags)
 
 
+def _gh_rule(arguments):
+    """The Rule for a gh command that deletes on the remote (round 10):
+    `gh repo delete`, `gh pr close -d/--delete-branch`, and `gh api` with the
+    DELETE method in any spelling; else None."""
+    positionals, flags = _parse_flags(arguments)
+    words = positionals[:2]
+    if words == ["repo", "delete"]:
+        return Rule("gh repo delete deletes a repository on the remote",
+                    _REMOTE_DELETION_ALTERNATIVE)
+    if words == ["pr", "close"] and ("d" in flags or _abbreviated(flags, "--delete-branch", 5)):
+        return Rule("gh pr close --delete-branch deletes the PR's branch on the remote",
+                    _REMOTE_DELETION_ALTERNATIVE)
+    if words[:1] == ["api"]:
+        for index, argument in enumerate(arguments):
+            name, _, value = argument.partition("=")
+            if argument.startswith("-X") and not argument.startswith("--"):
+                value = argument[2:].lstrip("=")
+            elif name == "--method":
+                pass
+            else:
+                continue
+            if not value:
+                value = arguments[index + 1] if index + 1 < len(arguments) else ""
+            if value.upper() == "DELETE":
+                return Rule("gh api -X DELETE deletes on the remote",
+                            _REMOTE_DELETION_ALTERNATIVE)
+    return None
+
+
 def _git_subcommand(tokens):
     """(subcommand, remaining tokens), skipping git's global options."""
     index = 1
@@ -182,6 +230,17 @@ _SOURCE_SUFFIXES = (
 
 def _is_source_file(target):
     return target.endswith(_SOURCE_SUFFIXES)
+
+
+def _would_overwrite(target):
+    """Whether writing `target` would destroy a source file's content: it is
+    a source file, and it exists, or the working directory is unknown so that
+    cannot be told (round 10: `echo x > new_dir/new.py` creates a file, which
+    is no loss)."""
+    if not _is_source_file(target):
+        return False
+    cwd = _CWD.get()
+    return cwd is None or os.path.lexists(os.path.join(cwd, target))
 
 
 #: Allowlisted programs that OVERWRITE a file named in their arguments, and
@@ -290,6 +349,18 @@ def _judge(tokens):
                 )
         return None
 
+    if program == "gh":
+        return _gh_rule(tokens[1:])
+
+    if program == "bd":
+        at, refused = _subcommand_at("bd", tokens[1:])
+        if refused is None and at is not None and tokens[1:][at] == "delete":
+            return Rule(
+                "bd delete removes an issue and its history from the tracker",
+                "bd close <id>, which keeps the record",
+            )
+        return None
+
     if program != "git":
         return None
 
@@ -355,6 +426,17 @@ def _judge(tokens):
         # branch case and saves the working tree on the path case.
         # `-b`/`-B`/`--orphan`/`--track` CREATE a branch; the positional is a
         # new branch name and there is no tree to lose.
+        # `-B` (checkout) and `-C`/`--force-create` (switch) create OR RESET:
+        # an existing branch is moved, and the commits only it had are dropped
+        # (round 10).
+        if (subcommand == "checkout" and "B" in flags) or (
+                subcommand == "switch" and ("C" in flags or _abbreviated(
+                    flags, "--force-create", 9))):
+            return Rule(
+                f"git {subcommand} {'-B' if subcommand == 'checkout' else '-C'} moves "
+                "an existing branch, dropping the commits only it had",
+                _BRANCH_MOVE_ALTERNATIVE,
+            )
         creating = flags & {"b", "B", "--orphan", "--track", "-t", "t"}
         if subcommand == "checkout" and positionals and not creating:
             return Rule(
@@ -398,7 +480,27 @@ def _judge(tokens):
                 "git branch -D deletes a branch even if its work is unmerged",
                 "git branch -d",
             )
+        # -f moves an existing branch, -M renames over one and -C copies over
+        # one: each drops the commits only the overwritten branch had.
+        if _is_forced(flags) or "M" in flags or "C" in flags:
+            return Rule(
+                "git branch -f/-M/-C moves or overwrites an existing branch, dropping "
+                "the commits only it had",
+                _BRANCH_MOVE_ALTERNATIVE,
+            )
         return None
+
+    if subcommand == "tag" and "d" in flags:
+        return Rule(
+            "git tag -d deletes a tag, which others may have fetched and built from",
+            "leave it; say in the PR which tag should go",
+        )
+
+    if subcommand == "rm" and "--cached" not in flags:
+        return Rule(
+            "git rm deletes files from the working tree",
+            DELETION_ALTERNATIVE,
+        )
 
     # The commands that make `git reset --hard` actually unrecoverable. This
     # module's own refusal text calls that command irrecoverable, which is only
@@ -459,16 +561,28 @@ def _inspect(tokens, depth):
         # Judged before the operators are stripped, because the write target is
         # the effect: `cat /dev/null > src/foo.py` truncates a source file while
         # every program in it is allowlisted.
+        bare = strip_redirections(segment)
         for target in redirection_targets(segment):
             if _OWN_STATE in target.split("/"):
                 return _own_state_rule("redirecting output over")
-            if _is_source_file(target):
+        for index, operator in enumerate(segment[:-1]):
+            if operator not in _TRUNCATING:
+                continue
+            target = segment[index + 1]
+            # The shell empties the target before the program reads it, so
+            # `sort a > a` leaves `a` empty (round 10).
+            if os.path.normpath(target) in {os.path.normpath(a) for a in bare[1:]}:
+                return Rule(
+                    f"redirecting output over {target}, which the same command reads, "
+                    "empties it before it is read",
+                    "write to a new file, then mv it over",
+                )
+            if _would_overwrite(target):
                 return Rule(
                     f"redirecting output over {target} truncates a source file, "
                     "discarding whatever it held with no backup",
                     "edit the file with the Edit tool, which keeps the old content",
                 )
-        bare = strip_redirections(segment)
         if not bare:
             continue
 
@@ -476,7 +590,7 @@ def _inspect(tokens, depth):
             return _own_state_rule(f"{program_name(bare[0])!r} over")
 
         for target in _write_targets(bare):
-            if _is_source_file(target):
+            if _would_overwrite(target):
                 return Rule(
                     f"{program_name(bare[0])} would overwrite {target}, a source "
                     "file, discarding whatever it held with no backup",

@@ -46,27 +46,50 @@ from curamoir.hooks.verdict import Category, Decision
 def main(argv=None, stdin=None, stdout=None):
     stdin = stdin or sys.stdin
     stdout = stdout or sys.stdout
+
+    # Whether this is a job is decided FIRST, from the environment, before
+    # anything in the payload is trusted (round 10): once in a job, a payload
+    # that cannot be read (not JSON, an array, a `cwd` that is a number, a
+    # `tool_input` that is a string) is a deny, never a silent exit, because
+    # silence permits the call. The lock fallback needs the payload's `cwd`,
+    # so a failure before it is found stays silent: then nothing says this
+    # is a job.
+    try:
+        signal = in_curamoir_job(os.environ)
+    except Exception:
+        return 0
+    payload = repo = None
     try:
         payload = json.load(stdin)
-    except (ValueError, OSError):
-        # Unparseable input is not our problem to escalate.
+        if signal is None:
+            repo = Path(payload.get("cwd") or ".")
+            signal = in_curamoir_job(os.environ, repo)
+    except Exception:
+        if signal is None:
+            return 0
+    if not signal:
         return 0
 
     try:
         if payload.get("tool_name") != "Bash":
             return 0
-
-        command = (payload.get("tool_input") or {}).get("command") or ""
-        repo = Path(payload.get("cwd") or ".")
-
-        signal = in_curamoir_job(os.environ, repo)
-        if not signal:
-            return 0
-    except Exception:
-        # Same reasoning as above: never let a guard failure become a crash on
-        # the developer's tool call. Before we know we are in a job, silence is
-        # right: outside one, nothing is denied anyway.
-        return 0
+        command = payload["tool_input"].get("command") or ""
+        if not isinstance(command, str):
+            raise TypeError("tool_input.command is not a string")
+        if repo is None:
+            cwd = payload.get("cwd") or "."
+            if not isinstance(cwd, str):
+                raise TypeError("cwd is not a string")
+            repo = Path(cwd)
+    except Exception as error:
+        return _deny(stdout, Decision(
+            deny=True,
+            reason=("blocked by cúramóir: the hook payload could not be read "
+                    f"({type(error).__name__}), so the command is refused rather "
+                    "than allowed"),
+            alternative="retry the command",
+            category=Category.UNVERIFIABLE,
+        ), signal)
 
     # Inside a job, a failure to judge is a refusal (R5 edge-case review):
     # silence here PERMITS the call, so an exception anywhere below would
@@ -88,6 +111,12 @@ def main(argv=None, stdin=None, stdout=None):
         )
     if not decision.deny:
         return 0
+    return _deny(stdout, decision, signal)
+
+
+def _deny(stdout, decision, signal):
+    """Write `decision` to `stdout` as a deny; 0 always (the hook never
+    crashes the developer's tool call)."""
     try:
         reason = refusal_text(decision, signal)
     except Exception:
