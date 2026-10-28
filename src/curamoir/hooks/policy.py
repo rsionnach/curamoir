@@ -19,7 +19,22 @@ The denylist is kept as a second pass, because an allowlisted program can still
 be used destructively: `git push` is legitimate, `git push --force` is not.
 
 Scope is E0-R5's: this applies during a cúramóir job. The developer's own
-commands in their own session are their business.
+commands in their own session are their business, except while the supervisor
+lock exists (hooks/destructive.py says why).
+
+**What it stops, and what it does not** (cm-hve, a decision of 2026-10-28).
+It stops code composed at call time: a shell's or interpreter's inline code,
+however it is reached (directly, through a wrapper runner such as `uv run` or
+`docker run`, through `make --eval`, or through a heredoc), a package fetched
+and run (`pnpm dlx`, `uv tool run`), and a git setting or environment variable
+whose value is a command. It does NOT stop code the agent writes to a file and
+then runs through an allowlisted runner: `pytest`, `make`, `go run`,
+`cargo run` or `bash script.sh` run whatever the repository holds at that
+moment, the agent's edits included. Telling a reviewed file from one written a
+moment ago would not close that, since a test file is one too. What bounds it
+is the sweep's scope review of every changed path (fix_scope), and, beneath
+that, the README's word: guards are a ratchet against drift, not a security
+boundary.
 
 Stdlib only, and no config read: this runs on every Bash call during a job.
 """
@@ -195,8 +210,8 @@ _INLINE_INPUT = frozenset({"<<", "<<-", "<<<", "-s", "/dev/stdin", "-"})
 #: lines are shell, `pip install -r /dev/stdin` a requirements file.
 #:
 #: This is NOT the "`make` runs repo-controlled code, which is an accepted
-#: trade" case: that trade is about a committed Makefile. Text composed at call
-#: time is the line this module draws.
+#: trade" case: that trade is about a Makefile in the repository. Text composed
+#: at call time is the line this module draws.
 _PROGRAM_TEXT_OPTIONS = frozenset({
     "-f", "--file", "--makefile", "-r", "--requirement", "-c", "--config",
     "--script",
@@ -210,7 +225,70 @@ _INLINE_CODE_OPTIONS = {
     "npm": frozenset({"-c", "--call"}),
     "yarn": frozenset({"-c", "--call"}),
     "pnpm": frozenset({"-c", "--call"}),
+    # `make --eval='x:;<recipe>' x` is a makefile written at call time, and
+    # its recipes are shell (cm-hve).
+    "make": frozenset({"--eval", "-E"}),
 }
+
+#: Allowlisted programs that run ANOTHER program named in their arguments:
+#: `uv run python -c ...`, `npm exec -- node -e ...`, `docker run img sh -c`.
+#: The inline-code checks looked only at the outermost program, so a one-word
+#: prefix walked past them (cm-hve). For these, a code runner anywhere in the
+#: arguments is judged from there as a command of its own.
+_WRAPPERS = frozenset({"uv", "npm", "pnpm", "yarn", "docker", "podman"})
+
+#: Programs that run code they are handed, looked for inside a wrapper's
+#: arguments. Not `_INTERPRETERS` itself: it holds `exec` and `.`, which are
+#: also ordinary words there (`pnpm exec eslint .`).
+_CODE_RUNNERS = SHELLS | frozenset({
+    "node", "nodejs", "deno", "bun", "perl", "ruby", "php", "awk", "gawk", "lua",
+    "env", "xargs", "eval", "sudo",
+})
+_PYTHON_NAME = re.compile(r"^python[0-9.]*$")
+
+#: (program, subcommand) pairs that fetch a package and run it: code nobody
+#: reviewed, chosen at call time. `uvx` is `uv tool run`, which the allowlist
+#: never admitted either. NOT `npm exec`: it runs a project's installed binary
+#: (`npm exec tsc`, kept allowed), though it also fetches a package that is
+#: not installed, which this guard does not tell apart (cm-hhr).
+_FETCH_AND_RUN = {"pnpm": {"dlx"}, "yarn": {"dlx"}}
+
+#: Environment variables whose value is a command, a library to load or a
+#: config that names one, so setting one in an assignment prefix runs code
+#: the guard never sees (`GIT_PAGER='sh -c ...' git log`). PYTHONPATH is
+#: deliberately absent: the sweep's own test command sets it, and the code it
+#: reaches is the repository's, the same door `pytest` already is.
+_COMMAND_VALUED_ENV = frozenset({
+    "GIT_PAGER", "GIT_SSH", "GIT_SSH_COMMAND", "GIT_EXTERNAL_DIFF", "GIT_EDITOR",
+    "GIT_SEQUENCE_EDITOR", "GIT_ASKPASS", "GIT_PROXY_COMMAND", "GIT_EXEC_PATH",
+    "GIT_CONFIG", "GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM", "GIT_CONFIG_PARAMETERS",
+    "GIT_CONFIG_COUNT", "GIT_TEMPLATE_DIR",
+    "PAGER", "MANPAGER", "EDITOR", "VISUAL", "SSH_ASKPASS", "LESSOPEN", "LESSCLOSE",
+    "BASH_ENV", "ENV", "PROMPT_COMMAND", "PATH",
+    "LD_PRELOAD", "LD_LIBRARY_PATH", "DYLD_INSERT_LIBRARIES", "DYLD_LIBRARY_PATH",
+    "NODE_OPTIONS", "PERL5OPT", "RUBYOPT",
+})
+_COMMAND_VALUED_ENV_PATTERN = re.compile(r"^GIT_CONFIG_(KEY|VALUE)_[0-9]+$")
+
+#: git settings whose value git RUNS (or loads a config from, or lets a
+#: transport run): setting one is inline code with a delay, since the next
+#: ordinary `git log` runs it (cm-hve). Lowercase, as git compares keys.
+_GIT_COMMAND_KEY = re.compile(
+    r"core\.(pager|sshcommand|hookspath|fsmonitor|editor|askpass|gitproxy"
+    r"|alternaterefscommand)"
+    r"|sequence\.editor|diff\.external|diff\..+\.(command|textconv)"
+    r"|(merge|mergetool|difftool)\..+\.(driver|cmd|path)"
+    r"|filter\..+\.(clean|smudge|process)|pager\..+|alias\..+"
+    r"|credential(\..+)?\.helper|gpg(\..+)?\.program"
+    r"|include\.path|includeif\..+\.path|uploadpack\.packobjectshook"
+    r"|interactive\.difffilter|remote\..+\.(uploadpack|receivepack)"
+    r"|protocol(\..+)?\.allow|url\..+\.(push)?insteadof|web\.browser"
+    r"|(browser|man)\..+\.(cmd|path)"
+)
+#: `git config` arguments that make it a read, which may name any key.
+_GIT_CONFIG_READS = frozenset({
+    "--get", "--get-all", "--get-regexp", "--get-urlmatch", "--list", "-l", "get", "list",
+})
 
 #: Programs a heredoc may legitimately feed, because they consume it as DATA.
 #:
@@ -293,13 +371,13 @@ def _inline_program_text(program, arguments):
                 Category.UNVERIFIABLE,
                 f"{program} {name} runs the string that follows as a command, "
                 "composed at call time and verifiable by nothing. Put it in a "
-                "committed script and run that instead",
+                "script file and run that instead",
             )
         if name in _PROGRAM_TEXT_OPTIONS and value in _INLINE_INPUT:
             return (
                 Category.UNVERIFIABLE,
                 f"{program!r} is being handed its {name} from stdin, so the "
-                "guard cannot read what it would run. Put it in a committed "
+                "guard cannot read what it would run. Put it in a "
                 "file and name that file instead",
             )
 
@@ -315,6 +393,59 @@ def _inline_program_text(program, arguments):
             "cannot tell whether the body is data or a program. Write the text "
             "to a file and name that file instead",
         )
+    return None
+
+
+def _wrapped_code(program, arguments):
+    """A refusal if a wrapper (`_WRAPPERS`) fetches a package to run, or
+    runs a code runner the guard would refuse on its own, else None."""
+    if program not in _WRAPPERS:
+        return None
+    words = [a for a in arguments if not a.startswith("-")]
+    fetching = _FETCH_AND_RUN.get(program, set())
+    if (words[:1] and words[0] in fetching) or (program == "uv" and words[:2] == ["tool", "run"]):
+        named = " ".join([program, *words[:2 if program == "uv" else 1]])
+        return (
+            Category.NOT_ALLOWLISTED,
+            f"{named} fetches a package and runs it, code nobody reviewed and "
+            "chosen at call time",
+        )
+    for index, argument in enumerate(arguments):
+        name = argument.strip("\"'").rsplit("/", 1)[-1]
+        if name in _CODE_RUNNERS or _PYTHON_NAME.match(name):
+            inner = _refusal_for(arguments[index:])
+            if inner is not None:
+                return inner
+    return None
+
+
+def _git_command_setting(arguments):
+    """A refusal if git is given configuration for this call (`-c`,
+    `--config-env`), or `git config` WRITES a key whose value git runs, else
+    None. Every `-c` is refused, not only the dangerous keys: a job needs
+    none, and a list of dangerous keys is a denylist."""
+    for argument in arguments:
+        if not argument.startswith("-"):
+            break
+        if argument.startswith("-c") or argument.startswith("--config-env"):
+            return (
+                Category.UNVERIFIABLE,
+                f"git {argument.split('=', 1)[0]} sets configuration for this call, and "
+                "a setting such as core.pager or core.sshCommand is a command git "
+                "runs. Run the git command without it",
+            )
+    words = [a for a in arguments if not a.startswith("-")]
+    if words[:1] != ["config"] or _GIT_CONFIG_READS.intersection(arguments):
+        return None
+    for word in words[1:]:
+        key = word.split("=", 1)[0].lower()
+        if _GIT_COMMAND_KEY.fullmatch(key):
+            return (
+                Category.UNVERIFIABLE,
+                f"git config {key} is a setting whose value git runs (or loads), so "
+                "setting it is code that runs on the next ordinary git command. "
+                "Leave the repository's git configuration as it is",
+            )
     return None
 
 
@@ -336,8 +467,17 @@ def _refusal_for(tokens):
     the effect — inline code, a bare interpreter. A program we recognise and
     decline is NOT_ALLOWLISTED, because we read it perfectly well and said no.
     """
-    # Drop leading assignment prefixes so the real program is judged.
+    # Drop leading assignment prefixes so the real program is judged, unless
+    # the variable's value is itself a command.
     while tokens and _ASSIGNMENT.match(tokens[0]):
+        name = tokens[0].split("=", 1)[0]
+        if name in _COMMAND_VALUED_ENV or _COMMAND_VALUED_ENV_PATTERN.match(name):
+            return (
+                Category.UNVERIFIABLE,
+                f"setting {name} makes the program run a command, load code or read "
+                "a config named at call time, which the guard cannot verify. Run "
+                "the command without it",
+            )
         tokens = tokens[1:]
     if not tokens:
         return None
@@ -350,23 +490,24 @@ def _refusal_for(tokens):
         return fed_inline
 
     if program in SHELLS:
-        # A committed SCRIPT may run; inline code may not.
+        # A script FILE may run; inline code may not.
         #
-        # The line is reviewed-artefact versus generated-at-call-time. cúramóir
-        # already allows `pytest`, `make` and `npm`, each of which executes
-        # arbitrary repo-controlled code, so a committed script is no worse.
-        # Inline code is different: it is composed at call time and is not an
-        # artefact anyone reviewed.
+        # The line is a file in the repository versus text composed at call
+        # time. cúramóir already allows `pytest`, `make` and `npm`, each of
+        # which runs whatever code the repository holds, so a script file is
+        # no worse. Whether that file is committed is NOT checked: the agent
+        # can write one and run it, as it can write a test and run pytest
+        # (module docstring, "What it stops, and what it does not").
         #
-        # `-c` is only the best-known route to it. A heredoc, a here-string,
-        # `-s` and `/dev/stdin` all feed a shell code that no one reviewed, and
-        # each of those reads as "a positional", so testing for a positional
-        # read `bash <<EOF` as a committed script.
+        # `-c` is only the best-known route to inline code. A heredoc, a
+        # here-string, `-s` and `/dev/stdin` all feed a shell code composed at
+        # call time, and each of those reads as "a positional", so testing for
+        # a positional read `bash <<EOF` as a script file.
         if _INLINE_INPUT.intersection(arguments):
             return (
                 Category.UNVERIFIABLE,
                 f"{program!r} is being fed code to run inline rather than a "
-                "committed script, which the guard cannot verify. Put the "
+                "script file, which the guard cannot verify. Put the "
                 "script in a file and run that instead",
             )
         # Match `-c` exactly for a long flag, and character by character for a
@@ -417,6 +558,14 @@ def _refusal_for(tokens):
             f"{program!r} is not on cúramóir's allowlist for jobs",
         )
 
+    wrapped = _wrapped_code(program, arguments)
+    if wrapped is not None:
+        return wrapped
+    if program == "git":
+        configured = _git_command_setting(arguments)
+        if configured is not None:
+            return configured
+
     subcommands = ALLOWED[program]
     if subcommands is None:
         return None
@@ -457,7 +606,7 @@ def judge_command(command, in_job):
                 "refused unverified rather than left to time out, because a "
                 "hook that times out permits the action."
             ),
-            alternative="put a command this long in a committed script and run that",
+            alternative="put a command this long in a script file and run that",
             category=Category.UNVERIFIABLE,
         )
 

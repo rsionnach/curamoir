@@ -173,10 +173,18 @@ before any of the features:
 - **An open-PR cap.** You will never come back to a wall of PRs.
 - **Redaction** on everything it writes.
 
-It has three known limits:
+It has four known limits:
 
 - **Guards are a ratchet against drift, not a security boundary.** A Claude Code
   hook that times out fails *open*, so a guard that hangs stops protecting.
+- **The command policy stops code written at call time, not code written to a
+  file.** During a job it refuses inline code (`bash -c`, `python -c`,
+  `node -e`, `make --eval`), including through a runner such as `uv run` or
+  `docker run`; packages fetched and run (`pnpm dlx`, `uv tool run`); and git
+  settings or environment variables whose value is a command (`core.pager`,
+  `GIT_SSH_COMMAND`). It does not stop the agent writing a file and running it
+  through an allowed runner (`pytest`, `make`, `go run`, a script). The sweep's
+  scope review of every changed file is what bounds that.
 - **Redaction is pattern-based.** It catches the shapes it knows. That reduces
   exposure but doesn't guarantee nothing leaks.
 - **The command denylist knows a job only by its signals.** It enforces only
