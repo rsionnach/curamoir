@@ -566,12 +566,8 @@ def _wrapped_code(program, arguments):
         )
     if subcommand not in _RUN_SUBCOMMANDS.get(program, ()):
         return None
-    if program == "npm" and ("--no" not in after or {"--yes", "-y"} & set(after)):
-        # cm-hhr (user decision 2026-10-28): npm exec runs an installed
-        # binary, but fetches and runs a package that is not installed.
-        # `--no` before the program is npm's "never install"; after it, it is
-        # the program's own argument (checked below: --no must be read past).
-        return _npm_without_no(subcommand)
+    if program == "npm":
+        return _npm_exec(subcommand, after)
     for argument in after:
         if argument.split("=", 1)[0] in _FETCHING_OPTIONS:
             return (
@@ -582,12 +578,54 @@ def _wrapped_code(program, arguments):
     start, refused = _leading(program, after, _RUN_OPTIONS)
     if refused is not None:
         return refused
-    if program == "npm" and "--no" not in after[:start if start is not None else len(after)]:
-        return _npm_without_no(subcommand)
     if start is None:
         return None
     # The program run must pass the allowlist on its own.
     return _refusal_for(after[start:])
+
+
+def _npm_exec(subcommand, after):
+    """A refusal for `npm exec`/`npm x` with `after` (what follows the
+    subcommand), else None (cm-hhr, cm-f41).
+
+    npm reads an option ANYWHERE before a literal `--` as its own, after the
+    program name too (`npm exec --no node --version` prints npm's version,
+    npm 11.9.0), so `npm exec --no tsc --yes` would install after all. Every
+    option before `--` is therefore read past with npm's _RUN_OPTIONS or
+    refused, `--no` must be among them, and arguments for the program go
+    after `--`."""
+    flags, valued = _RUN_OPTIONS["npm"]
+    words, options, index = [], set(), 0
+    while index < len(after):
+        argument = after[index]
+        if argument == "--":
+            words.extend(after[index + 1:])
+            break
+        if not argument.startswith("-"):
+            words.append(argument)
+            index += 1
+            continue
+        name, equals, _ = argument.partition("=")
+        if name in valued:
+            options.add(name)
+            index += 1 if equals else 2
+            continue
+        if not equals and argument in flags:
+            options.add(argument)
+            index += 1
+            continue
+        return (
+            Category.NOT_ALLOWLISTED,
+            f"npm {subcommand} reads {name} as its own option wherever it comes before "
+            "`--`, and it is not one a job may give npm",
+            f"npm {subcommand} --no -- <program> <its arguments>",
+        )
+    if "--no" not in options:
+        return _npm_without_no(subcommand)
+    if not words:
+        return None
+    # The program run must pass the allowlist on its own.
+    return _refusal_for(words)
 
 
 def _npm_without_no(subcommand):
