@@ -215,6 +215,17 @@ DEFAULT_TIMEOUT = 1800
 #: The fix agent's whole toolset (the module docstring cites the docs).
 FIX_TOOLS = ("Read", "Grep", "Glob", "Edit")
 
+#: The only tools a job's agent may be given (cm-xq9, user decision
+#: 2026-10-28: no release with known security gaps). None runs a command or
+#: code. The command guard (hooks/policy.py) is defence in depth, not a
+#: security boundary, so a shell (Bash, PowerShell, a REPL) or any tool not
+#: known to be unable to run one is refused by fix_step_argv, allowlist-first:
+#: a tool added to a job later is refused until it is put here on purpose,
+#: and a shell-capable one only once its job runs under a verified OS sandbox
+#: (cm-4w5). Write is left off too: no job needs it, and it could create a
+#: file the review step never expected.
+SHELL_FREE_TOOLS = frozenset({"Read", "Grep", "Glob", "Edit"})
+
 #: What a FixStepRun's `stderr` starts with when its process could not be
 #: started (FixStepRun.started is False); the OSError follows it.
 NOT_STARTED = "the fix step could not start: "
@@ -378,11 +389,19 @@ def fix_step_argv(prompt, model, repo, max_turns=DEFAULT_MAX_TURNS, claude="clau
     """The `claude -p` command line for the fix step in `repo`. The prompt
     sits right after `-p`, as in the CLI reference's examples, and each
     list-valued flag takes one comma-separated value, so no flag can swallow
-    the prompt. Raises ValueError as repo_rules does.
+    the prompt. Raises ValueError as repo_rules does, and for a toolset with
+    any tool outside SHELL_FREE_TOOLS: no job's agent gets a shell, or a tool
+    that could run one, without an OS sandbox (cm-xq9).
 
     `tools` is the whole toolset; the allow rules follow it, so a toolset
     without Edit (the tier-1 scan's, curamoir.tier1.SCAN_TOOLS) approves no
     edit either. Every other flag is the same for both calls."""
+    unsafe = sorted(set(tools) - SHELL_FREE_TOOLS)
+    if unsafe:
+        raise ValueError(
+            f"a job's agent may not be given {', '.join(unsafe)}: only "
+            f"{', '.join(sorted(SHELL_FREE_TOOLS))} run without an OS sandbox, and "
+            "none is verified yet (cm-xq9, cm-4w5)")
     allowed = tuple(tool for tool in _RULE_TOOLS if tool in tools)
     return [
         claude, "-p", prompt,

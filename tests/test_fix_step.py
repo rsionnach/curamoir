@@ -42,6 +42,7 @@ from curamoir.fix_scope import (
 from curamoir.fix_step import (
     FIX_TOOLS,
     SCOPE_LIMITS,
+    SHELL_FREE_TOOLS,
     FixStepRun,
     fix_prompt,
     fix_step_argv,
@@ -522,3 +523,26 @@ def test_before_call_runs_only_after_the_snapshot(sandboxed, monkeypatch):
         run_fix_step(sandboxed, "p", model="m", claude="/nonexistent/claude",
                      before_call=lambda: called.append(True))
     assert called == []
+
+
+# --- no shell without an OS sandbox (cm-xq9, user decision 2026-10-28) ---------------------
+
+@pytest.mark.parametrize("tool", ["Bash", "PowerShell", "BashOutput", "KillShell", "REPL",
+                                  "WebFetch", "Task", "Agent", "NotebookEdit", "mcp__x__y",
+                                  "Write", "bash"])
+def test_a_job_toolset_with_any_tool_outside_the_shell_free_list_is_refused(tmp_path, tool):
+    """The user will not release with known security gaps, and the command
+    guard is not a security boundary. So no job's agent gets a tool that can
+    run commands or code (or one not known to be unable to): allowlist-first,
+    so a tool added later is refused until it is put on the list on purpose,
+    and a shell only once an OS sandbox is verified (cm-4w5)."""
+    with pytest.raises(ValueError, match="sandbox"):
+        fix_step_argv("p", "m", tmp_path, tools=("Read", tool))
+
+
+def test_every_job_toolset_today_is_shell_free(tmp_path):
+    from curamoir.tier1 import SCAN_TOOLS
+
+    for tools in (FIX_TOOLS, SCAN_TOOLS):
+        fix_step_argv("p", "m", tmp_path, tools=tools)
+        assert set(tools) <= set(SHELL_FREE_TOOLS)
