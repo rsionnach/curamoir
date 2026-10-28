@@ -21,6 +21,55 @@ from curamoir.hooks import judge_command
 from curamoir.hooks.verdict import Category
 
 MUST_DENY = [
+    # R5 correctness review of the policy (2026-10-28)
+    pytest.param("yarn run rimraf .", id="r5_yarn_run_installed_binary"),
+    pytest.param("yarn run cross-env FOO=1 node -e 1", id="r5_yarn_run_cross_env"),
+    pytest.param("yarn run concurrently 'rm -rf .'", id="r5_yarn_run_concurrently"),
+    pytest.param("yarn run npx cowsay", id="r5_yarn_run_npx"),
+    pytest.param("npm run build --script-shell=python3", id="r5_npm_script_shell"),
+    pytest.param("npm run build --script-sh=python3", id="r5_npm_script_shell_abbreviated"),
+    pytest.param("yarn --cwd sub run build", id="r5_yarn_cwd_scripts_unknown"),
+    pytest.param("pnpm run build --node-options=--require=./x.js", id="r5_pnpm_node_options"),
+    pytest.param("go env --w GOFLAGS=-toolexec=x", id="r5_go_env_double_dash_w"),
+    pytest.param("go -C . env -w GOFLAGS=-toolexec=x", id="r5_go_C_hides_env"),
+    pytest.param("go -C . run example.com/x@latest", id="r5_go_C_hides_run"),
+    pytest.param("go --C . install example.com/x@latest", id="r5_go_double_dash_C"),
+    pytest.param("yarn run tsx -e 1", id="r5_yarn_run_tsx"),
+    pytest.param("yarn run --require ./x.js node -e 1", id="r5_yarn_run_option_hides_runner"),
+    pytest.param("npm run --prefix x sh -c id", id="r5_npm_run_unknown_option"),
+    pytest.param("git ls-remote --exec=id .", id="r5_git_ls_remote_exec"),
+    pytest.param("docker build -qo out .", id="r5_docker_build_output_cluster"),
+    pytest.param("pnpm node -e 1", id="r5_pnpm_unknown_word_runs_a_program"),
+    pytest.param("yarn node -e 1", id="r5_yarn_node"),
+    pytest.param("yarn run node -e 1", id="r5_yarn_run_a_code_runner"),
+    pytest.param("pnpm run node -e 1", id="r5_pnpm_run_a_code_runner"),
+    pytest.param("npm run sh -c id", id="r5_npm_run_a_shell"),
+    pytest.param("yarn workspace web node -e 1", id="r5_yarn_workspace"),
+    pytest.param("pnpm config set script-shell /tmp/x", id="r5_pnpm_config"),
+    pytest.param("yarn config set scriptShell /tmp/x", id="r5_yarn_config"),
+    pytest.param("git rebase -x 'rm -rf .' HEAD~1", id="r5_git_rebase_x"),
+    pytest.param("git rebase --exec='make' HEAD~1", id="r5_git_rebase_exec"),
+    pytest.param("git rebase --ex 'make' HEAD~1", id="r5_git_rebase_exec_abbreviated"),
+    pytest.param("git rebase -ix make HEAD~1", id="r5_git_rebase_x_in_cluster"),
+    pytest.param("git submodule foreach 'rm -rf .'", id="r5_git_submodule_foreach"),
+    pytest.param("git ls-remote --upload-pack='sh -c id' .", id="r5_git_ls_remote_upload_pack"),
+    pytest.param("git fetch --upload-pack=id .", id="r5_git_fetch_upload_pack"),
+    pytest.param("git fetch --upl id .", id="r5_git_fetch_upload_pack_abbreviated"),
+    pytest.param("git pull --upload-pack=id .", id="r5_git_pull_upload_pack"),
+    pytest.param("git push --receive-pack=id .", id="r5_git_push_receive_pack"),
+    pytest.param("git push --exec=id .", id="r5_git_push_exec"),
+    pytest.param("go env -w GOFLAGS=-toolexec=/tmp/x", id="r5_go_env_w"),
+    pytest.param("go env -u GOFLAGS", id="r5_go_env_u"),
+    pytest.param("go vet -vettool=/tmp/x ./...", id="r5_go_vettool"),
+    pytest.param("go run example.com/tool@latest", id="r5_go_run_remote_module"),
+    pytest.param("go install example.com/tool@v1.2.3", id="r5_go_install_remote_module"),
+    pytest.param("uv tool --color never run cowsay", id="r5_uv_tool_option_before_run"),
+    pytest.param("uv tool --cache-dir /tmp/c run cowsay", id="r5_uv_tool_valued_option"),
+    pytest.param("git config set user.name x --file=/tmp/f", id="r5_git_config_set_option_after"),
+    pytest.param("docker image rm app", id="r5_docker_image_rm"),
+    pytest.param("docker image push app", id="r5_docker_image_push"),
+    pytest.param("docker build -o type=local,dest=/ .", id="r5_docker_build_output"),
+    pytest.param("docker build --output=/ .", id="r5_docker_build_output_equals"),
     # cm-f41: a second review of cm-z0k; an option's value before the
     # subcommand was read as the subcommand
     pytest.param("git -C log config core.pager x", id="f_git_C_value_as_subcommand"),
@@ -165,6 +214,36 @@ MUST_ALLOW = [
     "pnpm --dir web exec eslint .",
     "NO_COLOR=1 CI=true pytest -q",
     "npm init -y",
+    "npm init --scope foo",
+    "go -C sub test ./...",
+    "npm run -w pkg lint",
+    "pnpm run --filter web build",
+    "yarn run -T lint",
+    "pnpm install",
+    "pnpm i --frozen-lockfile",
+    "pnpm run lint",
+    "pnpm test",
+    "yarn",
+    "yarn install --frozen-lockfile",
+    "yarn run build",
+    "yarn test",
+    "npm run lint -- --fix",
+    "git rebase -i HEAD~2",
+    "git rebase main",
+    "git fetch origin",
+    "git pull --rebase",
+    "git push -u origin feature",
+    "git submodule update --init",
+    "go vet ./...",
+    "go env GOPATH",
+    "go run ./cmd/tool",
+    "go install ./cmd/tool",
+    "uv run --directory web pytest",
+    "uv tool list",
+    "docker image ls",
+    "docker image inspect app",
+    "docker build -t app -f Dockerfile .",
+    "git config set user.name x",
     "git -C sub status",
     "git --no-pager log --oneline",
     "git --git-dir=.git status",
@@ -208,16 +287,22 @@ MUST_ALLOW = [
 
 @pytest.mark.parametrize("command", MUST_DENY)
 def test_inline_code_one_step_removed_is_refused(command):
-    decision = judge_command(command, in_job=True)
+    decision = judge_command(command, in_job=True, scripts=SCRIPTS)
 
     assert decision.deny, f"allowed: {command}"
     assert decision.category in (Category.UNVERIFIABLE, Category.NOT_ALLOWLISTED)
     assert decision.alternative, f"{command!r} refused with nothing to do instead"
 
 
+#: The package.json scripts the MUST_ALLOW rows assume (pretooluse reads
+#: them from the repository; `yarn run <name>` of anything else is judged as
+#: the binary it would be).
+SCRIPTS = {"build", "lint", "test"}
+
+
 @pytest.mark.parametrize("command", MUST_ALLOW)
 def test_ordinary_work_through_the_same_programs_is_allowed(command):
-    decision = judge_command(command, in_job=True)
+    decision = judge_command(command, in_job=True, scripts=SCRIPTS)
 
     assert not decision.deny, f"refused: {command}\n  {decision.reason}"
 
@@ -240,3 +325,10 @@ def test_npm_exec_without_no_names_the_flag_to_add():
     decision = judge_command("npm exec tsc", in_job=True)
 
     assert "--no" in decision.reason and "--no" in decision.alternative
+
+
+def test_yarn_run_of_a_script_name_is_judged_strictly_when_the_scripts_are_unknown():
+    """Without package.json's scripts, `build` may be a binary: refused, a
+    retry rather than a run of something unchecked."""
+    assert judge_command("yarn run build", in_job=True).deny
+    assert not judge_command("yarn run build", in_job=True, scripts={"build"}).deny

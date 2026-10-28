@@ -60,7 +60,8 @@ def main(argv=None, stdin=None, stdout=None):
             return 0
 
         delegated = _delegate_to_dcg(command)
-        decision = delegated if delegated is not None else judge_command(command, in_job=True)
+        decision = delegated if delegated is not None else judge_command(
+            command, in_job=True, scripts=_package_scripts(repo))
 
         if decision.deny:
             json.dump(
@@ -95,6 +96,27 @@ def main(argv=None, stdin=None, stdout=None):
 # judge the command, so a missed `dcg` verdict costs only dcg's extra coverage.
 # A wrong refusal costs every command in the job.
 _COULD_NOT_RUN = (2, 64, 126, 127)
+
+
+#: The largest package.json read for its script names. A bigger one is not
+#: read (its scripts are then unknown, and `yarn run <name>` is judged
+#: strictly): the hook has 5s, and a command hook that times out fails open.
+MAX_PACKAGE_JSON_BYTES = 1_000_000
+
+
+def _package_scripts(repo):
+    """The script names in `repo`'s package.json, or None when there is no
+    readable one (policy.judge_command's `scripts`)."""
+    path = repo / "package.json"
+    try:
+        if path.stat().st_size > MAX_PACKAGE_JSON_BYTES:
+            return None
+        scripts = json.loads(path.read_text(encoding="utf-8")).get("scripts")
+    except (OSError, ValueError, AttributeError):
+        return None
+    if not isinstance(scripts, dict):
+        return None
+    return frozenset(name for name in scripts if isinstance(name, str))
 
 
 def refusal_text(decision, signal=None):

@@ -224,3 +224,26 @@ def test_which_signal_fired_is_reported():
 
     assert in_curamoir_job({"CURAMOIR_JOB": "sweep"}).job == "sweep"
     assert in_curamoir_job({}) is None
+
+
+def test_the_hook_reads_package_json_scripts_for_yarn_run(tmp_path):
+    """R5 review of the policy: `yarn run <name>` runs a binary when <name>
+    is no script, so the hook gives the policy the repository's scripts."""
+    (tmp_path / ".curamoir").mkdir()
+    (tmp_path / "package.json").write_text(json.dumps({"scripts": {"build": "tsc"}}),
+                                           encoding="utf-8")
+
+    _, script = run_hook("yarn run build", env={"CURAMOIR_JOB": "sweep"}, cwd=tmp_path)
+    _, binary = run_hook("yarn run rimraf .", env={"CURAMOIR_JOB": "sweep"}, cwd=tmp_path)
+
+    assert script is None
+    assert binary is not None and binary["permissionDecision"] == "deny"
+
+
+def test_an_unreadable_package_json_means_yarn_run_is_judged_strictly(tmp_path):
+    (tmp_path / ".curamoir").mkdir()
+    (tmp_path / "package.json").write_text("{not json", encoding="utf-8")
+
+    _, decision = run_hook("yarn run build", env={"CURAMOIR_JOB": "sweep"}, cwd=tmp_path)
+
+    assert decision is not None and decision["permissionDecision"] == "deny"
