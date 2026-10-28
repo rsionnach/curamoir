@@ -90,6 +90,9 @@ sweep:
   # You should never come back to a wall of PRs.
   max_open_prs: 3
   max_files_per_pr: 20
+  # fixtures/sample-repo's violations are planted for the sweep's own tests
+  # (PLANTED.json): never scan or fix them (cm-t3a).
+  exclude: ["fixtures/**"]
 
 promotion:
   # A principle fixed this many times inside window_days becomes a candidate to

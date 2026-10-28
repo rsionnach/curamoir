@@ -1276,3 +1276,33 @@ def test_a_tier1_finding_in_a_remedied_file_is_not_the_agents(swept):
         findings=(finding(1, 1, unicodedata.normalize("NFC", nfd), ECC),)))
     gone = RemedyResult(deleted=(nfd,), skipped=(), deletable_rules=frozenset())
     assert gone.for_agent(spelled).tier1 == ()
+
+
+# --- sweep.exclude (cm-t3a) ---------------------------------------------------------------
+
+EXCLUDING_WEB = ('version: 1\nsweep:\n  test_command: "true"\n'
+                 '  exclude: ["src/sample/web/**"]\n')
+
+
+def test_excluded_paths_are_never_scan_candidates(tmp_path):
+    """The first dogfood sweep spent 9 of its 20 candidates on files whose
+    violations are planted for tests (fixtures/). `sweep.exclude` keeps a
+    path out of what the scan reads, and so out of what it can find."""
+    repo = tier1_repo(tmp_path, config=EXCLUDING_WEB)
+    with prepare_sandbox(repo, "HEAD", parent=tmp_path) as sandbox:
+        lint_sandbox(sandbox)
+        sandbox.work_list = SimpleNamespace(paths=("src/sample/web/handlers.py",))
+        candidates, _cursor = tier1.scan_candidates(sandbox, (), [], 50)
+
+    assert candidates, "nothing left to scan"
+    assert not [path for path in candidates if path.startswith("src/sample/web/")]
+
+
+def test_without_an_exclude_the_same_paths_are_candidates(tmp_path):
+    repo = tier1_repo(tmp_path)
+    with prepare_sandbox(repo, "HEAD", parent=tmp_path) as sandbox:
+        lint_sandbox(sandbox)
+        sandbox.work_list = SimpleNamespace(paths=())
+        candidates, _cursor = tier1.scan_candidates(sandbox, (), [], 50)
+
+    assert [path for path in candidates if path.startswith("src/sample/web/")]

@@ -170,6 +170,7 @@ from curamoir.git_guard import (
 from curamoir.job_run import SUCCESS
 from curamoir.pr_markdown import code_span, location, plain_text
 from curamoir.repo_config import config_value
+from curamoir.rules import glob_regex
 
 #: The scan's whole toolset: it reads; it never edits.
 SCAN_TOOLS = ("Read", "Grep", "Glob")
@@ -557,6 +558,14 @@ def scannable(path):
             and not is_dependency_file(path))
 
 
+def _excluded(sandbox):
+    """Whether a path is under `sweep.exclude` in the sandbox's config, the
+    base commit's (cm-t3a): a predicate over repo-relative paths."""
+    patterns = [glob_regex(glob) for glob in
+                config_value(str(sandbox.path), "sweep", "exclude", default=[]) or []]
+    return lambda path: any(pattern.fullmatch(path) for pattern in patterns)
+
+
 def _tracked_scannable(sandbox):
     """Every regular file tracked at the sandbox's base that is scannable,
     in git's spelling and order."""
@@ -630,11 +639,13 @@ def scan_candidates(sandbox, held_paths, entries, cap, *, _origin=None):
     already and must use the same pair it records; it is trusted as given,
     not validated, so no other caller passes it."""
     held = {nfc(path) for path in held_paths}
+    excluded = _excluded(sandbox)
     unheld = [path for path in sandbox.work_list.paths if nfc(path) not in held]
-    lint_paths = [path for path in unheld if scannable(path)]
+    lint_paths = [path for path in unheld if scannable(path) and not excluded(path)]
     lint_set = {nfc(path) for path in unheld}
     universe = [path for path in _tracked_scannable(sandbox)
-                if nfc(path) not in held and nfc(path) not in lint_set]
+                if nfc(path) not in held and nfc(path) not in lint_set
+                and not excluded(path)]
     if _origin is None:
         _origin = rotation_origin(entries, sandbox.base)
     changed_from, cursor = _origin

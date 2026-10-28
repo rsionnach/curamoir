@@ -138,6 +138,11 @@ DEFAULTS = {
         # DEC-5 (E3-R1b, curamoir.tier1): scan for violations of principles
         # that have no rule yet, on models.cheap, once per base commit.
         "tier1_scan": True,
+        # cm-t3a: globs (as rule globs, `**/` for any directories) the sweep
+        # never scans, so the tier-1 scan never reads, reports or sends the
+        # fix step to them. Lint rules scope themselves with their own
+        # `exclude:`.
+        "exclude": [],
     },
     "promotion": {"fix_threshold": 3, "window_days": 90},
     "filing": {
@@ -207,7 +212,7 @@ SCHEMA = {
     "sweep": {
         "max_open_prs": COUNT, "max_files_per_pr": COUNT,
         "test_command": STRING, "test_timeout_seconds": TIMEOUT_SECONDS, "max_test_runs": COUNT,
-        "tier1_scan": BOOLEAN,
+        "tier1_scan": BOOLEAN, "exclude": STRING_LIST,
     },
     "promotion": {"fix_threshold": PROMOTION_FIX_THRESHOLD,
                   "window_days": PROMOTION_WINDOW_DAYS},
@@ -487,11 +492,27 @@ def _check_scalar(path, given, expected, problems):
     elif expected is STRING_LIST:
         if not isinstance(given, list) or any(not isinstance(i, str) for i in given):
             problems.append(f"{path}: expected a {STRING_LIST}, got {_type_name(given)}")
+        elif path == "sweep.exclude":
+            _check_globs(path, given, problems)
     elif expected is MAPPING:
         if not isinstance(given, dict):
             problems.append(f"{path}: expected a {MAPPING}, got {_type_name(given)}")
         elif path.endswith("prices"):
             _check_price_table(path, given, problems)
+
+
+def _check_globs(path, globs, problems):
+    """Each glob compiles as a rule glob (rules.glob_regex), so a typo such
+    as `[z-a]` is named here, not raised from inside a sweep."""
+    import re
+
+    from curamoir.rules import glob_regex
+
+    for glob in globs:
+        try:
+            glob_regex(glob)
+        except re.error as error:
+            problems.append(f"{path}: {glob!r} is not a glob that compiles ({error})")
 
 
 def _check_price_table(path, table, problems):

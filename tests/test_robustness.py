@@ -563,3 +563,19 @@ def test_explicit_cache_rates_are_accepted_by_config_validation():
     config = load_config({"budget": {"prices": {"m": {
         "input": 1.0, "output": 1.0, "cache_write": 1.25, "cache_read": 0.1}}}})
     assert config["budget"]["prices"]["m"]["cache_read"] == 0.1
+
+
+@pytest.mark.parametrize("value", [["[z-a].py"], "fixtures/**", [3]])
+def test_a_malformed_sweep_exclude_is_rejected_by_config_validation(value):
+    """cm-t3a: sweep.exclude is a list of globs, each one a glob that compiles."""
+    from curamoir.config import ConfigError, load_config
+
+    with pytest.raises(ConfigError) as caught:
+        load_config({"sweep": {"exclude": value}})
+    assert "sweep.exclude" in str(caught.value)
+
+
+def test_sweep_exclude_defaults_to_nothing():
+    from curamoir.config import load_config
+
+    assert load_config({})["sweep"]["exclude"] == []

@@ -119,6 +119,11 @@ sweep:
   # does not end in a PR or a clean result), in at most max_files_per_pr
   # files (the lint's files first). false = lint output only.
   tier1_scan: true
+  # Paths the sweep never scans, as globs (`**/` matches any directories), so
+  # it never reports or fixes anything there: generated code, vendored code,
+  # test fixtures whose violations are deliberate. Lint rules scope
+  # themselves with their own `exclude:`.
+  exclude: []
 
 promotion:
   # A principle fixed this many times inside window_days becomes a candidate to
