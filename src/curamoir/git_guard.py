@@ -661,7 +661,9 @@ def verify_git_state(state):
         "a `.gitattributes` can point a filter or diff driver at a file, which the "
         "next `git diff` would apply"))
     for label in sorted(set(before) | set(after)):
-        if ".git" not in label.split("/"):
+        # Case-insensitively: on a case-insensitive file system (macOS's
+        # default) `sub/.GIT` is a nested repository to git (cm-3b2).
+        if ".git" not in (part.lower() for part in label.split("/")):
             continue
         change = ("added" if label not in before else "removed" if label not in after
                   else "changed" if before[label] != after[label] else "present")
@@ -727,7 +729,9 @@ def _tree_digests(root):
 
 
 def _is_attributes(label):
-    return label == ".gitattributes" or label.endswith("/.gitattributes")
+    """Whether `label` names a `.gitattributes`, in any case: git reads
+    `.GitAttributes` as one on a case-insensitive file system (cm-3b2)."""
+    return label.rsplit("/", 1)[-1].lower() == ".gitattributes"
 
 
 def _label(root, path):
