@@ -21,6 +21,14 @@ from curamoir.hooks import judge_command
 from curamoir.hooks.verdict import Category
 
 MUST_DENY = [
+    # cm-hhr: npm exec fetches and runs a package that is not installed,
+    # unless told `--no` (user decision 2026-10-28)
+    pytest.param("npm exec tsc", id="hhr_npm_exec_without_no"),
+    pytest.param("npm x tsc", id="hhr_npm_x_without_no"),
+    pytest.param("npm exec --yes cowsay", id="hhr_npm_exec_yes"),
+    pytest.param("npm exec --no --yes cowsay", id="hhr_npm_exec_no_and_yes"),
+    pytest.param("npm exec tsc --no", id="hhr_npm_exec_no_after_program"),
+    pytest.param("npm exec --no cowsay", id="hhr_npm_exec_no_unlisted_program"),
     # cm-z0k: the security review's probes of the first version, each of
     # which got through it
     pytest.param("git config core.pager 'sh -c id' --get", id="z_git_config_get_after"),
@@ -128,6 +136,9 @@ MUST_ALLOW = [
     "pnpm --dir web exec eslint .",
     "NO_COLOR=1 CI=true pytest -q",
     "npm init -y",
+    "npm exec --no tsc",
+    "npm exec --no -- eslint .",
+    "npm x --no prettier --check .",
     "make test",
     "make -C sub test",
     "git config user.name 'A Person'",
@@ -171,3 +182,9 @@ def test_a_command_valued_git_setting_names_the_key():
 
     assert decision.category is Category.UNVERIFIABLE
     assert "core.sshcommand" in decision.reason.lower()
+
+
+def test_npm_exec_without_no_names_the_flag_to_add():
+    decision = judge_command("npm exec tsc", in_job=True)
+
+    assert "--no" in decision.reason and "--no" in decision.alternative

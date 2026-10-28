@@ -254,7 +254,10 @@ _ALLOWED_ENV = frozenset({
 #: what the allowlist would admit on its own, judged by _refusal_for. So
 #: `uv run python -c` is refused as `python -c` is, and `uv run cowsay` as
 #: `cowsay` is.
-_RUN_SUBCOMMANDS = {"uv": "run", "npm": "exec", "pnpm": "exec", "yarn": "exec"}
+_RUN_SUBCOMMANDS = {
+    "uv": frozenset({"run"}), "npm": frozenset({"exec", "x"}),
+    "pnpm": frozenset({"exec"}), "yarn": frozenset({"exec"}),
+}
 
 #: Options of those runners that fetch packages into the run: `uv run --with
 #: pkg pkg-cli` runs code nobody reviewed, chosen at call time.
@@ -449,8 +452,9 @@ def _wrapped_code(program, arguments):
             "uv tool run fetches a package and runs it, code nobody reviewed "
             "and chosen at call time",
         )
-    run = _RUN_SUBCOMMANDS.get(program)
-    if run is None or run not in words[:2]:
+    run = next((word for word in words[:2] if word in _RUN_SUBCOMMANDS.get(program, ())),
+               None)
+    if run is None:
         return None
     after = arguments[arguments.index(run) + 1:]
     for argument in after:
@@ -464,8 +468,21 @@ def _wrapped_code(program, arguments):
     # `--`). An option's value read as the program is judged as one, which
     # refuses rather than admits.
     rest = [a for a in after if a != "--"]
+    leading = set()
     while rest and rest[0].startswith("-"):
+        leading.add(rest[0])
         rest = rest[1:]
+    if program == "npm" and ("--no" not in leading or leading & {"--yes", "-y"}):
+        # cm-hhr (user decision 2026-10-28): npm exec runs an installed
+        # binary, but fetches and runs a package that is not installed.
+        # `--no` before the program is npm's "never install"; after it, it is
+        # the program's own argument.
+        return (
+            Category.NOT_ALLOWLISTED,
+            f"npm {run} without --no (and without --yes) before the program fetches "
+            "and runs a package that is not installed, code nobody reviewed",
+            f"npm {run} --no <program>, which runs only what is installed",
+        )
     if not rest:
         return None
     return _refusal_for(rest)
@@ -804,7 +821,9 @@ def judge_command(command, in_job):
 
         refusal = _refusal_for(segment)
         if refusal is not None:
-            category, reason = refusal
+            # A refusal may name its own alternative as a third element; the
+            # default is the allowlist's own remedy.
+            category, reason, *named = refusal
             return Decision(
                 deny=True,
                 reason=(
@@ -815,9 +834,8 @@ def judge_command(command, in_job):
                     "ALLOWED in curamoir/hooks/policy.py — widening it is a "
                     "code change, so file a bead rather than editing config."
                 ),
-                alternative=(
-                    "file a bead to widen ALLOWED in curamoir/hooks/policy.py"
-                ),
+                alternative=(named[0] if named else
+                             "file a bead to widen ALLOWED in curamoir/hooks/policy.py"),
                 category=category,
             )
 

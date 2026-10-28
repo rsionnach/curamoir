@@ -56,7 +56,8 @@ STILL_ALLOWED = [
     pytest.param("make -f Makefile.ci test", id="make_named_file"),
     pytest.param("pip install -r requirements.txt", id="pip_named_file"),
     pytest.param("docker build -f Dockerfile .", id="docker_named_file"),
-    pytest.param("npm exec tsc", id="npm_exec_program"),
+    # `--no`: npm's "never install" (cm-hhr, user decision 2026-10-28).
+    pytest.param("npm exec --no tsc", id="npm_exec_program"),
 ]
 
 
