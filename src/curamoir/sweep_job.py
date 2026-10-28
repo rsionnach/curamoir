@@ -572,7 +572,14 @@ class _Fix:
         # why what was left was refused too (`scope_after_drop`).
         if not verdict.ok or (dropped and verdict.nothing_changed):
             after_drop = {"scope_after_drop": verdict.as_dict()} if dropped else {}
-            owner.refuse(Reason.SCOPE, first.render(), scope=first.as_dict(), **after_drop)
+            message = first.render()
+            if dropped:
+                # The reason is what was left, not what was dropped.
+                left = ("nothing in scope was left" if verdict.ok else
+                        f"what was left is still out of scope:\n{verdict.render()}")
+                message = (f"out of scope after dropping "
+                           f"{len({b.path for b in dropped})} file(s): {left}")
+            owner.refuse(Reason.SCOPE, message, scope=first.as_dict(), **after_drop)
             return
         # Step 7: only a verdict that changed something is trimmed and
         # tested.
@@ -626,7 +633,7 @@ class _Fix:
             return
         self.open_pr(records, gate, patch, remedies, left_out, fix_fields, dropped)
 
-    def open_pr(self, records, gate, patch, remedies, left_out, fix_fields, dropped=()):
+    def open_pr(self, records, gate, patch, remedies, left_out, fix_fields, dropped):
         """Step 9's PR: its text, then ONE publish.publish, and the line for
         each of publish's outcomes (publish's "Errors" table)."""
         owner, sandbox, sweep_base = self.owner, self.sandbox, self.owner.sweep_base

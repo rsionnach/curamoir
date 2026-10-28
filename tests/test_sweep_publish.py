@@ -1074,7 +1074,8 @@ def test_an_edit_far_from_its_violation_drops_that_file_and_keeps_the_rest(tmp_p
     assert changed_on(tmp_path, line["pr"]["branch"], base_of(repo)) == [BILLING]
     [create] = creates(no_real_gh)
     left = section(create["body_file_content"], "### Files left for the next run")
-    assert f"`{HANDLERS}` (dropped: an edit outside E3-R2's scope, outside_violation)" in left
+    assert (f"`{HANDLERS}` (dropped: an edit outside E3-R2's scope, outside_violation, "
+            "line 10)") in left
 
 
 def test_a_file_a_remedy_deleted_and_the_agent_wrote_back_stays_deleted(tmp_path,

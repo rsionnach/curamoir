@@ -27,7 +27,8 @@ in order:
 5. `### Files left for the next run`: those trimmed past
    `max_files_per_pr`, those the gate dropped, and those put back for an
    edit outside E3-R2's scope (cm-9ab) (E3-R3's "rest", which the next
-   sweep, at the next base, picks up).
+   sweep, at the next base, picks up), and files the agent added outside
+   that scope, removed.
 6. `### Remedies skipped`: each remedy not applied, with its reason.
 7. `### Promotion candidates`: PROMOTION_PENDING (E4-R1/E4-R2 have not
    landed).
@@ -249,7 +250,8 @@ def final_body(records, work_list, gate, base, skipped_remedies, left_out_paths,
             (past `max_files_per_pr`).
         scope_dropped: the breaches whose files the sweep put back before
             the gate (fix_scope.drop_breaching_paths, cm-9ab), listed with
-            the files left for the next run, one line per path.
+            the files left for the next run, one line per path and breach
+            kind, with the line where the breach names one.
         grade_section: E7-R5's text, or None for GRADE_PENDING. Redacted
             whole, then each line escaped as plain_text escapes it
             (pr_markdown.plain_lines: no HTML, links, autolinks or
@@ -420,11 +422,14 @@ def _parts(records, work_list, gate, base, skipped_remedies, left_out_paths, gra
     # Put back before the gate because an edit there went outside E3-R2's
     # scope (cm-9ab): a file's violations are unfixed and the next run has
     # them; a file the agent added had none, and is simply gone.
+    lines = {}
+    for breach in scope_dropped:
+        lines.setdefault((breach.path, breach.kind), breach.line)
     left += [f"- {code_span(path)} (removed: added outside E3-R2's scope)"
              if kind == FILE_ADDED else
              f"- {code_span(path)} (dropped: an edit outside E3-R2's scope, "
-             f"{plain_text(kind)})"
-             for path, kind in sorted({(b.path, b.kind) for b in scope_dropped})]
+             f"{plain_text(kind)}{'' if line is None else f', line {line}'})"
+             for (path, kind), line in sorted(lines.items())]
     skipped = [f"- {code_span(s.path)} ({code_span(s.rule_id)}, remedy "
                f"{code_span(s.remedy)}): {plain_text(s.reason)}" for s in skipped_remedies]
     files = len(gate.paths_for_pr)

@@ -1175,5 +1175,6 @@ def test_scope_dropped_paths_are_left_for_the_next_run_one_line_per_path_and_kin
     assert section(body, "Files left for the next run") == [
         "- ``src/a`new.py`` (removed: added outside E3-R2's scope)",
         "- `src/b.py` (dropped: an edit outside E3-R2's scope, file_not_in_work_list)",
-        "- `src/b.py` (dropped: an edit outside E3-R2's scope, outside_violation)",
+        # The first line a kind names is shown (line 3, not 9).
+        "- `src/b.py` (dropped: an edit outside E3-R2's scope, outside_violation, line 3)",
         "- `src/c.py` (dropped: an edit outside E3-R2's scope, &lt;kind> &#91;x](y))"]

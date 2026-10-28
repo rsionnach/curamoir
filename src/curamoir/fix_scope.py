@@ -343,7 +343,8 @@ which line each path records).
 6. Treat git_guard.GitGuardError (ScopeCheckError is one) as a refusal
    (with `**tier1_state.ledger_fields()`, step 2c's note): no verdict is
    not a verdict, and an unverified fix is not a fix.
-7. A `nothing_changed` verdict is a failure: NOTHING_CHANGED after a fix
+7. A `nothing_changed` verdict (unless step 5 dropped files: then it is
+   SCOPE, as step 5 says) is a failure: NOTHING_CHANGED after a fix
    step, or, when no fix step ran and every remedy was skipped,
    NOTHING_REMEDIED with `remedies_skipped` (curamoir.sweep_job).
    On an ok verdict with paths, test it (E3-R4).
