@@ -74,6 +74,11 @@ ACCEPTED_STRICT = {
     # fix. Found by this test on its first run, which is the point of it: the
     # construct was not in the 34 forms a reviewer had thought of.
     'echo "a\\" {payload}',
+    # ANSI-C quoting is refused whatever it holds (R5 edge-case review):
+    # `$'...'` decodes escapes, so `git reset -$'-hard'` is `--hard` in a
+    # spelling no word-level rule sees. Bash expands nothing inside it; the
+    # refusal is for the decoding, and a plain single-quoted string works.
+    "echo $'{payload}'",
 }
 
 

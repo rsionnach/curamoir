@@ -10,8 +10,9 @@ own, run through the runner (`uv run python -c`, `npm exec --no cowsay`,
 (`npm --script-shell`, `--node-options`).
 
 Each check is called as `check(program, arguments, judge)`, the shape of
-policy._PROGRAM_CHECKS, where `judge` is policy._refusal_for: the program a
-runner runs is judged by the whole policy, as if it were run on its own.
+policy._PROGRAM_CHECKS, where `judge` is policy._nested_refusal: the program
+a runner runs is judged by the whole policy, as if it were run on its own, one
+level of nesting deeper.
 """
 
 from curamoir.hooks._policy_common import (
@@ -96,10 +97,22 @@ _SCRIPT_OPTIONS = {
     "yarn": (frozenset({"-T", "--top-level", "-B", "--binaries-only"}), frozenset()),
 }
 
+#: yarn run's options that make it run a binary, never a script.
+_BINARIES_ONLY = frozenset({"-B", "--binaries-only"})
+
 #: Options of npm, pnpm and yarn that name the program running a script, or
 #: flags for node, refused wherever they come before `--`, since npm reads an
-#: option anywhere before it (R5 review).
-_PROGRAM_NAMING_OPTIONS = frozenset({"script-shell", "scriptshell", "node-options"})
+#: option anywhere before it (R5 review). Kept in the form _option_key gives:
+#: npm's config reads `-` and `_` alike and ignores case (`--node_options`,
+#: `--Script-Shell`), and `scriptshell` is the same key without its dash
+#: (security review of 986347c).
+_PROGRAM_NAMING_OPTIONS = frozenset({"scriptshell", "nodeoptions"})
+
+
+def _option_key(argument):
+    """`argument`'s option name with every `-` and `_` removed, lowercased:
+    the form in which two spellings npm reads as one option compare equal."""
+    return argument.split("=", 1)[0].replace("-", "").replace("_", "").lower()
 
 
 def _package_script(program, arguments, judge):
@@ -114,7 +127,7 @@ def _package_script(program, arguments, judge):
     for argument in after:
         if argument == "--":
             break
-        name = argument.lstrip("-").split("=", 1)[0].lower()
+        name = _option_key(argument)
         # Or a prefix of one (`--script-sh`, _abbreviates), in case npm's
         # option parser expands abbreviations as it long has.
         if argument.startswith("-") and any(
@@ -138,7 +151,8 @@ def _package_script(program, arguments, judge):
     #   is judged as `yarn exec` judges it (R5 review: `yarn run rimraf .`);
     #   when the scripts are unknown, every name is.
     # - With yarn's --cwd the scripts read are the hook's directory's, not
-    #   --cwd's, so they are treated as unknown.
+    #   --cwd's, so they are treated as unknown; with -B/--binaries-only yarn
+    #   runs the binary whatever the scripts are, so likewise.
     #
     # Options before the name are read by their arity (_SCRIPT_OPTIONS) and
     # any other refused, so a value cannot hide the name
@@ -152,6 +166,9 @@ def _package_script(program, arguments, judge):
         return judge(after[start:])
     scripts = _SCRIPTS.get()
     if program == "yarn" and "--cwd" in {a.split("=", 1)[0] for a in arguments}:
+        scripts = None
+    if program == "yarn" and _BINARIES_ONLY.intersection(after[:start]):
+        # Security review of 986347c: `yarn run -B build` with a `build` script.
         scripts = None
     if program == "yarn" and (scripts is None or after[start] not in scripts):
         return judge(after[start:])

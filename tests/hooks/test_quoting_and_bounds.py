@@ -54,7 +54,7 @@ MUST_ALLOW = [
     pytest.param('grep -n "a|b" src', id="pipe_in_pattern"),
     pytest.param('git log --oneline -5 2>&1', id="stderr_redirect"),
     pytest.param("git status >/dev/null 2>&1", id="discard_output"),
-    pytest.param("pytest -q 2>&1 | tee /tmp/out.log", id="pipe_to_tee"),
+    pytest.param("pytest -q 2>&1 | tee out.log", id="pipe_to_tee"),
     pytest.param("PYTHONPATH=src python3 -m pytest -q", id="the_sweeps_own_test_command"),
     pytest.param('git commit -m "use <<EOF for the fixture"', id="heredoc_mentioned_in_message"),
     pytest.param("bash scripts/curamoir-sweep", id="committed_script"),

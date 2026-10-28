@@ -48,7 +48,7 @@ INLINE_CODE_DOORS = [
 STILL_ALLOWED = [
     # a heredoc into a DATA CONSUMER is the case the stripping exists for
     pytest.param("cat > docs/security.md <<'EOF'\nNever run rm -rf /.\nEOF", id="cat_to_file"),
-    pytest.param("tee /tmp/notes.txt <<'EOF'\nnotes\nEOF", id="tee_to_file"),
+    pytest.param("tee notes.txt <<'EOF'\nnotes\nEOF", id="tee_to_file"),
     pytest.param("grep -F rm <<'EOF'\nrm -rf /\nEOF", id="grep_heredoc"),
     pytest.param("jq . <<'EOF'\n{}\nEOF", id="jq_heredoc"),
     # ordinary use of the same programs, with a real file

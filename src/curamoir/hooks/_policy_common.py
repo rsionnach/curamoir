@@ -132,7 +132,7 @@ def _abbreviates(name, option, min_length):
 
     The minimum is each caller's: git, docker and GNU make accept a prefix of
     two letters after the dashes, so their callers pass 4 with the dashes
-    counted; npm's caller compares names without dashes and passes 6. A prefix
+    counted; npm's caller compares names without dashes or underscores and passes 6. A prefix
     is matched whether or not another option shares it: refusing an ambiguous
     abbreviation costs a retry, and the parser may resolve it either way."""
     return len(name) >= min_length and option.startswith(name)

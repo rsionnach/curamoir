@@ -7,7 +7,7 @@ run that was not in the repository: an image's code (`docker run`), a makefile
 or variables written at call time (`make --eval`, `make SHELL=...`), a module
 fetched at a version (`go run pkg@latest`), a setting a later call obeys
 (`go env -w`), a program named in an option (`go -toolexec`,
-`cargo --config`), a build's output written anywhere (`docker build
+`go -ldflags=-extld=...`, `cargo --config`), a build's output written anywhere (`docker build
 --output`), and an image changed or moved (`docker image rm`, `push`)
 (cm-hve, cm-z0k, R5 review).
 
@@ -142,11 +142,67 @@ def _program_option(program, arguments, judge):
     return None
 
 
+#: The linker flags `go -ldflags` may pass (security review of 986347c):
+#: stripping (`-s`, `-w`), stamping (`-X importpath.name=value`, `-buildid`)
+#: and the link mode. An allowlist, not a list of the dangerous ones, because
+#: the linker's other flags include `-extld` (the external linker to run) and
+#: `-extldflags`, whose value goes to that linker, where `-fuse-ld=` and `-B`
+#: name programs in turn: listing those is the denylist problem one level down.
+_GO_LINK_FLAGS = frozenset({"s", "w", "X", "buildid", "linkmode", "compressdwarf"})
+
+#: go's options whose value is flags for a tool it runs. -ldflags is read
+#: against _GO_LINK_FLAGS; -gccgoflags is refused outright, since gccgo is gcc
+#: and gcc's `-B` names the directory its programs are run from.
+_GO_TOOL_FLAG_OPTIONS = ("ldflags", "gccgoflags")
+
+
+def _go_tool_flags(arguments):
+    """A refusal if go is given -gccgoflags, or -ldflags with a linker flag
+    not on _GO_LINK_FLAGS, in any spelling (one dash or two, `=` or a
+    separate value, with or without a `pattern=` prefix); else None."""
+    for index, argument in enumerate(arguments):
+        if not argument.startswith("-"):
+            continue
+        name, equals, value = argument.lstrip("-").partition("=")
+        if name not in _GO_TOOL_FLAG_OPTIONS:
+            continue
+        if name == "gccgoflags":
+            return (
+                Category.UNVERIFIABLE,
+                "go -gccgoflags passes flags to gcc, which can name the programs gcc "
+                "runs, chosen at call time. Build without it",
+            )
+        if not equals:
+            value = arguments[index + 1] if index + 1 < len(arguments) else ""
+        # `-ldflags=all=-s`: a package pattern, then the flags.
+        pattern, has_pattern, flags = value.partition("=")
+        if has_pattern and not pattern.startswith("-"):
+            value = flags
+        words = value.split()
+        position = 0
+        while position < len(words):
+            word = words[position]
+            position += 1
+            flag, attached, _ = word.lstrip("-").partition("=")
+            if word.startswith("-") and flag in _GO_LINK_FLAGS:
+                if flag == "X" and not attached:
+                    position += 1   # `-X importpath.name=value`
+                continue
+            return (
+                Category.UNVERIFIABLE,
+                f"go -ldflags {word!r} is not a linker flag a job may pass (only "
+                + ", ".join(f"-{f}" for f in sorted(_GO_LINK_FLAGS))
+                + "): others, such as -extld, name a program for the linker to run. "
+                "Build without it",
+            )
+    return None
+
+
 def _go_code(program, arguments, judge):
     """A refusal for `go env -w`/`-u` (a persistent setting, GOFLAGS among
     them, that a later go command obeys) or `go run`/`go install` of a
     module at a version (`pkg@latest`: fetched and run), else
-    _program_option's verdict."""
+    _go_tool_flags' verdict, else _program_option's."""
     at, refused = _subcommand_at("go", arguments)
     if refused is not None:
         return refused
@@ -169,4 +225,4 @@ def _go_code(program, arguments, judge):
             f"its code, chosen at call time. go {subcommand} a package in this "
             "repository instead",
         )
-    return _program_option("go", arguments, judge)
+    return _go_tool_flags(arguments) or _program_option("go", arguments, judge)

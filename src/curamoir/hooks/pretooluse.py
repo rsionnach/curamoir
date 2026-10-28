@@ -7,7 +7,9 @@ Two properties matter more than the logic:
 
 - **It never raises.** A hook that crashes adds noise to every tool call and,
   because command hooks fail OPEN on error or timeout (DEC-5), protects nothing
-  by dying. It exits 0 and lets the normal permission flow apply.
+  by dying. It exits 0 and lets the normal permission flow apply — except
+  inside a job, where a failure to JUDGE the command is a deny: there,
+  exiting silently would permit the very command that broke the guard.
 - **It is fast.** It runs on every Bash call during a job. No imports beyond the
   standard library, no network, no model.
 
@@ -27,9 +29,11 @@ parse. The switch is therefore the environment variable `CURAMOIR_USE_DCG`
 a docstring that quotes a key the code never reads is worse than no docstring.
 """
 
+import contextlib
 import json
 import os
 import shutil
+import stat
 import subprocess
 import sys
 from pathlib import Path
@@ -58,27 +62,47 @@ def main(argv=None, stdin=None, stdout=None):
         signal = in_curamoir_job(os.environ, repo)
         if not signal:
             return 0
-
-        delegated = _delegate_to_dcg(command)
-        decision = delegated if delegated is not None else judge_command(
-            command, in_job=True, scripts=_package_scripts(repo))
-
-        if decision.deny:
-            json.dump(
-                {
-                    "hookSpecificOutput": {
-                        "hookEventName": "PreToolUse",
-                        "permissionDecision": "deny",
-                        "permissionDecisionReason": refusal_text(decision, signal),
-                    }
-                },
-                stdout,
-            )
-        return 0
     except Exception:
         # Same reasoning as above: never let a guard failure become a crash on
-        # the developer's tool call.
+        # the developer's tool call. Before we know we are in a job, silence is
+        # right: outside one, nothing is denied anyway.
         return 0
+
+    # Inside a job, a failure to judge is a refusal (R5 edge-case review):
+    # silence here PERMITS the call, so an exception anywhere below would
+    # switch the guard off for the very command that caused it.
+    try:
+        delegated = _delegate_to_dcg(command)
+        decision = delegated if delegated is not None else judge_command(
+            command, in_job=True, scripts=_package_scripts(repo, command))
+    except Exception as error:
+        decision = Decision(
+            deny=True,
+            reason=("blocked by cúramóir: the guard could not judge this command "
+                    f"({type(error).__name__}), so it is refused rather than allowed"),
+            alternative="simplify the command",
+            category=Category.UNVERIFIABLE,
+        )
+    if not decision.deny:
+        return 0
+    try:
+        reason = refusal_text(decision, signal)
+    except Exception:
+        reason = decision.reason or "blocked by cúramóir"
+    # A stdout that cannot be written leaves nothing to tell anyone; the hook
+    # still must not crash the developer's tool call.
+    with contextlib.suppress(Exception):
+        json.dump(
+            {
+                "hookSpecificOutput": {
+                    "hookEventName": "PreToolUse",
+                    "permissionDecision": "deny",
+                    "permissionDecisionReason": reason,
+                }
+            },
+            stdout,
+        )
+    return 0
 
 
 # Exit statuses that mean `dcg` never reached a verdict on the command, rather
@@ -104,19 +128,48 @@ _COULD_NOT_RUN = (2, 64, 126, 127)
 MAX_PACKAGE_JSON_BYTES = 1_000_000
 
 
-def _package_scripts(repo):
-    """The script names in `repo`'s package.json, or None when there is no
-    readable one (policy.judge_command's `scripts`)."""
-    path = repo / "package.json"
+def _package_scripts(repo, command):
+    """The script names in `repo`'s package.json, or None when they are not
+    needed or there is no safely readable one (policy.judge_command's
+    `scripts`; None means unknown, and `yarn run <name>` is then judged
+    strictly).
+
+    Only yarn reads them, so nothing is opened unless the command mentions
+    yarn. The file is the repository's, which a job can write, so it is read
+    as untrusted input (R5 edge-case review): not through a symlink
+    (O_NOFOLLOW), not unless it is a regular file (a FIFO would block the
+    hook past its budget, and a hook that times out fails open; O_NONBLOCK
+    lets the open itself return), at most MAX_PACKAGE_JSON_BYTES from the
+    descriptor that was checked, as strict UTF-8 (a BOM is refused, not
+    skipped), and any failure at all, a RecursionError from deeply nested
+    JSON among them, means unknown."""
+    if "yarn" not in command:
+        return None
     try:
-        if path.stat().st_size > MAX_PACKAGE_JSON_BYTES:
+        descriptor = os.open(repo / "package.json",
+                             os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except Exception:
+        return None
+    try:
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
             return None
-        scripts = json.loads(path.read_text(encoding="utf-8")).get("scripts")
-    except (OSError, ValueError, AttributeError):
+        chunks, size = [], 0
+        while size <= MAX_PACKAGE_JSON_BYTES:
+            chunk = os.read(descriptor, MAX_PACKAGE_JSON_BYTES + 1 - size)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            size += len(chunk)
+        if size > MAX_PACKAGE_JSON_BYTES:
+            return None
+        scripts = json.loads(b"".join(chunks).decode("utf-8")).get("scripts")
+        if not isinstance(scripts, dict):
+            return None
+        return frozenset(name for name in scripts if isinstance(name, str))
+    except Exception:
         return None
-    if not isinstance(scripts, dict):
-        return None
-    return frozenset(name for name in scripts if isinstance(name, str))
+    finally:
+        os.close(descriptor)
 
 
 def refusal_text(decision, signal=None):

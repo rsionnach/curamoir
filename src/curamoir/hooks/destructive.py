@@ -115,6 +115,15 @@ def _parse_flags(tokens):
     return positionals, flags
 
 
+def _abbreviated(flags, option):
+    """Whether `flags` hold `option` or a prefix of it of at least two letters
+    after the dashes, which git's option parser reads as `option` when no
+    other option shares the prefix. Two letters is the policy's threshold for
+    git (_policy_common._abbreviates)."""
+    return any(flag.startswith("--") and len(flag) >= 4 and option.startswith(flag)
+               for flag in flags)
+
+
 def _git_subcommand(tokens):
     """(subcommand, remaining tokens), skipping git's global options."""
     index = 1
@@ -287,7 +296,12 @@ def _judge(tokens):
         return None
     positionals, flags = _parse_flags(rest)
 
-    if subcommand == "reset" and ("--hard" in flags or "--merge" in flags):
+    # An unambiguous prefix of a long option is that option to git (`--ha` is
+    # `--hard`), so the destructive ones are matched by prefix too (R5
+    # edge-case review). `--merge` likewise, from `--me` (`--m` is ambiguous
+    # with --mixed).
+    if subcommand == "reset" and (_abbreviated(flags, "--hard")
+                                  or _abbreviated(flags, "--merge")):
         return Rule(
             "git reset --hard discards uncommitted work irrecoverably",
             "git stash",
@@ -298,11 +312,19 @@ def _judge(tokens):
         # A `+` source forces; an EMPTY source deletes the remote branch.
         plus_refspec = any(argument.startswith("+") for argument in positionals)
         delete_refspec = any(argument.startswith(":") for argument in positionals)
-        # `--delete` is folded to "d" by _LONG_SYNONYMS, so check that spelling.
-        if "d" in flags or delete_refspec:
+        # `--delete` is folded to "d" by _LONG_SYNONYMS, so check that
+        # spelling, and its prefixes from `--de` (`--d` is ambiguous with
+        # --dry-run).
+        if "d" in flags or _abbreviated(flags, "--delete") or delete_refspec:
             return Rule(
                 "git push --delete (or an empty refspec) deletes a remote branch outright",
                 "delete the branch locally and let the PR close it",
+            )
+        if _abbreviated(flags, "--mirror"):
+            return Rule(
+                "git push --mirror overwrites every ref on the remote with the local "
+                "one and deletes the remote's others",
+                "git push <remote> <branch>",
             )
         if (_is_forced(flags) and not leased) or plus_refspec:
             return Rule(

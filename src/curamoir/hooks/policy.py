@@ -31,8 +31,11 @@ fetched and run (`pnpm dlx`, `npm create`, `uv tool run`, `uv run --with`,
 `docker run`, `go run pkg@version`); a program named in an option
 (`go -toolexec`, `cargo --config`, `npm --script-shell`); a command written
 into a git subcommand's options (`git rebase --exec`, `git fetch
---upload-pack`, `git submodule foreach`); a build's files written outside the
-repository (`docker build --output`); and configuration whose value is a
+--upload-pack`, `git submodule foreach`); a write the sweep's review of the
+diff never sees, into `.git/` or outside the repository (`> .git/hooks/x`,
+`cp`/`mv`/`tee`/`touch`/`mkdir` there, `docker build --output`); words the
+shell rewrites before the program sees them (`--{force,quiet}`, `$'...'`);
+and configuration whose value is a
 command: `git -c`, any `git config` write outside a short list of safe keys,
 `go env -w`, and any environment variable outside a short list (cm-z0k made
 each of these an allowlist). It does NOT stop code the agent writes to a file
@@ -52,12 +55,18 @@ program before its subcommand is checked, are in _policy_git.py (git),
 _policy_packages.py (uv, npm, pnpm, yarn) and _policy_tools.py (docker,
 podman, go, make, cargo), and the helpers they share in _policy_common.py.
 
+It fails closed: an exception while judging, or runners nested more than
+_MAX_NESTING deep, is a refusal, because a guard that raises is silent and a
+silent PreToolUse hook permits the call.
+
 Stdlib only, and no config read: this runs on every Bash call during a job.
 The one fact from the repository it uses, package.json's script names, is read
 by pretooluse and handed to judge_command as `scripts`.
 """
 
+import fnmatch
 import re
+from contextvars import ContextVar
 
 # _INTERPRETERS, _PYTHON and _ASSIGNMENT are the pipeline's own lists; they
 # are defined in _policy_common only because _is_code_runner and _make_code
@@ -245,7 +254,70 @@ def _unverifiable(tokens):
         for pattern, description in _UNVERIFIABLE:
             if pattern.search(token):
                 return description
+        if _BRACE_EXPANSION.search(_outside_double_quotes(token)):
+            return ("a brace expansion `{a,b}` or `{a..b}`, which the shell turns into "
+                    "words the guard never sees")
     return None
+
+
+#: An unquoted brace expansion: braces holding a `,` or a `..` (R5 edge-case
+#: review). The shell expands it before the program runs, so
+#: `git push origin main --{force,quiet}` is `--force --quiet` and
+#: `git reset {--hard,}` is `git reset --hard`, while the guard read one word
+#: that is neither. `{}` alone is not one, which `find -exec cmd {} ;` needs.
+_BRACE_EXPANSION = re.compile(r"\{[^{}]*(?:,|\.\.)[^{}]*\}")
+
+
+def _outside_double_quotes(token):
+    """`token` (from `unquoted`, single-quoted spans already blanked) with its
+    double-quoted spans and backslash-escaped characters blanked, since the
+    shell expands no braces in either. A scan rather than a regex for the
+    reason _shell._blank_single_quoted gives: an escaped quote does not open
+    a span, and a regex would read `\\"{a,b}\\"` as quoted."""
+    kept, in_double, escaped = [], False, False
+    for character in token:
+        if escaped:
+            escaped = False
+            kept.append("_")
+            continue
+        if character == "\\":
+            escaped = True
+            kept.append("_")
+            continue
+        if character == '"':
+            in_double = not in_double
+            kept.append("_")
+            continue
+        kept.append("_" if in_double else character)
+    return "".join(kept)
+
+
+def _ansi_c_or_locale_quoting(command):
+    """Whether `command` uses `$'...'` or `$"..."` outside quotes (R5
+    edge-case review). `$'...'` decodes escapes, so `git reset -$'-hard'` is
+    `git reset --hard` and `$'\\x2d'` is any character at all; `$"..."` is
+    translated by the locale. Scanned over the raw command, because by the
+    time `unquoted` has blanked the single-quoted span the `$` has nothing
+    after it. Inside double quotes neither is special (`"costs $"` is a
+    literal dollar), and inside single quotes nothing is."""
+    in_single = in_double = escaped = False
+    for index, character in enumerate(command):
+        if escaped:
+            escaped = False
+            continue
+        if character == "\\" and not in_single:
+            escaped = True
+            continue
+        if character == "'" and not in_double:
+            in_single = not in_single
+            continue
+        if character == '"' and not in_single:
+            in_double = not in_double
+            continue
+        if (character == "$" and not in_single and not in_double
+                and command[index + 1:index + 2] in ("'", '"')):
+            return True
+    return False
 
 
 #: Arguments that hand a program its own text to run, rather than naming a file
@@ -404,9 +476,10 @@ def _inline_program_text(program, arguments):
 #: The program-specific checks of cm-hve and cm-z0k, run on an allowlisted
 #: program's arguments before its subcommand is checked, in order, the first
 #: refusal winning. Each is called as `check(program, arguments, judge)`,
-#: where `judge` is _refusal_for: a runner's checks judge the program it runs
-#: by the whole policy, and taking the judge as an argument is what lets the
-#: family modules do that without importing this one.
+#: where `judge` is _nested_refusal (_refusal_for, one runner deeper): a
+#: runner's checks judge the program it runs by the whole policy, and taking
+#: the judge as an argument is what lets the family modules do that without
+#: importing this one.
 _PROGRAM_CHECKS = {
     "git": (_git_command_setting, _git_inline_command),
     "make": (_make_code,),
@@ -421,6 +494,91 @@ _PROGRAM_CHECKS = {
 }
 
 
+#: Redirection operators that write to their target. `>&` writes to a file
+#: unless its target is a descriptor (`2>&1`) or `-` (close).
+_WRITING_REDIRECTIONS = frozenset({">", ">>", ">|", "&>", "&>>", "<>", ">&"})
+
+#: Redirection targets that are not files anyone reviews or runs.
+_HARMLESS_TARGETS = frozenset({"/dev/null", "/dev/stdout", "/dev/stderr"})
+
+#: Allowlisted programs that write to paths they are given, and which of
+#: their words are those paths: "all" positionals, or cp's "last" (its
+#: sources are only read) unless a target directory is named.
+_WRITERS = {"tee": "all", "touch": "all", "mkdir": "all", "mv": "all", "cp": "last"}
+
+
+def _outside_diff(path):
+    """Whether writing `path` would change something the sweep's review of
+    the diff never sees (I1, R5 edge-case review): anything in `.git/`, in
+    any case (macOS's filesystem is case-insensitive), or outside the
+    repository (an absolute path, `~`, a `..` component). A component that is
+    a glob which could match `.git` or `..` counts, since the shell expands it
+    first (`.gi?`)."""
+    if path.startswith(("/", "~")):
+        return True
+    for component in path.split("/"):
+        lowered = component.lower()
+        if lowered == ".git" or component == "..":
+            return True
+        if component.startswith(".") and any(c in component for c in "*?[") and (
+                fnmatch.fnmatchcase(".git", lowered) or fnmatch.fnmatchcase("..", component)):
+            return True
+    return False
+
+
+def _outside_diff_refusal(what, path):
+    return (
+        Category.NOT_ALLOWLISTED,
+        f"{what} writes to {path!r}, outside the diff the sweep reviews: .git/ and "
+        "paths outside the repository are never in it, and a file there can run "
+        "code later (.git/hooks/pre-commit runs on the next git commit)",
+        "write inside the repository's working tree, where the change is reviewed",
+    )
+
+
+def _redirection_outside_diff(segment):
+    """The refusal for a redirection in `segment` (before the redirections
+    are stripped) that writes outside the diff, else None."""
+    for index, token in enumerate(segment[:-1]):
+        if token not in _WRITING_REDIRECTIONS:
+            continue
+        target = segment[index + 1]
+        if token == ">&" and (target.isdigit() or target == "-"):
+            continue
+        if target not in _HARMLESS_TARGETS and _outside_diff(target):
+            return _outside_diff_refusal(f"redirecting output with {token}", target)
+    return None
+
+
+def _written_paths(program, arguments):
+    """The paths `program` (one of _WRITERS) would write given `arguments`:
+    its positionals, all of them or cp's last, and the value of a target
+    directory option (`-t DIR`, `-tDIR`, `--target-directory=DIR`) however
+    it is spelled, which makes every positional a path to check."""
+    which = _WRITERS.get(program)
+    if which is None:
+        return []
+    positionals, attached, target_directory = [], [], False
+    options_ended = False
+    for argument in arguments:
+        if options_ended or not argument.startswith("-") or argument == "-":
+            positionals.append(argument)
+            continue
+        if argument == "--":
+            options_ended = True
+            continue
+        if argument.startswith("--"):
+            if argument.startswith("--t"):
+                target_directory = True
+                attached.append(argument.partition("=")[2])
+        elif "t" in argument[1:]:
+            target_directory = True
+            attached.append(argument[argument.index("t", 1) + 1:])
+    if which == "last" and not target_directory:
+        positionals = positionals[-1:]
+    return positionals + [path for path in attached if path]
+
+
 def _inline_code_refusal(program):
     """The refusal for a shell given inline code with `-c` or `--command`."""
     return (
@@ -428,6 +586,33 @@ def _inline_code_refusal(program):
         f"{program!r} with -c runs code composed at call time, which the "
         "guard cannot verify. Put the script in a file and run that instead",
     )
+
+
+#: How many runners deep a command may nest (`uv run pnpm exec yarn run ...`),
+#: each judging the next through _nested_refusal. Far above anything a job
+#: runs; it exists so that a deep enough nesting is a refusal and not a
+#: RecursionError (R5 edge-case review).
+_MAX_NESTING = 8
+
+#: How many runners deep the command now being judged is.
+_NESTING = ContextVar("curamoir_policy_nesting", default=0)
+
+
+def _nested_refusal(tokens):
+    """_refusal_for one runner deeper: the `judge` every program check is
+    handed for the program a runner runs. Past _MAX_NESTING, a refusal."""
+    depth = _NESTING.get() + 1
+    if depth > _MAX_NESTING:
+        return (
+            Category.UNVERIFIABLE,
+            f"runners nested more than {_MAX_NESTING} deep are more than the guard "
+            "will follow, so it cannot verify what the innermost one runs",
+        )
+    token = _NESTING.set(depth)
+    try:
+        return _refusal_for(tokens)
+    finally:
+        _NESTING.reset(token)
 
 
 def _refusal_for(tokens):
@@ -532,8 +717,12 @@ def _refusal_for(tokens):
             f"{program!r} is not on cúramóir's allowlist for jobs",
         )
 
+    for path in _written_paths(program, arguments):
+        if _outside_diff(path):
+            return _outside_diff_refusal(program, path)
+
     for check in _PROGRAM_CHECKS.get(program, ()):
-        refused = check(program, arguments, _refusal_for)
+        refused = check(program, arguments, _nested_refusal)
         if refused is not None:
             return refused
 
@@ -576,11 +765,37 @@ def judge_command(command, in_job, scripts=None):
     """
     if not in_job:
         return Decision(deny=False)
-    token = _SCRIPTS.set(frozenset(scripts) if scripts is not None else None)
+    token = _SCRIPTS.set(_script_names(scripts))
     try:
         return _judge(command)
+    except Exception as error:
+        # Fail closed (R5 edge-case review). A guard that raises protects
+        # nothing: pretooluse would exit silently and a silent PreToolUse hook
+        # PERMITS the call, so `uv run uv run ... rm -rf /` deep enough to hit
+        # the recursion limit ran unjudged. RecursionError is an Exception.
+        return Decision(
+            deny=True,
+            reason=(
+                "blocked by cúramóir: the guard could not judge this command "
+                f"({type(error).__name__}), so it is refused rather than allowed"
+            ),
+            alternative="simplify the command",
+            category=Category.UNVERIFIABLE,
+        )
     finally:
         _SCRIPTS.reset(token)
+
+
+def _script_names(scripts):
+    """`scripts` as a frozenset of names, or None (unknown, so yarn is judged
+    strictly) when it is not a set, frozenset, tuple or list of strings. A
+    string is not taken as a collection: frozenset("build") is five letters,
+    and `yarn run b` would then pass (M7)."""
+    if not isinstance(scripts, (set, frozenset, tuple, list)):
+        return None
+    if not all(isinstance(name, str) for name in scripts):
+        return None
+    return frozenset(scripts)
 
 
 def _judge(command):
@@ -643,6 +858,8 @@ def _judge(command):
     # leave `cat -rf /tmp/x` looking allowlisted.
     bare = unquoted(command)
     reason = _unverifiable(bare if bare is not None else tokens)
+    if reason is None and _ansi_c_or_locale_quoting(command):
+        reason = "ANSI-C or locale quoting (`$'...'`, `$\"...\"`), which the shell decodes"
     if reason is not None:
         return Decision(
             deny=True,
@@ -658,11 +875,15 @@ def _judge(command):
         )
 
     for segment in segments(tokens):
+        # The redirection targets are read before strip_redirections drops
+        # them: where the output goes is the effect (I1).
+        refusal = _redirection_outside_diff(segment)
         segment = strip_redirections(segment)
-        if not segment:
+        if refusal is None and not segment:
             continue
 
-        refusal = _refusal_for(segment)
+        if refusal is None:
+            refusal = _refusal_for(segment)
         if refusal is not None:
             # A refusal may name its own alternative as a third element; the
             # default is the allowlist's own remedy.
