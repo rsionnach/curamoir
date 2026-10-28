@@ -452,7 +452,6 @@ def _judge(tokens):
         )
 
     if subcommand == "push":
-        leased = "--force-with-lease" in flags or "--force-if-includes" in flags
         # A `+` source forces; an EMPTY source deletes the remote branch.
         plus_refspec = any(argument.startswith("+") for argument in positionals)
         delete_refspec = any(argument.startswith(":") for argument in positionals)
@@ -477,7 +476,11 @@ def _judge(tokens):
                 "one and deletes the remote's others",
                 "git push <remote> <branch>",
             )
-        if (_is_forced(flags) and not leased) or plus_refspec:
+        # An explicit -f/--force forces whatever lease is also given: `git
+        # help push` says -f "disables these checks", so `--force-with-lease`
+        # beside it protects nothing (round 13). The lease alone is the safe
+        # spelling, and passes.
+        if _is_forced(flags) or plus_refspec:
             return Rule(
                 "git push --force can overwrite a remote branch's history",
                 "git push --force-with-lease",

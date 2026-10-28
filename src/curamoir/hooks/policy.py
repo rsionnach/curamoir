@@ -541,6 +541,28 @@ _PROGRAM_CHECKS = {
 }
 
 
+def _sed_in_place(arguments):
+    """Whether sed is told to edit in place: `-i` alone, with a suffix
+    (`-i.bak`) or in a cluster (`-Ei`), or `--in-place` and any prefix of it
+    from `--i` (GNU sed's only long option starting so)."""
+    for argument in arguments:
+        if argument == "--":
+            return False
+        if argument.startswith("--"):
+            name = argument.split("=", 1)[0]
+            if len(name) >= 3 and "--in-place".startswith(name):
+                return True
+            continue
+        if not argument.startswith("-"):
+            continue
+        for character in argument[1:]:
+            if character == "i":
+                return True
+            if character in "efl":   # a value follows, which may hold an i
+                break
+    return False
+
+
 def _wrapped(segment):
     """The program `segment` (redirections stripped) runs, past assignments."""
     tokens = list(segment)
@@ -706,8 +728,7 @@ def _refusal_for(tokens):
             "allowlist everything",
         )
 
-    if program in _DELETERS or (program == "sed" and any(
-            a == "-i" or a.startswith(("-i", "--in-place")) for a in arguments)):
+    if program in _DELETERS or (program == "sed" and _sed_in_place(arguments)):
         return (
             Category.NOT_ALLOWLISTED,
             f"{program} deletes or truncates files, which a job does not do",

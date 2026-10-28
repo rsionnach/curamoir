@@ -183,6 +183,10 @@ def _package_scripts(repo, command):
     except Exception:
         return None
     try:
+        # A regular file only. A FIFO with no writer reads EOF at once (and
+        # O_NONBLOCK let the open return), but one that has a writer would
+        # block the read past the hook's 5s, and a hook that times out fails
+        # open; a device or socket likewise. The check is one fstat.
         if not stat.S_ISREG(os.fstat(descriptor).st_mode):
             return None
         chunks, size = [], 0
