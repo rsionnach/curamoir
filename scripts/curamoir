@@ -17,12 +17,29 @@ root="${CLAUDE_PLUGIN_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 # `command -v` each) and picks the right one wherever a conforming interpreter
 # is installed alongside an older default. /curamoir:doctor still reports the
 # case where none is.
+#
+# And the first that can `import yaml`, falling back to the first that exists,
+# as scripts/curamoir-lint does (cm-kry). Every command that reads
+# curamoir.yaml needs PyYAML, and a machine where a bare Homebrew python3.14
+# sits beside a python3 that has it is ordinary: taking the first that exists
+# made every `curamoir run` refuse while a working interpreter was on PATH.
+# The fallback still runs, so the CLI (and /curamoir:doctor) can say what is
+# missing. One probe per candidate costs a few tens of milliseconds, which a
+# command run by hand or on a schedule can afford.
+chosen=""
 for interpreter in python3.14 python3.13 python3.12 python3 python; do
   if command -v "$interpreter" >/dev/null 2>&1; then
-    PYTHONPATH="${root}/src${PYTHONPATH:+:${PYTHONPATH}}" \
-      exec "$interpreter" -m curamoir.cli "$@"
+    [ -n "$chosen" ] || chosen="$interpreter"
+    if "$interpreter" -c "import yaml" >/dev/null 2>&1; then
+      chosen="$interpreter"
+      break
+    fi
   fi
 done
 
-echo "cúramóir needs python3 on PATH, and found none." >&2
-exit 1
+if [ -z "$chosen" ]; then
+  echo "cúramóir needs python3 on PATH, and found none." >&2
+  exit 1
+fi
+
+PYTHONPATH="${root}/src${PYTHONPATH:+:${PYTHONPATH}}" exec "$chosen" -m curamoir.cli "$@"
