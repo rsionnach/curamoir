@@ -920,10 +920,13 @@ def _judge(command):
         if refusal is None:
             refusal = _refusal_for(segment)
         # A wrapper (`timeout 5`) or an environment assignment (`GIT_DIR=x`)
-        # in front of a destructive command: the destructive rule names the
-        # safe alternative, the generic refusal does not (rounds 10 and 11).
+        # in front of a destructive command, or a gh subcommand not on gh's
+        # allowlist that deletes (`gh release delete`): the destructive rule
+        # names the safe alternative, the generic refusal does not (rounds
+        # 10 to 12).
         if refusal is not None and (
-                (refusal[0] == Category.NOT_ALLOWLISTED and _wrapped(segment) in _WRAPPERS)
+                (refusal[0] == Category.NOT_ALLOWLISTED
+                 and _wrapped(segment) in _WRAPPERS | {"gh"})
                 or _ASSIGNMENT.match(segment[0])):
             wrapped = judge_destructive(segment, in_job=True)
             if wrapped.deny and wrapped.category == Category.DESTRUCTIVE:

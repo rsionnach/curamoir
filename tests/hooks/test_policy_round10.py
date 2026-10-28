@@ -70,13 +70,13 @@ def test_creating_or_renaming_a_branch_passes(command):
 # --- 3: deletions through gh, bd and git tag -------------------------------------
 
 @pytest.mark.parametrize("command,alternative", [
-    ("gh repo delete a/b --yes", "leave the branch"),
+    ("gh repo delete a/b --yes", "say in the PR"),
     ("gh pr close 1 --delete-branch", "leave the branch"),
     ("gh pr close 1 -d", "leave the branch"),
-    ("gh api -X DELETE repos/a/b", "leave the branch"),
-    ("gh api -XDELETE repos/a/b", "leave the branch"),
-    ("gh api --method=delete repos/a/b", "leave the branch"),
-    ("gh api --method DELETE repos/a/b", "leave the branch"),
+    ("gh api -X DELETE repos/a/b", "does not change it"),
+    ("gh api -XDELETE repos/a/b", "does not change it"),
+    ("gh api --method=delete repos/a/b", "does not change it"),
+    ("gh api --method DELETE repos/a/b", "does not change it"),
     ("git tag -d v1", "leave it"),
     ("git tag --delete v1", "leave it"),
     ("bd delete x-1", "bd close"),

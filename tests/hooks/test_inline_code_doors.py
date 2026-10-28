@@ -163,7 +163,10 @@ CONSUMERS_THAT_ARE_NOT = [
 # opening PRs is core to a sweep.
 CONSUMERS_THAT_ARE = [
     pytest.param("gh pr create --body-file - <<EOF\nbody\nEOF", id="gh_pr_body"),
-    pytest.param("gh api --input - <<EOF\n{}\nEOF", id="gh_api_body"),
+    # Not `gh api --input -`: since round 12 any gh api body is a state
+    # change, refused for that; the heredoc door is the same for this one.
+    pytest.param("gh issue create --title t --body-file - <<EOF\nbody\nEOF",
+                 id="gh_issue_body"),
     pytest.param("bd create 'title' --description=- <<EOF\nd\nEOF", id="bd_description"),
 ]
 

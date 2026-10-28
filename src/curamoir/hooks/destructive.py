@@ -147,45 +147,102 @@ def _abbreviated(flags, option, min_length=4):
                for flag in flags)
 
 
+#: Advice for a gh change, by what is changed (round 12).
+_GH_ISSUE_ALTERNATIVE = "close it instead (gh issue close)"
+_GH_SETTINGS_ALTERNATIVE = (
+    "say in the PR what should change; a job does not change the repository's settings"
+)
+_GH_API_ALTERNATIVE = "a job reads GitHub with gh api; it does not change it"
+
+#: gh api's options that take a value, short and long, so the endpoint and
+#: the method are found past them.
+_GH_API_VALUED_SHORT = frozenset("XHfFqtp")
+_GH_API_VALUED_LONG = frozenset({
+    "--method", "--header", "--field", "--raw-field", "--hostname", "--jq",
+    "--template", "--cache", "--preview", "--input",
+})
+
+
 def _gh_rule(arguments):
     """The Rule for a gh command that changes GitHub state a job leaves alone
-    (rounds 10 and 11): any `<noun> delete`, `repo archive`/`rename`,
-    `pr close -d`, `pr merge`, `api` with the DELETE method in any spelling
-    (`-X` inside a short-option cluster too), and `api graphql` with a
-    mutation, or a body from a file the guard cannot read; else None."""
+    (rounds 10 to 12), with advice that fits what it changes: `delete` among
+    the first three words (an issue: close it; anything else: say so in the
+    PR), `repo archive`/`rename`, `pr close -d`, `pr merge`, and any `gh api`
+    that is not a read (_gh_api_rule); else None."""
     positionals, flags = _parse_flags(arguments)
-    words = positionals[:2]
-    if len(words) == 2 and (words[1] == "delete" or words in (
-            ["repo", "archive"], ["repo", "rename"])):
-        return Rule(f"gh {words[0]} {words[1]} changes or deletes it on GitHub",
-                    _REMOTE_DELETION_ALTERNATIVE)
-    if words == ["pr", "close"] and ("d" in flags or _abbreviated(flags, "--delete-branch", 5)):
+    words = positionals[:3]
+    if words[:1] == ["api"]:
+        return _gh_api_rule(arguments[arguments.index("api") + 1:])
+    if words[:2] == ["pr", "close"] and (
+            "d" in flags or _abbreviated(flags, "--delete-branch", 5)):
         return Rule("gh pr close --delete-branch deletes the PR's branch on the remote",
                     _REMOTE_DELETION_ALTERNATIVE)
-    if words == ["pr", "merge"]:
+    if words[:2] == ["pr", "merge"]:
         return Rule("gh pr merge merges the PR, which is the reviewer's decision",
                     "leave the PR for review; a job never merges")
-    if words[:1] != ["api"]:
-        return None
-    if words == ["api", "graphql"] and (
-            any("mutation" in argument.lower() for argument in arguments)
-            or _abbreviated(flags, "--input", 4)):
-        return Rule("gh api graphql with a mutation changes GitHub state",
-                    "a job does not change GitHub state through the API; say in the "
-                    "PR what should change")
-    for index, argument in enumerate(arguments):
-        name, _, value = argument.partition("=")
-        if argument.startswith("-") and not argument.startswith("--") and "X" in argument:
-            # `-X` alone, attached (`-XDELETE`) or inside a cluster (`-iX`).
-            value = argument[argument.index("X") + 1:].lstrip("=")
-        elif name != "--method":
-            continue
-        if not value:
-            value = arguments[index + 1] if index + 1 < len(arguments) else ""
-        if value.upper() == "DELETE":
-            return Rule("gh api -X DELETE deletes on the remote",
-                        _REMOTE_DELETION_ALTERNATIVE)
+    if words[:2] == ["issue", "delete"]:
+        return Rule("gh issue delete deletes the issue and its history",
+                    _GH_ISSUE_ALTERNATIVE)
+    if "delete" in words or words[:2] in (["repo", "archive"], ["repo", "rename"]):
+        what = " ".join(words[:words.index("delete") + 1] if "delete" in words else words[:2])
+        return Rule(f"gh {what} changes or deletes it on GitHub", _GH_SETTINGS_ALTERNATIVE)
     return None
+
+
+def _gh_api_rule(arguments):
+    """The Rule for a `gh api` call (`arguments` follow `api`) that is not a
+    read (round 12): an explicit method other than GET or HEAD, in any
+    spelling (`-X`, `-XPUT`, `-iX PUT`, `--method=post`), or a body (fields,
+    `--input`) without an explicit GET, since gh then POSTs. `graphql` is
+    always POSTed, so it is judged by its body instead: a mutation, a field
+    read from a file (`-F query=@q.graphql`) or `--input` is refused. A
+    DELETE of a git ref gets the branch advice."""
+    method, fields, has_input, positionals = None, [], False, []
+    index = 0
+    while index < len(arguments):
+        argument = arguments[index]
+        index += 1
+        following = arguments[index] if index < len(arguments) else ""
+        if argument.startswith("--"):
+            name, equals, value = argument.partition("=")
+            if name not in _GH_API_VALUED_LONG:
+                continue
+            if not equals:
+                value, index = following, index + 1
+            if name == "--method":
+                method = value
+            elif name in ("--field", "--raw-field"):
+                fields.append(value)
+            elif name == "--input":
+                has_input = True
+            continue
+        if not argument.startswith("-") or argument == "-":
+            positionals.append(argument)
+            continue
+        for position, character in enumerate(argument[1:], start=2):
+            if character in _GH_API_VALUED_SHORT:
+                value = argument[position:]
+                if not value:
+                    value, index = following, index + 1
+                if character == "X":
+                    method = value
+                elif character in "fF":
+                    fields.append(value)
+                break
+    if "graphql" in positionals:
+        if has_input or any("mutation" in f.lower() or f.partition("=")[2].startswith("@")
+                            for f in fields):
+            return Rule("gh api graphql with a mutation, or a body from a file, may "
+                        "change GitHub state", _GH_API_ALTERNATIVE)
+        return None
+    verb = (method or "").upper()
+    if verb in ("GET", "HEAD") or (not verb and not fields and not has_input):
+        return None
+    if verb == "DELETE" and any("git/refs" in p for p in positionals):
+        return Rule("gh api -X DELETE on a ref deletes a branch or tag on the remote",
+                    _REMOTE_DELETION_ALTERNATIVE)
+    return Rule(f"gh api {'-X ' + verb if verb else 'with fields (a POST)'} changes "
+                "GitHub state", _GH_API_ALTERNATIVE)
 
 
 def _git_subcommand(tokens):
@@ -624,7 +681,7 @@ def _emptied(target):
     return Rule(
         f"writing over {target}, which the same command reads, empties it before "
         "it is read",
-        "write to a new file, then mv it over",
+        "write to a new file, then mv it over, as two separate commands",
     )
 
 

@@ -54,7 +54,7 @@ def test_a_sequential_or_distinct_write_passes(command):
 # --- 3: gh state changes -------------------------------------------------------------
 
 @pytest.mark.parametrize("command,alternative", [
-    ("gh issue delete 1", "say in the PR"),
+    ("gh issue delete 1", "gh issue close"),
     ("gh label delete bug", "say in the PR"),
     ("gh repo delete a/b", "say in the PR"),
     ("gh run delete 5", "say in the PR"),
@@ -62,11 +62,11 @@ def test_a_sequential_or_distinct_write_passes(command):
     ("gh repo rename x", "say in the PR"),
     ("gh pr merge 1", "never merges"),
     ("gh pr merge 1 --squash --auto", "never merges"),
-    ("gh api -iX DELETE repos/a/b", "say in the PR"),
-    ("gh api -iXDELETE repos/a/b", "say in the PR"),
-    ("gh api graphql -f query='mutation { closeIssue }'", "through the API"),
-    ("gh api graphql --raw-field query='Mutation{x}'", "through the API"),
-    ("gh api graphql --input body.json", "through the API"),
+    ("gh api -iX DELETE repos/a/b", "does not change it"),
+    ("gh api -iXDELETE repos/a/b", "does not change it"),
+    ("gh api graphql -f query='mutation { closeIssue }'", "does not change it"),
+    ("gh api graphql --raw-field query='Mutation{x}'", "does not change it"),
+    ("gh api graphql --input body.json", "does not change it"),
 ])
 def test_a_gh_state_change_is_refused(command, alternative):
     decision = verdict(command)
