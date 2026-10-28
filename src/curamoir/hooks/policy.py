@@ -121,7 +121,18 @@ ALLOWED = {
     "uv": None,
     "pip": None,
     "make": None,
-    "npm": None,
+    # npm accepts undocumented spellings (`npm exe` is `exec` on npm 11), so
+    # its subcommands are listed, with their documented aliases, as git's
+    # are (cm-f41). Not `config`/`c`: `npm config set script-shell` chooses
+    # the shell every later `npm run` uses.
+    "npm": {
+        "test", "t", "tst", "run", "run-script", "rum", "urn", "start", "stop",
+        "restart", "ci", "clean-install", "ic", "install-clean", "isntall-clean",
+        "install", "i", "add", "in", "ins", "inst", "insta", "instal", "isnt",
+        "isnta", "isntal", "isntall", "ls", "list", "outdated", "audit", "view",
+        "info", "pack", "version", "help", "explain", "why", "fund", "doctor",
+        "prune", "exec", "x", "init", "create", "innit",
+    },
     "pnpm": None,
     "yarn": None,
     "cargo": None,
@@ -268,8 +279,61 @@ _FETCHING_OPTIONS = ("--with", "--with-requirements", "--with-editable")
 #: allowlist never admitted. Found among the first two words, because an
 #: option's value can come first (`pnpm --dir web dlx pkg`).
 _FETCH_AND_RUN = {
-    "pnpm": {"dlx", "create"}, "yarn": {"dlx", "create"}, "npm": {"init", "create"},
+    "pnpm": {"dlx", "create"}, "yarn": {"dlx", "create"},
+    "npm": {"init", "innit", "create"},
 }
+
+#: Options that may come BEFORE a program's subcommand, as (flag-only,
+#: value-taking), cm-f41. The subcommand is found by reading past exactly
+#: these, a value-taking one together with its value (`-C dir` or
+#: `--git-dir=dir`); any other option there is refused, because without its
+#: arity its value would be taken for the subcommand (`git -C log config
+#: core.pager x` ran `config` while the checks saw `log`). The same index
+#: drives every check that depends on the subcommand.
+_LEADING_OPTIONS = {
+    "git": (frozenset({"--no-pager", "-P", "--paginate", "-p", "--bare",
+                       "--no-replace-objects", "--literal-pathspecs", "--glob-pathspecs",
+                       "--noglob-pathspecs", "--icase-pathspecs", "--no-optional-locks",
+                       "--version", "--help"}),
+            frozenset({"-C", "--git-dir", "--work-tree", "--namespace"})),
+    "docker": (frozenset({"--debug", "-D"}),
+               frozenset({"--context", "-c", "--host", "-H", "--log-level", "-l"})),
+    "podman": (frozenset({"--debug"}), frozenset({"--log-level", "--connection", "-c"})),
+    "compose": (frozenset(), frozenset({"-f", "--file", "-p", "--project-name", "--profile",
+                                        "--env-file", "--project-directory"})),
+    "npm": (frozenset({"-s", "--silent", "-q", "--quiet", "-ws", "--workspaces",
+                       "--no-audit", "--no-fund", "--ignore-scripts", "--offline"}),
+            frozenset({"--prefix", "-w", "--workspace", "--loglevel"})),
+    "pnpm": (frozenset({"-r", "--recursive", "-s", "--silent"}),
+             frozenset({"--dir", "-C", "--filter", "-F"})),
+    "yarn": (frozenset({"-s", "--silent"}), frozenset({"--cwd"})),
+    "uv": (frozenset({"-q", "--quiet", "-v", "--verbose", "--offline", "--no-cache",
+                      "--no-progress"}),
+           frozenset({"--directory", "--project"})),
+}
+
+#: Options that may come between a runner's run subcommand and the program
+#: it runs, by the same rule. uv run's `-m` makes the program a module name,
+#: judged as a program (so `uv run -m pytest` passes and `-m evil` does
+#: not). Absent on purpose: --with* (fetching), --index-url and the other
+#: index options (a source of packages), npm's --package/-p and --yes.
+_RUN_OPTIONS = {
+    "uv": (frozenset({"--frozen", "--locked", "--no-sync", "--isolated", "--no-project",
+                      "--all-extras", "--no-dev", "-q", "--quiet", "-m", "--module"}),
+           frozenset({"--extra", "--group", "--only-group", "--package", "--python", "-p",
+                      "--env-file"})),
+    "npm": (frozenset({"--no", "-ws", "--workspaces", "-s", "--silent", "-q", "--quiet"}),
+            frozenset({"-w", "--workspace"})),
+    "pnpm": (frozenset({"-r", "--recursive", "--parallel", "-s", "--silent"}),
+             frozenset({"--filter", "-F", "--dir", "-C"})),
+    "yarn": (frozenset(), frozenset()),
+}
+
+#: `docker compose` subcommands a job may run, by the container rule:
+#: `run`, `exec` and `up` start an image's code.
+_COMPOSE_SUBCOMMANDS = frozenset({
+    "build", "ps", "config", "logs", "images", "ls", "version", "top", "port",
+})
 
 #: docker and podman subcommands a job may run: building from the
 #: repository's Dockerfile and reading state. `run`, `exec` and the rest run
@@ -297,6 +361,16 @@ _GIT_WRITABLE_KEY = re.compile(
 _GIT_CONFIG_READS = frozenset({
     "--get", "--get-all", "--get-regexp", "--get-urlmatch", "--get-color",
     "--get-colorbool", "--list", "-l",
+})
+#: Every other option `git config` may be given during a job (cm-f41): scope,
+#: type and output flags, `--type=` only in its `=` form. Any other option
+#: is refused, among them -f/--file and --blob (another file, and a value read
+#: as the key), --default, --comment and --value, and `--type` with a
+#: separate value, which was read as the key.
+_GIT_CONFIG_OPTIONS = frozenset({
+    "--local", "--global", "--system", "--worktree", "--bool", "--int", "--bool-or-int",
+    "--path", "--expiry-date", "--show-origin", "--show-scope", "--name-only", "-z",
+    "--null", "--includes", "--no-includes", "--fixed-value", "--type",
 })
 #: `git config` options that write, and the new-style subcommands.
 _GIT_CONFIG_WRITES = frozenset({
@@ -421,71 +495,108 @@ def _inline_program_text(program, arguments):
     return None
 
 
+def _leading(program, arguments, table=None):
+    """(index of the subcommand in `arguments`, or None if there is none;
+    refusal or None), reading past only the options `table` (default
+    _LEADING_OPTIONS) gives `program`."""
+    flags, valued = (table or _LEADING_OPTIONS)[program]
+    index = 0
+    while index < len(arguments):
+        argument = arguments[index]
+        if not argument.startswith("-") or argument == "-":
+            return index, None
+        if argument == "--":
+            following = index + 1
+            return (following if following < len(arguments) else None), None
+        name, equals, _ = argument.partition("=")
+        if name in valued:
+            index += 1 if equals else 2
+            continue
+        if not equals and argument in flags:
+            index += 1
+            continue
+        return None, (
+            Category.NOT_ALLOWLISTED,
+            f"{program} {name} is not an option cúramóir knows how to read past at "
+            "this point, so it cannot tell which word is the subcommand or program "
+            "(an option's value can look like one)",
+        )
+    return None, None
+
+
 def _wrapped_code(program, arguments):
     """A refusal if a package runner fetches code to run, or runs a program
     the allowlist would refuse on its own; or if docker/podman would run a
-    container; else None."""
-    words = [a for a in arguments if not a.startswith("-")]
+    container; else None. The subcommand is found by _leading (cm-f41)."""
+    at, refused = _leading(program, arguments)
+    if refused is not None or at is None:
+        return refused
+    subcommand, after = arguments[at], arguments[at + 1:]
     if program in ("docker", "podman"):
-        if words and words[0] not in _CONTAINER_SUBCOMMANDS:
+        if subcommand not in _CONTAINER_SUBCOMMANDS:
             return (
                 Category.NOT_ALLOWLISTED,
-                f"{program} {words[0]!r} runs an image's code, fetched at call time; "
+                f"{program} {subcommand!r} runs an image's code, fetched at call time; "
                 f"a job may use {program} only to "
                 + ", ".join(sorted(_CONTAINER_SUBCOMMANDS)),
             )
+        if subcommand == "compose":
+            inner, refused = _leading("compose", after)
+            if refused is not None:
+                return refused
+            if inner is not None and after[inner] not in _COMPOSE_SUBCOMMANDS:
+                return (
+                    Category.NOT_ALLOWLISTED,
+                    f"{program} compose {after[inner]!r} runs a service's image; a job may "
+                    "use compose only to " + ", ".join(sorted(_COMPOSE_SUBCOMMANDS)),
+                )
         return None
-    lead = words[:2] if arguments[:1] != words[:1] else words[:1]
-    fetching = _FETCH_AND_RUN.get(program, set())
-    for index, word in enumerate(lead):
-        follows = words[index + 1:index + 2]
-        if word in fetching and (word in ("dlx",) or follows):
-            return (
-                Category.NOT_ALLOWLISTED,
-                f"{program} {word} fetches a package and runs it, code nobody "
-                "reviewed and chosen at call time",
-            )
-    tool = words.index("tool") if "tool" in words[:2] else None
-    if program == "uv" and tool is not None and words[tool + 1:tool + 2] == ["run"]:
+    following = [a for a in after if not a.startswith("-")]
+    if subcommand in _FETCH_AND_RUN.get(program, ()) and (subcommand == "dlx" or following):
+        return (
+            Category.NOT_ALLOWLISTED,
+            f"{program} {subcommand} fetches a package and runs it, code nobody "
+            "reviewed and chosen at call time",
+        )
+    if program == "uv" and subcommand == "tool" and following[:1] == ["run"]:
         return (
             Category.NOT_ALLOWLISTED,
             "uv tool run fetches a package and runs it, code nobody reviewed "
             "and chosen at call time",
         )
-    run = next((word for word in words[:2] if word in _RUN_SUBCOMMANDS.get(program, ())),
-               None)
-    if run is None:
+    if subcommand not in _RUN_SUBCOMMANDS.get(program, ()):
         return None
-    after = arguments[arguments.index(run) + 1:]
+    if program == "npm" and ("--no" not in after or {"--yes", "-y"} & set(after)):
+        # cm-hhr (user decision 2026-10-28): npm exec runs an installed
+        # binary, but fetches and runs a package that is not installed.
+        # `--no` before the program is npm's "never install"; after it, it is
+        # the program's own argument (checked below: --no must be read past).
+        return _npm_without_no(subcommand)
     for argument in after:
         if argument.split("=", 1)[0] in _FETCHING_OPTIONS:
             return (
                 Category.NOT_ALLOWLISTED,
-                f"{program} {run} {argument.split('=', 1)[0]} fetches a package into "
-                "the run, code nobody reviewed and chosen at call time",
+                f"{program} {subcommand} {argument.split('=', 1)[0]} fetches a package "
+                "into the run, code nobody reviewed and chosen at call time",
             )
-    # The program run is the first word after the subcommand (and after
-    # `--`). An option's value read as the program is judged as one, which
-    # refuses rather than admits.
-    rest = [a for a in after if a != "--"]
-    leading = set()
-    while rest and rest[0].startswith("-"):
-        leading.add(rest[0])
-        rest = rest[1:]
-    if program == "npm" and ("--no" not in leading or leading & {"--yes", "-y"}):
-        # cm-hhr (user decision 2026-10-28): npm exec runs an installed
-        # binary, but fetches and runs a package that is not installed.
-        # `--no` before the program is npm's "never install"; after it, it is
-        # the program's own argument.
-        return (
-            Category.NOT_ALLOWLISTED,
-            f"npm {run} without --no (and without --yes) before the program fetches "
-            "and runs a package that is not installed, code nobody reviewed",
-            f"npm {run} --no <program>, which runs only what is installed",
-        )
-    if not rest:
+    start, refused = _leading(program, after, _RUN_OPTIONS)
+    if refused is not None:
+        return refused
+    if program == "npm" and "--no" not in after[:start if start is not None else len(after)]:
+        return _npm_without_no(subcommand)
+    if start is None:
         return None
-    return _refusal_for(rest)
+    # The program run must pass the allowlist on its own.
+    return _refusal_for(after[start:])
+
+
+def _npm_without_no(subcommand):
+    return (
+        Category.NOT_ALLOWLISTED,
+        f"npm {subcommand} without --no (and without --yes) before the program fetches "
+        "and runs a package that is not installed, code nobody reviewed",
+        f"npm {subcommand} --no <program>, which runs only what is installed",
+    )
 
 
 def _make_code(arguments):
@@ -537,22 +648,25 @@ def _program_option(program, arguments):
 
 def _git_command_setting(arguments):
     """A refusal if git is given configuration for this call (`-c`,
-    `--config-env`), or `git config` writes a key not on _GIT_WRITABLE_KEY
-    or renames, removes or edits sections, else None."""
+    `--config-env`) or its helpers' directory (`--exec-path`), or if
+    `git config` writes a key not on _GIT_WRITABLE_KEY, renames, removes or
+    edits sections, or is given an option not on _GIT_CONFIG_OPTIONS; else
+    None."""
     for argument in arguments:
         if not argument.startswith("-"):
             break
-        if argument.startswith("-c") or argument.startswith("--config-env"):
+        if argument.startswith(("-c", "--config-env", "--exec-path")):
             return (
                 Category.UNVERIFIABLE,
-                f"git {argument.split('=', 1)[0]} sets configuration for this call, and "
-                "a setting such as core.pager or core.sshCommand is a command git "
-                "runs. Run the git command without it",
+                f"git {argument.split('=', 1)[0]} changes git's configuration or "
+                "helper programs for this call, and a setting such as core.pager "
+                "or core.sshCommand is a command git runs. Run the git command "
+                "without it",
             )
-    words = [a for a in arguments if not a.startswith("-")]
-    if words[:1] != ["config"]:
-        return None
-    after = arguments[arguments.index("config") + 1:]
+    at, refused = _leading("git", arguments)
+    if refused is not None or at is None or arguments[at] != "config":
+        return refused
+    after = arguments[at + 1:]
     # Options up to the first positional, as git reads them; everything from
     # there on is a positional, whatever it looks like.
     options, rest = set(), []
@@ -561,6 +675,9 @@ def _git_command_setting(arguments):
             rest = after[index:]
             break
         options.add(argument.split("=", 1)[0])
+        if argument == "--type":
+            # `--type` with its value apart: the value would be read as the key.
+            options.add("--type <value>")
     mode = _GIT_CONFIG_SUBCOMMANDS.get(rest[0]) if rest else None
     if mode is not None:
         rest = rest[1:]
@@ -569,6 +686,14 @@ def _git_command_setting(arguments):
             Category.NOT_ALLOWLISTED,
             "git config may not rename, remove or edit sections during a job: that "
             "can move a key into a setting git runs",
+        )
+    unknown = options - _GIT_CONFIG_OPTIONS - _GIT_CONFIG_READS - _GIT_CONFIG_WRITES
+    if unknown:
+        return (
+            Category.NOT_ALLOWLISTED,
+            f"git config {sorted(unknown)[0]} is not an option a job may give it: a "
+            "file, blob or value option can make another word the key, or write "
+            "somewhere git reads settings from",
         )
     if mode is None:
         if options & _GIT_CONFIG_READS:
@@ -722,6 +847,11 @@ def _refusal_for(tokens):
     if subcommands is None:
         return None
 
+    if program in _LEADING_OPTIONS:
+        at, refused = _leading(program, arguments)
+        if refused is not None:
+            return refused
+        arguments = arguments[at:] if at is not None else []
     for argument in arguments:
         if argument.startswith("-"):
             continue
