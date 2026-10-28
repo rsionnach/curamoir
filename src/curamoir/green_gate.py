@@ -43,7 +43,7 @@ sandbox, so the fixed code is what is tested, never in the user's checkout.
 The sandbox is a fresh clone with no venv or node_modules, so the SOURCE
 checkout's are reused read-only: its `.venv` (or `venv`) by VIRTUAL_ENV and
 PATH, its `node_modules/.bin` on PATH and its `node_modules` on NODE_PATH.
-No network is set up, nothing is provisioned.
+Nothing is provisioned, and the OS sandbox (below) denies the network.
 
 A reused venv can hold an editable install of the checkout itself (`pip
 install -e`, `uv sync`; this repository's own is hatch's
@@ -88,10 +88,28 @@ VIRTUAL_ENV, NODE_PATH, PYTHONPATH (above), PYTHONDONTWRITEBYTECODE=1 (so
 importing from the source's venv writes no `.pyc` into the checkout),
 CI=true (jest and npm then run non-interactively and jest neither writes
 nor deletes snapshots, so a run cannot pass by rewriting its own
-expectations), and HOME and TMPDIR, a fresh directory each per run, outside
-the sandbox and removed after it (no `.npmrc`, `.netrc`, git credential
-helper or cloud config of the user's is read). TERM and SHELL are dropped:
+expectations), and HOME and TMPDIR, a fresh directory each per run inside
+the run's scratch directory (outside the clone; the OS sandbox lets the
+run write there) and removed after it (no `.npmrc`, `.netrc`, git
+credential helper or cloud config of the user's is read). TERM and SHELL are dropped:
 the output is captured, not shown, and the command is run by `/bin/sh`.
+
+**The OS sandbox** (cm-p2f; os_sandbox): every run, the canary's
+included, is wrapped by os_sandbox.wrap, so the kernel confines it: writes
+only inside the clone and the run's own scratch directory (which holds its
+HOME and TMPDIR), no network but loopback, no connection to a Unix socket
+outside those two. macOS uses `sandbox-exec` with the shipped profile
+(os_sandbox.sb), Linux bubblewrap (`bwrap`, which needs unprivileged user
+namespaces); any other platform, or the tool missing, refuses. Before the
+first run of each gate, os_sandbox.self_test proves it through the same
+argv path (a write in the clone succeeds, one outside fails, a connect to
+1.1.1.1:53 fails, a connect to a Unix socket listening outside fails, one
+inside works). On Linux, the places host sockets live (/tmp, /run, HOME,
+XDG_RUNTIME_DIR) are hidden and what the run reads from them (_read_only:
+PATH, the venv and its interpreter, the version managers) is bound back
+read-only. Failing either is a GateError, so the sweep refuses
+(TEST_GATE, "the test command was not run: no OS sandbox ..."): there is
+no unsandboxed fallback. OS_SANDBOX is the seam tests replace.
 
 **The command** (resolve_test_command) is `sweep.test_command` from the
 BASE commit's `.curamoir/curamoir.yaml`, read from git's objects like the
@@ -159,13 +177,15 @@ front (memory without bound on a large repository) or git between runs.
 
 **Limits, stated rather than hidden.**
 
-- The tests run the fixed code, which the fix agent wrote, with the user's
-  privileges. E3-R2's review bounds what changed; it cannot prove the
-  change harmless, and nothing here is an operating-system sandbox
-  (cm-p2f): a test command can still write wherever the user can, outside
-  the clone and in the source's venv included, and reach the network. The
-  allowlist keeps the user's credentials out of its environment, not out
-  of its reach on disk.
+- The tests run the fixed code, which the fix agent wrote, as the user,
+  confined by the OS sandbox (above): it can still READ what the user can
+  (the reused venv must be readable, and so is the rest of the disk), but
+  cannot write outside the clone and the run's directory nor send what it
+  read anywhere. The allowlist keeps the user's credentials out of its
+  environment; the sandbox keeps them from leaving.
+- The OS sandbox exists on macOS and Linux only; elsewhere, or with the
+  tool missing, or with Linux's unprivileged user namespaces off, the gate
+  refuses (no test command runs, no PR).
 - The environment is the user's checkout, not necessarily the base's
   lockfile: a venv that is ahead of or behind the base can turn a green
   base red (then nothing is opened) or the reverse. The canary checks the
@@ -214,6 +234,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import PurePosixPath
 from typing import Optional
 
+from curamoir import os_sandbox
 from curamoir.config import DEFAULTS, load_config_text
 from curamoir.git_guard import (
     GitGuardError,
@@ -268,6 +289,11 @@ _NOT_RUNNABLE = frozenset({126, 127})
 #: -m pytest` without pytest ("No module named pytest"), and an npm script
 #: or a wrapper whose tool is not installed ("command not found").
 _MISSING_RUNNER = re.compile(r"No module named '?pytest'?|command not found")
+
+#: The OS sandbox every run is wrapped in (os_sandbox: its wrap() and
+#: self_test()). A module attribute so tests can put a stand-in in its place
+#: (tests/os_sandbox_stand_in.py); nothing in the package does.
+OS_SANDBOX = os_sandbox
 
 _RED_REASON = ("the tests fail with this fix applied on top of the fixes kept before it, "
                "so it is left for a later sweep")
@@ -610,21 +636,22 @@ def sandbox_environment(source, root=None, src=False):
 
 
 def _run_command(sandbox, argv, env, timeout, paths=()):
-    """One run of `argv` in the sandbox: a GateRun. HOME and TMPDIR are a
-    fresh directory each, outside the sandbox and removed afterwards, so a
-    run neither reads the user's dotfiles (an `.npmrc` token, a git
-    credential helper) nor hands state to the next run."""
+    """One run of `argv` in the sandbox, confined by the OS sandbox
+    (OS_SANDBOX.wrap: writes only in the clone and this run's scratch
+    directory, no network): a GateRun. HOME and TMPDIR are a fresh
+    directory each inside that scratch directory, outside the clone and
+    removed afterwards, so a run neither reads the user's dotfiles (an
+    `.npmrc` token, a git credential helper) nor hands state to the next
+    run. GateError, and nothing run, if no OS sandbox is available."""
     scratch = tempfile.mkdtemp(prefix="curamoir-test-run-")
     try:
-        home, tmp = os.path.join(scratch, "home"), os.path.join(scratch, "tmp")
-        os.mkdir(home)
-        os.mkdir(tmp)
-        env = dict(env, PWD=str(sandbox.path), HOME=home, TMPDIR=tmp)
+        env = _scratch_env(sandbox, env, scratch)
+        wrapped = _wrapped(argv, sandbox, scratch, env)
         started = time.monotonic()
         try:
             # 4 bytes per character: UTF-8's widest, so the last _TAIL
             # characters are inside the bytes kept whatever the text.
-            done = run_in_group(argv, cwd=str(sandbox.path), env=env, timeout=timeout,
+            done = run_in_group(wrapped, cwd=str(sandbox.path), env=env, timeout=timeout,
                                 tail_bytes=4 * _TAIL, max_output_bytes=_OUTPUT_CAP)
         except OutputCapExceeded as capped:
             return GateRun(paths, FAILED, None, time.monotonic() - started,
@@ -646,6 +673,62 @@ def _run_command(sandbox, argv, env, timeout, paths=()):
 
 def _tail(data):
     return (data or b"").decode("utf-8", "replace")[-_TAIL:]
+
+
+def _scratch_env(sandbox, env, scratch):
+    """`env` with HOME and TMPDIR made fresh inside `scratch` (the run's
+    directory, which the OS sandbox lets it write) and PWD the sandbox."""
+    home, tmp = os.path.join(scratch, "home"), os.path.join(scratch, "tmp")
+    os.mkdir(home)
+    os.mkdir(tmp)
+    return dict(env, PWD=str(sandbox.path), HOME=home, TMPDIR=tmp)
+
+
+_NO_SANDBOX = "the test command was not run: no OS sandbox confines it here"
+
+
+def _wrapped(argv, sandbox, scratch, env):
+    """`argv` wrapped in the OS sandbox for the clone and `scratch`;
+    GateError (the sweep refuses, TEST_GATE) where there is none. Never
+    the bare argv: there is no unsandboxed fallback."""
+    try:
+        return OS_SANDBOX.wrap(argv, clone=str(sandbox.path), run_dir=scratch,
+                               read_only=_read_only(env))
+    except os_sandbox.OsSandboxUnavailable as error:
+        raise GateError(f"{_NO_SANDBOX}: {error}") from error
+
+
+def _read_only(env):
+    """What a run reads from places Linux's sandbox masks (os_sandbox.wrap's
+    `read_only`): PATH's directories, the reused venv and the installation
+    its interpreter links to, NODE_PATH, the user base and the version
+    managers' roots. Read-only, and only the paths named; macOS ignores it."""
+    paths = [entry for name in ("PATH", "NODE_PATH")
+             for entry in env.get(name, "").split(os.pathsep)]
+    paths += [env.get(name, "") for name in ("VIRTUAL_ENV", "PYTHONUSERBASE",
+                                             *_VERSION_MANAGER_ROOTS)]
+    venv = env.get("VIRTUAL_ENV")
+    if venv:
+        interpreter = os.path.realpath(os.path.join(venv, "bin", "python3"))
+        paths.append(os.path.dirname(os.path.dirname(interpreter)))
+    return [path for path in paths if path and os.path.isabs(path)]
+
+
+def _sandbox_self_test(sandbox, env):
+    """OS_SANDBOX.self_test for this gate's clone, with a scratch directory
+    and environment shaped like a run's; GateError if it fails. Run once per
+    gate, before the manifest is taken (its probe file in the clone is
+    removed again) and before any command of the project's."""
+    scratch = tempfile.mkdtemp(prefix="curamoir-test-run-")
+    try:
+        try:
+            OS_SANDBOX.self_test(str(sandbox.path), scratch,
+                                 env=_scratch_env(sandbox, env, scratch),
+                                 read_only=_read_only(env))
+        except os_sandbox.OsSandboxUnavailable as error:
+            raise GateError(f"{_NO_SANDBOX}: {error}") from error
+    finally:
+        remove_tree(scratch, what="the sandbox self-test's scratch directory")
 
 
 # --- the canary -----------------------------------------------------------------------
@@ -818,6 +901,9 @@ def run_test_gate(sandbox, verdict, paths=None):
     names = _base_names(sandbox)
     env = sandbox_environment(sandbox.source, sandbox.path,
                               src=any(name.startswith("src/") for name in names))
+    # Before anything of the project's runs, and before the manifest: no
+    # proven OS sandbox, no run (GateError, the sweep refuses).
+    _sandbox_self_test(sandbox, env)
     git_state = snapshot_git_state(sandbox)
     held = _held(every)
     manifest = _tree(str(sandbox.path), held)

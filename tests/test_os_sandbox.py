@@ -1,0 +1,362 @@
+"""cm-p2f: the E3-R4 test run executes under an OS sandbox (os_sandbox), or
+not at all.
+
+Three groups:
+
+1. **The real sandbox** (macOS sandbox-exec here; Linux bwrap where it is
+   installed). Each skip names why, and on macOS
+   test_macos_has_sandbox_exec is never skipped, so a silent skip cannot
+   hide the real tests on the platform this project is developed on. They
+   run the gate (run_test_gate) with the real green_gate.OS_SANDBOX and
+   prove: a write outside the clone fails, an outbound connect fails, a
+   host Unix socket is unreachable, while a pytest run in the clone,
+   loopback, HOME/TMPDIR writes and a socket in TMPDIR all work.
+2. **Fail closed**: with the tool unavailable (shutil.which, sys.platform)
+   the gate raises GateError and the sweep refuses TEST_GATE, and no test
+   command ran (run_in_group is never called).
+3. **A self-test failure** (wrap() made a pass-through, so the probe runs
+   unconfined) is a refusal too, with nothing of the project's run.
+
+Fixture provenance: the repositories are tests/test_green_gate.py's
+one-commit repos (repo_of) and tests/test_sweep_job.py's committed sample
+(checkout); the outside targets are tmp_path files the test creates and
+checks, so what the sandbox blocked is observed, not assumed.
+"""
+
+import itertools
+import os
+import shutil
+import socket
+import sys
+
+import pytest
+
+from curamoir import green_gate, os_sandbox
+from curamoir.git_guard import prepare_sandbox
+from curamoir.green_gate import GREEN, GateError, run_test_gate
+from curamoir.guards.reasons import Reason
+from curamoir.job_run import REFUSED
+from tests.os_sandbox_stand_in import PREFIX, Unconfined
+from tests.test_green_gate import THREE, fix, repo_of
+from tests.test_lint import NO_BARE_PRINT
+from tests.test_sweep_job import (  # noqa: F401  (isolated_home is an autouse fixture)
+    checkout,
+    isolated_home,
+)
+from tests.test_sweep_publish import (  # noqa: F401  (quick_lookups is an autouse fixture)
+    GATE,
+    fixer,
+    nothing_pushed,
+    quick_lookups,
+    sweep,
+)
+
+PY = sys.executable
+
+if sys.platform == "darwin":
+    _TOOL = "sandbox-exec"
+elif sys.platform.startswith("linux"):
+    _TOOL = "bwrap"
+else:
+    _TOOL = None
+
+real_sandbox = pytest.mark.skipif(
+    _TOOL is None or shutil.which(_TOOL) is None,
+    reason=(f"no OS sandbox on {sys.platform}: these run only on macOS (sandbox-exec) or "
+            "Linux with bwrap installed" if _TOOL is None else
+            f"{_TOOL} is not on PATH on this {sys.platform} machine"))
+
+
+@pytest.fixture
+def no_project_command(monkeypatch):
+    """A spy on green_gate.run_in_group: every call is a run of something of
+    the project's (the canary or the test command). Returns the calls."""
+    calls = []
+    real = green_gate.run_in_group
+
+    def spy(argv, *args, **kwargs):
+        calls.append(list(argv))
+        return real(argv, *args, **kwargs)
+
+    monkeypatch.setattr(green_gate, "run_in_group", spy)
+    return calls
+
+
+def gate(tmp_path, command):
+    """run_test_gate on a three-file repo whose committed test command is
+    `command`, with one fix; the GateResult."""
+    repo = repo_of(tmp_path, THREE, command)
+    with prepare_sandbox(repo, "HEAD", parent=tmp_path) as sandbox:
+        return run_test_gate(sandbox, fix(sandbox, {"src/a.py": "a = 2\n"}))
+
+
+# --- 1. the real sandbox ----------------------------------------------------------------
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="checks macOS's sandbox-exec; this is "
+                                                    f"{sys.platform}")
+def test_macos_has_sandbox_exec():
+    """Never skipped on macOS: the real-sandbox tests below cannot be
+    skipped there by a missing tool without this failing."""
+    assert shutil.which("sandbox-exec"), "macOS without sandbox-exec: the gate would refuse"
+    assert os.path.isfile(os_sandbox.PROFILE)
+
+
+def test_the_gate_uses_the_real_sandbox_by_default():
+    assert green_gate.OS_SANDBOX is os_sandbox
+
+
+@real_sandbox
+def test_the_self_test_passes_and_leaves_nothing(tmp_path):
+    clone, run = tmp_path / "clone", tmp_path / "run"
+    clone.mkdir()
+    run.mkdir()
+    os_sandbox.self_test(clone, run)
+    assert list(clone.iterdir()) == [] and list(run.iterdir()) == []
+
+
+@real_sandbox
+def test_a_test_command_cannot_write_outside_the_clone(tmp_path, no_project_command):
+    outside = tmp_path / "escaped"
+    result = gate(tmp_path, f"echo pwned > {outside}; true")
+    assert result.strategy == GREEN
+    assert not outside.exists(), "the test command wrote outside the clone"
+    assert no_project_command and all(argv[0] == shutil.which(_TOOL)
+                                      for argv in no_project_command)
+
+
+@real_sandbox
+def test_a_conftest_writing_outside_the_clone_is_stopped(tmp_path):
+    """The shape of the boundary test's canary: test code (a conftest.py the
+    project's pytest imports) writes outside; the write fails, and the
+    tests still pass."""
+    canary = tmp_path / "canary"
+    files = dict(THREE)
+    files["tests/conftest.py"] = (f"try:\n    open({str(canary)!r}, 'w').write('ran')\n"
+                                  "except OSError:\n    pass\n")
+    files["tests/test_ok.py"] = "def test_ok():\n    assert True\n"
+    repo = repo_of(tmp_path, files, f"{PY} -m pytest -q -p no:cacheprovider tests")
+    with prepare_sandbox(repo, "HEAD", parent=tmp_path) as sandbox:
+        result = run_test_gate(sandbox, fix(sandbox, {"src/a.py": "a = 2\n"}))
+    assert result.strategy == GREEN, result.runs[-1].tail
+    assert not canary.exists()
+
+
+@real_sandbox
+def test_an_outbound_connection_fails(tmp_path):
+    script = tmp_path / "net.py"
+    script.write_text("import socket, sys\ns = socket.socket(); s.settimeout(3)\n"
+                      "try:\n    s.connect(('1.1.1.1', 53))\nexcept OSError:\n"
+                      "    sys.exit(0)\nsys.exit('connected')\n")
+    result = gate(tmp_path, f"{PY} {script}")
+    assert result.strategy == GREEN, result.runs[-1].tail
+
+
+@real_sandbox
+def test_a_host_unix_socket_is_unreachable(tmp_path):
+    """A daemon's socket outside the clone (the docker socket, an ssh agent)
+    stands here as one this test listens on."""
+    path = os.path.join(os.path.realpath(tmp_path), "d.sock")
+    if len(path) > 100:
+        path = os.path.join("/tmp", f"cm-{os.getpid()}.sock")
+    server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    server.bind(path)
+    server.listen(1)
+    try:
+        probe = ("import socket, sys\nu = socket.socket(socket.AF_UNIX)\n"
+                 f"try:\n    u.connect({path!r})\nexcept OSError:\n    sys.exit(0)\n"
+                 "sys.exit('connected')\n")
+        script = tmp_path / "probe.py"
+        script.write_text(probe)
+        result = gate(tmp_path, f"{PY} {script}")
+    finally:
+        server.close()
+        os.unlink(path)
+    assert result.strategy == GREEN, result.runs[-1].tail
+
+
+@real_sandbox
+def test_loopback_home_tmpdir_and_a_local_socket_work(tmp_path):
+    probe = tmp_path / "probe.py"
+    probe.write_text(
+        "import os, socket\n"
+        "server = socket.socket(); server.bind(('127.0.0.1', 0)); server.listen(1)\n"
+        "socket.create_connection(server.getsockname(), timeout=3).close()\n"
+        "path = os.path.join(os.environ['TMPDIR'], 's')\n"
+        "u = socket.socket(socket.AF_UNIX); u.bind(path); u.listen(1)\n"
+        "socket.socket(socket.AF_UNIX).connect(path)\n"
+        "open(os.path.join(os.environ['HOME'], 'h'), 'w').write('ok')\n")
+    result = gate(tmp_path, f"{PY} {probe}")
+    assert result.strategy == GREEN, result.runs[-1].tail
+
+
+@real_sandbox
+def test_a_pytest_suite_in_the_clone_passes(tmp_path):
+    files = dict(THREE)
+    files["tests/test_a.py"] = ("import sys, pathlib\n"
+                                "def test_a(tmp_path):\n"
+                                "    (tmp_path / 'x').write_text('x')\n"
+                                "    assert True\n")
+    repo = repo_of(tmp_path, files, f"{PY} -m pytest -q tests")
+    with prepare_sandbox(repo, "HEAD", parent=tmp_path) as sandbox:
+        result = run_test_gate(sandbox, fix(sandbox, {"src/a.py": "a = 2\n"}))
+    assert result.strategy == GREEN, result.runs[-1].tail
+    assert "1 passed" in result.runs[-1].tail
+
+
+# --- wrap -------------------------------------------------------------------------------
+
+def test_wrap_on_macos_is_sandbox_exec_with_real_paths(tmp_path, monkeypatch):
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setattr(os_sandbox.shutil, "which", lambda name: f"/usr/bin/{name}")
+    (tmp_path / "c").mkdir()
+    link = tmp_path / "link"
+    link.symlink_to(tmp_path / "c")
+    argv = os_sandbox.wrap(["/bin/sh", "-c", "x"], clone=link, run_dir=tmp_path)
+    assert argv == ["/usr/bin/sandbox-exec", "-f", os_sandbox.PROFILE,
+                    "-D", f"CLONE={os.path.realpath(tmp_path / 'c')}",
+                    "-D", f"RUN={os.path.realpath(tmp_path)}", "/bin/sh", "-c", "x"]
+
+
+def test_wrap_on_linux_is_bwrap_masking_socket_places(tmp_path, monkeypatch):
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr(os_sandbox.shutil, "which", lambda name: f"/usr/bin/{name}")
+    home = tmp_path / "home"
+    (home / ".pyenv").mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("XDG_RUNTIME_DIR", raising=False)
+    clone, run = tmp_path / "c", tmp_path / "r"
+    argv = os_sandbox.wrap(["/bin/sh"], clone=clone, run_dir=run,
+                           read_only=[str(home / ".pyenv"), str(home), "relative", ""])
+    clone, run = os.path.realpath(clone), os.path.realpath(run)
+    assert argv[:2] == ["/usr/bin/bwrap", "--ro-bind"]
+    assert argv[-2:] == ["--", "/bin/sh"]
+    pairs = list(itertools.pairwise(argv))
+    for masked in ("/tmp", "/run", os.path.realpath(home)):
+        assert ("--tmpfs", masked) in pairs
+    assert ("--ro-bind-try", os.path.realpath(home / ".pyenv")) in pairs
+    assert ("--ro-bind-try", os.path.realpath(home)) not in pairs, "HOME was unmasked"
+    for flag in ("--unshare-net", "--unshare-pid", "--unshare-ipc", "--die-with-parent"):
+        assert flag in argv
+    assert ("--bind", clone) in pairs and ("--bind", run) in pairs
+    assert argv.index("--bind") > max(i for i, a in enumerate(argv) if a == "--tmpfs")
+
+
+@pytest.mark.parametrize("platform", ["win32", "freebsd14", "cygwin"])
+def test_wrap_elsewhere_is_unavailable(tmp_path, monkeypatch, platform):
+    monkeypatch.setattr(sys, "platform", platform)
+    with pytest.raises(os_sandbox.OsSandboxUnavailable, match="no OS sandbox"):
+        os_sandbox.wrap(["true"], clone=tmp_path, run_dir=tmp_path)
+
+
+@pytest.mark.parametrize("platform, tool", [("darwin", "sandbox-exec"), ("linux", "bwrap")])
+def test_wrap_without_the_tool_is_unavailable(tmp_path, monkeypatch, platform, tool):
+    monkeypatch.setattr(sys, "platform", platform)
+    monkeypatch.setattr(os_sandbox.shutil, "which", lambda name: None)
+    with pytest.raises(os_sandbox.OsSandboxUnavailable, match=tool):
+        os_sandbox.wrap(["true"], clone=tmp_path, run_dir=tmp_path)
+
+
+def test_wrap_takes_argv_never_a_string(tmp_path):
+    with pytest.raises(ValueError, match="never a command string"):
+        os_sandbox.wrap("rm -rf ~", clone=tmp_path, run_dir=tmp_path)
+
+
+# --- 2. fail closed ---------------------------------------------------------------------
+
+@pytest.mark.parametrize("unavailable", ["no tool", "no platform"])
+def test_without_an_os_sandbox_the_gate_refuses_and_runs_nothing(
+        tmp_path, monkeypatch, no_project_command, unavailable):
+    if unavailable == "no tool":
+        monkeypatch.setattr(os_sandbox.shutil, "which", lambda name: None)
+    else:
+        monkeypatch.setattr(sys, "platform", "sunos5")
+    ran = tmp_path / "ran"
+    with pytest.raises(GateError, match="the test command was not run: no OS sandbox"):
+        gate(tmp_path, f"touch {ran}")
+    assert no_project_command == [] and not ran.exists()
+
+
+def test_without_an_os_sandbox_the_sweep_refuses_test_gate(tmp_path, no_real_gh, monkeypatch,
+                                                           no_project_command):
+    monkeypatch.setattr(os_sandbox.shutil, "which", lambda name: None)
+    repo = checkout(tmp_path, NO_BARE_PRINT, config=GATE)
+    claude, _ = fixer(tmp_path)
+
+    line = sweep(repo, claude=claude)
+
+    assert line["outcome"] == REFUSED and line["reason"] == Reason.TEST_GATE.value
+    assert "the test command was not run: no OS sandbox" in line["message"]
+    assert no_project_command == []
+    assert nothing_pushed(tmp_path, no_real_gh)
+
+
+# --- 3. the self-test -------------------------------------------------------------------
+
+def unconfined_wrap(argv, **_kwargs):
+    """A wrap() that confines nothing: what self_test must catch."""
+    return [*PREFIX, *argv]
+
+
+def test_a_sandbox_that_does_not_confine_fails_its_self_test(tmp_path, monkeypatch):
+    monkeypatch.setattr(os_sandbox, "wrap", unconfined_wrap)
+    (tmp_path / "c").mkdir()
+    (tmp_path / "r").mkdir()
+    with pytest.raises(os_sandbox.OsSandboxUnavailable,
+                       match="a write outside the clone and the run's directory was not denied"):
+        os_sandbox.self_test(tmp_path / "c", tmp_path / "r")
+    assert list((tmp_path / "c").iterdir()) == []
+
+
+@pytest.mark.parametrize("said, why", [
+    ({}, "printed nothing"),
+    ({"clone": "denied"}, "inside the clone did not succeed"),
+    ({"clone": "ok", "outside": "denied", "net": "connected"}, "1.1.1.1:53 was not denied"),
+    ({"clone": "ok", "outside": "denied", "net": "blocked", "unix_outside": "connected"},
+     "Unix socket outside"),
+    ({"clone": "ok", "outside": "denied", "net": "blocked", "unix_outside": "blocked",
+      "unix_inside": "denied"}, "inside the run's directory did not work"),
+    ({"clone": "ok", "outside": "denied"}, "the net check did not run"),
+])
+def test_each_failed_check_is_named(said, why):
+    assert why in os_sandbox._failed_check(said)
+
+
+def test_a_failed_self_test_refuses_the_gate_and_runs_nothing(tmp_path, monkeypatch,
+                                                               no_project_command):
+    monkeypatch.setattr(os_sandbox, "wrap", unconfined_wrap)
+    ran = tmp_path / "ran"
+    with pytest.raises(GateError, match="no OS sandbox confines it here: the sandbox "
+                                        "self-test failed"):
+        gate(tmp_path, f"touch {ran}")
+    assert no_project_command == [] and not ran.exists()
+
+
+def test_a_failed_self_test_is_a_test_gate_refusal(tmp_path, no_real_gh, monkeypatch,
+                                                   no_project_command):
+    monkeypatch.setattr(os_sandbox, "wrap", unconfined_wrap)
+    repo = checkout(tmp_path, NO_BARE_PRINT, config=GATE)
+    claude, _ = fixer(tmp_path)
+
+    line = sweep(repo, claude=claude)
+
+    assert line["outcome"] == REFUSED and line["reason"] == Reason.TEST_GATE.value
+    assert "self-test failed" in line["message"]
+    assert no_project_command == []
+    assert nothing_pushed(tmp_path, no_real_gh)
+
+
+def test_every_run_goes_through_wrap(tmp_path, monkeypatch, no_project_command):
+    """The canary and each test run, base and bisection included, are
+    wrapped; the self-test runs once per gate, first."""
+    stand_in = Unconfined()
+    monkeypatch.setattr(green_gate, "OS_SANDBOX", stand_in)
+    repo = repo_of(tmp_path, THREE, "! grep -rqs BROKEN src")
+    with prepare_sandbox(repo, "HEAD", parent=tmp_path) as sandbox:
+        result = run_test_gate(sandbox, fix(sandbox, {"src/a.py": "a = 2\n",
+                                                      "src/b.py": "BROKEN\n"}))
+    assert result.strategy == "reduced"
+    assert len(stand_in.self_tests) == 1
+    assert len(no_project_command) == len(result.runs) + 1  # + the canary
+    assert all(argv[:len(PREFIX)] == PREFIX for argv in no_project_command)
+    run_dirs = [run_dir for _, _, run_dir in stand_in.wrapped]
+    assert len(set(run_dirs)) == len(run_dirs), "a run reused another's directory"

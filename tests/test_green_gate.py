@@ -15,6 +15,13 @@ so which fix breaks the tests is decided by the test, not guessed. The
 end-to-end test uses `fixtures/sample-repo` (tests/conftest.py,
 committed_sample) with PLANTED.json's own `test_command` committed as the
 config, the real lint, the real remedy, and the real review.
+
+**The OS sandbox is a stand-in here.** These fake commands record their
+runs in files outside the clone (`counted`, `> {out}`), which the real OS
+sandbox denies, so every test in this module runs with
+tests/os_sandbox_stand_in.Unconfined in green_gate.OS_SANDBOX (the autouse
+fixture below). The real sandbox, and the gate refusing without one, are
+proved in tests/test_os_sandbox.py.
 """
 
 import contextlib
@@ -52,12 +59,22 @@ from curamoir.job_run import JobRun
 from curamoir.ledger import Ledger
 from curamoir.remedies import apply_file_remedies
 from tests.conftest import committed_sample
+from tests.os_sandbox_stand_in import Unconfined
 from tests.test_fix_scope import git_repo as files_repo
 
 ROOT = Path(__file__).resolve().parents[1]
 PLANTED = json.loads((ROOT / "fixtures" / "sample-repo" / "PLANTED.json").read_text("utf-8"))
 
 RED_IF_BROKEN = "! grep -rqs BROKEN src"
+
+
+@pytest.fixture(autouse=True)
+def unconfined_os_sandbox(monkeypatch):
+    """The module docstring's stand-in for the OS sandbox."""
+    from curamoir import green_gate
+    stand_in = Unconfined()
+    monkeypatch.setattr(green_gate, "OS_SANDBOX", stand_in)
+    return stand_in
 
 
 def config(command, extra=""):

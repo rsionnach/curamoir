@@ -1,0 +1,42 @@
+;; cúramóir's macOS sandbox for the E3-R4 test run (os_sandbox.wrap, cm-p2f).
+;;
+;; Run as: sandbox-exec -f os_sandbox.sb -D CLONE=<realpath> -D RUN=<realpath> argv...
+;; Both parameters MUST be real paths (/private/tmp, not /tmp): the kernel
+;; matches the resolved path, so a symlinked parameter matches nothing.
+;;
+;; Allow by default, then deny what matters: a deny-by-default profile is
+;; fragile across macOS releases (exit 71 for ordinary tools). Reads stay
+;; open (the reused venv, system libraries); writes are confined to the
+;; clone and the run's directory (its HOME and TMPDIR); the network is
+;; loopback only. Exit 65 or 71 from sandbox-exec itself means the profile
+;; or the exec failed; any other exit is the child's.
+
+(version 1)
+(allow default)
+
+;; Network: loopback only (a test's own server and client), no remote host.
+(deny network*)
+(allow network-bind network-inbound (local ip "localhost:*"))
+(allow network-outbound (remote ip "localhost:*"))
+
+;; Unix sockets: a test may make its own (multiprocessing, node IPC), but
+;; may connect only to one inside the clone or the run's directory, never to
+;; a daemon's socket elsewhere (a docker socket, an ssh agent, a launchd
+;; service). One filter per rule: a rule naming two subpaths matches neither.
+(allow network* (local unix-socket))
+(deny network-outbound (remote unix-socket))
+(allow network-outbound (remote unix-socket (subpath (param "CLONE"))))
+(allow network-outbound (remote unix-socket (subpath (param "RUN"))))
+
+;; Files: write only inside the clone and the run's directory, plus the
+;; device files every process writes to.
+(deny file-write*)
+(allow file-write*
+  (subpath (param "CLONE"))
+  (subpath (param "RUN"))
+  (literal "/dev/null")
+  (literal "/dev/zero")
+  (literal "/dev/dtracehelper")
+  (literal "/dev/stdout")
+  (literal "/dev/stderr")
+  (regex #"^/dev/fd/[0-9]+$"))

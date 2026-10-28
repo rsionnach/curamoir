@@ -113,6 +113,12 @@ Prerequisites:
 - **`ast-grep`**, if any of your rules use `matcher: ast-grep`.
 - **`bd` (beads)**, optional: with it, findings are filed as beads too;
   without it they go to GitHub only, with a ledger note.
+- **An OS sandbox for the sweep's test run**: macOS's built-in
+  `sandbox-exec`, or on Linux bubblewrap (`bwrap`) with unprivileged user
+  namespaces enabled (on Ubuntu 24.04, install the `bubblewrap` package,
+  whose AppArmor profile allows them). Without one, the sweep refuses to run
+  your tests on its fixes, so it opens no PR; other platforms are not
+  supported.
 
 ```bash
 claude plugin marketplace add rsionnach/curamoir
@@ -171,6 +177,13 @@ before any of the features:
   `git push --force`, `rm -rf` and similar commands are refused, and each refusal
   names the safe alternative.
 - **An open-PR cap.** You will never come back to a wall of PRs.
+- **The sweep's test run is OS-sandboxed.** Before opening a PR the sweep runs
+  your tests on its fixes, in a throwaway clone, under `sandbox-exec` (macOS)
+  or `bwrap` (Linux): the tests can write only inside that clone and their own
+  temporary directory, and cannot reach the network beyond loopback. The
+  sandbox is self-tested before every run; where it is missing or fails, the
+  sweep refuses rather than run the tests unconfined. The tests can still
+  read what you can read.
 - **Redaction** on everything it writes.
 
 It has four known limits:

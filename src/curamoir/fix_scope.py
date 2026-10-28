@@ -354,8 +354,11 @@ which line each path records).
    precedence over tier-1 fixes; every line from here carries the tier1
    field, step 2c's note): `gate = green_gate.run_test_gate(sandbox,
    verdict, paths=trimmed)`, which runs the base's test command in the
-   sandbox and, on red, drops fixed paths until the rest is green. Then,
-   by outcome:
+   sandbox, confined by an OS sandbox (os_sandbox: macOS sandbox-exec,
+   Linux bwrap; writes only in the clone and the run's own directory, no
+   network; a GateError where there is none, never an unconfined run),
+   and, on red, drops fixed paths until the rest is green. Then, by
+   outcome:
    - strategy `green` or `reduced`: compute `fix_fields` (step 8), patch
      and open the PR (step 9), then `run.succeeded(...,
      **gate.ledger_fields(), **fix_fields)`; then the snapshot (step 2a);
