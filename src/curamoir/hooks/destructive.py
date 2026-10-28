@@ -38,8 +38,10 @@ import re
 from fnmatch import fnmatch
 
 from curamoir.hooks._policy_common import _CWD, _subcommand_at
+from curamoir.hooks._policy_writes import _uniq_positionals
 from curamoir.hooks._shell import (
     SHELLS,
+    is_separator,
     lex,
     program_name,
     redirection_targets,
@@ -146,31 +148,43 @@ def _abbreviated(flags, option, min_length=4):
 
 
 def _gh_rule(arguments):
-    """The Rule for a gh command that deletes on the remote (round 10):
-    `gh repo delete`, `gh pr close -d/--delete-branch`, and `gh api` with the
-    DELETE method in any spelling; else None."""
+    """The Rule for a gh command that changes GitHub state a job leaves alone
+    (rounds 10 and 11): any `<noun> delete`, `repo archive`/`rename`,
+    `pr close -d`, `pr merge`, `api` with the DELETE method in any spelling
+    (`-X` inside a short-option cluster too), and `api graphql` with a
+    mutation, or a body from a file the guard cannot read; else None."""
     positionals, flags = _parse_flags(arguments)
     words = positionals[:2]
-    if words == ["repo", "delete"]:
-        return Rule("gh repo delete deletes a repository on the remote",
+    if len(words) == 2 and (words[1] == "delete" or words in (
+            ["repo", "archive"], ["repo", "rename"])):
+        return Rule(f"gh {words[0]} {words[1]} changes or deletes it on GitHub",
                     _REMOTE_DELETION_ALTERNATIVE)
     if words == ["pr", "close"] and ("d" in flags or _abbreviated(flags, "--delete-branch", 5)):
         return Rule("gh pr close --delete-branch deletes the PR's branch on the remote",
                     _REMOTE_DELETION_ALTERNATIVE)
-    if words[:1] == ["api"]:
-        for index, argument in enumerate(arguments):
-            name, _, value = argument.partition("=")
-            if argument.startswith("-X") and not argument.startswith("--"):
-                value = argument[2:].lstrip("=")
-            elif name == "--method":
-                pass
-            else:
-                continue
-            if not value:
-                value = arguments[index + 1] if index + 1 < len(arguments) else ""
-            if value.upper() == "DELETE":
-                return Rule("gh api -X DELETE deletes on the remote",
-                            _REMOTE_DELETION_ALTERNATIVE)
+    if words == ["pr", "merge"]:
+        return Rule("gh pr merge merges the PR, which is the reviewer's decision",
+                    "leave the PR for review; a job never merges")
+    if words[:1] != ["api"]:
+        return None
+    if words == ["api", "graphql"] and (
+            any("mutation" in argument.lower() for argument in arguments)
+            or _abbreviated(flags, "--input", 4)):
+        return Rule("gh api graphql with a mutation changes GitHub state",
+                    "a job does not change GitHub state through the API; say in the "
+                    "PR what should change")
+    for index, argument in enumerate(arguments):
+        name, _, value = argument.partition("=")
+        if argument.startswith("-") and not argument.startswith("--") and "X" in argument:
+            # `-X` alone, attached (`-XDELETE`) or inside a cluster (`-iX`).
+            value = argument[argument.index("X") + 1:].lstrip("=")
+        elif name != "--method":
+            continue
+        if not value:
+            value = arguments[index + 1] if index + 1 < len(arguments) else ""
+        if value.upper() == "DELETE":
+            return Rule("gh api -X DELETE deletes on the remote",
+                        _REMOTE_DELETION_ALTERNATIVE)
     return None
 
 
@@ -496,6 +510,13 @@ def _judge(tokens):
             "leave it; say in the PR which tag should go",
         )
 
+    if subcommand == "rm" and "--cached" in flags and "r" in flags:
+        return Rule(
+            "git rm -r --cached untracks a whole directory at once, more than a "
+            "change usually means to",
+            "git rm --cached <path> for each file",
+        )
+
     if subcommand == "rm" and "--cached" not in flags:
         return Rule(
             "git rm deletes files from the working tree",
@@ -552,10 +573,69 @@ def _judge(tokens):
     return None
 
 
+def _pipelines(tokens):
+    """`tokens` split into pipelines, each a list of segments: `|` and `|&`
+    join segments that run at the same time; every other separator (`;`,
+    `&&`, `||`, `&`, a newline) ends a pipeline."""
+    found, current, segment = [], [], []
+    for token in tokens:
+        if token in ("|", "|&"):
+            current.append(segment)
+            segment = []
+        elif is_separator(token):
+            current.append(segment)
+            found.append([s for s in current if s])
+            current, segment = [], []
+        else:
+            segment.append(token)
+    current.append(segment)
+    found.append([s for s in current if s])
+    return [pipeline for pipeline in found if pipeline]
+
+
+def _empties_its_input(tokens):
+    """The Rule for a truncating write (`>`, `>|`, `&>`) whose target the same
+    pipeline also reads: a word of any of its commands, or a `<` source, or
+    uniq's output path when it is the input (rounds 10 and 11). The shell
+    empties the target before anything reads it, so `cat a | sort > a` and
+    `sort < a > a` leave `a` empty. Commands joined by `&&` or `;` run one
+    after another, so `sort a > b && mv b a` is not one of these."""
+    for pipeline in _pipelines(tokens):
+        read = set()
+        for segment in pipeline:
+            bare = strip_redirections(segment)
+            read |= {os.path.normpath(word) for word in bare[1:]}
+            read |= {os.path.normpath(segment[i + 1])
+                     for i, token in enumerate(segment[:-1]) if token == "<"}
+            if bare and program_name(bare[0]) == "uniq":
+                paths = _uniq_positionals(bare[1:])
+                if len(paths) >= 2 and os.path.normpath(paths[0]) == os.path.normpath(
+                        paths[1]):
+                    return _emptied(paths[1])
+        for segment in pipeline:
+            for index, operator in enumerate(segment[:-1]):
+                target = segment[index + 1]
+                if operator in _TRUNCATING and os.path.normpath(target) in read:
+                    return _emptied(target)
+    return None
+
+
+def _emptied(target):
+    return Rule(
+        f"writing over {target}, which the same command reads, empties it before "
+        "it is read",
+        "write to a new file, then mv it over",
+    )
+
+
 def _inspect(tokens, depth):
     """The Rule `tokens` violate, following nested payloads. None if clean."""
     if depth > _MAX_DEPTH or not tokens:
         return None
+
+    emptied = _empties_its_input(tokens)
+    if emptied is not None:
+        return emptied
 
     for segment in segments(tokens):
         # Judged before the operators are stripped, because the write target is
@@ -569,14 +649,6 @@ def _inspect(tokens, depth):
             if operator not in _TRUNCATING:
                 continue
             target = segment[index + 1]
-            # The shell empties the target before the program reads it, so
-            # `sort a > a` leaves `a` empty (round 10).
-            if os.path.normpath(target) in {os.path.normpath(a) for a in bare[1:]}:
-                return Rule(
-                    f"redirecting output over {target}, which the same command reads, "
-                    "empties it before it is read",
-                    "write to a new file, then mv it over",
-                )
             if _would_overwrite(target):
                 return Rule(
                     f"redirecting output over {target} truncates a source file, "
