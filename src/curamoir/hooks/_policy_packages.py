@@ -128,10 +128,13 @@ def _package_script(program, arguments, judge):
         if argument == "--":
             break
         name = _option_key(argument)
-        # Or a prefix of one (`--script-sh`, _abbreviates), in case npm's
-        # option parser expands abbreviations as it long has.
+        # Or a prefix of one of at least three letters (`--scr`, `--nod`),
+        # in case npm's option parser expands abbreviations as it long has.
+        # Three, compared without dashes or underscores: a two-letter prefix
+        # (`--sc`, `--no`) is shared with options a job uses (`--no` is
+        # npm exec's), and erring toward refusing costs a retry (round 6).
         if argument.startswith("-") and any(
-                _abbreviates(name, option, 6) for option in _PROGRAM_NAMING_OPTIONS):
+                _abbreviates(name, option, 3) for option in _PROGRAM_NAMING_OPTIONS):
             return (
                 Category.UNVERIFIABLE,
                 f"{program} {argument.split('=', 1)[0]} names the program that runs "

@@ -28,7 +28,7 @@ MUST_ALLOW = [
     "git log --oneline -5",
     "git rev-parse --abbrev-ref HEAD",
     "git symbolic-ref --short HEAD",
-    "git for-each-ref --format=%(refname:short) refs/heads",
+    "git for-each-ref --format='%(refname:short)' refs/heads",
     "git checkout -b curamoir/sweep-2026-10-08",
     "git switch -c curamoir/sweep-2026-10-08",
     "git push origin curamoir/sweep-2026-10-08",

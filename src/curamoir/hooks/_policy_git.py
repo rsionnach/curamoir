@@ -12,7 +12,12 @@ policy._PROGRAM_CHECKS; git's never need the recursive `judge`.
 
 import re
 
-from curamoir.hooks._policy_common import _abbreviates, _subcommand_at
+from curamoir.hooks._policy_common import (
+    _abbreviates,
+    _subcommand_at,
+    _write_target_refusal,
+)
+from curamoir.hooks._policy_writes import _path_candidates
 from curamoir.hooks.verdict import Category
 
 #: git settings a job may WRITE with `git config`. Any other key is refused:
@@ -171,4 +176,71 @@ def _git_inline_command(program, arguments, judge):
                 f"git {subcommand} {dangerous[0]} runs a command written at call time. "
                 f"Run git {subcommand} without it, and the command on its own",
             )
+    return None
+
+
+#: git's options before the subcommand that name the directory it works in or
+#: on. Judged as write targets (round 6): git writes there (`git -C /tmp/x
+#: commit`, `--git-dir` into another repository's `.git`), and a directory
+#: outside the diff or inside `.git` is one the sweep's review never sees.
+#: `--namespace` names refs, not a directory.
+_GIT_DIRECTORY_OPTIONS = frozenset({"-C", "--git-dir", "--work-tree"})
+
+
+def _git_writes(program, arguments, judge):
+    """A refusal if git would write outside the diff the sweep reviews
+    (round 6): a directory given to `-C`, `--git-dir` or `--work-tree` that
+    lies outside it, a file named by `--output` (any subcommand, `git diff
+    --output=/tmp/x`, and any long option beginning `--out`), a repository
+    initialised elsewhere or with its git directory elsewhere
+    (`git init /tmp/x`, `--separate-git-dir`, a `--template` outside, whose
+    hooks are copied in), or a second work tree (`git worktree add`, which a
+    job does not need and whose files are not in the diff); else None."""
+    index = 0
+    while index < len(arguments) and arguments[index].startswith("-") \
+            and arguments[index] != "--":
+        name, equals, value = arguments[index].partition("=")
+        index += 1
+        if name in _GIT_DIRECTORY_OPTIONS:
+            if not equals:
+                value = arguments[index] if index < len(arguments) else ""
+                index += 1
+            refused = _write_target_refusal(f"git {name}", value)
+            if refused is not None:
+                return refused
+    at, refused = _subcommand_at("git", arguments)
+    if refused is not None or at is None:
+        return None
+    subcommand, after = arguments[at], arguments[at + 1:]
+    if subcommand == "worktree" and [a for a in after if not a.startswith("-")][:1] == ["add"]:
+        return (
+            Category.NOT_ALLOWLISTED,
+            "git worktree add creates a second work tree, whose files are outside "
+            "the diff the sweep reviews",
+            "work in this repository's own working tree",
+        )
+    for index, argument in enumerate(after):
+        if argument == "--":
+            break
+        name, equals, value = argument.partition("=")
+        if subcommand == "init" and name.startswith("--") and _abbreviates(
+                name, "--separate-git-dir", 5):
+            return (
+                Category.NOT_ALLOWLISTED,
+                "git init --separate-git-dir puts the repository's git directory "
+                "elsewhere, outside the diff the sweep reviews",
+                "git init without it",
+            )
+        if name.startswith("--out"):
+            if not equals:
+                value = after[index + 1] if index + 1 < len(after) else ""
+            refused = _write_target_refusal(f"git {subcommand} {name}", value)
+            if refused is not None:
+                return refused
+    if subcommand == "init":
+        for argument in after:
+            for path in _path_candidates(argument):
+                refused = _write_target_refusal("git init", path)
+                if refused is not None:
+                    return refused
     return None

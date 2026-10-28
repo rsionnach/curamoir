@@ -225,7 +225,7 @@ def test_a_write_outside_the_reviewed_diff_is_refused(command):
     "pytest > /dev/null 2>&1",
     "cp a b",
     "mkdir -p build/x",
-    "cp /usr/share/dict/words words.txt",
+    "cp words/list words.txt",
     "touch .gitignore",
     "tee out.log",
 ])

@@ -74,7 +74,10 @@ def main(argv=None, stdin=None, stdout=None):
     try:
         delegated = _delegate_to_dcg(command)
         decision = delegated if delegated is not None else judge_command(
-            command, in_job=True, scripts=_package_scripts(repo, command))
+            command, in_job=True, scripts=_package_scripts(repo, command),
+            # Not resolved: an absolute path the agent writes is spelled from
+            # the directory as given, symlinks in it and all.
+            cwd=os.path.abspath(repo))
     except Exception as error:
         decision = Decision(
             deny=True,

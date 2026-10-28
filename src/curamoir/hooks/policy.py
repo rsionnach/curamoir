@@ -32,9 +32,11 @@ fetched and run (`pnpm dlx`, `npm create`, `uv tool run`, `uv run --with`,
 (`go -toolexec`, `cargo --config`, `npm --script-shell`); a command written
 into a git subcommand's options (`git rebase --exec`, `git fetch
 --upload-pack`, `git submodule foreach`); a write the sweep's review of the
-diff never sees, into `.git/` or outside the repository (`> .git/hooks/x`,
-`cp`/`mv`/`tee`/`touch`/`mkdir` there, `docker build --output`); words the
-shell rewrites before the program sees them (`--{force,quiet}`, `$'...'`);
+diff never sees, into `.git/`, outside the repository or through a symlink to
+either (`> .git/hooks/x`, `cp`/`mv`/`tee`/`touch`/`mkdir` there, `sort -o`,
+`git diff --output`, `pytest --junitxml`, `docker build --output`), or to a
+glob the guard cannot resolve; words the shell rewrites before the program
+sees them (`--{force,quiet}`, `$'...'`, zsh's `*(e:cmd:)` and `=(cmd)`);
 and configuration whose value is a
 command: `git -c`, any `git config` write outside a short list of safe keys,
 `go env -w`, and any environment variable outside a short list (cm-z0k made
@@ -53,7 +55,9 @@ one allowlist of programs and their subcommands), and _refusal_for, which
 judges one command. Each family's own checks, which run on an allowlisted
 program before its subcommand is checked, are in _policy_git.py (git),
 _policy_packages.py (uv, npm, pnpm, yarn) and _policy_tools.py (docker,
-podman, go, make, cargo), and the helpers they share in _policy_common.py.
+podman, go, make, cargo); every program's writes to paths it is given are
+judged in _policy_writes.py; and the helpers they share, the outside-the-diff
+rule among them, are in _policy_common.py.
 
 It fails closed: an exception while judging, or runners nested more than
 _MAX_NESTING deep, is a refusal, because a guard that raises is silent and a
@@ -64,7 +68,6 @@ The one fact from the repository it uses, package.json's script names, is read
 by pretooluse and handed to judge_command as `scripts`.
 """
 
-import fnmatch
 import re
 from contextvars import ContextVar
 
@@ -73,13 +76,20 @@ from contextvars import ContextVar
 # read them there, and importing them back from here would be a cycle.
 from curamoir.hooks._policy_common import (
     _ASSIGNMENT,
+    _CWD,
     _INTERPRETERS,
     _LEADING_OPTIONS,
     _PYTHON,
     _SCRIPTS,
+    _UNQUOTED_GLOB,
+    _has_unquoted_glob,
     _subcommand_at,
 )
-from curamoir.hooks._policy_git import _git_command_setting, _git_inline_command
+from curamoir.hooks._policy_git import (
+    _git_command_setting,
+    _git_inline_command,
+    _git_writes,
+)
 from curamoir.hooks._policy_packages import _package_script, _runner_code
 from curamoir.hooks._policy_tools import (
     _container_code,
@@ -87,6 +97,7 @@ from curamoir.hooks._policy_tools import (
     _make_code,
     _program_option,
 )
+from curamoir.hooks._policy_writes import _redirection_outside_diff, _write_refusal
 from curamoir.hooks._shell import (
     HEREDOCS,
     MAX_COMMAND_CHARS,
@@ -105,9 +116,9 @@ _UNVERIFIABLE = (
     (re.compile(r"\$\("), "command substitution `$(...)`"),
     (re.compile(r"`"), "command substitution with backticks"),
     # A token that OPENS a parenthesis group: a process substitution lexes as
-    # `<` then `(rm`, and a subshell group as `(rm`. Anchored at the start of
-    # the token so that `--format=%(refname:short)`, one shell word the sweep
-    # runs, is not caught by it.
+    # `<` then `(rm`, and a subshell group as `(rm`. Named on its own for the
+    # message; an unquoted `(` anywhere else in a word is refused after this
+    # table (_UNQUOTED_PARENTHESIS).
     (re.compile(r"^\("), "a subshell or process substitution `(...)`"),
     (re.compile(r"\$\{?[A-Za-z_]"), "a shell variable, whose value is not knowable here"),
 )
@@ -254,10 +265,27 @@ def _unverifiable(tokens):
         for pattern, description in _UNVERIFIABLE:
             if pattern.search(token):
                 return description
-        if _BRACE_EXPANSION.search(_outside_double_quotes(token)):
+        bare = _outside_double_quotes(token)
+        if any(_BRACE_LIST.search(group.group()) for group in _BRACE_GROUP.finditer(bare)):
             return ("a brace expansion `{a,b}` or `{a..b}`, which the shell turns into "
                     "words the guard never sees")
+        if "(" in bare:
+            return _UNQUOTED_PARENTHESIS
     return None
+
+
+#: What an unquoted `(` anywhere in a word is refused as (round 6). zsh, the
+#: shell the Bash tool runs on macOS, reads `x(...)` as a glob with
+#: qualifiers, and `e:cmd:` and `+cmd` among them run commands; `=(cmd)` is a
+#: process substitution. git's format atoms are no exception: zsh can read
+#: `--format=%(refname:fe:id:)` as qualifiers that run `id`, and no rule over
+#: the atom's text closes that, so `%(` is refused unquoted too and the
+#: refusal says to quote it (`--format='%(refname:short)'`). The sweep's own
+#: git calls run from Python, not through this hook.
+_UNQUOTED_PARENTHESIS = (
+    "an unquoted `(` in a word, which zsh reads as a glob qualifier "
+    "(`*(e:cmd:)` runs cmd) or a process substitution (`=(cmd)`)"
+)
 
 
 #: An unquoted brace expansion: braces holding a `,` or a `..` (R5 edge-case
@@ -265,7 +293,11 @@ def _unverifiable(tokens):
 #: `git push origin main --{force,quiet}` is `--force --quiet` and
 #: `git reset {--hard,}` is `git reset --hard`, while the guard read one word
 #: that is neither. `{}` alone is not one, which `find -exec cmd {} ;` needs.
-_BRACE_EXPANSION = re.compile(r"\{[^{}]*(?:,|\.\.)[^{}]*\}")
+_BRACE_GROUP = re.compile(r"\{[^{}]*\}")
+#: Found in two steps, a group and then a list inside it, so the search is
+#: linear: one pattern with `[^{}]*` either side of the `,` backtracked
+#: quadratically over a long run of commas (round 6).
+_BRACE_LIST = re.compile(r",|\.\.")
 
 
 def _outside_double_quotes(token):
@@ -481,7 +513,7 @@ def _inline_program_text(program, arguments):
 #: the judge as an argument is what lets the family modules do that without
 #: importing this one.
 _PROGRAM_CHECKS = {
-    "git": (_git_command_setting, _git_inline_command),
+    "git": (_git_command_setting, _git_inline_command, _git_writes),
     "make": (_make_code,),
     "go": (_go_code,),
     "cargo": (_program_option,),
@@ -492,91 +524,6 @@ _PROGRAM_CHECKS = {
     "docker": (_container_code,),
     "podman": (_container_code,),
 }
-
-
-#: Redirection operators that write to their target. `>&` writes to a file
-#: unless its target is a descriptor (`2>&1`) or `-` (close).
-_WRITING_REDIRECTIONS = frozenset({">", ">>", ">|", "&>", "&>>", "<>", ">&"})
-
-#: Redirection targets that are not files anyone reviews or runs.
-_HARMLESS_TARGETS = frozenset({"/dev/null", "/dev/stdout", "/dev/stderr"})
-
-#: Allowlisted programs that write to paths they are given, and which of
-#: their words are those paths: "all" positionals, or cp's "last" (its
-#: sources are only read) unless a target directory is named.
-_WRITERS = {"tee": "all", "touch": "all", "mkdir": "all", "mv": "all", "cp": "last"}
-
-
-def _outside_diff(path):
-    """Whether writing `path` would change something the sweep's review of
-    the diff never sees (I1, R5 edge-case review): anything in `.git/`, in
-    any case (macOS's filesystem is case-insensitive), or outside the
-    repository (an absolute path, `~`, a `..` component). A component that is
-    a glob which could match `.git` or `..` counts, since the shell expands it
-    first (`.gi?`)."""
-    if path.startswith(("/", "~")):
-        return True
-    for component in path.split("/"):
-        lowered = component.lower()
-        if lowered == ".git" or component == "..":
-            return True
-        if component.startswith(".") and any(c in component for c in "*?[") and (
-                fnmatch.fnmatchcase(".git", lowered) or fnmatch.fnmatchcase("..", component)):
-            return True
-    return False
-
-
-def _outside_diff_refusal(what, path):
-    return (
-        Category.NOT_ALLOWLISTED,
-        f"{what} writes to {path!r}, outside the diff the sweep reviews: .git/ and "
-        "paths outside the repository are never in it, and a file there can run "
-        "code later (.git/hooks/pre-commit runs on the next git commit)",
-        "write inside the repository's working tree, where the change is reviewed",
-    )
-
-
-def _redirection_outside_diff(segment):
-    """The refusal for a redirection in `segment` (before the redirections
-    are stripped) that writes outside the diff, else None."""
-    for index, token in enumerate(segment[:-1]):
-        if token not in _WRITING_REDIRECTIONS:
-            continue
-        target = segment[index + 1]
-        if token == ">&" and (target.isdigit() or target == "-"):
-            continue
-        if target not in _HARMLESS_TARGETS and _outside_diff(target):
-            return _outside_diff_refusal(f"redirecting output with {token}", target)
-    return None
-
-
-def _written_paths(program, arguments):
-    """The paths `program` (one of _WRITERS) would write given `arguments`:
-    its positionals, all of them or cp's last, and the value of a target
-    directory option (`-t DIR`, `-tDIR`, `--target-directory=DIR`) however
-    it is spelled, which makes every positional a path to check."""
-    which = _WRITERS.get(program)
-    if which is None:
-        return []
-    positionals, attached, target_directory = [], [], False
-    options_ended = False
-    for argument in arguments:
-        if options_ended or not argument.startswith("-") or argument == "-":
-            positionals.append(argument)
-            continue
-        if argument == "--":
-            options_ended = True
-            continue
-        if argument.startswith("--"):
-            if argument.startswith("--t"):
-                target_directory = True
-                attached.append(argument.partition("=")[2])
-        elif "t" in argument[1:]:
-            target_directory = True
-            attached.append(argument[argument.index("t", 1) + 1:])
-    if which == "last" and not target_directory:
-        positionals = positionals[-1:]
-    return positionals + [path for path in attached if path]
 
 
 def _inline_code_refusal(program):
@@ -689,7 +636,8 @@ def _refusal_for(tokens):
     if program in _PYTHON:
         if len(arguments) >= 2 and arguments[0] == "-m":
             if arguments[1] in _ALLOWED_PYTHON_MODULES:
-                return None
+                # `python3 -m pytest` writes where `pytest` does.
+                return _write_refusal(arguments[1], arguments[2:])
             # The module is plainly readable; we simply decline it.
             return (
                 Category.NOT_ALLOWLISTED,
@@ -717,9 +665,9 @@ def _refusal_for(tokens):
             f"{program!r} is not on cúramóir's allowlist for jobs",
         )
 
-    for path in _written_paths(program, arguments):
-        if _outside_diff(path):
-            return _outside_diff_refusal(program, path)
+    refused = _write_refusal(program, arguments)
+    if refused is not None:
+        return refused
 
     for check in _PROGRAM_CHECKS.get(program, ()):
         refused = check(program, arguments, _nested_refusal)
@@ -748,7 +696,7 @@ def _refusal_for(tokens):
     return None
 
 
-def judge_command(command, in_job, scripts=None):
+def judge_command(command, in_job, scripts=None, cwd=None):
     """Whether to block `command` during a cúramóir job.
 
     Allowlist first, then the denylist as a second pass over the same string.
@@ -757,8 +705,13 @@ def judge_command(command, in_job, scripts=None):
     judged as the binary it may be. It affects only `yarn run`: npm and pnpm
     run nothing but a script by that name.
 
-    `scripts` is held in a ContextVar (_SCRIPTS) for the length of the call
-    rather than passed down, because the judgement recurses: _refusal_for runs
+    `cwd` is the directory the command runs in, when the caller knows it
+    (pretooluse does): with it, a write's absolute path inside it is judged as
+    the relative one, and a write through a symlink is refused; without it,
+    every absolute path is outside and symlinks are not looked for.
+
+    `scripts` and `cwd` are held in ContextVars (_SCRIPTS, _CWD) for the
+    length of the call rather than passed down, because the judgement recurses: _refusal_for runs
     a program's checks, which run _refusal_for on the program a runner runs,
     and a parameter would be threaded through every check to reach the one
     place that reads it.
@@ -766,6 +719,8 @@ def judge_command(command, in_job, scripts=None):
     if not in_job:
         return Decision(deny=False)
     token = _SCRIPTS.set(_script_names(scripts))
+    cwd_token = _CWD.set(cwd if isinstance(cwd, str) and cwd else None)
+    glob_token = _UNQUOTED_GLOB.set(True)
     try:
         return _judge(command)
     except Exception as error:
@@ -783,6 +738,8 @@ def judge_command(command, in_job, scripts=None):
             category=Category.UNVERIFIABLE,
         )
     finally:
+        _UNQUOTED_GLOB.reset(glob_token)
+        _CWD.reset(cwd_token)
         _SCRIPTS.reset(token)
 
 
@@ -802,6 +759,7 @@ def _judge(command):
     """judge_command's verdict for a command run inside a job."""
 
     command = command or ""
+    _UNQUOTED_GLOB.set(_has_unquoted_glob(command))
 
     # Before any parsing, because this bound exists to stop the parse. Lexing is
     # superlinear in length, a PreToolUse hook has 5s, and a command hook that
@@ -870,7 +828,10 @@ def _judge(command):
                 "Rewrite it without substitution, or run the inner command "
                 "directly."
             ),
-            alternative="run the inner command directly",
+            alternative=(
+                "quote the format string, or the word holding the parenthesis "
+                "(`--format='%(refname:short)'`)"
+                if reason == _UNQUOTED_PARENTHESIS else "run the inner command directly"),
             category=Category.UNVERIFIABLE,
         )
 

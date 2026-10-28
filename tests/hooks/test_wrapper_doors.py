@@ -246,7 +246,7 @@ MUST_ALLOW = [
     "git config set user.name x",
     "git -C sub status",
     "git --no-pager log --oneline",
-    "git --git-dir=.git status",
+    "git --work-tree=. status",
     "git -C sub config user.name x",
     "git config --local user.name x",
     "git config --type=bool core.filemode false",

@@ -115,12 +115,14 @@ def _parse_flags(tokens):
     return positionals, flags
 
 
-def _abbreviated(flags, option):
-    """Whether `flags` hold `option` or a prefix of it of at least two letters
-    after the dashes, which git's option parser reads as `option` when no
-    other option shares the prefix. Two letters is the policy's threshold for
-    git (_policy_common._abbreviates)."""
-    return any(flag.startswith("--") and len(flag) >= 4 and option.startswith(flag)
+def _abbreviated(flags, option, min_length=4):
+    """Whether `flags` hold `option` or a prefix of it at least `min_length`
+    characters long with the dashes, which git's option parser reads as
+    `option` when no other option shares the prefix. The default, two letters
+    after the dashes, is the policy's threshold for git
+    (_policy_common._abbreviates); a caller passes more where a shorter prefix
+    is shared (`--pr` is --progress's too)."""
+    return any(flag.startswith("--") and len(flag) >= min_length and option.startswith(flag)
                for flag in flags)
 
 
@@ -319,6 +321,13 @@ def _judge(tokens):
             return Rule(
                 "git push --delete (or an empty refspec) deletes a remote branch outright",
                 "delete the branch locally and let the PR close it",
+            )
+        # `--prune` from `--pru`: `--pr` is shared with --progress (round 6).
+        if _abbreviated(flags, "--prune", 5):
+            return Rule(
+                "git push --prune deletes every remote branch that has no local "
+                "counterpart",
+                "git push <remote> <branch>",
             )
         if _abbreviated(flags, "--mirror"):
             return Rule(

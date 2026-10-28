@@ -4,14 +4,16 @@ policy.py is the pipeline and the spec of record; the program families' checks
 live in _policy_git.py, _policy_packages.py and _policy_tools.py, and this
 module holds what more than one of them reads: how a program's subcommand is
 found, how an abbreviated long option is recognised, which words name a
-program that runs code, and the package.json script names for the command
-being judged. It imports nothing from policy.py, so the families can import it
+program that runs code, whether a path written lies outside the reviewed
+diff, and the per-call facts (the package.json script names, the hook's
+working directory) for the command being judged. It imports nothing from policy.py, so the families can import it
 and policy.py can import them without a cycle; the one thing a family needs
 from the pipeline, the recursive judge, is handed to each check as an argument.
 
 Stdlib only, and no config read, as policy.py.
 """
 
+import os
 import re
 from contextvars import ContextVar
 
@@ -132,7 +134,7 @@ def _abbreviates(name, option, min_length):
 
     The minimum is each caller's: git, docker and GNU make accept a prefix of
     two letters after the dashes, so their callers pass 4 with the dashes
-    counted; npm's caller compares names without dashes or underscores and passes 6. A prefix
+    counted; npm's caller compares names without dashes or underscores and passes 3. A prefix
     is matched whether or not another option shares it: refusing an ambiguous
     abbreviation costs a retry, and the parser may resolve it either way."""
     return len(name) >= min_length and option.startswith(name)
@@ -197,3 +199,98 @@ def _is_code_runner(word):
     name = word.strip("\"'").rsplit("/", 1)[-1]
     return (name in SHELLS or name in _INTERPRETERS or name in _PYTHON
             or name in _SCRIPT_RUNNERS or bool(re.fullmatch(r"python[0-9.]*", name)))
+
+
+#: The directory the command runs in (judge_command's `cwd`, which pretooluse
+#: supplies from the hook payload), or None when it is not known. Read only by
+#: _write_target_refusal, to resolve a write's real target; a ContextVar for
+#: the reason _SCRIPTS is one.
+_CWD = ContextVar("curamoir_policy_cwd", default=None)
+
+#: Whether the command being judged holds an unquoted glob character anywhere
+#: (_has_unquoted_glob). True by default, so a caller that did not ask is
+#: judged strictly.
+_UNQUOTED_GLOB = ContextVar("curamoir_policy_unquoted_glob", default=True)
+
+#: Characters that make a word a glob the shell expands before the program
+#: sees it.
+_GLOB_CHARACTERS = frozenset("*?[")
+
+
+def _has_unquoted_glob(command):
+    """Whether `command` holds `*`, `?` or `[` outside quotes and unescaped.
+
+    Per command rather than per word, because `lex` has already removed the
+    quotes by the time a word is judged: when this is False no word was
+    globbed, and when it is True every write target holding one of these is
+    read as a glob (round 6), which errs strict."""
+    in_single = in_double = escaped = False
+    for character in command:
+        if escaped:
+            escaped = False
+        elif character == "\\" and not in_single:
+            escaped = True
+        elif character == "'" and not in_double:
+            in_single = not in_single
+        elif character == '"' and not in_single:
+            in_double = not in_double
+        elif character in _GLOB_CHARACTERS and not in_single and not in_double:
+            return True
+    return False
+
+
+def _write_target_refusal(what, path):
+    """The refusal for `what` writing `path` outside the diff the sweep
+    reviews, else None (I1, R5 edge-case review; round 6).
+
+    - A glob (`*`, `?`, `[` in a command that globs) is refused as
+      unverifiable: which files it names is the shell's answer, and emulating
+      bash's matching here (`[!x]` against `[^x]`, dotfiles, options) is a
+      second implementation to get wrong.
+    - Literally: `~`, a `.git` component in any case (macOS's filesystem is
+      case-insensitive), and, when the working directory is unknown, an
+      absolute path or a `..` component.
+    - When the working directory is known: the real path of the target
+      (os.path.realpath, which follows a symlink in ANY component and
+      collapses `..`) must lie under the working directory's real path, with
+      no component of it, relative to that, named `.git` in any case. That covers a symlink to `.git` or outside,
+      wherever in the path it sits."""
+    if not path:
+        return None
+    if _GLOB_CHARACTERS.intersection(path) and _UNQUOTED_GLOB.get():
+        return (
+            Category.UNVERIFIABLE,
+            f"{what} writes to {path!r}, a glob: a write target with a glob cannot "
+            "be checked against the diff the sweep reviews, since which files it "
+            "names is the shell's answer",
+            "name the file",
+        )
+    cwd = _CWD.get()
+    components = path.split("/")
+    outside = path.startswith("~") or any(c.lower() == ".git" for c in components)
+    if cwd is None:
+        outside = outside or path.startswith("/") or ".." in components
+    elif not outside:
+        try:
+            root = os.path.realpath(cwd)
+            real = os.path.realpath(os.path.join(cwd, path))
+        except (OSError, ValueError):
+            outside = True
+        else:
+            # Relative to the root, and `.git` compared without case in every
+            # component: on macOS's case-insensitive filesystem a symlink to
+            # `.GIT` reaches `.git` while realpath keeps the case it was
+            # given, and a nested repository's `.git` is as unreviewed.
+            relative = os.path.relpath(real, root)
+            outside = (relative == ".." or relative.startswith(".." + os.sep)
+                       or any(c.lower() == ".git" for c in relative.split(os.sep)))
+    if not outside:
+        return None
+    return (
+        Category.NOT_ALLOWLISTED,
+        f"{what} writes to {path!r}, outside the diff the sweep reviews: .git/, "
+        "paths outside the repository and paths through a symlink to either are "
+        "never in it, and a file there can run code later (.git/hooks/pre-commit "
+        "runs on the next git commit)",
+        "write inside the repository's working tree, where the change is reviewed",
+    )
