@@ -553,8 +553,8 @@ def test_a_malformed_cache_rate_is_rejected_by_config_validation(value):
 
     with pytest.raises(ConfigError) as caught:
         load_config({"budget": {"prices": {"m": {"input": 1.0, "output": 1.0,
-                                                 "cache_read": value}}}})
-    assert "budget.prices.m.cache_read" in str(caught.value)
+                                                 "cache_write_1h": value}}}})
+    assert "budget.prices.m.cache_write_1h" in str(caught.value)
 
 
 def test_explicit_cache_rates_are_accepted_by_config_validation():

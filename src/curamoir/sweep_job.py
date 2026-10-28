@@ -144,7 +144,13 @@ from pathlib import Path
 from typing import Optional
 
 from curamoir import github, publish
-from curamoir.budget import CACHE_READ_FIELD, CACHE_WRITE_FIELD, UNRECORDED
+from curamoir.budget import (
+    CACHE_READ_FIELD,
+    CACHE_WRITE_1H_FIELD,
+    CACHE_WRITE_5M_FIELD,
+    CACHE_WRITE_FIELD,
+    UNRECORDED,
+)
 from curamoir.config import ConfigError
 from curamoir.fix_counts import (
     found_delta,
@@ -684,7 +690,8 @@ def _unfinished(fix_run):
 
 #: Every top-level field line_cost_fields may write.
 COST_FIELDS = frozenset({"input_tokens", "output_tokens", CACHE_WRITE_FIELD,
-                         CACHE_READ_FIELD, "model", "cost_usd"})
+                         CACHE_READ_FIELD, CACHE_WRITE_5M_FIELD, CACHE_WRITE_1H_FIELD,
+                         "model", "cost_usd"})
 
 
 def line_cost_fields(model, scan=None, fix_run=None):
@@ -741,11 +748,33 @@ def line_cost_fields(model, scan=None, fix_run=None):
             total = sum(count[position] for count in counts)
             if total > 0:
                 fields[field] = total
+        # The 5-minute / 1-hour split of the writes (cm-1et), only when every
+        # call that wrote the cache gave it: a split for part of the writes
+        # would price the rest as 1-hour anyway, but would read as complete.
+        splits = [_write_split(usage) for usage, _cost in calls]
+        writers = [splits[index] for index, count in enumerate(counts) if count[2] > 0]
+        if writers and all(split is not None for split in writers):
+            for position, field in ((0, CACHE_WRITE_5M_FIELD), (1, CACHE_WRITE_1H_FIELD)):
+                total = sum(split[position] for split in writers)
+                if total > 0:
+                    fields[field] = total
     fields["model"] = model
     costs = [cost for _usage, cost in calls]
     if all(usable_number(cost) for cost in costs):
         fields["cost_usd"] = sum(costs)
     return fields
+
+
+def _write_split(usage):
+    """(5-minute, 1-hour) cache-write tokens from a call's
+    usage.cache_creation, or None when it is absent or not a pair of usable
+    counts: writes then price as 1-hour, the dearer."""
+    split = usage.get("cache_creation") if isinstance(usage, dict) else None
+    if not isinstance(split, dict):
+        return None
+    pair = tuple(0 if split.get(key) is None else split.get(key)
+                 for key in ("ephemeral_5m_input_tokens", "ephemeral_1h_input_tokens"))
+    return pair if all(usable_number(value) for value in pair) else None
 
 
 def _counts(usage):

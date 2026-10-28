@@ -115,17 +115,40 @@ from curamoir.ledger import Ledger  # noqa: E402
 
 
 def test_cache_tokens_default_to_the_standard_multiples_of_the_input_rate():
-    # sonnet input is $2.00/M: a write is $2.50/M, a read $0.20/M.
-    assert PRICES.cost("claude-sonnet-5", 0, 0, cache_write_tokens=1_000_000) == pytest.approx(2.5)
+    # sonnet input is $2.00/M: a 5-minute write is $2.50/M, a 1-hour write
+    # $4.00/M, a read $0.20/M. A write with no 5-minute share given is
+    # priced as 1-hour (cm-1et, user decision 2026-10-28).
+    assert PRICES.cost("claude-sonnet-5", 0, 0, cache_write_tokens=1_000_000,
+                       cache_write_5m_tokens=1_000_000) == pytest.approx(2.5)
+    assert PRICES.cost("claude-sonnet-5", 0, 0, cache_write_tokens=1_000_000) == pytest.approx(4.0)
     assert PRICES.cost("claude-sonnet-5", 0, 0, cache_read_tokens=1_000_000) == pytest.approx(0.2)
 
 
-def test_an_explicit_cache_rate_overrides_the_default():
-    prices = PriceTable({"m": {"input": 2.0, "output": 10.0,
-                               "cache_write": 4.0, "cache_read": 1.0}})
+def test_a_split_write_prices_each_share_and_the_rest_as_1_hour():
+    # 400k 5-minute at $2.50/M, the other 600k at $4.00/M.
+    assert PRICES.cost("claude-sonnet-5", 0, 0, cache_write_tokens=1_000_000,
+                       cache_write_5m_tokens=400_000) == pytest.approx(1.0 + 2.4)
 
-    assert prices.cost("m", 0, 0, cache_write_tokens=1_000_000,
-                       cache_read_tokens=1_000_000) == pytest.approx(5.0)
+
+def test_a_5_minute_share_larger_than_the_total_is_capped_at_it():
+    assert PRICES.cost("claude-sonnet-5", 0, 0, cache_write_tokens=100,
+                       cache_write_5m_tokens=10**9) == pytest.approx(100 * 2.5 / 1e6)
+
+
+def test_the_first_dogfood_run_prices_to_what_the_cli_reported():
+    """cm-1et's evidence: run e19fa0bd04d3 (2026-10-28) reported
+    total_cost_usd 1.0192166 for these tokens on claude-sonnet-5, which is
+    exactly what 2x pricing of its cache writes gives (1.25x gave 0.7971)."""
+    assert PRICES.cost("claude-sonnet-5", 34, 28218, cache_write_tokens=148071,
+                       cache_read_tokens=723423) == pytest.approx(1.0192166, abs=1e-6)
+
+
+def test_an_explicit_cache_rate_overrides_the_default():
+    prices = PriceTable({"m": {"input": 2.0, "output": 10.0, "cache_write": 3.0,
+                               "cache_write_1h": 7.0, "cache_read": 1.0}})
+
+    assert prices.cost("m", 0, 0, cache_write_tokens=2_000_000, cache_write_5m_tokens=1_000_000,
+                       cache_read_tokens=1_000_000) == pytest.approx(3.0 + 7.0 + 1.0)
 
 
 @pytest.mark.parametrize("rate", ["cheap", None, True])
@@ -149,8 +172,16 @@ def test_month_to_date_prices_a_lines_cache_tokens(harness):
 
     spend = month_to_date(ledger, PRICES, OCTOBER())
 
-    # $2.00 input + $2.50 write + $2.00 read
-    assert spend.usd == pytest.approx(6.5) and spend.unaccounted == 0
+    # $2.00 input + $4.00 write (no split: 1-hour) + $2.00 read
+    assert spend.usd == pytest.approx(8.0) and spend.unaccounted == 0
+
+
+def test_month_to_date_prices_a_recorded_5_minute_share(harness):
+    ledger = Ledger(harness.repo / ".curamoir" / "state" / "ledger.jsonl")
+    cache_line(ledger, cache_creation_input_tokens=1_000_000,
+               cache_creation_5m_input_tokens=1_000_000)
+
+    assert month_to_date(ledger, PRICES, OCTOBER()).usd == pytest.approx(2.5)
 
 
 def test_a_line_of_only_cache_reads_is_still_priced(harness):

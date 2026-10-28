@@ -46,8 +46,10 @@ budget:
   # change, and a stale table silently misreports spend. Cost is derived from
   # recorded tokens at read time, so correcting a price here fixes historical
   # figures without re-running any job. Prompt-cache tokens are priced too:
-  # a model may set `cache_write` and `cache_read` (USD per million tokens);
-  # without them a cache write costs 1.25x its input rate and a read 0.1x.
+  # a model may set `cache_write` (5-minute writes), `cache_write_1h` and
+  # `cache_read` (USD per million tokens); without them a 5-minute write
+  # costs 1.25x its input rate, a 1-hour write 2x and a read 0.1x. A write
+  # the CLI did not say is 5-minute is priced as 1-hour.
   prices:
     claude-opus-5:
       input: 5.00

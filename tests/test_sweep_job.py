@@ -1078,3 +1078,34 @@ def test_a_cache_count_that_is_not_usable_makes_the_line_unrecorded(value):
 
     assert got["input_tokens"] == UNRECORDED and got["output_tokens"] == UNRECORDED
     assert "cache_read_input_tokens" not in got
+
+
+
+def test_line_cost_fields_records_the_cache_write_split_when_the_usage_gives_it():
+    """cm-1et: the Messages API's usage.cache_creation breaks writes into
+    ephemeral_5m_input_tokens and ephemeral_1h_input_tokens."""
+    def usage(total, five, hour):
+        return {"input_tokens": 1, "output_tokens": 1, "cache_creation_input_tokens": total,
+                "cache_creation": {"ephemeral_5m_input_tokens": five,
+                                   "ephemeral_1h_input_tokens": hour}}
+    scan = scan_of(SCANNED, usage=usage(100, 40, 60))
+    fix = fix_run_of(claude_payloads.success("done", usage=usage(10, 0, 10)))
+
+    got = line_cost_fields(MODEL, scan=scan, fix_run=fix)
+
+    assert got["cache_creation_input_tokens"] == 110
+    assert got["cache_creation_5m_input_tokens"] == 40
+    assert got["cache_creation_1h_input_tokens"] == 70
+
+
+@pytest.mark.parametrize("split", [None, "x", {"ephemeral_5m_input_tokens": -1},
+                                   {"ephemeral_5m_input_tokens": "many"}])
+def test_a_missing_or_malformed_split_is_left_out_so_writes_price_as_1_hour(split):
+    usage = {"input_tokens": 1, "output_tokens": 1, "cache_creation_input_tokens": 50}
+    if split is not None:
+        usage["cache_creation"] = split
+    got = line_cost_fields(MODEL, fix_run=fix_run_of(claude_payloads.success("done", usage=usage)))
+
+    assert got["cache_creation_input_tokens"] == 50
+    assert "cache_creation_5m_input_tokens" not in got
+    assert "cache_creation_1h_input_tokens" not in got

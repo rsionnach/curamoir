@@ -517,7 +517,7 @@ def _check_globs(path, globs, problems):
 
 def _check_price_table(path, table, problems):
     """Each price entry needs numeric `input` and `output`, and may give
-    `cache_write` and `cache_read`.
+    `cache_write`, `cache_write_1h` and `cache_read`.
 
     Validated here rather than discovered at read time: the table is documented
     as editable, so a typo is an ordinary user action, and the error belongs with
@@ -531,7 +531,7 @@ def _check_price_table(path, table, problems):
         # `cache_write` and `cache_read` are optional (budget.PriceTable
         # defaults them from `input`, cm-2ui), but one that is given must be
         # a price like the other two.
-        for side in ("input", "output", "cache_write", "cache_read"):
+        for side in ("input", "output", "cache_write", "cache_write_1h", "cache_read"):
             if side.startswith("cache_") and side not in rate:
                 continue
             value = rate.get(side)

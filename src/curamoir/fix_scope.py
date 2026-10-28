@@ -238,9 +238,12 @@ which line each path records).
    authoritative spend of a sweep line is its top-level `input_tokens`
    and `output_tokens`, with its prompt-cache counts
    `cache_creation_input_tokens` and `cache_read_input_tokens` when above
-   0 (cm-2ui; priced at the model's `cache_write` / `cache_read` rates,
-   1.25x and 0.1x its input rate by default), priced at its top-level
-   `model`. That is what
+   0 (cm-2ui), and the writes' 5-minute / 1-hour split
+   (`cache_creation_5m_input_tokens`, `cache_creation_1h_input_tokens`)
+   when every call that wrote the cache gave one (cm-1et). Priced at its
+   top-level `model`: a 5-minute write at `cache_write` (1.25x input by
+   default), every other write at `cache_write_1h` (2x), a read at
+   `cache_read` (0.1x). That is what
    budget.month_to_date reads (the E0-R4 ceiling and /curamoir:status),
    and what E11-R2 re-prices when a price changes; it reads nothing
    inside `tier1`. So the runner writes those two counts as TOTALS: the
@@ -296,11 +299,10 @@ which line each path records).
    If the fix step and the scan ever run on different models, that
    single `model` misprices one of them, and the line will need a token
    record per call (cm-kpz.1, E11-R1: every model call attributed with
-   its own tokens). A second known limit: a write to the 1-hour cache
-   costs 2x the input rate, not the default 1.25x, and the counts do not
-   tell the two caches apart, so such writes are under-priced unless the
-   model's price entry sets `cache_write` (budget.CACHE_WRITE_MULTIPLIER).
-   curamoir.sweep_job writes these top-level fields on each sweep line on
+   its own tokens). A write with no split is priced as 1-hour, the
+   dearer, so a missing split can over-price but never under-price (the
+   first dogfood sweep's CLI cost matched 2x exactly). curamoir.sweep_job
+   writes these top-level fields on each sweep line on
    which a call started.
 
    **A cap of 0.** `sweep.max_files_per_pr: 0` is a valid count, and
