@@ -24,10 +24,14 @@ lock exists (hooks/destructive.py says why).
 
 **What it stops, and what it does not** (cm-hve, a decision of 2026-10-28).
 It stops code composed at call time: a shell's or interpreter's inline code,
-however it is reached (directly, through a wrapper runner such as `uv run` or
-`docker run`, through `make --eval`, or through a heredoc), a package fetched
-and run (`pnpm dlx`, `uv tool run`), and a git setting or environment variable
-whose value is a command. It does NOT stop code the agent writes to a file and
+however it is reached (directly, through a package runner such as `uv run` or
+`pnpm exec`, which may run only what the allowlist admits, through
+`make --eval` or make variables, or through a heredoc); a package or image
+fetched and run (`pnpm dlx`, `npm create`, `uv tool run`, `uv run --with`,
+`docker run`); a program named in an option (`go -toolexec`, `cargo
+--config`); and configuration whose value is a command: `git -c`, any
+`git config` write outside a short list of safe keys, and any environment
+variable outside a short list (cm-z0k made each of these an allowlist). It does NOT stop code the agent writes to a file and
 then runs through an allowlisted runner: `pytest`, `make`, `go run`,
 `cargo run` or `bash script.sh` run whatever the repository holds at that
 moment, the agent's edits included. Telling a reviewed file from one written a
@@ -225,70 +229,88 @@ _INLINE_CODE_OPTIONS = {
     "npm": frozenset({"-c", "--call"}),
     "yarn": frozenset({"-c", "--call"}),
     "pnpm": frozenset({"-c", "--call"}),
-    # `make --eval='x:;<recipe>' x` is a makefile written at call time, and
-    # its recipes are shell (cm-hve).
-    "make": frozenset({"--eval", "-E"}),
 }
 
-#: Allowlisted programs that run ANOTHER program named in their arguments:
-#: `uv run python -c ...`, `npm exec -- node -e ...`, `docker run img sh -c`.
-#: The inline-code checks looked only at the outermost program, so a one-word
-#: prefix walked past them (cm-hve). For these, a code runner anywhere in the
-#: arguments is judged from there as a command of its own.
-_WRAPPERS = frozenset({"uv", "npm", "pnpm", "yarn", "docker", "podman"})
+# cm-hve, rewritten allowlist-first by cm-z0k after a security review got
+# past the first version's lists of dangerous spellings: an abbreviated
+# `make --ev=`, a `--get` after the value, an option value hiding `dlx`, an
+# unlisted environment variable. Each rule below names what is ALLOWED and
+# refuses the rest, as the rest of this module does.
 
-#: Programs that run code they are handed, looked for inside a wrapper's
-#: arguments. Not `_INTERPRETERS` itself: it holds `exec` and `.`, which are
-#: also ordinary words there (`pnpm exec eslint .`).
-_CODE_RUNNERS = SHELLS | frozenset({
-    "node", "nodejs", "deno", "bun", "perl", "ruby", "php", "awk", "gawk", "lua",
-    "env", "xargs", "eval", "sudo",
+#: Environment variables a job may set in an assignment prefix. Any other
+#: name is refused: a variable's value can be a command (GIT_PAGER, EDITOR),
+#: a library to load (LD_PRELOAD), flags (GOFLAGS=-toolexec=..., MAKEFLAGS)
+#: or a config location (HOME, GIT_CONFIG_*), and listing those is the
+#: denylist problem. PYTHONPATH is here because the sweep's own test command
+#: sets it; the code it reaches is the repository's, the door `pytest`
+#: already is.
+_ALLOWED_ENV = frozenset({
+    "PYTHONPATH", "PYTHONDONTWRITEBYTECODE", "PYTHONUNBUFFERED", "PYTHONHASHSEED",
+    "PYTHONIOENCODING", "CI", "NO_COLOR", "FORCE_COLOR", "CLICOLOR", "TERM", "COLUMNS",
+    "LANG", "LC_ALL", "LC_CTYPE", "TZ", "NODE_ENV", "RUST_BACKTRACE",
 })
-_PYTHON_NAME = re.compile(r"^python[0-9.]*$")
 
-#: (program, subcommand) pairs that fetch a package and run it: code nobody
-#: reviewed, chosen at call time. `uvx` is `uv tool run`, which the allowlist
-#: never admitted either. NOT `npm exec`: it runs a project's installed binary
-#: (`npm exec tsc`, kept allowed), though it also fetches a package that is
-#: not installed, which this guard does not tell apart (cm-hhr).
-_FETCH_AND_RUN = {"pnpm": {"dlx"}, "yarn": {"dlx"}}
+#: The programs `uv run`, `npm exec`, `pnpm exec` and `yarn exec` may run:
+#: what the allowlist would admit on its own, judged by _refusal_for. So
+#: `uv run python -c` is refused as `python -c` is, and `uv run cowsay` as
+#: `cowsay` is.
+_RUN_SUBCOMMANDS = {"uv": "run", "npm": "exec", "pnpm": "exec", "yarn": "exec"}
 
-#: Environment variables whose value is a command, a library to load or a
-#: config that names one, so setting one in an assignment prefix runs code
-#: the guard never sees (`GIT_PAGER='sh -c ...' git log`). PYTHONPATH is
-#: deliberately absent: the sweep's own test command sets it, and the code it
-#: reaches is the repository's, the same door `pytest` already is.
-_COMMAND_VALUED_ENV = frozenset({
-    "GIT_PAGER", "GIT_SSH", "GIT_SSH_COMMAND", "GIT_EXTERNAL_DIFF", "GIT_EDITOR",
-    "GIT_SEQUENCE_EDITOR", "GIT_ASKPASS", "GIT_PROXY_COMMAND", "GIT_EXEC_PATH",
-    "GIT_CONFIG", "GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM", "GIT_CONFIG_PARAMETERS",
-    "GIT_CONFIG_COUNT", "GIT_TEMPLATE_DIR",
-    "PAGER", "MANPAGER", "EDITOR", "VISUAL", "SSH_ASKPASS", "LESSOPEN", "LESSCLOSE",
-    "BASH_ENV", "ENV", "PROMPT_COMMAND", "PATH",
-    "LD_PRELOAD", "LD_LIBRARY_PATH", "DYLD_INSERT_LIBRARIES", "DYLD_LIBRARY_PATH",
-    "NODE_OPTIONS", "PERL5OPT", "RUBYOPT",
+#: Options of those runners that fetch packages into the run: `uv run --with
+#: pkg pkg-cli` runs code nobody reviewed, chosen at call time.
+_FETCHING_OPTIONS = ("--with", "--with-requirements", "--with-editable")
+
+#: Subcommands that fetch a package and run it. `npm init <pkg>` and
+#: `npm create <pkg>` run create-<pkg>; `uv tool run` is `uvx`, which the
+#: allowlist never admitted. Found among the first two words, because an
+#: option's value can come first (`pnpm --dir web dlx pkg`).
+_FETCH_AND_RUN = {
+    "pnpm": {"dlx", "create"}, "yarn": {"dlx", "create"}, "npm": {"init", "create"},
+}
+
+#: docker and podman subcommands a job may run: building from the
+#: repository's Dockerfile and reading state. `run`, `exec` and the rest run
+#: an image's code, fetched at call time, which is fetch-and-run.
+_CONTAINER_SUBCOMMANDS = frozenset({
+    "build", "ps", "images", "image", "inspect", "logs", "version", "info", "compose",
 })
-_COMMAND_VALUED_ENV_PATTERN = re.compile(r"^GIT_CONFIG_(KEY|VALUE)_[0-9]+$")
 
-#: git settings whose value git RUNS (or loads a config from, or lets a
-#: transport run): setting one is inline code with a delay, since the next
-#: ordinary `git log` runs it (cm-hve). Lowercase, as git compares keys.
-_GIT_COMMAND_KEY = re.compile(
-    r"core\.(pager|sshcommand|hookspath|fsmonitor|editor|askpass|gitproxy"
-    r"|alternaterefscommand)"
-    r"|sequence\.editor|diff\.external|diff\..+\.(command|textconv)"
-    r"|(merge|mergetool|difftool)\..+\.(driver|cmd|path)"
-    r"|filter\..+\.(clean|smudge|process)|pager\..+|alias\..+"
-    r"|credential(\..+)?\.helper|gpg(\..+)?\.program"
-    r"|include\.path|includeif\..+\.path|uploadpack\.packobjectshook"
-    r"|interactive\.difffilter|remote\..+\.(uploadpack|receivepack)"
-    r"|protocol(\..+)?\.allow|url\..+\.(push)?insteadof|web\.browser"
-    r"|(browser|man)\..+\.(cmd|path)"
+#: git settings a job may WRITE with `git config`. Any other key is refused:
+#: a key's value can be a command git runs on the next ordinary call
+#: (core.pager, core.sshCommand, core.hooksPath, filters, aliases), a config
+#: to include, or a transport to allow, and listing those is the denylist
+#: problem. Lowercase, as git compares keys.
+_GIT_WRITABLE_KEY = re.compile(
+    r"user\.(name|email)|core\.(autocrlf|filemode|ignorecase|quotepath|safecrlf|eol)"
+    r"|color\..+|advice\..+|init\.defaultbranch|pull\.(rebase|ff)"
+    r"|push\.(default|autosetupremote)|(commit|tag)\.gpgsign|merge\.conflictstyle"
+    r"|rerere\.enabled|branch\.[^.]+\.(remote|merge|rebase)"
 )
-#: `git config` arguments that make it a read, which may name any key.
+
+#: `git config` options that make it a read. Only options BEFORE the first
+#: positional count: git config stops parsing options there, so in
+#: `git config core.pager 'sh -c id' --get` the `--get` is a value pattern
+#: and the call SETS core.pager (checked against git 2.39, cm-z0k).
 _GIT_CONFIG_READS = frozenset({
-    "--get", "--get-all", "--get-regexp", "--get-urlmatch", "--list", "-l", "get", "list",
+    "--get", "--get-all", "--get-regexp", "--get-urlmatch", "--get-color",
+    "--get-colorbool", "--list", "-l",
 })
+#: `git config` options that write, and the new-style subcommands.
+_GIT_CONFIG_WRITES = frozenset({
+    "--add", "--replace-all", "--unset", "--unset-all", "--rename-section",
+    "--remove-section", "--edit", "-e",
+})
+_GIT_CONFIG_SUBCOMMANDS = {"get": "read", "list": "read", "set": "write", "unset": "write",
+                           "rename-section": "refuse", "remove-section": "refuse",
+                           "edit": "refuse"}
+
+#: Options whose value is a program to run, per program, matched however the
+#: option is spelled (`-toolexec=x`, `--toolexec x`): go's flag package takes
+#: one dash or two, and cargo's `--config` can set a target's runner.
+_PROGRAM_OPTIONS = {
+    "go": ("toolexec", "exec"),
+    "cargo": ("config",),
+}
 
 #: Programs a heredoc may legitimately feed, because they consume it as DATA.
 #:
@@ -397,33 +419,109 @@ def _inline_program_text(program, arguments):
 
 
 def _wrapped_code(program, arguments):
-    """A refusal if a wrapper (`_WRAPPERS`) fetches a package to run, or
-    runs a code runner the guard would refuse on its own, else None."""
-    if program not in _WRAPPERS:
-        return None
+    """A refusal if a package runner fetches code to run, or runs a program
+    the allowlist would refuse on its own; or if docker/podman would run a
+    container; else None."""
     words = [a for a in arguments if not a.startswith("-")]
+    if program in ("docker", "podman"):
+        if words and words[0] not in _CONTAINER_SUBCOMMANDS:
+            return (
+                Category.NOT_ALLOWLISTED,
+                f"{program} {words[0]!r} runs an image's code, fetched at call time; "
+                f"a job may use {program} only to "
+                + ", ".join(sorted(_CONTAINER_SUBCOMMANDS)),
+            )
+        return None
+    lead = words[:2] if arguments[:1] != words[:1] else words[:1]
     fetching = _FETCH_AND_RUN.get(program, set())
-    if (words[:1] and words[0] in fetching) or (program == "uv" and words[:2] == ["tool", "run"]):
-        named = " ".join([program, *words[:2 if program == "uv" else 1]])
+    for index, word in enumerate(lead):
+        follows = words[index + 1:index + 2]
+        if word in fetching and (word in ("dlx",) or follows):
+            return (
+                Category.NOT_ALLOWLISTED,
+                f"{program} {word} fetches a package and runs it, code nobody "
+                "reviewed and chosen at call time",
+            )
+    tool = words.index("tool") if "tool" in words[:2] else None
+    if program == "uv" and tool is not None and words[tool + 1:tool + 2] == ["run"]:
         return (
             Category.NOT_ALLOWLISTED,
-            f"{named} fetches a package and runs it, code nobody reviewed and "
-            "chosen at call time",
+            "uv tool run fetches a package and runs it, code nobody reviewed "
+            "and chosen at call time",
         )
-    for index, argument in enumerate(arguments):
-        name = argument.strip("\"'").rsplit("/", 1)[-1]
-        if name in _CODE_RUNNERS or _PYTHON_NAME.match(name):
-            inner = _refusal_for(arguments[index:])
-            if inner is not None:
-                return inner
+    run = _RUN_SUBCOMMANDS.get(program)
+    if run is None or run not in words[:2]:
+        return None
+    after = arguments[arguments.index(run) + 1:]
+    for argument in after:
+        if argument.split("=", 1)[0] in _FETCHING_OPTIONS:
+            return (
+                Category.NOT_ALLOWLISTED,
+                f"{program} {run} {argument.split('=', 1)[0]} fetches a package into "
+                "the run, code nobody reviewed and chosen at call time",
+            )
+    # The program run is the first word after the subcommand (and after
+    # `--`). An option's value read as the program is judged as one, which
+    # refuses rather than admits.
+    rest = [a for a in after if a != "--"]
+    while rest and rest[0].startswith("-"):
+        rest = rest[1:]
+    if not rest:
+        return None
+    return _refusal_for(rest)
+
+
+def _make_code(arguments):
+    """A refusal if make is given a makefile or variables at call time:
+    `--eval` (and any prefix of it GNU make accepts, `--ev`), `-E` alone or
+    in a cluster (`-sE`), or a `NAME=value` on its command line, which
+    overrides the makefile (SHELL, CC and the like are commands)."""
+    for argument in arguments:
+        if argument.startswith("--"):
+            name = argument.split("=", 1)[0]
+            if len(name) >= 4 and "--eval".startswith(name):
+                return (
+                    Category.UNVERIFIABLE,
+                    f"make {name} runs a makefile written at call time, and its "
+                    "recipes are shell. Put the rule in the Makefile instead",
+                )
+        elif argument.startswith("-") and "E" in argument[1:]:
+            return (
+                Category.UNVERIFIABLE,
+                f"make {argument} includes -E, a makefile written at call time whose "
+                "recipes are shell. Put the rule in the Makefile instead",
+            )
+        elif _ASSIGNMENT.match(argument):
+            return (
+                Category.UNVERIFIABLE,
+                f"make {argument.split('=', 1)[0]}=... overrides the Makefile at call "
+                "time, and a variable such as SHELL or CC is a command. Run make "
+                "without command-line variables",
+            )
+    return None
+
+
+def _program_option(program, arguments):
+    """A refusal if an option whose value is a program (_PROGRAM_OPTIONS) is
+    given, however it is spelled, else None."""
+    names = _PROGRAM_OPTIONS.get(program, ())
+    for argument in arguments:
+        if not argument.startswith("-"):
+            continue
+        name = argument.lstrip("-").split("=", 1)[0]
+        if name in names:
+            return (
+                Category.UNVERIFIABLE,
+                f"{program} -{name} names a program for {program} to run, chosen at "
+                f"call time. Run {program} without it",
+            )
     return None
 
 
 def _git_command_setting(arguments):
     """A refusal if git is given configuration for this call (`-c`,
-    `--config-env`), or `git config` WRITES a key whose value git runs, else
-    None. Every `-c` is refused, not only the dangerous keys: a job needs
-    none, and a list of dangerous keys is a denylist."""
+    `--config-env`), or `git config` writes a key not on _GIT_WRITABLE_KEY
+    or renames, removes or edits sections, else None."""
     for argument in arguments:
         if not argument.startswith("-"):
             break
@@ -435,18 +533,57 @@ def _git_command_setting(arguments):
                 "runs. Run the git command without it",
             )
     words = [a for a in arguments if not a.startswith("-")]
-    if words[:1] != ["config"] or _GIT_CONFIG_READS.intersection(arguments):
+    if words[:1] != ["config"]:
         return None
-    for word in words[1:]:
-        key = word.split("=", 1)[0].lower()
-        if _GIT_COMMAND_KEY.fullmatch(key):
-            return (
-                Category.UNVERIFIABLE,
-                f"git config {key} is a setting whose value git runs (or loads), so "
-                "setting it is code that runs on the next ordinary git command. "
-                "Leave the repository's git configuration as it is",
-            )
-    return None
+    after = arguments[arguments.index("config") + 1:]
+    # Options up to the first positional, as git reads them; everything from
+    # there on is a positional, whatever it looks like.
+    options, rest = set(), []
+    for index, argument in enumerate(after):
+        if not argument.startswith("-"):
+            rest = after[index:]
+            break
+        options.add(argument.split("=", 1)[0])
+    mode = _GIT_CONFIG_SUBCOMMANDS.get(rest[0]) if rest else None
+    if mode is not None:
+        rest = rest[1:]
+    if mode == "refuse" or options & {"--rename-section", "--remove-section", "--edit", "-e"}:
+        return (
+            Category.NOT_ALLOWLISTED,
+            "git config may not rename, remove or edit sections during a job: that "
+            "can move a key into a setting git runs",
+        )
+    if mode is None:
+        if options & _GIT_CONFIG_READS:
+            mode = "read"
+        elif options & _GIT_CONFIG_WRITES or len(rest) >= 2:
+            mode = "write"
+        else:
+            mode = "read"
+    if mode == "read":
+        return None
+    key = rest[0].lower() if rest else ""
+    if _GIT_WRITABLE_KEY.fullmatch(key):
+        return None
+    return (
+        Category.UNVERIFIABLE,
+        f"git config may write only known-safe settings during a job, and "
+        f"{key or 'this setting'!r} is not one: a setting's value can be a command "
+        "git runs on the next ordinary call (core.pager, core.sshCommand, "
+        "core.hooksPath). Leave the repository's git configuration as it is",
+    )
+
+
+#: The program-specific checks of cm-hve and cm-z0k, run on an allowlisted
+#: program's arguments before its subcommand is checked.
+_PROGRAM_CHECKS = {
+    "git": (_git_command_setting,),
+    "make": (_make_code,),
+    "go": (lambda arguments: _program_option("go", arguments),),
+    "cargo": (lambda arguments: _program_option("cargo", arguments),),
+    **{runner: ((lambda arguments, runner=runner: _wrapped_code(runner, arguments)),)
+       for runner in ("uv", "npm", "pnpm", "yarn", "docker", "podman")},
+}
 
 
 def _inline_code(program):
@@ -471,12 +608,13 @@ def _refusal_for(tokens):
     # the variable's value is itself a command.
     while tokens and _ASSIGNMENT.match(tokens[0]):
         name = tokens[0].split("=", 1)[0]
-        if name in _COMMAND_VALUED_ENV or _COMMAND_VALUED_ENV_PATTERN.match(name):
+        if name not in _ALLOWED_ENV:
             return (
                 Category.UNVERIFIABLE,
-                f"setting {name} makes the program run a command, load code or read "
-                "a config named at call time, which the guard cannot verify. Run "
-                "the command without it",
+                f"setting {name} is not on cúramóir's list of variables a job may "
+                "set: a variable's value can be a command, a library to load or "
+                "a config to read, chosen at call time. Allowed: "
+                + ", ".join(sorted(_ALLOWED_ENV)),
             )
         tokens = tokens[1:]
     if not tokens:
@@ -558,13 +696,10 @@ def _refusal_for(tokens):
             f"{program!r} is not on cúramóir's allowlist for jobs",
         )
 
-    wrapped = _wrapped_code(program, arguments)
-    if wrapped is not None:
-        return wrapped
-    if program == "git":
-        configured = _git_command_setting(arguments)
-        if configured is not None:
-            return configured
+    for check in _PROGRAM_CHECKS.get(program, ()):
+        refused = check(arguments)
+        if refused is not None:
+            return refused
 
     subcommands = ALLOWED[program]
     if subcommands is None:

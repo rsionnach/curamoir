@@ -179,10 +179,11 @@ It has four known limits:
   hook that times out fails *open*, so a guard that hangs stops protecting.
 - **The command policy stops code written at call time, not code written to a
   file.** During a job it refuses inline code (`bash -c`, `python -c`,
-  `node -e`, `make --eval`), including through a runner such as `uv run` or
-  `docker run`; packages fetched and run (`pnpm dlx`, `uv tool run`); and git
-  settings or environment variables whose value is a command (`core.pager`,
-  `GIT_SSH_COMMAND`). It does not stop the agent writing a file and running it
+  `node -e`, `make --eval`), including through a runner such as `uv run`;
+  packages and images fetched and run (`pnpm dlx`, `uv tool run`,
+  `docker run`); and configuration whose value can be a command: `git -c`,
+  `git config` writes beyond a few safe keys, and environment variables beyond
+  a short list. It does not stop the agent writing a file and running it
   through an allowed runner (`pytest`, `make`, `go run`, a script). The sweep's
   scope review of every changed file is what bounds that.
 - **Redaction is pattern-based.** It catches the shapes it knows. That reduces
