@@ -331,12 +331,15 @@ which line each path records).
 5. Review it: `verify_fix(sandbox, git_state=run.git_state)`. Same sandbox,
    same snapshot, same base: there is nothing else to pass. Then drop and
    re-gate (cm-9ab, user decision 2026-10-28): `verdict, dropped =
-   drop_breaching_paths(sandbox, verdict, git_state=run.git_state)` puts
+   drop_breaching_paths(sandbox, first, git_state=run.git_state)`, where
+   `first` is that review's verdict, puts
    back every file a breach names and reviews again, unless a breach is one
-   of WHOLE_RUN_KINDS. A verdict still with breaches, or one with nothing
-   left after dropping, is a SCOPE refusal carrying the FIRST verdict as
-   `scope`; otherwise the dropped breaches are noted as `scope_dropped` and
-   the run goes on with what is left.
+   of WHOLE_RUN_KINDS. The dropped breaches are noted as `scope_dropped`
+   on the line, whatever its outcome. A verdict still with breaches, or one
+   with nothing left after dropping, is a SCOPE refusal carrying the FIRST
+   verdict as `scope` and the second as `scope_after_drop`; otherwise the
+   run goes on with what is left. A file that cannot be put back safely
+   raises ScopeCheckError, a SANDBOX refusal that still carries `scope`.
 6. Treat git_guard.GitGuardError (ScopeCheckError is one) as a refusal
    (with `**tier1_state.ledger_fields()`, step 2c's note): no verdict is
    not a verdict, and an unverified fix is not a fix.
@@ -579,6 +582,10 @@ KINDS = (FILE_NOT_IN_WORK_LIST, FILE_ADDED, FILE_DELETED, DEPENDENCY_CHANGE,
 #: kind names a path that can be put back as it was at the base.
 WHOLE_RUN_KINDS = frozenset({GIT_INTERNALS_CHANGED, BASE_MOVED, HIDDEN_CHANGE})
 
+#: git tree-entry modes of a file, an executable and a symlink.
+_FILE_MODE, _EXECUTABLE_MODE, _SYMLINK_MODE = "100644", "100755", "120000"
+
+
 #: The principle permission that lifts SIGNATURE_CHANGE (principles.PERMISSIONS).
 SIGNATURE_PERMISSION = "signature_change"
 
@@ -691,6 +698,12 @@ class Breach:
         where = self.path if self.line is None else f"{self.path}:{self.line}"
         return f"{self.kind} {where}: {self.detail}"
 
+    def as_dict(self):
+        """For the ledger line and the PR body: ScopeVerdict.as_dict's
+        breaches and the sweep's `scope_dropped`."""
+        return {"kind": self.kind, "path": self.path, "line": self.line,
+                "detail": self.detail}
+
 
 @dataclass(frozen=True)
 class ScopeVerdict:
@@ -730,10 +743,7 @@ class ScopeVerdict:
         return {
             "ok": self.ok,
             "paths": list(self.paths),
-            "breaches": [
-                {"kind": b.kind, "path": b.path, "line": b.line, "detail": b.detail}
-                for b in self.breaches
-            ],
+            "breaches": [breach.as_dict() for breach in self.breaches],
         }
 
 
@@ -1606,51 +1616,119 @@ def verify_fix(sandbox, *, git_state, window=WINDOW):
         paths=tuple(sorted(set(verdict.paths) | set(hidden))))
 
 
-def drop_breaching_paths(sandbox, verdict, *, git_state, window=WINDOW):
+def drop_breaching_paths(sandbox, verdict, *, git_state, removed=(), window=WINDOW):
     """`(verdict, dropped)`: cm-9ab's drop and re-gate (user decision
     2026-10-28). When `verdict` has breaches and none is a WHOLE_RUN_KINDS
-    one, every path a breach names is put back as it was at the base (its
-    base bytes written over it, or the file removed if the base has none)
-    and verify_fix runs again on what is left; `dropped` is the original
-    breaches. Otherwise `verdict` is returned as it is with `dropped` empty.
+    one, every path a breach names is put back as it was at the base
+    (_restore_from_base) and verify_fix runs again on what is left;
+    `dropped` is the original breaches. Otherwise `verdict` is returned as
+    it is with `dropped` empty. `removed` is the paths the runner's
+    remedies deleted before the fix step (remedies.RemedyResult.deleted):
+    put back, they are put back as the remedy left them, deleted, because
+    that is what the fix step's snapshot holds.
 
-    The restore reads the base with `git cat-file` and writes the work tree
-    only, never the index or anything under `.git`, so the second review
-    still holds the sandbox to the fix step's own snapshot: a file put back
-    byte for byte digests as it did before the fix step. Whatever the
-    second verdict says is the answer (the caller refuses one that still
-    has breaches, and one that changed nothing)."""
+    Deepest paths first, so a file is put back before the directory the
+    agent made of its parent is looked at.
+
+    The restore reads the base with git and writes the work tree only,
+    never the index or anything under `.git`, so the second review still
+    holds the sandbox to the fix step's own snapshot: a file put back byte
+    for byte digests as it did before the fix step. Whatever the second
+    verdict says is the answer (the caller refuses one that still has
+    breaches, and one that changed nothing). ScopeCheckError when a path
+    cannot be put back safely; paths before it may already be restored, so
+    the sandbox is then fit only to be thrown away."""
     if verdict.ok or any(b.kind in WHOLE_RUN_KINDS for b in verdict.breaches):
         return verdict, ()
-    for path in sorted({breach.path for breach in verdict.breaches}):
-        _restore_from_base(sandbox, path)
+    removed = {nfc(path) for path in removed}
+    paths = sorted({breach.path for breach in verdict.breaches},
+                   key=lambda path: (-path.count("/"), path))
+    for path in paths:
+        _restore_from_base(sandbox, path, deleted=nfc(path) in removed)
     return verify_fix(sandbox, git_state=git_state, window=window), verdict.breaches
 
 
-def _restore_from_base(sandbox, path):
-    """Put `path` (repo-relative) back as it is at the sandbox's base: its
-    blob's bytes, or no file when the base has none at that path."""
-    target = Path(str(sandbox.path), path)
-    listed = git(sandbox.path, "ls-tree", "-z", sandbox.base, "--", path)
+def _restore_from_base(sandbox, path, deleted=False):
+    """Put `path` (repo-relative) back as it is at the sandbox's base: a
+    fresh file of its blob's bytes (or a symlink to its target), or nothing
+    when the base has no such path. ScopeCheckError when it cannot be done
+    safely (cm-9ab):
+
+    - Whatever is at `path` is unlinked first and a NEW inode created
+      (O_EXCL|O_NOFOLLOW): writing through the old one would write through
+      a hard link to a file outside the sandbox.
+    - A directory there, a parent that is a symlink or not a directory, or
+      a base entry that is neither a file nor a symlink, is refused rather
+      than worked round.
+    - An OSError, or a git that fails or times out, on the way is refused
+      too (ScopeCheckError), never a crash.
+
+    `deleted`: the runner's remedy deleted `path` before the fix step, so it
+    is put back deleted (drop_breaching_paths' `removed`)."""
+    root = Path(str(sandbox.path))
+    target = root / path
+    try:
+        entry = None if deleted else _base_entry(sandbox, path)
+        # The base's kind is checked before anything is unlinked, so a
+        # refusal leaves the path as the agent left it.
+        if entry is not None:
+            mode, kind, blob = entry
+            if kind != "blob" or mode not in (_FILE_MODE, _EXECUTABLE_MODE, _SYMLINK_MODE):
+                raise ScopeCheckError(f"{path} is a {mode} {kind} at the base, not a file "
+                                      "that can be put back")
+        _refuse_linked_parents(root, target, path)
+        if os.path.lexists(target):
+            if target.is_dir() and not target.is_symlink():
+                raise ScopeCheckError(f"{path} is a directory in the sandbox, so it is not "
+                                      "put back as the base's file")
+            target.unlink()
+        if entry is None:
+            return
+        content = git(sandbox.path, "cat-file", "blob", blob)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        # Again: mkdir may have created parents, and a parent may have been
+        # replaced between the first check and now.
+        _refuse_linked_parents(root, target, path)
+        if mode == _SYMLINK_MODE:
+            os.symlink(os.fsdecode(content), target)
+            return
+        # The mode git's own checkout gives, before the umask: only the
+        # executable bit is recorded.
+        descriptor = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                             0o777 if mode == _EXECUTABLE_MODE else 0o666)
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(content)
+    except ScopeCheckError:
+        raise
+    except (OSError, GitGuardError) as error:
+        raise ScopeCheckError(f"{path} could not be put back as it was at the base: "
+                              f"{error}") from error
+
+
+def _base_entry(sandbox, path):
+    """`(mode, kind, blob)` of `path` in the sandbox's base tree, as str,
+    or None when the base has no such path."""
+    # `:(literal)`: the path is the agent's choosing, and `:colon` or
+    # `:(top)a.py` would otherwise be read as pathspec magic (as
+    # _tracked_change does).
+    listed = git(sandbox.path, "ls-tree", "-z", sandbox.base, "--", f":(literal){path}")
     entry = listed.split(b"\0", 1)[0]
     if not entry:
-        if target.is_symlink() or target.is_file():
-            target.unlink()
-        return
-    meta = entry.split(b"\t", 1)[0].split(b" ")
-    mode, kind, blob = meta[0], meta[1], meta[2].decode("ascii")
-    if kind != b"blob" or mode not in (b"100644", b"100755"):
-        raise ScopeCheckError(f"{path} is a {mode.decode()} {kind.decode()} at the base, "
-                              "not a file that can be put back")
-    content = git(sandbox.path, "cat-file", "blob", blob)
-    if target.is_symlink():
-        target.unlink()
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_bytes(content)
-    # Only the executable bit, which is all git records: the checkout's other
-    # permission bits (its umask's) are left as they were.
-    current = target.stat().st_mode & 0o7777
-    target.chmod(current | 0o111 if mode == b"100755" else current & ~0o111)
+        return None
+    mode, kind, blob = entry.split(b"\t", 1)[0].decode("ascii").split(" ")
+    return mode, kind, blob
+
+
+def _refuse_linked_parents(root, target, path):
+    """ScopeCheckError if a directory between `root` and `target` is a
+    symlink or not a directory: a write there would land outside the
+    sandbox, or nowhere it should."""
+    current = root
+    for part in target.relative_to(root).parts[:-1]:
+        current = current / part
+        if current.is_symlink() or (os.path.lexists(current) and not current.is_dir()):
+            raise ScopeCheckError(f"{path} lies under {current.relative_to(root)}, which is "
+                                  "a symlink or not a directory in the sandbox")
 
 
 def rules_licensing_deletion(rules):

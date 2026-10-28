@@ -26,6 +26,8 @@ sandbox's work list by hand; the pure-core tests build their own inputs.
 """
 
 import ast
+import os
+import shutil
 import subprocess
 import unicodedata
 from dataclasses import dataclass
@@ -54,6 +56,7 @@ from curamoir.fix_scope import (
     Hunk,
     ScopeCheckError,
     _only_header_statements,
+    _restore_from_base,
     base_known_modules,
     base_principles,
     check_scope,
@@ -1171,3 +1174,137 @@ def test_a_utf8_byte_order_mark_is_utf8():
     old = "﻿" + _PY_TODO
 
     assert check_scope([modified("m.py", old, old.replace("  # TODO", ""))], [V("m.py", 5)]).ok
+
+
+# --- putting a dropped path back (cm-9ab) ----------------------
+
+
+
+def test_a_restore_never_writes_through_a_hard_link_to_a_file_outside(tmp_path):
+    repo = git_repo(tmp_path, {"a.py": "base\n"})
+    sandbox = sandbox_of(repo)
+    outside = tmp_path / "outside.txt"
+    outside.write_text("outside, untouched\n", encoding="utf-8")
+    (sandbox.path / "a.py").unlink()
+    os.link(outside, sandbox.path / "a.py")
+
+    _restore_from_base(sandbox, "a.py")
+
+    assert outside.read_text(encoding="utf-8") == "outside, untouched\n"
+    assert (sandbox.path / "a.py").read_text(encoding="utf-8") == "base\n"
+    assert not os.path.samefile(outside, sandbox.path / "a.py")
+
+
+def test_a_directory_where_the_file_was_is_a_scope_check_error_not_a_crash(tmp_path):
+    repo = git_repo(tmp_path, {"d/f.py": "base\n"})
+    sandbox = sandbox_of(repo)
+    (sandbox.path / "d" / "f.py").unlink()
+    (sandbox.path / "d" / "f.py").mkdir()
+    (sandbox.path / "d" / "f.py" / "x").write_text("x", encoding="utf-8")
+
+    with pytest.raises(ScopeCheckError):
+        _restore_from_base(sandbox, "d/f.py")
+
+
+def test_a_path_under_a_symlinked_directory_is_refused(tmp_path):
+    repo = git_repo(tmp_path, {"d/f.py": "base\n"})
+    sandbox = sandbox_of(repo)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    shutil.rmtree(sandbox.path / "d")
+    (sandbox.path / "d").symlink_to(elsewhere)
+
+    with pytest.raises(ScopeCheckError):
+        _restore_from_base(sandbox, "d/f.py")
+    assert list(elsewhere.iterdir()) == []
+
+
+def test_a_symlink_in_the_base_is_put_back_as_one(tmp_path):
+    repo = git_repo(tmp_path, {"target.py": "t\n"})
+    (repo / "link.py").symlink_to("target.py")
+    subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-qm", "link"], cwd=repo, check=True)
+    sandbox = sandbox_of(repo)
+    (sandbox.path / "link.py").unlink()
+    (sandbox.path / "link.py").write_text("edited\n", encoding="utf-8")
+
+    _restore_from_base(sandbox, "link.py")
+
+    assert os.readlink(sandbox.path / "link.py") == "target.py"
+
+
+def test_a_restored_executable_keeps_its_executable_bit(tmp_path):
+    repo = git_repo(tmp_path, {"run.sh": "echo\n"})
+    (repo / "run.sh").chmod(0o755)
+    subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-qm", "exec"], cwd=repo, check=True)
+    sandbox = sandbox_of(repo)
+    (sandbox.path / "run.sh").write_text("edited\n", encoding="utf-8")
+
+    _restore_from_base(sandbox, "run.sh")
+
+    assert os.access(sandbox.path / "run.sh", os.X_OK)
+
+
+def test_a_tracked_path_that_looks_like_pathspec_magic_is_put_back_not_deleted(tmp_path):
+    """R5 edge-case review: `:colon` read as pathspec magic found no base
+    entry, so the restore deleted the tracked file instead."""
+    repo = git_repo(tmp_path, {":colon": "base\n"})
+    sandbox = sandbox_of(repo)
+    (sandbox.path / ":colon").write_text("edited\n", encoding="utf-8")
+
+    _restore_from_base(sandbox, ":colon")
+
+    assert (sandbox.path / ":colon").read_text(encoding="utf-8") == "base\n"
+
+
+def test_an_added_path_naming_another_file_by_magic_is_removed_not_filled(tmp_path):
+    """`:(top)a.py`, read as magic, resolved to the base's a.py, whose bytes
+    were then written into the agent's new file."""
+    repo = git_repo(tmp_path, {"a.py": "a\n"})
+    sandbox = sandbox_of(repo)
+    (sandbox.path / ":(top)a.py").write_text("new\n", encoding="utf-8")
+
+    _restore_from_base(sandbox, ":(top)a.py")
+
+    assert not (sandbox.path / ":(top)a.py").exists()
+
+
+def test_a_git_failure_while_putting_back_is_a_scope_check_error(tmp_path, monkeypatch):
+    from curamoir import fix_scope
+    from curamoir.git_guard import GitGuardError
+
+    repo = git_repo(tmp_path, {"a.py": "base\n"})
+    sandbox = sandbox_of(repo)
+
+    def failing(*_args, **_kwargs):
+        raise GitGuardError("git ls-tree timed out")
+    monkeypatch.setattr(fix_scope, "git", failing)
+
+    with pytest.raises(ScopeCheckError, match="timed out"):
+        _restore_from_base(sandbox, "a.py")
+
+
+def test_a_path_a_remedy_deleted_is_put_back_deleted(tmp_path):
+    """The fix step's snapshot holds the remedy's result, not the base."""
+    repo = git_repo(tmp_path, {"gone.py": "base\n"})
+    sandbox = sandbox_of(repo)
+    (sandbox.path / "gone.py").write_text("recreated by the agent\n", encoding="utf-8")
+
+    _restore_from_base(sandbox, "gone.py", deleted=True)
+
+    assert not (sandbox.path / "gone.py").exists()
+
+
+def test_a_refused_restore_leaves_the_agents_file_as_it_was(tmp_path):
+    """The base's kind is checked before anything is unlinked."""
+    repo = git_repo(tmp_path, {"d/f.py": "base\n"})
+    sandbox = sandbox_of(repo)
+    shutil.rmtree(sandbox.path / "d")
+    (sandbox.path / "d").write_text("a file where the base has a directory\n",
+                                    encoding="utf-8")
+
+    with pytest.raises(ScopeCheckError):
+        _restore_from_base(sandbox, "d")
+
+    assert (sandbox.path / "d").read_text(encoding="utf-8").startswith("a file")

@@ -54,19 +54,22 @@ and never in the user's checkout; nothing is ever re-run there.
 
 **What each outcome writes.** A refusal carries no `found_delta`,
 decision fields, `fixes` or snapshot (fix_scope step 2a); it keeps the
-tier1 field and the cost fields of any call already made (note_cost),
-and SCOPE's adds the verdict as `scope`. Every other line from step 3 on
-carries the decision's fields (Decision.ledger_fields), `found_delta`,
-the tier1 field and, once the gate ran, its `test_gate`; the snapshot
-follows it.
+tier1 field and the cost fields of any call already made (note_cost).
+The scope fields (cm-9ab): `scope` is the FIRST review's verdict, on a
+SCOPE refusal and on the SANDBOX refusal of a file that could not be
+dropped; `scope_after_drop` is the second review's, on a SCOPE refusal
+after files were dropped; `scope_dropped` (the dropped breaches) is on
+every line of a run that dropped files, whatever its outcome. Every other
+line from step 3 on carries the decision's fields (Decision.ledger_fields),
+`found_delta`, the tier1 field and, once the gate ran, its `test_gate`;
+the snapshot follows it.
 
 - Refusals, each with its Reason: the remedies or the review cannot
-  answer, a git_guard.GitGuardError or its ScopeCheckError (SANDBOX); the
-  verdict still has breaches once the breaching files are dropped, or
-  nothing is left after dropping them (SCOPE, with the first verdict as
-  `scope`; a run that dropped files and went on carries `scope_dropped`,
-  cm-9ab); the gate or
-  the patch raises green_gate.GateError (TEST_GATE); the fixes cannot be
+  answer, a git_guard.GitGuardError or its ScopeCheckError, a file that
+  could not be dropped among them (SANDBOX); the verdict still has
+  breaches once the breaching files are dropped, or nothing is left after
+  dropping them (SCOPE); the gate or the patch raises
+  green_gate.GateError (TEST_GATE); the fixes cannot be
   counted, record_fixes' or record_tier1_fixes' error or a ValueError from
   fix_counts.ledger_fields (FIX_RECORDS); publish.PublishRefused, nothing
   pushed (PUBLISH).
@@ -166,6 +169,7 @@ from curamoir.fix_counts import (
 )
 from curamoir.fix_counts import ledger_fields as fix_ledger_fields
 from curamoir.fix_scope import (
+    ScopeCheckError,
     base_principles,
     drop_breaching_paths,
     lint_sandbox,
@@ -546,20 +550,29 @@ class _Fix:
             # run_fix_step would have taken it.
             fix_run, git_state = None, snapshot_git_state(sandbox)
         # Step 5 (step 6, a GitGuardError here, is _Sweep.execute's refusal).
-        verdict = verify_fix(sandbox, git_state=git_state)
+        first = verify_fix(sandbox, git_state=git_state)
         # cm-9ab (user decision 2026-10-28): drop and re-gate. Every file a
         # breach names is put back as it was at the base and the review runs
         # again; what is left goes on to the gate. Not when a breach says the
         # sandbox itself cannot be trusted (fix_scope.WHOLE_RUN_KINDS).
-        first = verdict
-        verdict, dropped = drop_breaching_paths(sandbox, verdict, git_state=git_state)
+        try:
+            verdict, dropped = drop_breaching_paths(sandbox, first, git_state=git_state,
+                                                    removed=remedies.deleted)
+        except ScopeCheckError as error:
+            # Refused here rather than left to step 6, so the line keeps
+            # `scope`: what the agent breached, which the generic refusal
+            # would lose.
+            owner.refuse(Reason.SANDBOX, f"a file outside E3-R2's scope could not be "
+                         f"dropped: {error}", scope=first.as_dict())
+            return
         if dropped:
-            owner.run.note(scope_dropped=[
-                {"kind": b.kind, "path": b.path, "line": b.line, "detail": b.detail}
-                for b in dropped])
-        # Still out of E3-R2's scope, or nothing in scope left: refused.
+            owner.run.note(scope_dropped=[breach.as_dict() for breach in dropped])
+        # Still out of E3-R2's scope, or nothing in scope left: refused,
+        # with what the agent did (`scope`) and, once files were dropped,
+        # why what was left was refused too (`scope_after_drop`).
         if not verdict.ok or (dropped and verdict.nothing_changed):
-            owner.refuse(Reason.SCOPE, first.render(), scope=first.as_dict())
+            after_drop = {"scope_after_drop": verdict.as_dict()} if dropped else {}
+            owner.refuse(Reason.SCOPE, first.render(), scope=first.as_dict(), **after_drop)
             return
         # Step 7: only a verdict that changed something is trimmed and
         # tested.
@@ -611,9 +624,9 @@ class _Fix:
         except GateError as error:
             owner.refuse(Reason.TEST_GATE, error)
             return
-        self.open_pr(records, gate, patch, remedies, left_out, fix_fields)
+        self.open_pr(records, gate, patch, remedies, left_out, fix_fields, dropped)
 
-    def open_pr(self, records, gate, patch, remedies, left_out, fix_fields):
+    def open_pr(self, records, gate, patch, remedies, left_out, fix_fields, dropped=()):
         """Step 9's PR: its text, then ONE publish.publish, and the line for
         each of publish's outcomes (publish's "Errors" table)."""
         owner, sandbox, sweep_base = self.owner, self.sandbox, self.owner.sweep_base
@@ -621,7 +634,7 @@ class _Fix:
         try:
             # One day (owner.day) for the branch, the title and the message.
             body = final_body(records, sandbox.work_list, gate, sandbox.base, remedies.skipped,
-                              left_out)
+                              left_out, scope_dropped=dropped)
             branch = sweep_branch(owner.branch_prefix, owner.day, sandbox.base)
             title = pr_title(records, gate, owner.day)
             message = commit_message(records, gate, owner.day, sandbox.base)

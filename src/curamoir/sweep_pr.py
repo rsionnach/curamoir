@@ -25,8 +25,9 @@ in order:
    one its summary without the dropped paths (render() lists them all on
    a line that is never cut), then each dropped file with its reason.
 5. `### Files left for the next run`: those trimmed past
-   `max_files_per_pr` and those the gate dropped (E3-R3's "rest", which the
-   next sweep, at the next base, picks up).
+   `max_files_per_pr`, those the gate dropped, and those put back for an
+   edit outside E3-R2's scope (cm-9ab) (E3-R3's "rest", which the next
+   sweep, at the next base, picks up).
 6. `### Remedies skipped`: each remedy not applied, with its reason.
 7. `### Promotion candidates`: PROMOTION_PENDING (E4-R1/E4-R2 have not
    landed).
@@ -135,7 +136,7 @@ from datetime import date as Date
 from typing import NamedTuple
 
 from curamoir.fix_counts import REMEDY, RULE, TIER1
-from curamoir.fix_scope import nfc
+from curamoir.fix_scope import FILE_ADDED, nfc
 from curamoir.green_gate import REDUCED
 from curamoir.idempotence import (
     MARKER_WORD,
@@ -218,18 +219,18 @@ def commit_message(records, gate, date, base):
 
 
 def render_pr_body(records, work_list, gate, base, skipped_remedies, left_out_paths,
-                   grade_section=None, limit=MAX_BODY_SIZE):
+                   grade_section=None, limit=MAX_BODY_SIZE, scope_dropped=()):
     """final_body's body without its checks (the redaction verification,
     the marker, the headings): the same arguments, the same raises
     otherwise, fitted under `limit`. For inspection and tests, never for
     sending."""
     parts = _parts(records, work_list, gate, base, skipped_remedies, left_out_paths,
-                   grade_section)
+                   grade_section, scope_dropped)
     return _body(parts, lambda text: github_size(text) <= limit)
 
 
 def final_body(records, work_list, gate, base, skipped_remedies, left_out_paths,
-               grade_section=None, limit=MAX_BODY_SIZE):
+               grade_section=None, limit=MAX_BODY_SIZE, scope_dropped=()):
     """The PR body the runner sends: rendered from redacted pieces (E0-R7),
     fitted under `limit`, then checked: redaction would change nothing
     (_check_redacted), its marker reads back, its headings are its own.
@@ -246,6 +247,9 @@ def final_body(records, work_list, gate, base, skipped_remedies, left_out_paths,
         skipped_remedies: remedies.RemedyResult.skipped.
         left_out_paths: the verdict's paths trim_pr_paths did not keep
             (past `max_files_per_pr`).
+        scope_dropped: the breaches whose files the sweep put back before
+            the gate (fix_scope.drop_breaching_paths, cm-9ab), listed with
+            the files left for the next run, one line per path.
         grade_section: E7-R5's text, or None for GRADE_PENDING. Redacted
             whole, then each line escaped as plain_text escapes it
             (pr_markdown.plain_lines: no HTML, links, autolinks or
@@ -274,7 +278,7 @@ def final_body(records, work_list, gate, base, skipped_remedies, left_out_paths,
     """
     _check_grade_headings(grade_section)
     parts = _parts(records, work_list, gate, base, skipped_remedies, left_out_paths,
-                   grade_section)
+                   grade_section, scope_dropped)
     body = _body(parts, lambda text: github_size(text) <= limit)
     _check_redacted(body)
     if parse_sweep_marker(body) != base:
@@ -377,7 +381,8 @@ class _Listed(NamedTuple):
     more_suffix: str = ""
 
 
-def _parts(records, work_list, gate, base, skipped_remedies, left_out_paths, grade_section):
+def _parts(records, work_list, gate, base, skipped_remedies, left_out_paths, grade_section,
+           scope_dropped=()):
     """The body's pieces, a dict _compose assembles: "marker", "header",
     "gate" and "grade" (text never cut), and "lists", {name: _Listed} (the
     lists _fitted may cut). Raises as final_body's docstring says."""
@@ -412,6 +417,14 @@ def _parts(records, work_list, gate, base, skipped_remedies, left_out_paths, gra
     # A dropped path is listed twice on purpose: under "Test gate" with its
     # reason, and here, because the next sweep picks it up like the rest.
     left += [f"- {code_span(drop.path)} (dropped by the test gate)" for drop in gate.dropped]
+    # Put back before the gate because an edit there went outside E3-R2's
+    # scope (cm-9ab): a file's violations are unfixed and the next run has
+    # them; a file the agent added had none, and is simply gone.
+    left += [f"- {code_span(path)} (removed: added outside E3-R2's scope)"
+             if kind == FILE_ADDED else
+             f"- {code_span(path)} (dropped: an edit outside E3-R2's scope, "
+             f"{plain_text(kind)})"
+             for path, kind in sorted({(b.path, b.kind) for b in scope_dropped})]
     skipped = [f"- {code_span(s.path)} ({code_span(s.rule_id)}, remedy "
                f"{code_span(s.remedy)}): {plain_text(s.reason)}" for s in skipped_remedies]
     files = len(gate.paths_for_pr)

@@ -279,6 +279,10 @@ def test_an_out_of_scope_file_is_dropped_and_the_rest_opens_a_pr(tmp_path, no_re
     dropped = line["scope_dropped"]
     assert [breach["path"] for breach in dropped] == ["README.md"]
     assert dropped[0]["kind"] == "file_not_in_work_list"
+    # The PR's reviewer is told too: an edit there was discarded.
+    [create] = creates(no_real_gh)
+    left = section(create["body_file_content"], "### Files left for the next run")
+    assert "`README.md` (dropped: an edit outside E3-R2's scope, file_not_in_work_list)" in left
 
 
 def test_when_every_changed_file_breaches_the_run_is_refused(tmp_path, no_real_gh):
@@ -1032,3 +1036,6 @@ def test_a_file_the_agent_added_out_of_scope_is_removed_and_the_rest_opens_a_pr(
     assert "scratch_notes.py" not in line["pr"]["paths"]
     assert [(b["path"], b["kind"]) for b in line["scope_dropped"]] == [
         ("scratch_notes.py", "file_added")]
+    [create] = creates(no_real_gh)
+    left = section(create["body_file_content"], "### Files left for the next run")
+    assert "`scratch_notes.py` (removed: added outside E3-R2's scope)" in left
