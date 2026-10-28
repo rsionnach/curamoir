@@ -329,7 +329,14 @@ which line each path records).
    nothing, no call is made, and the review holds the sandbox to a
    snapshot taken there instead (git_guard.snapshot_git_state).
 5. Review it: `verify_fix(sandbox, git_state=run.git_state)`. Same sandbox,
-   same snapshot, same base: there is nothing else to pass.
+   same snapshot, same base: there is nothing else to pass. Then drop and
+   re-gate (cm-9ab, user decision 2026-10-28): `verdict, dropped =
+   drop_breaching_paths(sandbox, verdict, git_state=run.git_state)` puts
+   back every file a breach names and reviews again, unless a breach is one
+   of WHOLE_RUN_KINDS. A verdict still with breaches, or one with nothing
+   left after dropping, is a SCOPE refusal carrying the FIRST verdict as
+   `scope`; otherwise the dropped breaches are noted as `scope_dropped` and
+   the run goes on with what is left.
 6. Treat git_guard.GitGuardError (ScopeCheckError is one) as a refusal
    (with `**tier1_state.ledger_fields()`, step 2c's note): no verdict is
    not a verdict, and an unverified fix is not a fix.
@@ -566,6 +573,11 @@ ENCODING_DECLARATION = "encoding_declaration"
 KINDS = (FILE_NOT_IN_WORK_LIST, FILE_ADDED, FILE_DELETED, DEPENDENCY_CHANGE,
          NEW_DEPENDENCY, OUTSIDE_VIOLATION, SIGNATURE_CHANGE, UNVERIFIABLE,
          GIT_INTERNALS_CHANGED, BASE_MOVED, HIDDEN_CHANGE, ENCODING_DECLARATION)
+
+#: Breaches that say the sandbox itself cannot be trusted, not one file of
+#: it: no file is dropped then, and the run is refused (cm-9ab). Every other
+#: kind names a path that can be put back as it was at the base.
+WHOLE_RUN_KINDS = frozenset({GIT_INTERNALS_CHANGED, BASE_MOVED, HIDDEN_CHANGE})
 
 #: The principle permission that lifts SIGNATURE_CHANGE (principles.PERMISSIONS).
 SIGNATURE_PERMISSION = "signature_change"
@@ -1592,6 +1604,53 @@ def verify_fix(sandbox, *, git_state, window=WINDOW):
             "an uninitialised submodule, or hidden another way); a change git cannot see "
             "can be neither reviewed nor carried to a PR") for path in hidden),
         paths=tuple(sorted(set(verdict.paths) | set(hidden))))
+
+
+def drop_breaching_paths(sandbox, verdict, *, git_state, window=WINDOW):
+    """`(verdict, dropped)`: cm-9ab's drop and re-gate (user decision
+    2026-10-28). When `verdict` has breaches and none is a WHOLE_RUN_KINDS
+    one, every path a breach names is put back as it was at the base (its
+    base bytes written over it, or the file removed if the base has none)
+    and verify_fix runs again on what is left; `dropped` is the original
+    breaches. Otherwise `verdict` is returned as it is with `dropped` empty.
+
+    The restore reads the base with `git cat-file` and writes the work tree
+    only, never the index or anything under `.git`, so the second review
+    still holds the sandbox to the fix step's own snapshot: a file put back
+    byte for byte digests as it did before the fix step. Whatever the
+    second verdict says is the answer (the caller refuses one that still
+    has breaches, and one that changed nothing)."""
+    if verdict.ok or any(b.kind in WHOLE_RUN_KINDS for b in verdict.breaches):
+        return verdict, ()
+    for path in sorted({breach.path for breach in verdict.breaches}):
+        _restore_from_base(sandbox, path)
+    return verify_fix(sandbox, git_state=git_state, window=window), verdict.breaches
+
+
+def _restore_from_base(sandbox, path):
+    """Put `path` (repo-relative) back as it is at the sandbox's base: its
+    blob's bytes, or no file when the base has none at that path."""
+    target = Path(str(sandbox.path), path)
+    listed = git(sandbox.path, "ls-tree", "-z", sandbox.base, "--", path)
+    entry = listed.split(b"\0", 1)[0]
+    if not entry:
+        if target.is_symlink() or target.is_file():
+            target.unlink()
+        return
+    meta = entry.split(b"\t", 1)[0].split(b" ")
+    mode, kind, blob = meta[0], meta[1], meta[2].decode("ascii")
+    if kind != b"blob" or mode not in (b"100644", b"100755"):
+        raise ScopeCheckError(f"{path} is a {mode.decode()} {kind.decode()} at the base, "
+                              "not a file that can be put back")
+    content = git(sandbox.path, "cat-file", "blob", blob)
+    if target.is_symlink():
+        target.unlink()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(content)
+    # Only the executable bit, which is all git records: the checkout's other
+    # permission bits (its umask's) are left as they were.
+    current = target.stat().st_mode & 0o7777
+    target.chmod(current | 0o111 if mode == b"100755" else current & ~0o111)
 
 
 def rules_licensing_deletion(rules):

@@ -262,9 +262,28 @@ def test_abandoned_pushes_nothing_creates_no_pr_and_fails(tmp_path, no_real_gh):
     assert read_snapshot(snapshot_path(repo)) is not None
 
 
-def test_an_out_of_scope_edit_is_refused_and_nothing_is_pushed(tmp_path, no_real_gh):
+def test_an_out_of_scope_file_is_dropped_and_the_rest_opens_a_pr(tmp_path, no_real_gh):
+    """cm-9ab (user decision 2026-10-28): drop and re-gate. The first
+    dogfood sweep spent $1 and kept nothing because one file broke E3-R2.
+    Now the breaching file is restored to the base, the review runs again on
+    what is left, and the PR carries the in-scope fixes; the line records
+    what was dropped and why."""
     repo = checkout(tmp_path, NO_BARE_PRINT, config=GATE)
     claude, _ = fixer(tmp_path, edits=[*PRINT_FIXES, ("README.md", "#", "# Rewritten\n#")])
+
+    line = sweep(repo, claude=claude)
+
+    assert line["outcome"] == SUCCESS, line["message"]
+    assert "README.md" not in line["pr"]["paths"]
+    assert sorted(fix["path"] for fix in line["fixes"]) == sorted([BILLING, HANDLERS])
+    dropped = line["scope_dropped"]
+    assert [breach["path"] for breach in dropped] == ["README.md"]
+    assert dropped[0]["kind"] == "file_not_in_work_list"
+
+
+def test_when_every_changed_file_breaches_the_run_is_refused(tmp_path, no_real_gh):
+    repo = checkout(tmp_path, NO_BARE_PRINT, config=GATE)
+    claude, _ = fixer(tmp_path, edits=[("README.md", "#", "# Rewritten\n#")])
 
     line = sweep(repo, claude=claude)
 
@@ -998,3 +1017,18 @@ def test_the_new_refusal_reasons_are_the_ledgers_strings():
         Reason.PUBLISH)} == {"SCOPE": "scope", "TEST_GATE": "test_gate",
                              "FIX_RECORDS": "fix_records", "FILE_CAP": "file_cap",
                              "PUBLISH": "publish"}
+
+
+def test_a_file_the_agent_added_out_of_scope_is_removed_and_the_rest_opens_a_pr(
+        tmp_path, no_real_gh):
+    """cm-9ab: a dropped path the base does not have is removed, not
+    restored."""
+    repo = checkout(tmp_path, NO_BARE_PRINT, config=GATE)
+    claude, _ = fixer(tmp_path, writes={"scratch_notes.py": "x = 1\n"})
+
+    line = sweep(repo, claude=claude)
+
+    assert line["outcome"] == SUCCESS, line["message"]
+    assert "scratch_notes.py" not in line["pr"]["paths"]
+    assert [(b["path"], b["kind"]) for b in line["scope_dropped"]] == [
+        ("scratch_notes.py", "file_added")]

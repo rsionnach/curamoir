@@ -62,7 +62,10 @@ follows it.
 
 - Refusals, each with its Reason: the remedies or the review cannot
   answer, a git_guard.GitGuardError or its ScopeCheckError (SANDBOX); the
-  verdict has breaches (SCOPE, with the verdict as `scope`); the gate or
+  verdict still has breaches once the breaching files are dropped, or
+  nothing is left after dropping them (SCOPE, with the first verdict as
+  `scope`; a run that dropped files and went on carries `scope_dropped`,
+  cm-9ab); the gate or
   the patch raises green_gate.GateError (TEST_GATE); the fixes cannot be
   counted, record_fixes' or record_tier1_fixes' error or a ValueError from
   fix_counts.ledger_fields (FIX_RECORDS); publish.PublishRefused, nothing
@@ -162,7 +165,13 @@ from curamoir.fix_counts import (
     write_snapshot_or_warn,
 )
 from curamoir.fix_counts import ledger_fields as fix_ledger_fields
-from curamoir.fix_scope import base_principles, lint_sandbox, nfc, verify_fix
+from curamoir.fix_scope import (
+    base_principles,
+    drop_breaching_paths,
+    lint_sandbox,
+    nfc,
+    verify_fix,
+)
 from curamoir.fix_step import (
     DEFAULT_TIMEOUT,
     FixStepRun,
@@ -538,9 +547,19 @@ class _Fix:
             fix_run, git_state = None, snapshot_git_state(sandbox)
         # Step 5 (step 6, a GitGuardError here, is _Sweep.execute's refusal).
         verdict = verify_fix(sandbox, git_state=git_state)
-        # A verdict with breaches is out of E3-R2's scope: refused.
-        if not verdict.ok:
-            owner.refuse(Reason.SCOPE, verdict.render(), scope=verdict.as_dict())
+        # cm-9ab (user decision 2026-10-28): drop and re-gate. Every file a
+        # breach names is put back as it was at the base and the review runs
+        # again; what is left goes on to the gate. Not when a breach says the
+        # sandbox itself cannot be trusted (fix_scope.WHOLE_RUN_KINDS).
+        first = verdict
+        verdict, dropped = drop_breaching_paths(sandbox, verdict, git_state=git_state)
+        if dropped:
+            owner.run.note(scope_dropped=[
+                {"kind": b.kind, "path": b.path, "line": b.line, "detail": b.detail}
+                for b in dropped])
+        # Still out of E3-R2's scope, or nothing in scope left: refused.
+        if not verdict.ok or (dropped and verdict.nothing_changed):
+            owner.refuse(Reason.SCOPE, first.render(), scope=first.as_dict())
             return
         # Step 7: only a verdict that changed something is trimmed and
         # tested.
