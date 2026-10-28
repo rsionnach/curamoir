@@ -60,6 +60,12 @@ _READERS = frozenset({
     "date", "pwd", "test",
 })
 
+#: Programs that cannot change the working tree, for the rule that a write
+#: in a command line beside any other program is refused (round 8, I3): the
+#: pure readers, and sort, uniq, find and yq, whose one write each is a
+#: definite write target in its own right (find's runners are refused).
+_TREE_SAFE = _READERS | {"sort", "uniq", "find", "yq"}
+
 #: find's actions that write a file. Refused outright: redirect find's output.
 _FIND_WRITES = frozenset({"-fprint", "-fprint0", "-fprintf", "-fls"})
 
@@ -141,7 +147,13 @@ def _write_refusal(program, arguments):
     elif program in _READERS or program == "git":
         return None
     else:
-        paths = [path for argument in arguments for path in _path_candidates(argument)]
+        # Mostly what the program reads, so not definite writes (_TREE_*).
+        for argument in arguments:
+            for path in _path_candidates(argument):
+                refused = _write_target_refusal(program, path, definite=False)
+                if refused is not None:
+                    return refused
+        return None
     for path in paths:
         refused = _write_target_refusal(program, path)
         if refused is not None:
@@ -303,16 +315,31 @@ def _path_candidates(argument):
     attached short value (`-o.git/x`, `-o=/tmp/x`), and every part of each
     of those between `=` and `:` separators, nested ones included
     (`cache_dir=/tmp/x`, `--config=a=b=/tmp/x`, `html:/tmp/x`; round 7, S5).
-    A part beginning `//` is the rest of a URL (`git+https://host/x`), not a
-    path."""
+
+    A URL (`scheme://...`, `git+https://host/x`) is taken out of a value
+    before it is split, so that the `//host/x` after its scheme is not read as
+    a path. Only there: a `//x` anywhere else is the absolute path `/x`, as
+    Linux and macOS read it (round 8, C1), and a URL with a `..` segment is
+    not exempt, since as a relative path (`a://../../x`) it climbs out."""
     if argument.startswith("--"):
         values = [argument.partition("=")[2]] if "=" in argument else []
     elif argument.startswith("-") and argument != "-":
         values = [argument[2:]] if len(argument) > 2 else []
     else:
         values = [argument]
+    values = [_URL.sub(_without_url, value) for value in values]
     parts = [part for value in values for part in _SEPARATORS.split(value)]
-    return [path for path in values + parts if path and not path.startswith("//")]
+    return [path for path in values + parts if path]
+
+
+#: A URL: a scheme, `://`, and the rest of the word up to a separator.
+_URL = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*://[^\s=]*")
+
+
+def _without_url(match):
+    """A URL's replacement in a value: nothing, unless it has a `..` segment."""
+    url = match.group()
+    return url if ".." in url.split("://", 1)[1].split("/") else ""
 
 
 #: The separators _path_candidates splits a value at.

@@ -105,16 +105,17 @@ def test_ordinary_work_and_pure_reads_pass(command):
     "git pull && cp a b",
     "git stash && echo x >> notes.txt",
     "git -C sub merge main && tee out.log",
+    # Round 8 widened E3: any non-reader in the line, before or after.
+    "git status && echo x > out.txt",
+    "echo x > out.txt && git apply p.patch",
 ])
 def test_a_write_after_the_tree_may_change_is_refused(command):
     decision = judge_command(command, in_job=True)
     assert decision.deny and decision.category == Category.UNVERIFIABLE, decision
-    assert "run them separately" in decision.reason
+    assert "on its own" in decision.reason
 
 
 @pytest.mark.parametrize("command", [
-    "git status && echo x > out.txt",
-    "echo x > out.txt && git apply p.patch",
     "git pull && git log -1",
     "git add -A && git commit -m x",
 ])

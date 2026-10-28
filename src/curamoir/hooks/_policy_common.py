@@ -224,10 +224,12 @@ _CWD = ContextVar("curamoir_policy_cwd", default=None)
 #: judged strictly.
 _UNQUOTED_GLOB = ContextVar("curamoir_policy_unquoted_glob", default=True)
 
-#: Whether an earlier segment of the command being judged may change the
-#: working tree (a git apply, checkout, pull, ...; policy._TREE_CHANGING), set
-#: by policy._judge as it walks the segments. A write after one is refused:
-#: the tree the guard looked at is not the tree the write meets (round 7).
+#: Whether the command being judged has more than one segment and any of them
+#: runs a program that is not a pure reader (policy._judge decides it, over
+#: the whole command, before any segment is judged). Every definite write
+#: target in such a command is refused: that program may change the tree
+#: before the write (`&&`, `;`) or while it happens (`&`, `|`), so the tree
+#: the guard looked at is not the tree the write meets (rounds 7 and 8).
 _TREE_MAY_HAVE_CHANGED = ContextVar("curamoir_policy_tree_changed", default=False)
 
 #: Characters that make a word a glob the shell expands before the program
@@ -257,7 +259,7 @@ def _has_unquoted_glob(command):
     return False
 
 
-def _write_target_refusal(what, path):
+def _write_target_refusal(what, path, definite=True):
     """The refusal for `what` writing `path` outside the diff the sweep
     reviews, else None (I1, R5 edge-case review; round 6).
 
@@ -273,8 +275,10 @@ def _write_target_refusal(what, path):
       collapses `..`) must lie under the working directory's real path, with
       no component of it, relative to that, named `.git` in any case. That
       covers a symlink to `.git` or outside, wherever in the path it sits.
-    - After a segment that may change the tree (_TREE_MAY_HAVE_CHANGED), any
-      write target at all: the guard looked at the tree before it changed.
+    - In a command that also runs a non-reader (_TREE_MAY_HAVE_CHANGED), any
+      `definite` write target at all: the guard looked at the tree before it
+      changed. Not a path-strict program's arguments (`definite=False`),
+      which are mostly what it reads (`make build && make test`).
 
     Best effort, and said so: the real path is read when the command is
     judged, and a link can appear between that and the write (another
@@ -283,13 +287,16 @@ def _write_target_refusal(what, path):
     an OS sandbox) and cm-4w5."""
     if not path:
         return None
-    if _TREE_MAY_HAVE_CHANGED.get():
+    # `//x` is `/x` to Linux and macOS (round 8, C1).
+    if path.startswith("//"):
+        path = "/" + path.lstrip("/")
+    if definite and _TREE_MAY_HAVE_CHANGED.get():
         return (
             Category.UNVERIFIABLE,
-            f"{what} writes to {path!r} after an earlier command that may change the "
-            "working tree, so the tree may change before this write; run them "
-            "separately",
-            "run the git command first, then the write as its own command",
+            f"{what} writes to {path!r} in a command line that also runs a program "
+            "which may change the working tree before or while it is written; run "
+            "the write on its own, as a separate command",
+            "run the other commands first, then the write on its own",
         )
     if _GLOB_CHARACTERS.intersection(path) and _UNQUOTED_GLOB.get():
         return (

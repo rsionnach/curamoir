@@ -97,8 +97,13 @@ from curamoir.hooks._policy_tools import (
     _go_code,
     _make_code,
     _program_option,
+    _runs_a_program,
 )
-from curamoir.hooks._policy_writes import _redirection_outside_diff, _write_refusal
+from curamoir.hooks._policy_writes import (
+    _TREE_SAFE,
+    _redirection_outside_diff,
+    _write_refusal,
+)
 from curamoir.hooks._shell import (
     HEREDOCS,
     MAX_COMMAND_CHARS,
@@ -533,26 +538,15 @@ _PROGRAM_CHECKS = {
 }
 
 
-#: git subcommands that may change the working tree, and with it what a path
-#: resolves to: a patch, a checkout or a merge can add a symlink that a later
-#: write in the same command follows, after the guard has looked (round 7,
-#: E3). A write in any later segment is refused (_TREE_MAY_HAVE_CHANGED).
-_TREE_CHANGING = frozenset({
-    "apply", "am", "checkout", "switch", "restore", "stash", "pull", "merge",
-    "rebase", "cherry-pick", "revert", "reset", "clone", "submodule", "worktree",
-})
-
-
-def _changes_tree(segment):
-    """Whether `segment` (redirections stripped) is a git command whose
-    subcommand is on _TREE_CHANGING."""
+def _runs_a_non_reader(segment):
+    """Whether `segment` (redirections stripped) runs a program not on
+    _TREE_SAFE, which may change the working tree (round 8, I3). A runner
+    (`uv run`, `npm exec`) is itself not on it, so whatever it runs, at any
+    depth, counts."""
     tokens = list(segment)
     while tokens and _ASSIGNMENT.match(tokens[0]):
         tokens = tokens[1:]
-    if not tokens or tokens[0].strip("\"'").rsplit("/", 1)[-1] != "git":
-        return False
-    at, _ = _subcommand_at("git", tokens[1:])
-    return at is not None and tokens[1:][at] in _TREE_CHANGING
+    return bool(tokens) and tokens[0].strip("\"'").rsplit("/", 1)[-1] not in _TREE_SAFE
 
 
 def _inline_code_refusal(program):
@@ -665,8 +659,9 @@ def _refusal_for(tokens):
     if program in _PYTHON:
         if len(arguments) >= 2 and arguments[0] == "-m":
             if arguments[1] in _ALLOWED_PYTHON_MODULES:
-                # `python3 -m pytest` writes where `pytest` does.
-                return _write_refusal(arguments[1], arguments[2:])
+                # `python3 -m pytest` runs and writes what `pytest` does.
+                return (_runs_a_program(arguments[1], arguments[2:])
+                        or _write_refusal(arguments[1], arguments[2:]))
             # The module is plainly readable; we simply decline it.
             return (
                 Category.NOT_ALLOWLISTED,
@@ -693,6 +688,10 @@ def _refusal_for(tokens):
             Category.NOT_ALLOWLISTED,
             f"{program!r} is not on cúramóir's allowlist for jobs",
         )
+
+    refused = _runs_a_program(program, arguments)
+    if refused is not None:
+        return refused
 
     for check in _PROGRAM_CHECKS.get(program, ()):
         refused = check(program, arguments, _nested_refusal)
@@ -872,7 +871,14 @@ def _judge(command):
             category=Category.UNVERIFIABLE,
         )
 
-    for segment in segments(tokens):
+    # Decided for the whole command before any segment is judged (round 8,
+    # I3): segments joined by `&` or `|` run at the same time, so a program
+    # in a LATER segment can change the tree under an earlier write too.
+    found = segments(tokens)
+    _TREE_MAY_HAVE_CHANGED.set(len(found) > 1 and any(
+        _runs_a_non_reader(strip_redirections(segment)) for segment in found))
+
+    for segment in found:
         # The redirection targets are read before strip_redirections drops
         # them: where the output goes is the effect (I1).
         refusal = _redirection_outside_diff(segment)
@@ -882,8 +888,6 @@ def _judge(command):
 
         if refusal is None:
             refusal = _refusal_for(segment)
-        if refusal is None and _changes_tree(segment):
-            _TREE_MAY_HAVE_CHANGED.set(True)
         if refusal is not None:
             # A refusal may name its own alternative as a third element; the
             # default is the allowlist's own remedy.

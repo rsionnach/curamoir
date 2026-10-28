@@ -226,3 +226,86 @@ def _go_code(program, arguments, judge):
             "repository instead",
         )
     return _go_tool_flags(arguments) or _program_option("go", arguments, judge)
+
+
+#: Long options that run a program, or load configuration that does, by the
+#: program they belong to, with the shortest prefix each program's parser would
+#: still read as the option (round 8, I2). Found by reading `--help` and the
+#: man page of every allowlisted program installed on the development
+#: machine: rg's `--pre` (a preprocessor run on every file) and
+#: `--hostname-bin`, sort's `--compress-program` (GNU, and Apple's sort
+#: 2.3), and uv run's `--env-file` (environment variables from a file, past
+#: the assignment allowlist). rg and uv accept no abbreviations, so theirs
+#: are matched whole (`--pre` is not `--pretty`, nor `--pre-glob`); GNU sort
+#: accepts any unambiguous prefix.
+_PROGRAM_RUNNING_OPTIONS = {
+    "rg": (("--pre", 5), ("--hostname-bin", 5)),
+    "sort": (("--compress-program", 5),),
+    "uv": (("--env-file", 10),),
+}
+
+#: bd subcommands that install or configure code that runs later: git hooks
+#: in `.git/hooks`, and editor integrations outside the repository.
+_BD_REFUSED = frozenset({"hooks", "setup"})
+
+#: pytest's short options that take a value, which ends a short cluster.
+_PYTEST_VALUED_SHORT = frozenset("kmcoWrnp")
+
+
+def _runs_a_program(program, arguments):
+    """A refusal if `arguments` give `program` an option that runs a program
+    or loads code (_PROGRAM_RUNNING_OPTIONS; pytest's `-p` other than
+    `-p no:<plugin>`, which loads a module of that name), or a bd subcommand
+    on _BD_REFUSED; else None."""
+    if program == "bd":
+        words = [a for a in arguments if not a.startswith("-")]
+        if words[:1] and words[0] in _BD_REFUSED:
+            return (
+                Category.NOT_ALLOWLISTED,
+                f"bd {words[0]} installs hooks or integrations that run later, "
+                "outside the diff the sweep reviews",
+            )
+        return None
+    if program == "pytest":
+        return _pytest_plugin(arguments)
+    options = _PROGRAM_RUNNING_OPTIONS.get(program, ())
+    for argument in arguments:
+        if argument == "--":
+            break
+        name = argument.split("=", 1)[0]
+        if not name.startswith("--"):
+            continue
+        for option, shortest in options:
+            if _abbreviates(name, option, shortest):
+                return (
+                    Category.UNVERIFIABLE,
+                    f"{program} {option} names a program for {program} to run, or a "
+                    f"file of settings it loads, chosen at call time. Run {program} "
+                    "without it",
+                )
+    return None
+
+
+def _pytest_plugin(arguments):
+    """The refusal for pytest's `-p NAME` (in any spelling: `-pNAME`, `-p=NAME`,
+    in a cluster) when NAME is not `no:<plugin>`: it imports NAME at start-up,
+    an installed module chosen at call time; else None."""
+    for index, argument in enumerate(arguments):
+        if argument == "--":
+            break
+        if not argument.startswith("-") or argument.startswith("--"):
+            continue
+        for position, character in enumerate(argument[1:], start=2):
+            if character == "p":
+                value = argument[position:].lstrip("=") or (
+                    arguments[index + 1] if index + 1 < len(arguments) else "")
+                if not value.startswith("no:"):
+                    return (
+                        Category.UNVERIFIABLE,
+                        f"pytest -p {value} loads a plugin module chosen at call time. "
+                        "Run pytest without it; -p no:<plugin> is allowed",
+                    )
+                break
+            if character in _PYTEST_VALUED_SHORT:
+                break
+    return None
