@@ -147,13 +147,7 @@ def _write_refusal(program, arguments):
     elif program in _READERS or program == "git":
         return None
     else:
-        # Mostly what the program reads, so not definite writes (_TREE_*).
-        for argument in arguments:
-            for path in _path_candidates(argument):
-                refused = _write_target_refusal(program, path, definite=False)
-                if refused is not None:
-                    return refused
-        return None
+        return _strict_refusal(program, arguments)
     for path in paths:
         refused = _write_target_refusal(program, path)
         if refused is not None:
@@ -309,25 +303,78 @@ def _yq_paths(arguments):
     return [a for a in arguments if not a.startswith("-")]
 
 
-def _path_candidates(argument):
+def _strict_refusal(program, arguments):
+    """The refusal for a path-strict program's arguments (round 7, E2):
+    every argument and option value is judged as a write target.
+
+    Definite or not, for the whole-command rule (_TREE_MAY_HAVE_CHANGED;
+    round 9, I2): a value given to an option, attached (`-o=V`, `--x=V`,
+    `-oV`) or as the word right after it, is a definite write, since an
+    option names where output goes as often as not; a bare positional is not,
+    being mostly what the program reads (`make build && make test`).
+
+    A URL is exempt only where one is documented (round 9, S1): a package
+    spec among a package manager's install positionals (`pip install
+    git+https://...`), and the value of an index option. Anywhere else it is
+    judged as the path it also is: `a://b` is the relative `a:/b`, which
+    may pass through a symlink named `a:`."""
+    installing = program in _INSTALLERS and bool(
+        _INSTALL_SUBCOMMANDS.intersection(a for a in arguments if not a.startswith("-")))
+    after_option = None
+    for argument in arguments:
+        if argument == "--":
+            after_option = None
+            continue
+        if argument.startswith("-") and argument != "-":
+            name = argument.split("=", 1)[0]
+            url_ok = name in _URL_OPTIONS
+            for path in _path_candidates(argument, url_ok):
+                refused = _write_target_refusal(program, path)
+                if refused is not None:
+                    return refused
+            after_option = None if "=" in argument else name
+            continue
+        definite = after_option is not None
+        url_ok = (after_option in _URL_OPTIONS) if definite else installing
+        for path in _path_candidates(argument, url_ok):
+            refused = _write_target_refusal(program, path, definite=definite)
+            if refused is not None:
+                return refused
+        after_option = None
+    return None
+
+
+#: Package managers, and the subcommands with which they install a package
+#: named by a positional that may be a URL (`pip install git+https://...`).
+_INSTALLERS = frozenset({"pip", "npm", "pnpm", "yarn", "uv"})
+_INSTALL_SUBCOMMANDS = frozenset({"install", "add", "i", "in", "sync"})
+
+#: Options documented to take a URL: package indexes (pip, uv), and the
+#: daemon address of docker and podman (`-H unix:///var/run/docker.sock`).
+_URL_OPTIONS = frozenset({"--index-url", "--extra-index-url", "-i", "--default-index",
+                          "--index", "-H", "--host", "--url"})
+
+
+def _path_candidates(argument, url_ok=False):
     """The words in `argument` that may be a path, for a path-strict program:
     the argument itself if it is not an option, an option's `=` value or
     attached short value (`-o.git/x`, `-o=/tmp/x`), and every part of each
     of those between `=` and `:` separators, nested ones included
     (`cache_dir=/tmp/x`, `--config=a=b=/tmp/x`, `html:/tmp/x`; round 7, S5).
 
-    A URL (`scheme://...`, `git+https://host/x`) is taken out of a value
-    before it is split, so that the `//host/x` after its scheme is not read as
-    a path. Only there: a `//x` anywhere else is the absolute path `/x`, as
-    Linux and macOS read it (round 8, C1), and a URL with a `..` segment is
-    not exempt, since as a relative path (`a://../../x`) it climbs out."""
+    With `url_ok` (_strict_refusal says where), a URL is taken out of a
+    value before it is split, so the `//host/x` after its scheme is not read
+    as a path; a URL with a `..` segment is not exempt, since as a relative
+    path (`a://../../x`) it climbs out. Anywhere else a `//x` is the absolute
+    path `/x`, as Linux and macOS read it (round 8, C1)."""
     if argument.startswith("--"):
         values = [argument.partition("=")[2]] if "=" in argument else []
     elif argument.startswith("-") and argument != "-":
         values = [argument[2:]] if len(argument) > 2 else []
     else:
         values = [argument]
-    values = [_URL.sub(_without_url, value) for value in values]
+    if url_ok:
+        values = [_URL.sub(_without_url, value) for value in values]
     parts = [part for value in values for part in _SEPARATORS.split(value)]
     return [path for path in values + parts if path]
 

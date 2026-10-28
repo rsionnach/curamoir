@@ -228,21 +228,48 @@ def _go_code(program, arguments, judge):
     return _go_tool_flags(arguments) or _program_option("go", arguments, judge)
 
 
-#: Long options that run a program, or load configuration that does, by the
-#: program they belong to, with the shortest prefix each program's parser would
-#: still read as the option (round 8, I2). Found by reading `--help` and the
-#: man page of every allowlisted program installed on the development
-#: machine: rg's `--pre` (a preprocessor run on every file) and
-#: `--hostname-bin`, sort's `--compress-program` (GNU, and Apple's sort
-#: 2.3), and uv run's `--env-file` (environment variables from a file, past
-#: the assignment allowlist). rg and uv accept no abbreviations, so theirs
-#: are matched whole (`--pre` is not `--pretty`, nor `--pre-glob`); GNU sort
-#: accepts any unambiguous prefix.
+#: Long options that run a program, name an interpreter, plugin or module to
+#: load, or set configuration at call time, by program, each with the
+#: shortest prefix that program's parser would still read as it (rounds 8
+#: and 9). Refused outright, whatever the value, as go's -toolexec is.
+#: Installed programs were read from their `--help` and man pages; the rest
+#: from their documentation (tests/hooks/test_policy_round9.py lists the
+#: versions and the reasons). A parser that accepts no abbreviation (rg, uv,
+#: eslint, prettier, podman) has its options matched whole; argparse and GNU
+#: getopt (tox, nox, mypy, pip, sort) from the shortest unambiguous prefix.
 _PROGRAM_RUNNING_OPTIONS = {
     "rg": (("--pre", 5), ("--hostname-bin", 5)),
-    "sort": (("--compress-program", 5),),
+    "sort": (("--compress-program", 4),),
     "uv": (("--env-file", 10),),
+    "tox": (("--override", 3), ("--discover", 4), ("--runner", 4)),
+    "nox": (("--force-python", 4), ("--force-venv-backend", 4), ("--extra-python", 4),
+            ("--default-venv-backend", 4)),
+    "mypy": (("--python-executable", 10),),
+    "eslint": (("--plugin", 8), ("--rulesdir", 10), ("--parser", 8),
+               ("--resolve-plugins-relative-to", 29)),
+    "prettier": (("--plugin", 8), ("--plugin-search-dir", 19)),
+    "pip": (("--python", 8), ("--config-settings", 6), ("--global-option", 4),
+            ("--build-option", 5), ("--install-option", 5)),
+    "podman": (("--runtime", 9), ("--runtime-flag", 14), ("--conmon", 8),
+               ("--hooks-dir", 11), ("--network-cmd-path", 18), ("--module", 8)),
 }
+
+#: The short spellings of those, by program: a letter is found anywhere in a
+#: cluster (`tox -rx k=v`), erring toward refusing; nox's two-letter ones
+#: (`-db`, `-fb`) are matched as words.
+_PROGRAM_RUNNING_SHORTS = {
+    "tox": frozenset("x"),
+    "nox": frozenset({"P", "-db", "-fb"}),
+    "pip": frozenset("C"),
+    "cargo": frozenset("Z"),
+}
+
+#: eslint's built-in formatters (8.x and 9.x). Any other `-f`/`--format` is a
+#: module path or package eslint loads.
+_ESLINT_FORMATTERS = frozenset({
+    "stylish", "json", "json-with-metadata", "html", "checkstyle", "compact",
+    "jslint-xml", "junit", "tap", "unix", "visualstudio",
+})
 
 #: bd subcommands that install or configure code that runs later: git hooks
 #: in `.git/hooks`, and editor integrations outside the repository.
@@ -251,54 +278,116 @@ _BD_REFUSED = frozenset({"hooks", "setup"})
 #: pytest's short options that take a value, which ends a short cluster.
 _PYTEST_VALUED_SHORT = frozenset("kmcoWrnp")
 
+#: ini keys `pytest -o` may set: output, collection and warning settings. Any
+#: other is refused (round 9 addendum): `addopts` is any option, `-p` among
+#: them, and `required_plugins` and the rest steer what loads. An allowlist,
+#: since the list of keys that can load code is the denylist problem.
+_PYTEST_SAFE_INI = frozenset({
+    "cache_dir", "testpaths", "python_files", "python_classes", "python_functions",
+    "filterwarnings", "log_cli", "log_cli_level", "log_level", "log_format",
+    "log_date_format", "junit_family", "junit_suite_name", "junit_logging",
+    "junit_duration_report", "markers", "xfail_strict", "minversion", "norecursedirs",
+    "console_output_style", "tmp_path_retention_count", "tmp_path_retention_policy",
+    "empty_parameter_set_mark", "faulthandler_timeout", "verbosity_assertions",
+    "verbosity_test_cases", "truncation_limit_lines", "truncation_limit_chars",
+})
+
+
+def _option_refusal(program, option):
+    return (
+        Category.UNVERIFIABLE,
+        f"{program} {option} names a program, interpreter or module for {program} to "
+        "run or load, or sets its configuration, chosen at call time. Run "
+        f"{program} without it",
+    )
+
 
 def _runs_a_program(program, arguments):
-    """A refusal if `arguments` give `program` an option that runs a program
-    or loads code (_PROGRAM_RUNNING_OPTIONS; pytest's `-p` other than
-    `-p no:<plugin>`, which loads a module of that name), or a bd subcommand
-    on _BD_REFUSED; else None."""
+    """A refusal if `arguments` give `program` an option that runs a program,
+    loads code or sets configuration at call time (_PROGRAM_RUNNING_OPTIONS,
+    _PROGRAM_RUNNING_SHORTS, cargo's `+toolchain`, eslint's non-built-in
+    formatters, pytest's `-p`, `-c` and `-o`), or a bd subcommand on
+    _BD_REFUSED; else None."""
     if program == "bd":
-        words = [a for a in arguments if not a.startswith("-")]
-        if words[:1] and words[0] in _BD_REFUSED:
-            return (
-                Category.NOT_ALLOWLISTED,
-                f"bd {words[0]} installs hooks or integrations that run later, "
-                "outside the diff the sweep reviews",
-            )
-        return None
+        return _bd_subcommand(arguments)
     if program == "pytest":
-        return _pytest_plugin(arguments)
+        return _pytest_options(arguments)
+    if program == "cargo" and arguments[:1] and arguments[0].startswith("+"):
+        return _option_refusal("cargo", arguments[0])
     options = _PROGRAM_RUNNING_OPTIONS.get(program, ())
-    for argument in arguments:
-        if argument == "--":
-            break
-        name = argument.split("=", 1)[0]
-        if not name.startswith("--"):
-            continue
-        for option, shortest in options:
-            if _abbreviates(name, option, shortest):
-                return (
-                    Category.UNVERIFIABLE,
-                    f"{program} {option} names a program for {program} to run, or a "
-                    f"file of settings it loads, chosen at call time. Run {program} "
-                    "without it",
-                )
-    return None
-
-
-def _pytest_plugin(arguments):
-    """The refusal for pytest's `-p NAME` (in any spelling: `-pNAME`, `-p=NAME`,
-    in a cluster) when NAME is not `no:<plugin>`: it imports NAME at start-up,
-    an installed module chosen at call time; else None."""
+    shorts = _PROGRAM_RUNNING_SHORTS.get(program, frozenset())
     for index, argument in enumerate(arguments):
         if argument == "--":
             break
-        if not argument.startswith("-") or argument.startswith("--"):
+        name = argument.split("=", 1)[0]
+        if name.startswith("--"):
+            for option, shortest in options:
+                if _abbreviates(name, option, shortest):
+                    return _option_refusal(program, option)
+            if program == "eslint" and _abbreviates(name, "--format", 8):
+                value = argument.partition("=")[2] or (
+                    arguments[index + 1] if index + 1 < len(arguments) else "")
+                if value not in _ESLINT_FORMATTERS:
+                    return _option_refusal(program, f"--format {value}")
+            continue
+        if not argument.startswith("-") or argument == "-":
+            continue
+        if name in shorts:
+            return _option_refusal(program, name)
+        letters = set(name[1:]) & {short for short in shorts if len(short) == 1}
+        if letters:
+            return _option_refusal(program, f"-{sorted(letters)[0]}")
+        if program == "eslint" and argument.startswith("-f"):
+            value = argument[2:].lstrip("=") or (
+                arguments[index + 1] if index + 1 < len(arguments) else "")
+            if value not in _ESLINT_FORMATTERS:
+                return _option_refusal(program, f"-f {value}")
+    return None
+
+
+def _bd_subcommand(arguments):
+    """The refusal for a bd subcommand on _BD_REFUSED, found past bd's
+    leading options by their arity (_LEADING_OPTIONS["bd"]; an unknown one is
+    refused, so a value cannot hide the subcommand); else None."""
+    at, refused = _subcommand_at("bd", arguments)
+    if refused is not None:
+        return refused
+    if at is not None and arguments[at] in _BD_REFUSED:
+        return (
+            Category.NOT_ALLOWLISTED,
+            f"bd {arguments[at]} installs hooks or integrations that run later, "
+            "outside the diff the sweep reviews",
+        )
+    return None
+
+
+def _pytest_options(arguments):
+    """The refusal for pytest's `-p NAME` other than `-p no:<plugin>` (it
+    imports NAME), `-c`/`--config-file` (another configuration file), and
+    `-o`/`--override-ini KEY=VALUE` with a KEY not on _PYTEST_SAFE_INI, in any
+    spelling (`-pNAME`, `-p=NAME`, in a cluster, `--override-ini=...`, an
+    abbreviation); else None."""
+    for index, argument in enumerate(arguments):
+        if argument == "--":
+            break
+        following = arguments[index + 1] if index + 1 < len(arguments) else ""
+        if argument.startswith("--"):
+            name, equals, value = argument.partition("=")
+            value = value if equals else following
+            if _abbreviates(name, "--config-file", 4):
+                return _option_refusal("pytest", "--config-file")
+            if _abbreviates(name, "--override-ini", 5):
+                refused = _pytest_ini(value)
+                if refused is not None:
+                    return refused
+            continue
+        if not argument.startswith("-") or argument == "-":
             continue
         for position, character in enumerate(argument[1:], start=2):
+            value = argument[position:].lstrip("=") or following
+            if character == "c":
+                return _option_refusal("pytest", "-c")
             if character == "p":
-                value = argument[position:].lstrip("=") or (
-                    arguments[index + 1] if index + 1 < len(arguments) else "")
                 if not value.startswith("no:"):
                     return (
                         Category.UNVERIFIABLE,
@@ -306,6 +395,25 @@ def _pytest_plugin(arguments):
                         "Run pytest without it; -p no:<plugin> is allowed",
                     )
                 break
+            if character == "o":
+                refused = _pytest_ini(value)
+                if refused is not None:
+                    return refused
+                break
             if character in _PYTEST_VALUED_SHORT:
                 break
     return None
+
+
+def _pytest_ini(setting):
+    """The refusal for `pytest -o setting` unless its key is on
+    _PYTEST_SAFE_INI."""
+    key = setting.split("=", 1)[0].strip()
+    if key in _PYTEST_SAFE_INI:
+        return None
+    return (
+        Category.UNVERIFIABLE,
+        f"pytest -o {key}=... sets configuration that can load code (addopts can "
+        "add -p, for one), chosen at call time. Allowed keys: "
+        + ", ".join(sorted(_PYTEST_SAFE_INI)),
+    )

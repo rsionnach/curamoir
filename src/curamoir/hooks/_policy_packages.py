@@ -110,9 +110,12 @@ _PROGRAM_NAMING_OPTIONS = frozenset({"scriptshell", "nodeoptions"})
 
 
 def _option_key(argument):
-    """`argument`'s option name with every `-` and `_` removed, lowercased:
-    the form in which two spellings npm reads as one option compare equal."""
-    return argument.split("=", 1)[0].replace("-", "").replace("_", "").lower()
+    """`argument`'s option name with every `-` and `_` removed, lowercased,
+    and a leading `config.` dropped: the form in which spellings npm and pnpm
+    read as one setting compare equal (`--config.script-shell` is pnpm's
+    spelling of `--script-shell`; round 9)."""
+    key = argument.split("=", 1)[0].replace("-", "").replace("_", "").lower()
+    return key.removeprefix("config.")
 
 
 def _package_script(program, arguments, judge):

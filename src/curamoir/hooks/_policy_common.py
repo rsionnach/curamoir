@@ -92,6 +92,10 @@ _LEADING_OPTIONS = {
     "uv": (frozenset({"-q", "--quiet", "-v", "--verbose", "--offline", "--no-cache",
                       "--no-progress"}),
            frozenset({"--directory", "--project"})),
+    # bd's global flags (bd --help), so `bd --db x hooks` finds `hooks`.
+    "bd": (frozenset({"--json", "--profile", "-q", "--quiet", "--readonly", "--sandbox",
+                      "-v", "--verbose", "-V", "--version", "-h", "--help"}),
+           frozenset({"--actor", "--db", "--dolt-auto-commit"})),
     # go's only option before its subcommand, in either dash spelling.
     "go": (frozenset(), frozenset({"-C", "--C"})),
 }
