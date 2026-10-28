@@ -13,8 +13,11 @@ Acceptance criteria, and the tests that hold them:
   absent from the commit, from the body's "Fixes" and from `fixes`.
 - "abandoned: no push, no gh create call, failure line":
   test_abandoned_pushes_nothing_creates_no_pr_and_fails.
-- "out-of-scope edit: refusal, no push":
-  test_an_out_of_scope_edit_is_refused_and_nothing_is_pushed.
+- "out-of-scope edit: refusal, no push", amended by cm-9ab (drop and
+  re-gate): the breaching file is put back and the rest opens a PR,
+  test_an_out_of_scope_file_is_dropped_and_the_rest_opens_a_pr; a run with
+  nothing in scope left is refused and pushes nothing,
+  test_when_every_changed_file_breaches_the_run_is_refused.
 - "PR creation fails: failure line with no fixes (and branch deleted per
   ST3)": test_a_pr_that_fails_to_open_is_a_failure_with_no_fixes_and_no_branch.
 - "crash after the PR opened: the line keeps pr":
@@ -279,6 +282,7 @@ def test_an_out_of_scope_file_is_dropped_and_the_rest_opens_a_pr(tmp_path, no_re
     dropped = line["scope_dropped"]
     assert [breach["path"] for breach in dropped] == ["README.md"]
     assert dropped[0]["kind"] == "file_not_in_work_list"
+    assert "work list" in dropped[0]["detail"]
     # The PR's reviewer is told too: an edit there was discarded.
     [create] = creates(no_real_gh)
     left = section(create["body_file_content"], "### Files left for the next run")
@@ -295,6 +299,9 @@ def test_when_every_changed_file_breaches_the_run_is_refused(tmp_path, no_real_g
     assert "out of scope" in line["message"]
     assert line["scope"]["ok"] is False
     assert {b["path"] for b in line["scope"]["breaches"]} == {"README.md"}
+    # README.md was dropped, and the second review found nothing left.
+    assert [b["path"] for b in line["scope_dropped"]] == ["README.md"]
+    assert line["scope_after_drop"] == {"ok": True, "paths": [], "breaches": []}
     assert line["tier1"]["status"] == OFF
     assert "found_delta" not in line and "fixes" not in line and "pr" not in line
     assert nothing_pushed(tmp_path, no_real_gh)
@@ -906,8 +913,12 @@ def test_an_agent_that_writes_into_the_sandboxs_git_is_refused(tmp_path, no_real
     line = sweep(repo, claude=claude)
 
     assert line["outcome"] == REFUSED, line["message"]
-    assert line["reason"] in (Reason.SCOPE.value, Reason.SANDBOX.value)
+    assert line["reason"] == Reason.SCOPE.value
     assert "git_internals_changed" in line["message"]
+    # cm-9ab: a whole-run breach drops nothing, so nothing is noted as
+    # dropped and there is no second review.
+    assert "scope_dropped" not in line and "scope_after_drop" not in line
+    assert {b["kind"] for b in line["scope"]["breaches"]} == {"git_internals_changed"}
     assert nothing_pushed(tmp_path, no_real_gh)
 
 
@@ -1039,3 +1050,93 @@ def test_a_file_the_agent_added_out_of_scope_is_removed_and_the_rest_opens_a_pr(
     [create] = creates(no_real_gh)
     left = section(create["body_file_content"], "### Files left for the next run")
     assert "`scratch_notes.py` (removed: added outside E3-R2's scope)" in left
+
+
+# --- drop and re-gate (cm-9ab): what only these tests pin ------------------------------
+
+def test_an_edit_far_from_its_violation_drops_that_file_and_keeps_the_rest(tmp_path,
+                                                                         no_real_gh):
+    """The motivating case: in handlers.py the agent fixes the print (line
+    22) and also edits PAGE_SIZE (line 10), more than WINDOW lines away, an
+    OUTSIDE_VIOLATION. handlers.py is put back whole, print and all, and
+    the PR carries billing.py's fix alone."""
+    repo = checkout(tmp_path, NO_BARE_PRINT, config=GATE)
+    claude, _ = fixer(tmp_path, edits=[*PRINT_FIXES, (HANDLERS, "PAGE_SIZE = 20",
+                                                      "PAGE_SIZE = 25")])
+
+    line = sweep(repo, claude=claude)
+
+    assert line["outcome"] == SUCCESS, line["message"]
+    assert line["pr"]["paths"] == [BILLING]
+    assert [fix["path"] for fix in line["fixes"]] == [BILLING]
+    assert {(b["path"], b["kind"]) for b in line["scope_dropped"]} == {
+        (HANDLERS, "outside_violation")}
+    assert changed_on(tmp_path, line["pr"]["branch"], base_of(repo)) == [BILLING]
+    [create] = creates(no_real_gh)
+    left = section(create["body_file_content"], "### Files left for the next run")
+    assert f"`{HANDLERS}` (dropped: an edit outside E3-R2's scope, outside_violation)" in left
+
+
+def test_a_file_a_remedy_deleted_and_the_agent_wrote_back_stays_deleted(tmp_path,
+                                                                        no_real_gh):
+    """The delete_file remedy removes the variant module before the fix
+    step; the agent writes it back. Dropping that edit puts it back as the
+    remedy left it, deleted (remedies.deleted reaches the restore), so the
+    PR still carries the remedy's deletion beside the agent's fixes."""
+    repo = checkout(tmp_path, NO_BARE_PRINT, NO_VARIANT_MODULE, config=GATE)
+    claude, log = fixer(tmp_path, writes={VARIANT: "restored = True\n"})
+
+    line = sweep(repo, claude=claude)
+
+    assert log.exists(), "the agent ran"
+    assert line["outcome"] == SUCCESS, line["message"]
+    assert VARIANT in {b["path"] for b in line["scope_dropped"]}
+    assert VARIANT in line["pr"]["paths"]
+    assert (VARIANT, REMEDY) in {(fix["path"], fix["fixed_by"]) for fix in line["fixes"]}
+    branch = line["pr"]["branch"]
+    assert VARIANT not in git(tmp_path / "origin.git", "ls-tree", "-r", "--name-only",
+                              branch).split()
+
+
+def test_a_file_that_cannot_be_dropped_is_a_sandbox_refusal_keeping_scope(
+        tmp_path, no_real_gh, monkeypatch):
+    from curamoir import fix_scope
+
+    def cannot(_sandbox, path, deleted=False):
+        raise ScopeCheckError(f"{path} is a directory in the sandbox")
+
+    monkeypatch.setattr(fix_scope, "_restore_from_base", cannot)
+    repo = checkout(tmp_path, NO_BARE_PRINT, config=GATE)
+    claude, _ = fixer(tmp_path, edits=[*PRINT_FIXES, ("README.md", "#", "# Rewritten\n#")])
+
+    line = sweep(repo, claude=claude)
+
+    assert line["outcome"] == REFUSED and line["reason"] == Reason.SANDBOX.value
+    assert "could not be dropped" in line["message"]
+    assert "README.md is a directory" in line["message"]
+    assert [b["path"] for b in line["scope"]["breaches"]] == ["README.md"]
+    assert "scope_dropped" not in line
+    assert nothing_pushed(tmp_path, no_real_gh)
+
+
+def test_a_run_still_out_of_scope_after_the_drop_is_refused_with_both_verdicts(
+        tmp_path, no_real_gh, monkeypatch):
+    """The second review is the answer: one that still has breaches is a
+    SCOPE refusal carrying the first verdict as `scope` and the second as
+    `scope_after_drop`."""
+    from curamoir import fix_scope
+    from curamoir.fix_scope import Breach, ScopeVerdict
+
+    still = ScopeVerdict(breaches=(Breach("outside_violation", BILLING, 3, "still"),),
+                         paths=(BILLING, HANDLERS))
+    monkeypatch.setattr(fix_scope, "verify_fix", lambda *_args, **_kwargs: still)
+    repo = checkout(tmp_path, NO_BARE_PRINT, config=GATE)
+    claude, _ = fixer(tmp_path, edits=[*PRINT_FIXES, ("README.md", "#", "# Rewritten\n#")])
+
+    line = sweep(repo, claude=claude)
+
+    assert line["outcome"] == REFUSED and line["reason"] == Reason.SCOPE.value
+    assert [b["path"] for b in line["scope"]["breaches"]] == ["README.md"]
+    assert line["scope_after_drop"] == still.as_dict()
+    assert [b["path"] for b in line["scope_dropped"]] == ["README.md"]
+    assert nothing_pushed(tmp_path, no_real_gh)

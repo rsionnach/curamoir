@@ -52,15 +52,18 @@ from curamoir.fix_scope import (
     SIGNATURE_CHANGE,
     UNVERIFIABLE,
     WINDOW,
+    Breach,
     FileChange,
     Hunk,
     ScopeCheckError,
+    ScopeVerdict,
     _only_header_statements,
     _restore_from_base,
     base_known_modules,
     base_principles,
     check_scope,
     compute_hunks,
+    drop_breaching_paths,
     is_dependency_file,
     lint_sandbox,
     parse_hunks,
@@ -1202,7 +1205,7 @@ def test_a_directory_where_the_file_was_is_a_scope_check_error_not_a_crash(tmp_p
     (sandbox.path / "d" / "f.py").mkdir()
     (sandbox.path / "d" / "f.py" / "x").write_text("x", encoding="utf-8")
 
-    with pytest.raises(ScopeCheckError):
+    with pytest.raises(ScopeCheckError, match="is a directory in the sandbox"):
         _restore_from_base(sandbox, "d/f.py")
 
 
@@ -1308,3 +1311,70 @@ def test_a_refused_restore_leaves_the_agents_file_as_it_was(tmp_path):
         _restore_from_base(sandbox, "d")
 
     assert (sandbox.path / "d").read_text(encoding="utf-8").startswith("a file")
+
+
+# --- drop_breaching_paths (cm-9ab) -----------------------------------------------------
+
+#: A path the agent breached E3-R2 in, which a drop would put back.
+_STRAY = Breach(FILE_NOT_IN_WORK_LIST, "a.py", None,
+                "changed, but the work list has no violation in this file")
+
+
+@pytest.mark.parametrize("kind", [GIT_INTERNALS_CHANGED, BASE_MOVED, HIDDEN_CHANGE])
+def test_a_whole_run_breach_drops_nothing_and_returns_the_verdict_as_it_is(tmp_path, kind):
+    """WHOLE_RUN_KINDS: the sandbox itself is not to be trusted, so no file
+    of it is put back, not even one another breach names, and the review
+    is not run again: the run is refused on the first verdict."""
+    repo = git_repo(tmp_path, {"a.py": "base\n", "b.py": "base\n"})
+    sandbox = sandbox_of(repo)
+    state = snapshot_git_state(sandbox)
+    (sandbox.path / "a.py").write_text("edited\n", encoding="utf-8")
+    (sandbox.path / "b.py").write_text("edited\n", encoding="utf-8")
+    first = ScopeVerdict(breaches=(_STRAY, Breach(kind, "b.py", None, "whole run")),
+                         paths=("a.py", "b.py"))
+
+    second, dropped = drop_breaching_paths(sandbox, first, git_state=state)
+
+    assert second is first and dropped == ()
+    assert (sandbox.path / "a.py").read_text(encoding="utf-8") == "edited\n"
+    assert (sandbox.path / "b.py").read_text(encoding="utf-8") == "edited\n"
+
+
+def test_a_path_a_remedy_deleted_is_dropped_back_to_deleted(tmp_path):
+    """`removed` (the remedies' deletions) reaches the restore: the agent's
+    re-creation of a file a remedy deleted is undone to the remedy's
+    result, not to the base's file."""
+    repo = git_repo(tmp_path, {"gone.py": "base\n", "a.py": "base\n"})
+    sandbox = sandbox_of(repo)
+    (sandbox.path / "gone.py").unlink()  # the remedy, before the fix step
+    state = snapshot_git_state(sandbox)
+    (sandbox.path / "gone.py").write_text("re-created by the agent\n", encoding="utf-8")
+    first = verify_fix(sandbox, git_state=state)
+    assert "gone.py" in {breach.path for breach in first.breaches}
+
+    _second, dropped = drop_breaching_paths(sandbox, first, git_state=state,
+                                            removed=("gone.py",))
+
+    assert dropped == first.breaches
+    assert not os.path.lexists(sandbox.path / "gone.py")
+
+
+def test_breaching_paths_are_put_back_deepest_first(tmp_path, monkeypatch):
+    """The order is observed directly. In the sandboxes where order might
+    matter (a file `d` the agent made a directory holding `d/x.py`, and a
+    directory `d/` the agent made a file `d`), both orders are refused, so
+    only the calls show it."""
+    from curamoir import fix_scope
+
+    order = []
+    monkeypatch.setattr(fix_scope, "_restore_from_base",
+                        lambda _sandbox, path, deleted=False: order.append(path))
+    monkeypatch.setattr(fix_scope, "verify_fix",
+                        lambda *_args, **_kwargs: ScopeVerdict(breaches=(), paths=()))
+    paths = ["z.py", "a.py", "a/b.py", "a/b/c.py", "a/b"]
+    first = ScopeVerdict(breaches=tuple(Breach(FILE_NOT_IN_WORK_LIST, path, None, "x")
+                                        for path in paths), paths=tuple(sorted(paths)))
+
+    drop_breaching_paths(SimpleNamespace(), first, git_state=None)
+
+    assert order == ["a/b/c.py", "a/b", "a/b.py", "a.py", "z.py"]

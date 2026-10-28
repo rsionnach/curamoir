@@ -1627,8 +1627,9 @@ def drop_breaching_paths(sandbox, verdict, *, git_state, removed=(), window=WIND
     put back, they are put back as the remedy left them, deleted, because
     that is what the fix step's snapshot holds.
 
-    Deepest paths first, so a file is put back before the directory the
-    agent made of its parent is looked at.
+    Deepest paths first, and otherwise in name order, so the order is the
+    same on every run; a file the agent put where the base has a directory,
+    or the reverse, is refused (ScopeCheckError) whichever order is taken.
 
     The restore reads the base with git and writes the work tree only,
     never the index or anything under `.git`, so the second review still
@@ -1654,9 +1655,13 @@ def _restore_from_base(sandbox, path, deleted=False):
     when the base has no such path. ScopeCheckError when it cannot be done
     safely (cm-9ab):
 
-    - Whatever is at `path` is unlinked first and a NEW inode created
-      (O_EXCL|O_NOFOLLOW): writing through the old one would write through
-      a hard link to a file outside the sandbox.
+    - Whatever is at `path` is unlinked first and a NEW inode created:
+      writing through the old one would write through a hard link (or a
+      symlink) to a file outside the sandbox. The unlink is the guarantee;
+      O_EXCL|O_NOFOLLOW on the create is defence in depth after it, a
+      guard against a race that puts something back at `path` between the
+      unlink and the open (the open then fails, a ScopeCheckError, rather
+      than following or reusing it).
     - A directory there, a parent that is a symlink or not a directory, or
       a base entry that is neither a file nor a symlink, is refused rather
       than worked round.

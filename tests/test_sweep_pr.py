@@ -1155,3 +1155,25 @@ def work_of(items):
 def green_gate(kept):
     return GateResult(strategy=GREEN, cause=None, command="true", command_source="config",
                       kept=tuple(kept), dropped=(), runs=())
+
+
+# --- files put back for an edit outside E3-R2's scope (cm-9ab) -------------------------
+
+def test_scope_dropped_paths_are_left_for_the_next_run_one_line_per_path_and_kind(green):
+    from curamoir.fix_scope import FILE_ADDED, FILE_NOT_IN_WORK_LIST, OUTSIDE_VIOLATION, Breach
+
+    dropped = (
+        Breach(OUTSIDE_VIOLATION, "src/b.py", 3, "edit far from the violation"),
+        Breach(FILE_NOT_IN_WORK_LIST, "src/b.py", None, "not in the work list"),
+        Breach(OUTSIDE_VIOLATION, "src/b.py", 9, "a second, same kind"),
+        Breach(FILE_ADDED, "src/a`new.py", None, "added"),
+        Breach("<kind> [x](y)", "src/c.py", None, "odd kind"),
+    )
+
+    body = body_of(green, scope_dropped=dropped)
+
+    assert section(body, "Files left for the next run") == [
+        "- ``src/a`new.py`` (removed: added outside E3-R2's scope)",
+        "- `src/b.py` (dropped: an edit outside E3-R2's scope, file_not_in_work_list)",
+        "- `src/b.py` (dropped: an edit outside E3-R2's scope, outside_violation)",
+        "- `src/c.py` (dropped: an edit outside E3-R2's scope, &lt;kind> &#91;x](y))"]
