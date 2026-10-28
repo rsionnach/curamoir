@@ -14,6 +14,7 @@ import re
 
 from curamoir.hooks._policy_common import (
     _abbreviates,
+    _read_leading,
     _subcommand_at,
     _write_target_refusal,
 )
@@ -196,19 +197,18 @@ def _git_writes(program, arguments, judge):
     (`git init /tmp/x`, `--separate-git-dir`, a `--template` outside, whose
     hooks are copied in), or a second work tree (`git worktree add`, which a
     job does not need and whose files are not in the diff); else None."""
-    index = 0
-    while index < len(arguments) and arguments[index].startswith("-") \
-            and arguments[index] != "--":
-        name, equals, value = arguments[index].partition("=")
-        index += 1
+    # git's leading options, read with the arity that finds the subcommand
+    # (_read_leading), so a valued option before them cannot shift which
+    # word is read as a directory (round 7, S1). Every directory one is
+    # judged, a repeated -C included.
+    at, refused, leading = _read_leading("git", arguments)
+    elsewhere = False
+    for name, value in leading:
         if name in _GIT_DIRECTORY_OPTIONS:
-            if not equals:
-                value = arguments[index] if index < len(arguments) else ""
-                index += 1
-            refused = _write_target_refusal(f"git {name}", value)
-            if refused is not None:
-                return refused
-    at, refused = _subcommand_at("git", arguments)
+            elsewhere = True
+            refused_directory = _write_target_refusal(f"git {name}", value)
+            if refused_directory is not None:
+                return refused_directory
     if refused is not None or at is None:
         return None
     subcommand, after = arguments[at], arguments[at + 1:]
@@ -232,15 +232,36 @@ def _git_writes(program, arguments, judge):
                 "git init without it",
             )
         if name.startswith("--out"):
+            if elsewhere:
+                return _relative_elsewhere(f"git {subcommand} {name}")
             if not equals:
                 value = after[index + 1] if index + 1 < len(after) else ""
             refused = _write_target_refusal(f"git {subcommand} {name}", value)
             if refused is not None:
                 return refused
     if subcommand == "init":
+        if elsewhere:
+            return _relative_elsewhere("git init")
         for argument in after:
             for path in _path_candidates(argument):
                 refused = _write_target_refusal("git init", path)
                 if refused is not None:
                     return refused
     return None
+
+
+def _relative_elsewhere(what):
+    """The refusal for a path `what` writes while -C, --git-dir or
+    --work-tree names another directory (round 7, S2).
+
+    Refused rather than resolved: git resolves such a path against a
+    directory that -C options compose (`-C a -C b` is `a/b`) and that
+    --work-tree and --git-dir each move differently, per subcommand, and a
+    second implementation of that resolution is one more thing to get
+    wrong. Running git from the directory instead costs a retry."""
+    return (
+        Category.UNVERIFIABLE,
+        f"{what} names a path relative to the directory -C, --git-dir or "
+        "--work-tree gives, which the guard does not resolve",
+        "run git without the directory option, naming the path from here",
+    )

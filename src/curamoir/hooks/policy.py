@@ -81,6 +81,7 @@ from curamoir.hooks._policy_common import (
     _LEADING_OPTIONS,
     _PYTHON,
     _SCRIPTS,
+    _TREE_MAY_HAVE_CHANGED,
     _UNQUOTED_GLOB,
     _has_unquoted_glob,
     _subcommand_at,
@@ -271,6 +272,12 @@ def _unverifiable(tokens):
                     "words the guard never sees")
         if "(" in bare:
             return _UNQUOTED_PARENTHESIS
+        # zsh expands a word beginning `=` to the path of the command it
+        # names (`=ls` is `/bin/ls`), so the word the guard reads is not the
+        # word that runs or is written to (round 7). `=` and `==` alone are
+        # operators (`test a = b`).
+        if bare.startswith("=") and bare not in ("=", "=="):
+            return "a word beginning with `=`, which zsh expands to a command's path"
     return None
 
 
@@ -526,6 +533,28 @@ _PROGRAM_CHECKS = {
 }
 
 
+#: git subcommands that may change the working tree, and with it what a path
+#: resolves to: a patch, a checkout or a merge can add a symlink that a later
+#: write in the same command follows, after the guard has looked (round 7,
+#: E3). A write in any later segment is refused (_TREE_MAY_HAVE_CHANGED).
+_TREE_CHANGING = frozenset({
+    "apply", "am", "checkout", "switch", "restore", "stash", "pull", "merge",
+    "rebase", "cherry-pick", "revert", "reset", "clone", "submodule", "worktree",
+})
+
+
+def _changes_tree(segment):
+    """Whether `segment` (redirections stripped) is a git command whose
+    subcommand is on _TREE_CHANGING."""
+    tokens = list(segment)
+    while tokens and _ASSIGNMENT.match(tokens[0]):
+        tokens = tokens[1:]
+    if not tokens or tokens[0].strip("\"'").rsplit("/", 1)[-1] != "git":
+        return False
+    at, _ = _subcommand_at("git", tokens[1:])
+    return at is not None and tokens[1:][at] in _TREE_CHANGING
+
+
 def _inline_code_refusal(program):
     """The refusal for a shell given inline code with `-c` or `--command`."""
     return (
@@ -665,14 +694,17 @@ def _refusal_for(tokens):
             f"{program!r} is not on cúramóir's allowlist for jobs",
         )
 
-    refused = _write_refusal(program, arguments)
-    if refused is not None:
-        return refused
-
     for check in _PROGRAM_CHECKS.get(program, ()):
         refused = check(program, arguments, _nested_refusal)
         if refused is not None:
             return refused
+
+    # After the program's own checks, so that what a runner runs is judged
+    # (and a nesting too deep refused as such) before the runner's arguments
+    # are read as paths.
+    refused = _write_refusal(program, arguments)
+    if refused is not None:
+        return refused
 
     subcommands = ALLOWED[program]
     if subcommands is None:
@@ -708,7 +740,10 @@ def judge_command(command, in_job, scripts=None, cwd=None):
     `cwd` is the directory the command runs in, when the caller knows it
     (pretooluse does): with it, a write's absolute path inside it is judged as
     the relative one, and a write through a symlink is refused; without it,
-    every absolute path is outside and symlinks are not looked for.
+    every absolute path is outside and symlinks are not looked for. That
+    check is best effort: the real path is read now, and a link can appear
+    between the judgement and the write. The boundary for that is cm-xq9 (no
+    job agent gets a shell without an OS sandbox) and cm-4w5, not this guard.
 
     `scripts` and `cwd` are held in ContextVars (_SCRIPTS, _CWD) for the
     length of the call rather than passed down, because the judgement recurses: _refusal_for runs
@@ -721,6 +756,7 @@ def judge_command(command, in_job, scripts=None, cwd=None):
     token = _SCRIPTS.set(_script_names(scripts))
     cwd_token = _CWD.set(cwd if isinstance(cwd, str) and cwd else None)
     glob_token = _UNQUOTED_GLOB.set(True)
+    tree_token = _TREE_MAY_HAVE_CHANGED.set(False)
     try:
         return _judge(command)
     except Exception as error:
@@ -738,6 +774,7 @@ def judge_command(command, in_job, scripts=None, cwd=None):
             category=Category.UNVERIFIABLE,
         )
     finally:
+        _TREE_MAY_HAVE_CHANGED.reset(tree_token)
         _UNQUOTED_GLOB.reset(glob_token)
         _CWD.reset(cwd_token)
         _SCRIPTS.reset(token)
@@ -845,6 +882,8 @@ def _judge(command):
 
         if refusal is None:
             refusal = _refusal_for(segment)
+        if refusal is None and _changes_tree(segment):
+            _TREE_MAY_HAVE_CHANGED.set(True)
         if refusal is not None:
             # A refusal may name its own alternative as a third element; the
             # default is the allowlist's own remedy.

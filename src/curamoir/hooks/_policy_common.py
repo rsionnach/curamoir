@@ -102,17 +102,29 @@ def _subcommand_at(program, arguments, table=_LEADING_OPTIONS):
     refusal or None), reading past only the options `table` gives `program`
     (the `(flags, valued)` shape above). With _RUN_OPTIONS or _SCRIPT_OPTIONS
     as the table, the word found is the program or script a runner runs."""
+    at, refused, _ = _read_leading(program, arguments, table)
+    return at, refused
+
+
+def _read_leading(program, arguments, table=_LEADING_OPTIONS):
+    """_subcommand_at's answer, and the `(name, value)` of every valued option
+    read on the way: one walk, so a check that judges an option's value
+    (git's -C) reads exactly the options, at exactly the arity, that find the
+    subcommand (round 7: `--namespace x -C /tmp` had shifted them)."""
     flags, valued = table[program]
-    index = 0
+    index, pairs = 0, []
     while index < len(arguments):
         argument = arguments[index]
         if not argument.startswith("-") or argument == "-":
-            return index, None
+            return index, None, pairs
         if argument == "--":
             following = index + 1
-            return (following if following < len(arguments) else None), None
-        name, equals, _ = argument.partition("=")
+            return (following if following < len(arguments) else None), None, pairs
+        name, equals, value = argument.partition("=")
         if name in valued:
+            if not equals:
+                value = arguments[index + 1] if index + 1 < len(arguments) else ""
+            pairs.append((name, value))
             index += 1 if equals else 2
             continue
         if not equals and argument in flags:
@@ -123,8 +135,8 @@ def _subcommand_at(program, arguments, table=_LEADING_OPTIONS):
             f"{program} {name} is not an option cúramóir knows how to read past at "
             "this point, so it cannot tell which word is the subcommand or program "
             "(an option's value can look like one)",
-        )
-    return None, None
+        ), pairs
+    return None, None, pairs
 
 
 def _abbreviates(name, option, min_length):
@@ -212,6 +224,12 @@ _CWD = ContextVar("curamoir_policy_cwd", default=None)
 #: judged strictly.
 _UNQUOTED_GLOB = ContextVar("curamoir_policy_unquoted_glob", default=True)
 
+#: Whether an earlier segment of the command being judged may change the
+#: working tree (a git apply, checkout, pull, ...; policy._TREE_CHANGING), set
+#: by policy._judge as it walks the segments. A write after one is refused:
+#: the tree the guard looked at is not the tree the write meets (round 7).
+_TREE_MAY_HAVE_CHANGED = ContextVar("curamoir_policy_tree_changed", default=False)
+
 #: Characters that make a word a glob the shell expands before the program
 #: sees it.
 _GLOB_CHARACTERS = frozenset("*?[")
@@ -253,10 +271,26 @@ def _write_target_refusal(what, path):
     - When the working directory is known: the real path of the target
       (os.path.realpath, which follows a symlink in ANY component and
       collapses `..`) must lie under the working directory's real path, with
-      no component of it, relative to that, named `.git` in any case. That covers a symlink to `.git` or outside,
-      wherever in the path it sits."""
+      no component of it, relative to that, named `.git` in any case. That
+      covers a symlink to `.git` or outside, wherever in the path it sits.
+    - After a segment that may change the tree (_TREE_MAY_HAVE_CHANGED), any
+      write target at all: the guard looked at the tree before it changed.
+
+    Best effort, and said so: the real path is read when the command is
+    judged, and a link can appear between that and the write (another
+    process, or a step of the command the guard does not model). The boundary
+    for that is not this check but cm-xq9 (no job agent gets a shell without
+    an OS sandbox) and cm-4w5."""
     if not path:
         return None
+    if _TREE_MAY_HAVE_CHANGED.get():
+        return (
+            Category.UNVERIFIABLE,
+            f"{what} writes to {path!r} after an earlier command that may change the "
+            "working tree, so the tree may change before this write; run them "
+            "separately",
+            "run the git command first, then the write as its own command",
+        )
     if _GLOB_CHARACTERS.intersection(path) and _UNQUOTED_GLOB.get():
         return (
             Category.UNVERIFIABLE,

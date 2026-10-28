@@ -14,15 +14,18 @@ judged by _policy_common._write_target_refusal:
 - an option or argument that names an output (`sort -o`, `uniq in OUT`),
   an in-place mode (`yq -i`), and `find -fprint` and its kin, refused
   outright, since a job can redirect find's output instead;
-- for the test runners, linters and formatters, every argument and option
-  value: they write reports, caches and fixed files to paths in their options
-  (`--junitxml`, `-o cache_dir=`, `--output-file`, `--write`), and listing
-  each tool's is the denylist problem, while a path outside the repository is
-  something a job rarely gives them at all.
+- for every program that is not a pure reader (_READERS), every argument
+  and option value: build tools, package managers, test runners, linters and
+  formatters write outputs, caches and fixed files to paths in their options
+  (`go build -o`, `--junitxml`, `npm --prefix`), listing each tool's is the
+  denylist problem, and a path outside the repository is something a job
+  rarely gives them at all.
 
 git's own writes (`--output`, `init --separate-git-dir`, `worktree add`) are
 in _policy_git.
 """
+
+import re
 
 from curamoir.hooks._policy_common import _write_target_refusal
 from curamoir.hooks.verdict import Category
@@ -31,18 +34,30 @@ from curamoir.hooks.verdict import Category
 #: unless its target is a descriptor (`2>&1`) or `-` (close).
 _WRITING_REDIRECTIONS = frozenset({">", ">>", ">|", "&>", "&>>", "<>", ">&"})
 
+#: A run of redirection punctuation that writes (holds `>`) and is not one of
+#: the operators above (`>>|`, `>&|`): refused, never guessed at (round 7).
+_UNKNOWN_OPERATOR = re.compile(r"[<>|&]*>[<>|&]*")
+
 #: Redirection targets that are not files anyone reviews or runs.
 _HARMLESS_TARGETS = frozenset({"/dev/null", "/dev/stdout", "/dev/stderr"})
 
 #: Programs that write every path they are given (mv removes its sources too).
 _WRITERS = frozenset({"tee", "touch", "mkdir", "mv"})
 
-#: Programs whose every argument and option value is judged as a path: the
-#: test runners, linters and formatters, which write reports, caches and
-#: fixed files wherever their options say (module docstring).
-_PATH_STRICT = frozenset({
-    "pytest", "tox", "nox", "ruff", "black", "mypy", "flake8", "pyflakes", "eslint",
-    "prettier", "tsc", "ast-grep", "sg",
+#: The pure readers: programs that only read the paths they are given, and so
+#: may be given any path, absolute ones included (`cat /etc/hosts`). sort,
+#: uniq, yq and find are readers with one writing option each, handled by
+#: name below. Every other program reaching _write_refusal is path-strict
+#: (round 7, E2): every argument and option value is judged as a write target,
+#: since `go build -o`, `cargo --target-dir`, `pip --target`, `npm --prefix`,
+#: `gh run download -D` and `make -C` all write where an option says, and a
+#: per-tool list of those options is the denylist problem. git is judged by
+#: _policy_git instead, its arguments being messages and revisions as much as
+#: paths.
+_READERS = frozenset({
+    "cat", "head", "tail", "ls", "wc", "grep", "rg", "egrep", "fgrep", "cut", "tr",
+    "diff", "which", "basename", "dirname", "echo", "printf", "true", "false", "jq",
+    "date", "pwd", "test",
 })
 
 #: find's actions that write a file. Refused outright: redirect find's output.
@@ -70,7 +85,22 @@ _CP_LONG_REFUSED = frozenset({"--symbolic-link", "--link"})
 def _redirection_outside_diff(segment):
     """The refusal for a redirection in `segment` (before the redirections
     are stripped) that writes outside the diff, else None."""
-    for index, token in enumerate(segment[:-1]):
+    for index, token in enumerate(segment):
+        # zsh's clobber forms lex as an operator and a `!` (`>!`, `&>>!`), or
+        # as one operator no list here names (`>>|`); either way the word after
+        # is the real target. Refused as unverifiable rather than read, and so
+        # is an operator with no target at all.
+        known = token in _WRITING_REDIRECTIONS
+        if (known or _UNKNOWN_OPERATOR.fullmatch(token)) and (
+                not known or index + 1 >= len(segment)
+                or segment[index + 1].startswith(("!", "|"))):
+            return (
+                Category.UNVERIFIABLE,
+                f"{token} {' '.join(segment[index + 1:index + 2])} is a zsh clobber "
+                "redirection or an operator the guard does not know, so it cannot "
+                "tell what it writes",
+                "write with a plain > or >> and no !",
+            )
         if token not in _WRITING_REDIRECTIONS:
             continue
         target = segment[index + 1]
@@ -93,8 +123,6 @@ def _write_refusal(program, arguments):
             return refused
     elif program in _WRITERS:
         paths = _written_paths(arguments)
-    elif program in _PATH_STRICT:
-        paths = [path for argument in arguments for path in _path_candidates(argument)]
     elif program == "sort":
         paths = _option_values(arguments, "o", "--output", "ktST")
     elif program == "uniq":
@@ -110,8 +138,10 @@ def _write_refusal(program, arguments):
                 "redirect find's output to a file inside the repository",
             )
         return None
-    else:
+    elif program in _READERS or program == "git":
         return None
+    else:
+        paths = [path for argument in arguments for path in _path_candidates(argument)]
     for path in paths:
         refused = _write_target_refusal(program, path)
         if refused is not None:
@@ -268,16 +298,22 @@ def _yq_paths(arguments):
 
 
 def _path_candidates(argument):
-    """The words in `argument` that may be a path: a positional itself, an
-    option's `=` value or attached short value, a `key=value`'s value, and the
-    part after the last `:` of each (`html:/tmp/x`, `cache_dir=/tmp/c`)."""
+    """The words in `argument` that may be a path, for a path-strict program:
+    the argument itself if it is not an option, an option's `=` value or
+    attached short value (`-o.git/x`, `-o=/tmp/x`), and every part of each
+    of those between `=` and `:` separators, nested ones included
+    (`cache_dir=/tmp/x`, `--config=a=b=/tmp/x`, `html:/tmp/x`; round 7, S5).
+    A part beginning `//` is the rest of a URL (`git+https://host/x`), not a
+    path."""
     if argument.startswith("--"):
         values = [argument.partition("=")[2]] if "=" in argument else []
     elif argument.startswith("-") and argument != "-":
         values = [argument[2:]] if len(argument) > 2 else []
     else:
         values = [argument]
-        if "=" in argument:
-            values.append(argument.partition("=")[2])
-    values += [value.rsplit(":", 1)[1] for value in values if ":" in value]
-    return [value for value in values if value]
+    parts = [part for value in values for part in _SEPARATORS.split(value)]
+    return [path for path in values + parts if path and not path.startswith("//")]
+
+
+#: The separators _path_candidates splits a value at.
+_SEPARATORS = re.compile(r"[=:]")
