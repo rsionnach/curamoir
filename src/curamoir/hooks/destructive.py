@@ -20,7 +20,10 @@ Two invariants:
   shell's `-c` script.
 
 Scope is the spec's: "during any cúramóir job". The developer's own destructive
-commands in their own session are their business.
+commands in their own session are their business, except while the supervisor
+lock exists: the lock is the job signal's fallback (hooks/_entry.in_curamoir_job),
+so a running job, or a stale lock a killed one left, puts every session in that
+repository under the denylist until the lock is gone. The denial says so.
 
 If `dcg` is installed and not switched off, delegate to it rather than
 maintaining a second copy of this list (E0-R5). The switch reaching the hook is

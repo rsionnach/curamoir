@@ -55,7 +55,8 @@ def main(argv=None, stdin=None, stdout=None):
         command = (payload.get("tool_input") or {}).get("command") or ""
         repo = Path(payload.get("cwd") or ".")
 
-        if not in_curamoir_job(os.environ, repo):
+        signal = in_curamoir_job(os.environ, repo)
+        if not signal:
             return 0
 
         delegated = _delegate_to_dcg(command)
@@ -67,7 +68,7 @@ def main(argv=None, stdin=None, stdout=None):
                     "hookSpecificOutput": {
                         "hookEventName": "PreToolUse",
                         "permissionDecision": "deny",
-                        "permissionDecisionReason": refusal_text(decision),
+                        "permissionDecisionReason": refusal_text(decision, signal),
                     }
                 },
                 stdout,
@@ -96,7 +97,7 @@ def main(argv=None, stdin=None, stdout=None):
 _COULD_NOT_RUN = (2, 64, 126, 127)
 
 
-def refusal_text(decision):
+def refusal_text(decision, signal=None):
     """What the agent is told: the reason, and what to do instead.
 
     E0-R5 makes naming the safe alternative an acceptance criterion, because an
@@ -106,11 +107,21 @@ def refusal_text(decision):
     length cap, unparseable quoting, an unterminated heredoc) arrived with
     nothing to act on. A structured field with no consumer reads as "this gets
     shown", which is why it is joined here rather than dropped.
+
+    The last sentence says which signal made this a job (`signal`, from
+    in_curamoir_job): a denial in the developer's own session, from a lock a
+    killed run left behind, is otherwise a mystery (cm-azr).
     """
     reason = decision.reason or "blocked by cúramóir"
     if decision.alternative and decision.alternative not in reason:
-        return f"{reason} Try instead: {decision.alternative}."
-    return reason
+        reason = f"{reason} Try instead: {decision.alternative}."
+    if signal is None:
+        return reason
+    if signal.job is not None:
+        return f"{reason} Denied during cúramóir job {signal.job!r}."
+    return (f"{reason} Denied because .curamoir/state/lock exists: a cúramóir job is "
+            "running in this repository, or a killed one left its lock behind. See "
+            "/curamoir:status.")
 
 
 def _delegate_to_dcg(command):

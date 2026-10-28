@@ -186,8 +186,12 @@ It has three known limits:
   lock is per-repository, while a job runs every session in that repository
   is treated as inside it, yours included. In a clone of the repository,
   where there is no lock, the variable is the only signal, so anything that
-  drops it from a process's environment stops enforcement there. The sweep's
-  fix step does not load the denylist hook yet; it has no Bash tool. Any
+  drops it from a process's environment stops enforcement there. A stale lock,
+  left by a job that was killed, keeps the denylist on in your own sessions
+  until you clear it; the denial says so, and `/curamoir:status` and
+  `/curamoir:doctor` say whether the lock looks stale. The sweep's fix step
+  runs Claude Code in restricted mode, which loads no plugin, so it loads the
+  denylist hook through its own settings (it has no Bash tool today). Any
   non-empty `CURAMOIR_JOB` counts, `0` and `false` included, so do not export
   it in your own shell.
 

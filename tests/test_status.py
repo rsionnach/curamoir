@@ -291,3 +291,65 @@ def test_a_listing_of_none_means_could_not_list_not_no_prs(tmp_path):
     """One contract with the cap and the sweep's decision: None is unknown."""
     status = collect_status(initialised(tmp_path), open_pr_branches=lambda: None)
     assert status["open_prs"]["unavailable"] is True
+
+
+# --- a stale lock, told apart from a live one (cm-azr) -------------------------------
+
+def write_lock(repo, **held):
+    path = repo / ".curamoir" / "state" / "lock"
+    path.write_text(json.dumps(held), encoding="utf-8")
+    return path
+
+
+def test_a_stale_lock_says_it_looks_stale_why_and_which_file_to_clear(tmp_path):
+    from curamoir.guards.lock import SupervisorLock
+
+    repo = initialised(tmp_path)
+    write_lock(repo, pid=999999, host=SupervisorLock.this_host(), job="sweep",
+               started="2026-10-05T20:00:00+00:00")
+
+    status = collect_status(repo)
+    rendered = render_status(status)
+
+    assert status["lock"]["stale_because"] == "pid 999999 is not running on this host"
+    assert "looks STALE (pid 999999 is not running on this host)" in rendered
+    assert ".curamoir/state/lock" in rendered
+    assert "started 2026-10-05T20:00:00+00:00" in rendered
+
+
+def test_a_live_lock_shows_its_start_and_age_and_no_staleness(tmp_path):
+    import os
+
+    from curamoir.guards.lock import SupervisorLock
+
+    repo = initialised(tmp_path)
+    started = (datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat()
+    write_lock(repo, pid=os.getppid(), host=SupervisorLock.this_host(), job="sweep",
+               started=started)
+
+    status = collect_status(repo)
+    rendered = render_status(status)
+
+    assert status["lock"]["stale_because"] is None
+    assert "held by 'sweep'" in rendered and f"started {started}" in rendered
+    assert "5 min ago" in rendered and "stale" not in rendered.lower()
+
+
+def test_a_lock_holding_a_json_array_is_unreadable_not_a_crash(tmp_path):
+    repo = initialised(tmp_path)
+    (repo / ".curamoir" / "state" / "lock").write_text("[]", encoding="utf-8")
+
+    status = collect_status(repo)
+
+    assert status["lock"]["held"] is True and "unreadable" in render_status(status).lower()
+
+
+def test_a_dangling_lock_symlink_is_not_shown_as_free(tmp_path):
+    """The guard refuses on it (lexists), so status must not say free."""
+    repo = initialised(tmp_path)
+    (repo / ".curamoir" / "state" / "lock").symlink_to(repo / "nowhere")
+
+    status = collect_status(repo)
+
+    assert status["lock"]["held"] is True
+    assert "free" not in render_status(status).split("lock:", 1)[1].splitlines()[0]

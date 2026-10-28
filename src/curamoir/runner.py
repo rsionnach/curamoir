@@ -84,9 +84,10 @@ from typing import Any, Optional
 
 from curamoir import github, publish
 from curamoir.brief import gh_pr_states, write_brief
-from curamoir.job_guard import UNUSABLE_ROOT, Terminated, run_guarded
+from curamoir.job_guard import UNUSABLE_ROOT, run_guarded
 from curamoir.job_run import FAILURE, REFUSED, SUCCESS, UNKNOWN
 from curamoir.sweep_job import run_sweep
+from curamoir.termination import Terminated
 
 EXIT_SUCCESS = 0
 EXIT_FAILURE = 1

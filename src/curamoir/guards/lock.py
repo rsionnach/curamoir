@@ -9,8 +9,11 @@ writing to the same repo at once. The job refuses, says the lock looks stale,
 and leaves clearing it to a human — or to E10-R5's crash path, which owns
 releasing a lock its own job left behind.
 
-The reader is `SupervisorLock`; the writer is `create_lock` (with
-`lock_bytes`), beside it so the lock's shape is defined in one module.
+The reader is `read_lock`, whose LockState carries the staleness verdict
+for everything that shows the lock (`SupervisorLock`, the guard; status;
+doctor), so they never disagree about it (cm-azr). The writer is
+`create_lock` (with `lock_bytes`), beside it so the lock's shape is defined
+in one module.
 `job_guard.LockSlot` is the one caller that acquires and releases
 (cm-x5a.6). The shape is a JSON object: `pid` and `host` (liveness on the
 lock's own host), `job` (named in the refusal), `started` (an aware
@@ -25,8 +28,10 @@ import json
 import os
 import socket
 import uuid
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Optional
 
 from curamoir.guards.context import unusable_repo
 from curamoir.guards.reasons import Reason
@@ -106,6 +111,34 @@ def create_lock(repo, written):
     _HELD_BY_THIS_PROCESS.add(_token(written))
 
 
+@dataclass(frozen=True)
+class LockState:
+    """A repository's lock as `read_lock` found it.
+
+    `present` is whether anything is at `path` (lexists: a dangling symlink
+    is present). When present, either `unreadable` says why the holder
+    cannot be read, or the holder fields are set and `stale_because` says
+    why the lock looks stale (None: it looks live). `age_seconds` is None
+    when the start time cannot be parsed, and negative when it is ahead of
+    this clock."""
+
+    path: Path
+    present: bool
+    unreadable: Optional[str] = None
+    job: Optional[str] = None
+    pid: Optional[int] = None
+    host: Optional[str] = None
+    started: Optional[str] = None
+    age_seconds: Optional[float] = None
+    stale_because: Optional[str] = None
+
+
+def read_lock(repo, timeout_seconds=DEFAULT_TIMEOUT_SECONDS, now=None):
+    """`repo`'s lock and the guard's verdict on it (LockState). Never
+    raises for what is in the file; OSError from `repo` itself only."""
+    return SupervisorLock(timeout_seconds=timeout_seconds, now=now).read(repo)
+
+
 def forget_lock(written):
     """This process no longer holds the lock `written` (its release)."""
     _HELD_BY_THIS_PROCESS.discard(_token(written))
@@ -136,12 +169,48 @@ class SupervisorLock:
                     "Resolve the repository root before attempting the job."
                 ),
             )
-        path = context.repo.joinpath(".curamoir", *LOCK_PATH)
-        # lexists: a dangling symlink there is not a free repository; reading
-        # it fails below and refuses, naming the file.
-        if not os.path.lexists(path):
+        state = self.read(context.repo)
+        path = state.path
+        if not state.present:
             return None
+        if state.unreadable is not None:
+            # An unreadable lock is not an absent lock. We cannot show it is
+            # safe to proceed, so we do not.
+            return Refusal(
+                reason=Reason.LOCKED,
+                message=(
+                    f"lock at {path} could not be read ({state.unreadable}); refusing "
+                    "rather than assuming the repository is free. Inspect and delete "
+                    "it if no cúramóir job is running."
+                ),
+            )
 
+        held_by = (f"job {state.job!r}, pid {state.pid} on {state.host!r}, "
+                   f"started {state.started}")
+        if state.stale_because:
+            return Refusal(
+                reason=Reason.LOCKED,
+                message=(
+                    f"lock looks STALE ({state.stale_because}): {held_by}. Reported, "
+                    f"not overridden. Delete {path} if you are sure no job is running."
+                ),
+            )
+        age = state.age_seconds
+        clock_note = (" (its start time is in the future: this host's clock has "
+                      "gone back since it was written)") if age is not None and age < 0 else ""
+        return Refusal(
+            reason=Reason.LOCKED,
+            message=f"another cúramóir job holds the lock: {held_by}{clock_note}.",
+        )
+
+    def read(self, repo):
+        """`repo`'s lock as a LockState, judged with this guard's clock and
+        timeout (read_lock)."""
+        path = lock_file(repo)
+        # lexists: a dangling symlink there is not a free repository; reading
+        # it fails below, and the lock is unreadable, not absent.
+        if not os.path.lexists(path):
+            return LockState(path=path, present=False)
         try:
             held = json.loads(path.read_text(encoding="utf-8"))
             pid = int(held["pid"])
@@ -150,34 +219,13 @@ class SupervisorLock:
             started = held["started"]
             token = held.get("token")
         except (ValueError, KeyError, TypeError, OSError) as error:
-            # An unreadable lock is not an absent lock. We cannot show it is
-            # safe to proceed, so we do not.
-            return Refusal(
-                reason=Reason.LOCKED,
-                message=(
-                    f"lock at {path} could not be read ({error}); refusing rather "
-                    "than assuming the repository is free. Inspect and delete it "
-                    "if no cúramóir job is running."
-                ),
-            )
-
-        stale_because = self._staleness(pid, host, started, token)
-        held_by = f"job {job!r}, pid {pid} on {host!r}, started {started}"
-        if stale_because:
-            return Refusal(
-                reason=Reason.LOCKED,
-                message=(
-                    f"lock looks STALE ({stale_because}): {held_by}. Reported, not "
-                    f"overridden. Delete {path} if you are sure no job is running."
-                ),
-            )
-        age = self._age_seconds(started)
-        clock_note = (" (its start time is in the future: this host's clock has "
-                      "gone back since it was written)") if age is not None and age < 0 else ""
-        return Refusal(
-            reason=Reason.LOCKED,
-            message=f"another cúramóir job holds the lock: {held_by}{clock_note}.",
-        )
+            # TypeError: valid JSON that is not an object ([], "x", 7) cannot
+            # be indexed by a key.
+            return LockState(path=path, present=True,
+                             unreadable=str(error) or type(error).__name__)
+        return LockState(path=path, present=True, job=job, pid=pid, host=host,
+                         started=started, age_seconds=self._age_seconds(started),
+                         stale_because=self._staleness(pid, host, started, token))
 
     def _staleness(self, pid, host, started, token=None):
         """Why this lock looks stale, or None if it looks live."""

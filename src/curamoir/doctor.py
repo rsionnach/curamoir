@@ -23,6 +23,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from curamoir.config import ConfigError, load_config_text
+from curamoir.guards.lock import read_lock
 from curamoir.repo_config import CONFIG_PATH
 from curamoir.rules import AST_GREP_INSTALL
 from curamoir.scaffold import detect_languages, detect_modules
@@ -64,6 +65,7 @@ def diagnose(repo, tools=None):
     findings.append(_check_rules(repo))
     findings.extend(_check_modules(repo))
     findings.append(_check_pause(base))
+    findings.append(_check_lock(repo))
     findings.extend(_check_hooks(repo))
     findings.append(_check_writable(base))
     findings.append(_check_gitignore(base))
@@ -246,6 +248,28 @@ def _check_pause(base):
     return Finding("pause", "ok", "not paused")
 
 
+def _check_lock(repo):
+    """The supervisor lock, judged as the guard judges it
+    (guards.lock.read_lock). A stale or unreadable lock refuses every job
+    and keeps the denylist on in every session in this repository until a
+    human clears it, so it is a warning; a live one is a job running."""
+    state = read_lock(repo)
+    clear = "Delete .curamoir/state/lock if no cúramóir job is running."
+    if not state.present:
+        return Finding("lock", "ok", "free")
+    if state.unreadable is not None:
+        return Finding("lock", "warning",
+                       f"the lock is present but unreadable ({state.unreadable}), so every "
+                       "job refuses", fix=clear)
+    held_by = f"job {state.job!r}, pid {state.pid} on {state.host!r}, started {state.started}"
+    if state.stale_because is not None:
+        return Finding("lock", "warning",
+                       f"the lock looks STALE ({state.stale_because}): {held_by}. Every job "
+                       "refuses, and the command denylist stays on in this repository",
+                       fix=clear)
+    return Finding("lock", "ok", f"held by a running {held_by}")
+
+
 # One probe per hook event: the payload to send, and what proves it worked.
 # Driven off hooks.json rather than hardcoded, so registering a sixth event
 # cannot leave doctor silently ignoring it.
@@ -256,6 +280,8 @@ _HOOK_PROBES = {
             "hook_event_name": "PreToolUse", "tool_name": "Bash",
             "tool_input": {"command": "git reset --hard"},
         },
+        # Any non-empty value makes the hook enforce; "doctor" names the probe,
+        # not a job (no runner job has that name).
         "env": {"CURAMOIR_JOB": "doctor"},
         "expect": "deny",
         "proves": "fires and denies a destructive command",

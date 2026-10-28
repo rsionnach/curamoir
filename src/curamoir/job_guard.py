@@ -151,9 +151,7 @@ from curamoir.config import ConfigError
 from curamoir.job_run import REFUSED, JobRun
 from curamoir.ledger import repo_ledger
 from curamoir.repo_config import strict_config
-# `Terminated as Terminated`: re-exported, for the runner to catch from here.
 from curamoir.termination import HoldOnExit, TerminationSignals
-from curamoir.termination import Terminated as Terminated
 
 UNUSABLE_ROOT = "unusable_root"
 
@@ -432,6 +430,11 @@ def run_guarded(repo, job, open_pr_listing, body, *, now=None, repo_labels=None,
     run starts writes no job line, and a naive value is not checked.
     `repo_labels` is passed to the kill switch (job_gateway).
 
+    It sets os.environ['CURAMOIR_JOB'] to `job` for the run and restores
+    the value before it on every exit (module docstring, Ordering 5), so it
+    changes the whole process's environment and is not thread-safe: run one
+    job per process at a time.
+
     `job` must be a non-empty str with no NUL: it becomes CURAMOIR_JOB, and
     the denylist hook takes an empty value for "not in a job" while
     os.environ refuses a NUL. Anything else is a caller's error (runner.JOBS
@@ -475,11 +478,11 @@ def run_guarded(repo, job, open_pr_listing, body, *, now=None, repo_labels=None,
     #     (hooks/_entry.in_curamoir_job), and a signal cannot cut the restore
     #     short.
     lock = LockSlot()
-    # Ordering 5a.
+    # Ordering 5a: read the value to restore.
     before = os.environ.get(JOB_VARIABLE)
     with TerminationSignals() as signals:
         try:
-            # Ordering 5a.
+            # Ordering 5a: set it for the run.
             os.environ[JOB_VARIABLE] = job
             # HoldOnExit AFTER JobRun: it exits first (Ordering 2).
             with JobRun(repo_ledger(context.repo), job, now=now) as run, \

@@ -12,8 +12,10 @@ import json
 import os
 from datetime import datetime, timedelta, timezone
 
+import pytest
+
 from curamoir.guards import Reason
-from curamoir.guards.lock import SupervisorLock, lock_bytes
+from curamoir.guards.lock import SupervisorLock, lock_bytes, lock_file, read_lock
 
 
 def write_lock(harness, pid, host, started, job="sweep"):
@@ -161,3 +163,56 @@ def test_two_locks_for_the_same_job_in_the_same_instant_differ_by_their_token(mo
     assert first["token"] != second["token"]
     assert {key: value for key, value in first.items() if key != "token"} == \
         {key: value for key, value in second.items() if key != "token"}
+
+
+# --- read_lock: the one verdict status, doctor and the guard share (cm-azr) -----------
+
+NOW = datetime(2026, 10, 28, 12, 0, tzinfo=timezone.utc)
+
+
+def test_no_lock_reads_as_absent(harness):
+    state = read_lock(harness.repo)
+
+    assert state.present is False and state.stale_because is None and state.unreadable is None
+
+
+def test_a_live_lock_reads_with_its_holder_and_age_and_no_staleness(harness):
+    write_lock(harness, pid=os.getppid(), host=SupervisorLock.this_host(),
+               started="2026-10-28T11:00:00+00:00", job="sweep")
+
+    state = read_lock(harness.repo, now=lambda: NOW)
+
+    assert state.present and state.unreadable is None and state.stale_because is None
+    assert (state.job, state.pid, state.host) == ("sweep", os.getppid(), SupervisorLock.this_host())
+    assert state.started == "2026-10-28T11:00:00+00:00" and state.age_seconds == 3600
+    assert state.path == lock_file(harness.repo)
+
+
+def test_a_dead_pid_reads_as_stale_with_the_guards_reason(harness):
+    write_lock(harness, pid=999999, host=SupervisorLock.this_host(),
+               started="2026-10-28T11:00:00+00:00")
+
+    state = read_lock(harness.repo, now=lambda: NOW)
+    refusal = harness.run(SupervisorLock(now=lambda: NOW), job="sweep").refusal
+
+    assert state.stale_because == "pid 999999 is not running on this host"
+    assert state.stale_because in refusal.message
+
+
+@pytest.mark.parametrize("text", ["[]", "\"a string\"", "7", "not json", "{}"])
+def test_a_lock_that_is_not_a_readable_object_reads_as_unreadable_never_raises(harness, text):
+    harness.write(".curamoir/state/lock", text)
+
+    state = read_lock(harness.repo)
+
+    assert state.present and state.unreadable and state.stale_because is None
+
+
+def test_a_dangling_symlink_is_a_present_unreadable_lock_not_a_free_repo(harness):
+    lock = lock_file(harness.repo)
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    lock.symlink_to(harness.repo / "nowhere")
+
+    state = read_lock(harness.repo)
+
+    assert state.present and state.unreadable

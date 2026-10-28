@@ -364,3 +364,55 @@ def test_an_unwritable_state_directory_is_reported(tmp_path):
     writable = [f for f in findings if f.check == "writable state"]
     assert writable and writable[0].level == "error", writable
     assert "handoff" in writable[0].detail
+
+
+# --- the supervisor lock (cm-azr) ----------------------------------------------------
+
+def test_no_lock_is_ok(tmp_path):
+    findings = diagnose(initialised(tmp_path), tools={"python3": True, "yaml": True})
+
+    (lock,) = by_name(findings, "lock")
+    assert lock.level == "ok"
+
+
+def test_a_stale_lock_is_a_warning_naming_why_and_the_file(tmp_path):
+    import json
+
+    from curamoir.guards.lock import SupervisorLock
+
+    repo = initialised(tmp_path)
+    (repo / ".curamoir" / "state" / "lock").write_text(json.dumps({
+        "pid": 999999, "host": SupervisorLock.this_host(), "job": "sweep",
+        "started": "2026-10-05T20:00:00+00:00"}), encoding="utf-8")
+
+    (lock,) = by_name(diagnose(repo, tools={"python3": True, "yaml": True}), "lock")
+
+    assert lock.level == "warning"
+    assert "pid 999999 is not running on this host" in lock.detail
+    assert ".curamoir/state/lock" in lock.fix
+
+
+def test_an_unreadable_lock_is_a_warning(tmp_path):
+    repo = initialised(tmp_path)
+    (repo / ".curamoir" / "state" / "lock").write_text("[]", encoding="utf-8")
+
+    (lock,) = by_name(diagnose(repo, tools={"python3": True, "yaml": True}), "lock")
+
+    assert lock.level == "warning" and ".curamoir/state/lock" in lock.fix
+
+
+def test_a_live_lock_is_ok_and_says_a_job_is_running(tmp_path):
+    import json
+    import os
+    from datetime import datetime, timezone
+
+    from curamoir.guards.lock import SupervisorLock
+
+    repo = initialised(tmp_path)
+    (repo / ".curamoir" / "state" / "lock").write_text(json.dumps({
+        "pid": os.getppid(), "host": SupervisorLock.this_host(), "job": "sweep",
+        "started": datetime.now(timezone.utc).isoformat()}), encoding="utf-8")
+
+    (lock,) = by_name(diagnose(repo, tools={"python3": True, "yaml": True}), "lock")
+
+    assert lock.level == "ok" and "sweep" in lock.detail

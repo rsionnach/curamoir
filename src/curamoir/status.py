@@ -29,8 +29,12 @@ from curamoir.budget import (
 from curamoir.cadence import scheduled_jobs
 from curamoir.config import DEFAULTS, ConfigError, load_config_text
 from curamoir.grades import graded_modules
+from curamoir.guards.lock import read_lock
 from curamoir.guards.pr_cap import open_pr_branch_names
 from curamoir.ledger import Ledger
+
+#: The lock's path as status shows it, relative to the repository root.
+LOCK_SHOWN = ".curamoir/state/lock"
 
 NOT_AVAILABLE = "not yet available"
 
@@ -55,7 +59,7 @@ def collect_status(repo, open_pr_branches=None, now=None):
         "repo": str(repo),
         "config_error": config_error,
         "paused": (base / "PAUSE").exists(),
-        "lock": _read_lock(base),
+        "lock": _read_lock(repo),
         "spend": _read_spend(base, config, now),
         "grades": _read_json(base / "state" / "grades.json"),
         "cadence": _read_json(base / "state" / "cadence.json"),
@@ -86,10 +90,18 @@ def render_status(status):
         # Rendering the holder fields instead produced "held by None, pid None on
         # None", which tells the developer nothing about why.
         lines.append(f"  lock:      {lock['detail']}")
+        lines.append(f"             ⚠ Delete {LOCK_SHOWN} if no cúramóir job is running.")
     elif lock["held"]:
-        lines.append(f"  lock:      held by {lock['job']!r}, pid {lock['pid']} on {lock['host']}")
+        lines.append(f"  lock:      held by {lock['job']!r}, pid {lock['pid']} on "
+                     f"{lock['host']}, started {lock['started']}{_ago(lock['age_seconds'])}")
+        if lock["stale_because"]:
+            # The guard's own verdict (guards.lock.read_lock): every job
+            # refuses on this lock, and while it is there the denylist treats
+            # every session in this repository as inside a job.
+            lines.append(f"             ⚠ looks STALE ({lock['stale_because']}). Delete "
+                         f"{LOCK_SHOWN} if no cúramóir job is running.")
     else:
-        lines.append(f"  lock:      {lock['detail'] or 'free'}")
+        lines.append("  lock:      free")
 
     spend = status["spend"]
     if spend["unavailable"]:
@@ -135,23 +147,31 @@ def _read_config(base):
         return deepcopy(DEFAULTS), str(invalid).replace("\n", " ")
 
 
-def _read_lock(base):
-    path = base / "state" / "lock"
-    if not path.exists():
-        return {"held": False, "detail": None, "job": None, "pid": None, "host": None}
-    try:
-        held = json.loads(path.read_text(encoding="utf-8"))
-        return {
-            "held": True, "detail": None,
-            "job": held.get("job"), "pid": held.get("pid"), "host": held.get("host"),
-            "started": held.get("started"),
-        }
-    except (ValueError, OSError) as error:
+def _read_lock(repo):
+    """The lock as the guard judges it (guards.lock.read_lock), including
+    whether it looks stale: status is where a developer looks first."""
+    state = read_lock(repo)
+    return {
         # Present but unreadable is not free. Say so rather than implying free.
-        return {
-            "held": True, "detail": f"lock present but unreadable ({error})",
-            "job": None, "pid": None, "host": None,
-        }
+        "held": state.present,
+        "detail": (f"lock present but unreadable ({state.unreadable})"
+                   if state.unreadable is not None else None),
+        "job": state.job, "pid": state.pid, "host": state.host, "started": state.started,
+        "age_seconds": state.age_seconds, "stale_because": state.stale_because,
+    }
+
+
+def _ago(seconds):
+    """`" (5 min ago)"`, or nothing when the start time could not be read."""
+    if seconds is None:
+        return ""
+    if seconds < 0:
+        return " (in the future by this clock)"
+    if seconds < 3600:
+        return f" ({int(seconds // 60)} min ago)"
+    if seconds < 2 * 86400:
+        return f" ({int(seconds // 3600)} h ago)"
+    return f" ({int(seconds // 86400)} days ago)"
 
 
 def _read_spend(base, config, now):

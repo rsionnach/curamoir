@@ -6,10 +6,13 @@ dying. A hook that blocks turns a note-taking convenience into an obstacle.
 """
 
 import json
+import os
 import sys
 from pathlib import Path
+from typing import NamedTuple, Optional
 
-#: Where the supervisor lock lives, relative to `.curamoir/`.
+#: Where the supervisor lock lives, relative to `.curamoir/`. Mirrors
+#: guards.lock.LOCK_PATH, not imported, to keep the hook stdlib-light.
 _LOCK = ("state", "lock")
 
 #: Same name as job_guard.JOB_VARIABLE; not imported, to keep the hook
@@ -47,8 +50,18 @@ def run(handler):
     return 0
 
 
+class JobSignal(NamedTuple):
+    """Which signal said we are inside a cúramóir job: `job`, the name in
+    CURAMOIR_JOB, when the variable did; else `lock`, the lock file that did.
+    Always truthy (a non-empty tuple)."""
+
+    job: Optional[str]
+    lock: Optional[Path]
+
+
 def in_curamoir_job(env, repo=None):
-    """Whether we are running inside a cúramóir job.
+    """Whether we are running inside a cúramóir job: a JobSignal saying
+    which signal fired, or None.
 
     Two signals, per DEC-5. The env var is primary: hook processes inherit the
     parent environment, and `job_guard.run_guarded` sets CURAMOIR_JOB for
@@ -76,7 +89,11 @@ def in_curamoir_job(env, repo=None):
     carry it: there the env var is the only signal.
     """
     if env.get(_JOB_VARIABLE):
-        return True
+        return JobSignal(job=env[_JOB_VARIABLE], lock=None)
     if repo is not None:
-        return repo.joinpath(".curamoir", *_LOCK).exists()
-    return False
+        lock = repo.joinpath(".curamoir", *_LOCK)
+        # lexists, as the guard reads it: a dangling symlink the guard refuses
+        # on is a lock here too.
+        if os.path.lexists(lock):
+            return JobSignal(job=None, lock=lock)
+    return None

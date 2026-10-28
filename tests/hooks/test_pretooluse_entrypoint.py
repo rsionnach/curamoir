@@ -187,3 +187,40 @@ def test_the_lock_the_runner_writes_makes_the_fallback_fire(harness, monkeypatch
     assert during["decision"]["permissionDecision"] == "deny"
     _, after = run_hook("rm -rf build/", cwd=harness.repo)
     assert after is None
+
+
+# --- the deny message says which signal made it a job (cm-azr) ------------------------
+
+def test_a_denial_inside_a_job_names_the_job():
+    _, decision = run_hook("git reset --hard", env={"CURAMOIR_JOB": "sweep"})
+
+    assert "cúramóir job 'sweep'" in decision["permissionDecisionReason"]
+
+
+def test_a_denial_from_the_lock_says_so_and_points_to_status(tmp_path):
+    """The developer's own session, denied because a lock exists: the
+    message must say why, since a stale lock is the usual cause."""
+    (tmp_path / ".curamoir" / "state").mkdir(parents=True)
+    (tmp_path / ".curamoir" / "state" / "lock").write_text("{}", encoding="utf-8")
+
+    _, decision = run_hook("rm -rf build/", cwd=tmp_path)
+
+    reason = decision["permissionDecisionReason"]
+    assert ".curamoir/state/lock" in reason and "/curamoir:status" in reason
+
+
+def test_a_dangling_lock_symlink_is_still_the_fallback(tmp_path):
+    """As the guard reads it (lexists): a lock it refuses on is a lock here."""
+    (tmp_path / ".curamoir" / "state").mkdir(parents=True)
+    (tmp_path / ".curamoir" / "state" / "lock").symlink_to(tmp_path / "nowhere")
+
+    _, decision = run_hook("rm -rf build/", cwd=tmp_path)
+
+    assert decision is not None and decision["permissionDecision"] == "deny"
+
+
+def test_which_signal_fired_is_reported():
+    from curamoir.hooks import in_curamoir_job
+
+    assert in_curamoir_job({"CURAMOIR_JOB": "sweep"}).job == "sweep"
+    assert in_curamoir_job({}) is None

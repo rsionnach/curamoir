@@ -18,10 +18,12 @@ everything else and a developer skimming will miss them:
 
 - **PAUSED.** Nothing is running on a schedule. Say so first.
 - **A held lock.** A job is in progress, or a crashed job left the lock behind.
-  If the lock looks stale say so, and name the file — `.curamoir/state/lock` —
-  since clearing it by hand is the fix. Do not promise that
-  `/curamoir:doctor` will say more: it does not check the lock, and
-  `/curamoir:status` is the only thing that reads it.
+  The output says which: a lock that looks stale carries `looks STALE (why)`,
+  the guard's own verdict. If it does, say so with the reason, and name the
+  file — `.curamoir/state/lock` — since clearing it by hand is the fix. Say
+  too that until it is cleared every job refuses and the command denylist
+  stays on in this repository's sessions. `/curamoir:doctor` reports the same
+  verdict.
 
 If spend is close to the ceiling, say that plainly too: at the ceiling,
 scheduled jobs refuse to run rather than overrunning — quietly, recording the
