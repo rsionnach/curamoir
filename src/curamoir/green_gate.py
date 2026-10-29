@@ -719,8 +719,9 @@ def _read_only(env):
     directories, the reused venv and the installation its interpreter links
     to (_installation), NODE_PATH, the user base and the version managers'
     roots, as os_sandbox._granted keeps them (under a home only its
-    allowlist: toolchain directories, a venv, a node_modules; never a
-    credential tree, a socket directory or a home).
+    allowlist: toolchain directories, a venv, a conda environment's bin
+    and lib, a node_modules; never a credential tree, a socket directory or
+    a home; and a token-bearing pip.conf or .condarc in one masked).
     Read-only, and only the paths named, so a tool on PATH whose link points
     elsewhere under the home (outside these) cannot be read and fails:
     then the base is red or the command not runnable, and no PR opens."""
@@ -765,8 +766,10 @@ def _installation(interpreter):
     one planted in a credential tree is that tree. So only a real
     installation (lib/pythonX.Y beside a python, lib/node_modules beside
     node) is offered, and os_sandbox._granted then grants one under a home
-    only inside a toolchain directory (its allowlist). A refused prefix is
-    left out silently: a run that needed it fails, so no PR opens."""
+    only inside a toolchain directory (its allowlist), and of a conda
+    environment's prefix only its bin and lib (never the root, with its
+    .condarc and other environments). A refused prefix is left out
+    silently: a run that needed it fails, so no PR opens."""
     prefix = os.path.dirname(os.path.dirname(os.path.realpath(interpreter)))
     lib = os.path.join(prefix, "lib")
     if os.path.basename(interpreter) == "node":

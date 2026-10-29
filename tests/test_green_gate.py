@@ -1123,6 +1123,19 @@ def test_no_other_prefix_is_granted(fake_home, prefix, name, marker, why):
     assert granted_prefixes(fake_home, on_path) == [], why
 
 
+@pytest.mark.parametrize("prefix", ["miniconda3", "miniforge3/envs/py", "opt/conda"])
+def test_of_a_conda_installation_only_bin_and_lib_are_granted(fake_home, tmp_path, prefix):
+    """conda's root (or an environment) holds .condarc and conda-meta/state,
+    channel tokens and environment variables: _installation names the
+    prefix, and only its bin and lib are granted, in the home or not."""
+    where = tmp_path if prefix.startswith("opt") else fake_home
+    on_path = installed(where, prefix)
+    (where / prefix / "conda-meta").mkdir()
+    (where / prefix / ".condarc").write_text("channels: [https://t/TOKEN/conda]\n")
+    root = os.path.realpath(where / prefix)
+    assert granted_prefixes(fake_home, on_path) == [f"{root}/bin", f"{root}/lib"]
+
+
 def test_a_prefix_outside_the_home_is_granted_when_it_is_an_installation(fake_home, tmp_path):
     framework = tmp_path / "Frameworks" / "3.12"
     on_path = installed(tmp_path, framework.relative_to(tmp_path))

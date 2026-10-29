@@ -26,6 +26,7 @@ checks, so what the sandbox blocked is observed, not assumed.
 import itertools
 import os
 import socket
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -263,6 +264,62 @@ def test_the_users_home_is_unreadable(tmp_path):
     assert result.strategy == GREEN, result.runs[-1].tail
 
 
+def a_venv_with_a_token(where):
+    """A venv at `where` (pyvenv.cfg, bin/) holding a pip.conf with a token
+    in it and a file beside it; the venv."""
+    (where / "bin").mkdir(parents=True)
+    (where / "pyvenv.cfg").write_text("home = /usr/bin\n")
+    (where / "pip.conf").write_text("[global]\nindex-url = https://u:TOKEN@index/simple\n")
+    (where / "beside").write_text("visible\n")
+    return where
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="the fake venv is in tmp_path, under /tmp "
+                                                    "on Linux, which bwrap never grants; this "
+                                                    f"is {sys.platform}")
+@real_sandbox
+def test_a_pip_conf_in_a_granted_venv_is_unreadable_while_a_file_beside_it_is(tmp_path):
+    venv = a_venv_with_a_token(tmp_path / "venv")
+    clone, run = tmp_path / "c", tmp_path / "r"
+    clone.mkdir()
+    run.mkdir()
+    argv = os_sandbox.wrap(["/bin/sh", "-c", 'cat "$1"; cat "$2"', "sh", str(venv / "pip.conf"),
+                            str(venv / "beside")], clone=clone, run_dir=run,
+                           read_only=[str(venv)])
+    done = subprocess.run(argv, cwd=clone, capture_output=True, timeout=30)
+    assert b"visible" in done.stdout, done.stderr
+    assert b"TOKEN" not in done.stdout
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="the fake venv is in tmp_path, under /tmp "
+                                                    "on Linux, which bwrap never grants; this "
+                                                    f"is {sys.platform}")
+@real_sandbox
+@pytest.mark.parametrize("masks", [True, False])
+def test_the_self_test_reads_a_masked_file_and_fails_where_it_is_readable(tmp_path, monkeypatch,
+                                                                          masks):
+    """With the masks the self-test passes; without them (wrap's profile
+    stripped of its MASK rules) it fails naming the masked file's check."""
+    venv = a_venv_with_a_token(tmp_path / "venv")
+    if not masks:
+        real_wrap = os_sandbox.wrap
+
+        def unmasked(argv, **kwargs):
+            line = real_wrap(argv, **kwargs)
+            line[2] = "\n".join(rule for rule in line[2].splitlines() if '"MASK' not in rule)
+            return line
+
+        monkeypatch.setattr(os_sandbox, "wrap", unmasked)
+    clone, run = tmp_path / "c", tmp_path / "r"
+    clone.mkdir()
+    run.mkdir()
+    if masks:
+        os_sandbox.self_test(clone, run, read_only=[str(venv)])
+    else:
+        with pytest.raises(os_sandbox.OsSandboxUnavailable, match="masked in a granted venv"):
+            os_sandbox.self_test(clone, run, read_only=[str(venv)])
+
+
 @pytest.mark.skipif(sys.platform != "darwin", reason="Mach services, launchd and "
                                                     f"LaunchServices are macOS's; this is "
                                                     f"{sys.platform}")
@@ -405,6 +462,20 @@ def test_no_credential_tree_is_granted(tmp_path, monkeypatch, tree):
     assert os_sandbox._granted([str(home / tree)]) == []
 
 
+@pytest.mark.parametrize("tree", [".pypirc", ".pip", ".condarc"])
+def test_a_venv_inside_pip_or_condas_user_configuration_is_not_granted(tmp_path, monkeypatch,
+                                                                       tree):
+    """pip's and conda's user configuration is a credential tree: even a venv
+    in it (which the allowlist would otherwise grant) is refused. (~/.config/pip
+    and ~/Library/Application Support/pip are named too, inside trees that
+    are refused already.)"""
+    home = tmp_path / "home"
+    (home / tree / "v").mkdir(parents=True)
+    (home / tree / "v" / "pyvenv.cfg").write_text("")
+    monkeypatch.setattr(os_sandbox, "homes", lambda: [os.path.realpath(home)])
+    assert os_sandbox._granted([str(home / tree / "v")]) == []
+
+
 @pytest.mark.parametrize("holder", [".local", ".local/share", ".config/..", "."])
 def test_no_path_holding_a_credential_tree_is_granted(tmp_path, monkeypatch, holder):
     home = tmp_path / "home"
@@ -419,18 +490,24 @@ GRANTED_UNDER_A_HOME = (".pyenv/versions", ".pyenv/versions/3.12.1/lib", ".nvm/v
                         ".cargo/bin", ".rbenv/versions/3.3", ".sdkman/candidates/java",
                         ".local/share/uv/python/cpython-3.12", ".local/share/mise/installs/node",
                         "work/proj/.venv", "work/proj/.venv/bin", "work/proj/node_modules",
-                        "work/proj/node_modules/.bin", "miniconda3", "miniconda3/bin",
-                        "anaconda3/lib", "miniforge3/envs/py", "mambaforge/bin")
+                        "work/proj/node_modules/.bin", "miniconda3/bin",
+                        "anaconda3/lib/python3.12", "miniforge3/envs/py/bin", "mambaforge/lib")
 REFUSED_UNDER_A_HOME = (".pyenv", ".pyenv/shims", ".cargo", ".cargo/registry", ".nvm",
                         ".local/share/uv", ".local/bin", ".bun/bin", "bin", "work", "work/proj",
-                        "work/proj/src", ".configs")
+                        "work/proj/src", ".configs", "miniconda3/pkgs", "miniconda3/etc/conda",
+                        "miniconda3/condabin", "miniforge3/envs", "miniforge3/envs/py/include",
+                        "nometa/bin")
+#: The conda environments made_home makes (each holds conda-meta/).
+CONDA_PREFIXES = ("miniconda3", "anaconda3", "miniforge3", "miniforge3/envs/py", "mambaforge")
 
 
 def made_home(tmp_path, monkeypatch):
     """A fake home holding every path of both lists above (work/proj/.venv a
-    venv: it holds pyvenv.cfg) and a keyring; homes() is it alone."""
+    venv: it holds pyvenv.cfg; CONDA_PREFIXES conda environments, nometa
+    not one) and a keyring; homes() is it alone."""
     home = tmp_path / "home"
-    for path in (*GRANTED_UNDER_A_HOME, *REFUSED_UNDER_A_HOME, ".local/share/keyrings"):
+    for path in (*GRANTED_UNDER_A_HOME, *REFUSED_UNDER_A_HOME, ".local/share/keyrings",
+                 *(f"{prefix}/conda-meta" for prefix in CONDA_PREFIXES)):
         (home / path).mkdir(parents=True, exist_ok=True)
     (home / "work/proj/.venv/pyvenv.cfg").write_text("")
     monkeypatch.setattr(os_sandbox, "homes", lambda: [os_sandbox._canonical(str(home))])
@@ -451,6 +528,112 @@ def test_nothing_else_under_a_home_is_granted(tmp_path, monkeypatch, path):
     venv: none is in the allowlist."""
     home = made_home(tmp_path, monkeypatch)
     assert os_sandbox._granted([str(home / path)]) == []
+
+
+@pytest.mark.parametrize("where", ["home", "outside"])
+def test_a_conda_environment_is_granted_only_its_bin_and_lib(tmp_path, monkeypatch, where):
+    """A conda root holds .condarc (channel tokens), conda-meta/state (`conda
+    env config vars`), etc/conda/activate.d, pkgs and every other
+    environment: asked for a root or an environment, _granted gives only
+    that one's bin and lib; asked for anything else of it, nothing. Under
+    the home or outside it (what Linux binds)."""
+    home = tmp_path / "account"
+    home.mkdir()
+    monkeypatch.setattr(os_sandbox, "homes", lambda: [os.path.realpath(home)])
+    root = (home if where == "home" else tmp_path / "opt") / "miniconda3"
+    for prefix in (root, root / "envs/py", root / "envs/other"):
+        for part in ("bin", "lib/python3.12", "conda-meta", "etc/conda/activate.d", "include"):
+            (prefix / part).mkdir(parents=True)
+        (prefix / "conda-meta/state").write_text('{"env_vars": {"TOKEN": "x"}}\n')
+    (root / "pkgs").mkdir()
+    (root / ".condarc").write_text("channels: [https://t/TOKEN/conda]\n")
+    real = os.path.realpath
+    assert os_sandbox._granted([str(root)]) == [real(root / "bin"), real(root / "lib")]
+    asked = [str(root / part) for part in (
+        "", "bin", "lib/python3.12", "envs", "envs/py", "envs/other/conda-meta", "conda-meta",
+        "conda-meta/state", "etc", "etc/conda", "pkgs", ".condarc", "include")]
+    assert os_sandbox._granted(asked) == sorted(real(root / part) for part in (
+        "bin", "lib", "lib/python3.12", "envs/py/bin", "envs/py/lib"))
+    assert os_sandbox._ungranted([str(root)]) == []
+
+
+def test_a_home_holding_conda_meta_is_not_granted_its_bin(tmp_path, monkeypatch):
+    home = tmp_path / "account"
+    for part in ("conda-meta", "bin", "lib"):
+        (home / part).mkdir(parents=True)
+    monkeypatch.setattr(os_sandbox, "homes", lambda: [os.path.realpath(home)])
+    assert os_sandbox._granted([str(home), str(home / "bin"), str(home / "lib")]) == []
+
+
+def tokens_in_granted_places(tmp_path, monkeypatch):
+    """A fake home with a venv holding pip.conf and .pypirc (not pip.ini)
+    and a pyenv version holding a pyenv-virtualenv venv with a pip.conf;
+    homes() is it alone. (the venv, the version, the masks expected)."""
+    home = tmp_path / "account"
+    venv = a_venv_with_a_token(home / "work" / ".venv")
+    (venv / ".pypirc").write_text("[pypi]\npassword = TOKEN\n")
+    version = home / ".pyenv" / "versions" / "3.12.1"
+    (version / "envs" / "v").mkdir(parents=True)
+    (version / "envs" / "v" / "pip.conf").write_text("[global]\nindex-url = TOKEN\n")
+    monkeypatch.setattr(os_sandbox, "homes", lambda: [os_sandbox._canonical(str(home))])
+    real = os.path.realpath
+    return venv, version, sorted([real(venv / ".pypirc"), real(venv / "pip.conf"),
+                                  real(version / "envs" / "v" / "pip.conf")])
+
+
+def test_the_macos_profile_denies_each_masked_file_after_the_grants(tmp_path, monkeypatch):
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setattr(os_sandbox, "_is_executable", lambda path: True)
+    venv, version, masks = tokens_in_granted_places(tmp_path, monkeypatch)
+    argv = os_sandbox.wrap(["true"], clone=tmp_path / "c", run_dir=tmp_path / "r",
+                           read_only=[str(venv), str(version)])
+    profile = argv[2]
+    params = dict(argv[i + 1].split("=", 1) for i, arg in enumerate(argv) if arg == "-D")
+    named = {value: name for name, value in params.items() if name.startswith("MASK")}
+    assert sorted(named) == masks
+    last_allow = profile.rindex("(allow file-read")
+    for name in named.values():
+        rule = f'(deny file-read* (literal (param "{name}")))'
+        assert rule in profile and profile.index(rule) > last_allow
+    assert not any(mask in profile for mask in masks), "a path spliced into the profile"
+
+
+def test_on_linux_each_masked_file_is_covered_by_dev_null_after_its_grant(tmp_path,
+                                                                         monkeypatch):
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr(os_sandbox, "_is_executable", lambda path: True)
+    venv, version, masks = tokens_in_granted_places(tmp_path, monkeypatch)
+    argv = os_sandbox.wrap(["true"], clone=tmp_path / "c", run_dir=tmp_path / "r",
+                           read_only=[str(venv), str(version)])
+    triples = list(zip(argv, argv[1:], argv[2:], strict=False))
+    covered = [path for flag, source, path in triples
+               if flag == "--ro-bind" and source == "/dev/null"]
+    assert covered == masks
+    last_grant = max(i for i, arg in enumerate(argv) if arg == "--ro-bind-try"
+                     and argv[i + 1] in (os.path.realpath(venv), os.path.realpath(version)))
+    for mask in masks:
+        assert argv.index(mask) > last_grant
+    assert argv.index("--dev") > max(argv.index(mask) for mask in masks)
+
+
+@pytest.mark.parametrize("content, asked", [("[global]\nindex-url = TOKEN\n", True),
+                                            ("", False)])
+def test_the_self_test_reads_a_masked_file_only_where_one_has_content(tmp_path, monkeypatch,
+                                                                     content, asked):
+    """An empty file reads the same as Linux's /dev/null mask, so it proves
+    nothing: then no masked file is given and the check is not asked."""
+    seen = []
+    monkeypatch.setattr(os_sandbox, "wrap", recording_wrap(seen))
+    venv, _version, _masks = tokens_in_granted_places(tmp_path, monkeypatch)
+    for name in ("pip.conf", ".pypirc"):
+        (venv / name).write_text(content)
+    (tmp_path / "c").mkdir()
+    (tmp_path / "r").mkdir()
+    with pytest.raises(os_sandbox.OsSandboxUnavailable):
+        os_sandbox.self_test(tmp_path / "c", tmp_path / "r", read_only=[str(venv)])
+    [argv] = seen
+    expected = os.path.realpath(venv / ".pypirc") if asked else ""
+    assert argv[-1] == expected
 
 
 case_insensitive = pytest.mark.skipif(
@@ -760,20 +943,30 @@ def test_an_interpreter_the_sandbox_will_not_grant_is_said_plainly(tmp_path, mon
 
 @pytest.mark.parametrize("root", ["miniconda3", "anaconda3", "miniforge3", "mambaforge"])
 def test_a_conda_interpreter_is_granted_to_the_probe(tmp_path, monkeypatch, root):
-    """conda's base Python has no pyvenv.cfg: its install root is in the
-    allowlist, so the self-test runs its probe with it."""
-    seen = []
-    monkeypatch.setattr(os_sandbox, "wrap", recording_wrap(seen))
-    a_python(tmp_path, monkeypatch, root)
+    """conda's base Python has no pyvenv.cfg: its environment's bin and lib
+    are granted (never its root, which sys.base_prefix names), so the
+    self-test runs its probe with it."""
+    seen, asked = [], []
+
+    def wrap(argv, **kwargs):
+        asked.append(kwargs["read_only"])
+        return recording_wrap(seen)(argv)
+
+    monkeypatch.setattr(os_sandbox, "wrap", wrap)
+    home = a_python(tmp_path, monkeypatch, root)
+    for part in ("conda-meta", "lib/python3.12"):
+        (home / root / part).mkdir(parents=True)
     with pytest.raises(os_sandbox.OsSandboxUnavailable, match="self-test failed"):
         os_sandbox.self_test(tmp_path / "c", tmp_path / "r")
     assert len(seen) == 1
+    prefix = os.path.realpath(home / root)
+    assert os_sandbox._granted(asked[0]) == [f"{prefix}/bin", f"{prefix}/lib"]
 
 
 GOOD = {"clone": "ok", "outside": "denied", "net": "blocked", "unix_outside": "blocked",
         "unix_inside": "ok", "dns": "failed", "home_read": "denied", "home_link": "denied",
-        "home_alias": "denied", "launchctl": "denied", "launchservices": "denied",
-        "loopback": "denied"}
+        "home_alias": "denied", "masked_read": "denied", "launchctl": "denied",
+        "launchservices": "denied", "loopback": "denied"}
 
 
 @pytest.mark.parametrize("change, why", [
@@ -787,6 +980,8 @@ GOOD = {"clone": "ok", "outside": "denied", "net": "blocked", "unix_outside": "b
     ({"home_read": "read"}, "under the user's home directory was readable"),
     ({"home_link": "linked"}, "a hard link to a file under the user's home"),
     ({"home_alias": "read"}, "/System/Volumes/Data"),
+    ({"masked_read": "read"}, "masked in a granted venv or prefix (pip.conf"),
+    ({"masked_read": None}, "the masked_read check did not run"),
     ({"home_link": None}, "the home_link check did not run"),
     ({"launchctl": "ran"}, "/bin/launchctl ran"),
     ({"launchservices": "reached"}, "LaunchServices"),
@@ -796,17 +991,20 @@ GOOD = {"clone": "ok", "outside": "denied", "net": "blocked", "unix_outside": "b
 def test_each_failed_check_is_named(change, why):
     said = {} if change is None else {k: v for k, v in {**GOOD, **change}.items()
                                       if v is not None}
-    assert os_sandbox._failed_check(GOOD, platform="darwin", link=True, alias=True) == ""
-    assert why in os_sandbox._failed_check(said, platform="darwin", link=True, alias=True)
+    assert os_sandbox._failed_check(GOOD, platform="darwin", link=True, alias=True,
+                                    mask=True) == ""
+    assert why in os_sandbox._failed_check(said, platform="darwin", link=True, alias=True,
+                                           mask=True)
 
 
 def test_the_link_and_alias_checks_are_asked_only_when_the_probe_can_make_them():
     """No file of the home's to link (an unwritable home: the probe lists the
     directory instead), no alias (not macOS, or no Data volume): not asked."""
-    said = {k: v for k, v in GOOD.items() if k not in ("home_link", "home_alias")}
+    said = {k: v for k, v in GOOD.items() if k not in ("home_link", "home_alias", "masked_read")}
     assert os_sandbox._failed_check(said, platform="darwin") == ""
     assert "home_link" in os_sandbox._failed_check(said, platform="darwin", link=True)
     assert "home_alias" in os_sandbox._failed_check(said, platform="darwin", alias=True)
+    assert "masked_read" in os_sandbox._failed_check(said, platform="darwin", mask=True)
 
 
 def test_with_loopback_allowed_the_self_test_wants_it_working():
