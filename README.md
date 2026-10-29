@@ -195,14 +195,16 @@ before any of the features:
 
 ### Where the security boundary is
 
-What keeps an agent that has gone wrong, by accident or because something it
-read told it to, from harming your machine or your repository is not the
-command guard but these, each enforced in code and tested:
+What contains an agent that has gone wrong, by accident or because something it
+read told it to, is not the command guard but these, each enforced in code and
+tested:
 
-- **No job's agent has a shell.** The sweep's fix agent and its scan get only
-  Read, Grep, Glob and Edit. Any other tool, Bash above all, is refused when
-  the job is set up, and a shell will only ever be given to a job that runs
-  under an operating-system sandbox.
+- **No job's agent has a shell.** The sweep's scan gets only Read, Grep and
+  Glob, and its fix agent Edit as well. Any other tool, Bash above all, is
+  refused when the job is set up: today every shell is refused outright, and
+  one will only ever be allowed to a job that runs under a verified
+  operating-system sandbox. With no shell, a file the agent writes is never
+  run by it; the sweep's tests run it only inside the OS sandbox below.
 - **It works in a throwaway clone, never your checkout.** The git cúramóir
   runs there is hardened: no hooks, filters, diff drivers, pager or other
   configuration the clone could plant ever run, and a planted `.git` or
@@ -211,15 +213,24 @@ command guard but these, each enforced in code and tested:
   put back or refuses the run.
 - **Your tests run OS-sandboxed** when the sweep checks its fixes (above).
 
-It has four known limits:
+What this does not yet cover: the fix agent's own reads, and any edit it
+attempts outside the clone, are fenced by Claude Code's permission rules
+(scoped to the clone, with every other path denied), not by an operating-system
+sandbox, and Claude Code applies those rules to Grep and Glob on a best-effort
+basis. Nothing outside the clone is reviewed by the sweep.
+
+### Known limits
+
+The guardrails have three known limits:
 
 - **The command guard catches mistakes, not a hostile agent.** It refuses
   destructive commands an agent might honestly type, along with inline code
-  and other constructions it cannot read, and it fails closed on anything it
-  cannot judge. But a shell and its tools offer more routes than a list of
+  and other constructions it cannot read, and inside a job it refuses anything
+  it cannot judge. But a shell and its tools offer more routes than a list of
   rules can close, so it is deliberately not the security boundary: that is
   why no job's agent has a shell (above). A Claude Code hook that times out
-  fails *open*; the guard is bounded well inside its 5-second budget.
+  fails *open*; the guard is bounded inside its 5-second budget, and tested
+  to be.
 - **Redaction is pattern-based.** It catches the shapes it knows. That reduces
   exposure but doesn't guarantee nothing leaks.
 - **The command denylist knows a job only by its signals.** It enforces only

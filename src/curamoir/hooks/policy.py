@@ -23,8 +23,10 @@ commands in their own session are their business, except while the supervisor
 lock exists (hooks/destructive.py says why).
 
 **What it is for** (the user's re-scope, 2026-10-28). This guard catches an
-agent's HONEST destructive mistakes, names the safe alternative, and never
-fails open: any input it cannot judge, or that makes it raise, is refused.
+agent's HONEST destructive mistakes, names the safe alternative, and inside
+a job never fails open: any input it cannot judge, or that makes it raise, is
+refused (pretooluse: before the job signal is known, an unreadable payload
+still exits silently).
 It is not the security boundary against a hostile agent. A shell and its
 tools offer more routes than any list of rules can close (nine hardening
 rounds kept finding new ones), so the boundary is elsewhere and enforced in
