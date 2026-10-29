@@ -320,6 +320,46 @@ def test_the_self_test_reads_a_masked_file_and_fails_where_it_is_readable(tmp_pa
             os_sandbox.self_test(clone, run, read_only=[str(venv)])
 
 
+def a_conda_root(prefix):
+    """A conda root at `prefix` (conda-meta/, bin/tool, lib/, pkgs/, an
+    environment envs/py) holding tokens: .condarc, conda-meta/state and
+    pkgs/urls.txt. The prefix."""
+    for part in ("conda-meta", "bin", "lib/python3.12", "pkgs", "etc/conda/activate.d",
+                 "envs/py/conda-meta", "envs/py/bin"):
+        (prefix / part).mkdir(parents=True)
+    (prefix / "bin" / "tool").write_text("visible\n")
+    (prefix / ".condarc").write_text("channels: [https://t/TOKEN/conda]\n")
+    (prefix / "conda-meta" / "state").write_text('{"env_vars": {"TOKEN": "x"}}\n')
+    (prefix / "pkgs" / "urls.txt").write_text("https://t/TOKEN/conda/x.conda\n")
+    return prefix
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="the fake home is in tmp_path, under /tmp "
+                                                    "on Linux, which bwrap never grants; this "
+                                                    f"is {sys.platform}")
+@real_sandbox
+def test_a_conda_root_inside_a_granted_toolchain_is_unreadable_but_its_bin(tmp_path,
+                                                                         monkeypatch):
+    """The reproduction: ~/.asdf/installs/python granted whole exposed the
+    miniconda3-latest in it (.condarc, pkgs). Asked for that and for the
+    conda root itself, a run reads its bin and nothing else of it."""
+    home = tmp_path / "account"
+    python = home / ".asdf" / "installs" / "python"
+    prefix = a_conda_root(python / "miniconda3-latest")
+    monkeypatch.setattr(os_sandbox, "homes", lambda: [os_sandbox._canonical(str(home))])
+    clone, run = tmp_path / "c", tmp_path / "r"
+    clone.mkdir()
+    run.mkdir()
+    argv = os_sandbox.wrap(["/bin/sh", "-c", 'for f; do cat "$f" || echo "denied $f"; done', "sh",
+                            str(prefix / ".condarc"), str(prefix / "pkgs" / "urls.txt"),
+                            str(prefix / "conda-meta" / "state"), str(prefix / "bin" / "tool")],
+                           clone=clone, run_dir=run, read_only=[str(python), str(prefix)])
+    done = subprocess.run(argv, cwd=clone, capture_output=True, timeout=30)
+    assert b"visible" in done.stdout, done.stderr
+    assert b"TOKEN" not in done.stdout
+    assert done.stdout.count(b"denied ") == 3, done.stdout
+
+
 @pytest.mark.skipif(sys.platform != "darwin", reason="Mach services, launchd and "
                                                     f"LaunchServices are macOS's; this is "
                                                     f"{sys.platform}")
@@ -429,18 +469,19 @@ def test_wrap_on_linux_binds_only_what_the_run_needs(tmp_path, monkeypatch):
     monkeypatch.setattr(os_sandbox, "_is_executable", lambda path: True)
     home = tmp_path / "home"
     versions = home / ".pyenv" / "versions"
-    versions.mkdir(parents=True)
+    (versions / "3.12.1").mkdir(parents=True)
     monkeypatch.setattr(os_sandbox, "homes", lambda: [os.path.realpath(home)])
     clone, run = tmp_path / "c", tmp_path / "r"
     argv = os_sandbox.wrap(["/bin/sh"], clone=clone, run_dir=run,
-                           read_only=[str(versions), str(home / ".pyenv"), str(home), "/",
-                                      "relative", ""])
+                           read_only=[str(versions / "3.12.1"), str(versions),
+                                      str(home / ".pyenv"), str(home), "/", "relative", ""])
     clone, run = os.path.realpath(clone), os.path.realpath(run)
     assert argv[0] == "/usr/bin/bwrap" and argv[-2:] == ["--", "/bin/sh"]
     pairs = list(itertools.pairwise(argv))
     assert ("--ro-bind", "/") not in pairs, "the whole root is visible"
     assert ("--tmpfs", "/tmp") in pairs
-    assert ("--ro-bind-try", os.path.realpath(versions)) in pairs
+    assert ("--ro-bind-try", os.path.realpath(versions / "3.12.1")) in pairs
+    assert ("--ro-bind-try", os.path.realpath(versions)) not in pairs, "every version granted"
     assert ("--ro-bind-try", os.path.realpath(home / ".pyenv")) not in pairs
     assert ("--ro-bind-try", os.path.realpath(home)) not in pairs, "the home was granted"
     assert ("--ro-bind-try", "/") not in pairs
@@ -485,14 +526,16 @@ def test_no_path_holding_a_credential_tree_is_granted(tmp_path, monkeypatch, hol
     assert os_sandbox._granted([str(home / holder)]) == []
 
 
-GRANTED_UNDER_A_HOME = (".pyenv/versions", ".pyenv/versions/3.12.1/lib", ".nvm/versions/node",
+GRANTED_UNDER_A_HOME = (".pyenv/versions/3.12.1", ".pyenv/versions/3.12.1/lib",
+                        ".nvm/versions/node",
                         ".asdf/installs/python", ".volta/tools/image", ".rustup/toolchains/x",
                         ".cargo/bin", ".rbenv/versions/3.3", ".sdkman/candidates/java",
                         ".local/share/uv/python/cpython-3.12", ".local/share/mise/installs/node",
                         "work/proj/.venv", "work/proj/.venv/bin", "work/proj/node_modules",
                         "work/proj/node_modules/.bin", "miniconda3/bin",
                         "anaconda3/lib/python3.12", "miniforge3/envs/py/bin", "mambaforge/lib")
-REFUSED_UNDER_A_HOME = (".pyenv", ".pyenv/shims", ".cargo", ".cargo/registry", ".nvm",
+REFUSED_UNDER_A_HOME = (".pyenv", ".pyenv/versions", ".asdf/installs", ".nvm/versions",
+                        ".local/share/uv/python", ".local/share/mise/installs", ".pyenv/shims", ".cargo", ".cargo/registry", ".nvm",
                         ".local/share/uv", ".local/bin", ".bun/bin", "bin", "work", "work/proj",
                         "work/proj/src", ".configs", "miniconda3/pkgs", "miniconda3/etc/conda",
                         "miniconda3/condabin", "miniforge3/envs", "miniforge3/envs/py/include",
@@ -636,6 +679,195 @@ def test_the_self_test_reads_a_masked_file_only_where_one_has_content(tmp_path, 
     assert argv[-1] == expected
 
 
+def platform_wrap(tmp_path, monkeypatch, platform, read_only):
+    """wrap() as on `platform` (the tool taken as present), with `read_only`:
+    (the argv, the granted paths it names, the masked paths it names). On
+    macOS a grant is a READ parameter (only under a home) and a mask a MASK
+    one; on Linux a grant is bound with --ro-bind-try, a mask with /dev/null."""
+    monkeypatch.setattr(sys, "platform", platform)
+    monkeypatch.setattr(os_sandbox, "_is_executable", lambda path: True)
+    argv = os_sandbox.wrap(["true"], clone=tmp_path / "c", run_dir=tmp_path / "r",
+                           read_only=read_only)
+    if platform == "darwin":
+        params = [argv[i + 1].split("=", 1) for i, arg in enumerate(argv) if arg == "-D"]
+        return (argv, sorted(v for n, v in params if n.startswith("READ")),
+                sorted(v for n, v in params if n.startswith("MASK")))
+    triples = list(zip(argv, argv[1:], argv[2:], strict=False))
+    return (argv, sorted(path for flag, path, _ in triples if flag == "--ro-bind-try"
+                         and _ == path and path.startswith(str(os.path.realpath(tmp_path)))),
+            sorted(path for flag, source, path in triples
+                   if flag == "--ro-bind" and source == "/dev/null"))
+
+
+@pytest.mark.parametrize("platform", ["darwin", "linux"])
+def test_a_toolchain_directory_holding_a_conda_root_grants_only_that_roots_bin_and_lib(
+        tmp_path, monkeypatch, platform):
+    """The reproduction: ~/.pyenv/versions granted whole held
+    versions/miniconda3-latest (.condarc, conda-meta/state, pkgs, envs).
+    The toolchain directory itself is never granted, one of its version
+    managers' directories holding a conda root is refused by the walk, and
+    the root asked for itself is its bin and lib alone, on both platforms."""
+    home = tmp_path / "account"
+    pyenv = home / ".pyenv" / "versions"
+    prefix = a_conda_root(pyenv / "miniconda3-latest")
+    (pyenv / "3.12.1" / "bin").mkdir(parents=True)
+    asdf = home / ".asdf" / "installs" / "python"
+    a_conda_root(asdf / "miniconda3-latest")
+    monkeypatch.setattr(os_sandbox, "homes", lambda: [os_sandbox._canonical(str(home))])
+    _argv, granted, masked = platform_wrap(tmp_path, monkeypatch, platform,
+                                           [str(pyenv), str(asdf), str(prefix),
+                                            str(pyenv / "3.12.1")])
+    real = os.path.realpath
+    assert granted == sorted([real(prefix / "bin"), real(prefix / "lib"),
+                              real(pyenv / "3.12.1")])
+    # macOS: the root's masks besides (its root is denied under the home
+    # anyway); Linux: the root is not bound, so there is nothing to mask.
+    assert masked == (sorted([real(prefix / ".condarc"), real(prefix / "conda-meta/state")])
+                      if platform == "darwin" else [])
+    assert os_sandbox._ungranted([str(pyenv), str(asdf)]) == [real(asdf), real(pyenv)]
+
+
+@pytest.mark.parametrize("platform", ["darwin", "linux"])
+def test_a_venv_nested_below_a_versions_top_refuses_the_grant(tmp_path, monkeypatch,
+                                                             platform):
+    """The reproduction: versions/3.12/lib/sub/.venv/pip.conf was readable
+    through the grant of versions/3.12. A venv anywhere but a grant's top
+    or envs/<name> refuses the grant whole; pyenv-virtualenv's envs/<name>
+    is granted, its pip.conf masked."""
+    home = tmp_path / "account"
+    version = home / ".pyenv" / "versions" / "3.12"
+    a_venv_with_a_token(version / "lib" / "sub" / ".venv")
+    beside = home / ".pyenv" / "versions" / "3.11"
+    a_venv_with_a_token(beside / "envs" / "v")
+    monkeypatch.setattr(os_sandbox, "homes", lambda: [os_sandbox._canonical(str(home))])
+    _argv, granted, masked = platform_wrap(tmp_path, monkeypatch, platform,
+                                           [str(version), str(beside)])
+    assert granted == [os.path.realpath(beside)]
+    assert masked == [os.path.realpath(beside / "envs" / "v" / "pip.conf")]
+
+
+@pytest.mark.parametrize("platform", ["darwin", "linux"])
+def test_a_token_file_at_any_depth_of_a_grant_is_masked(tmp_path, monkeypatch, platform):
+    """Grant and mask agree on depth: a pip.conf two levels down (not in a
+    venv), npm's etc/npmrc in a node version and a .npmrc and condarc.d
+    file deep in it are each masked, on both platforms."""
+    home = tmp_path / "account"
+    version = home / ".pyenv" / "versions" / "3.12.1"
+    node = home / ".nvm" / "versions" / "node" / "v20.1.0"
+    files = [version / "lib" / "sub" / "pip.conf", node / "etc" / "npmrc",
+             node / "lib" / "node_modules" / "pkg" / ".npmrc",
+             version / "share" / "condarc.d" / "channels.yml"]
+    for path in files:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("TOKEN\n")
+    (version / "lib" / "sub" / "other.conf").write_text("visible\n")
+    monkeypatch.setattr(os_sandbox, "homes", lambda: [os_sandbox._canonical(str(home))])
+    argv, granted, masked = platform_wrap(tmp_path, monkeypatch, platform,
+                                          [str(version), str(node)])
+    assert granted == sorted([os.path.realpath(version), os.path.realpath(node)])
+    assert masked == sorted(os.path.realpath(path) for path in files)
+    if platform == "linux":
+        assert min(argv.index(path) for path in masked) > max(argv.index(path)
+                                                              for path in granted)
+
+
+@pytest.mark.parametrize("cap, value", [("_WALK_ENTRIES", 5), ("_WALK_DEPTH", 2)])
+def test_a_grant_too_large_to_walk_is_refused(tmp_path, monkeypatch, cap, value):
+    """Never granted partly checked: past the walk's cap, refused whole."""
+    home = tmp_path / "account"
+    version = home / ".pyenv" / "versions" / "3.12.1"
+    (version / "lib" / "a" / "b").mkdir(parents=True)
+    for name in "cdefg":
+        (version / name).write_text("")
+    monkeypatch.setattr(os_sandbox, "homes", lambda: [os_sandbox._canonical(str(home))])
+    assert os_sandbox._granted([str(version)]) == [os.path.realpath(version)]
+    monkeypatch.setattr(os_sandbox, cap, value)
+    assert os_sandbox._granted([str(version)]) == []
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root lists a directory whatever its mode")
+def test_a_grant_holding_a_directory_that_cannot_be_listed_is_refused(tmp_path, monkeypatch):
+    """A directory with x but not r may hide a pip.conf a run could still
+    open by name: the walk cannot see it, so the grant is refused."""
+    home = tmp_path / "account"
+    hidden = home / ".pyenv" / "versions" / "3.12.1" / "hidden"
+    hidden.mkdir(parents=True)
+    monkeypatch.setattr(os_sandbox, "homes", lambda: [os_sandbox._canonical(str(home))])
+    hidden.chmod(0o311)
+    try:
+        assert os_sandbox._granted([str(hidden.parent)]) == []
+    finally:
+        hidden.chmod(0o755)
+
+
+def test_a_link_in_a_grant_is_not_followed(tmp_path, monkeypatch):
+    """A link to a conda root elsewhere is not walked into (what it points
+    to is read by its own path, granted or not on its own)."""
+    home = tmp_path / "account"
+    version = home / ".pyenv" / "versions" / "3.12.1"
+    version.mkdir(parents=True)
+    (version / "elsewhere").symlink_to(a_conda_root(tmp_path / "conda"))
+    monkeypatch.setattr(os_sandbox, "homes", lambda: [os_sandbox._canonical(str(home))])
+    assert os_sandbox._granted([str(version)]) == [os.path.realpath(version)]
+
+
+def test_the_macos_profile_masks_an_interpreters_conda_root_outside_the_home(tmp_path,
+                                                                            monkeypatch):
+    """Outside the home macOS's reads are open, so a conda root's own
+    .condarc and conda-meta/state (and its environments') are denied by
+    name, whichever of its environments' bin is granted."""
+    prefix = a_conda_root(tmp_path / "opt" / "miniconda3")
+    (prefix / "envs" / "py" / ".condarc").write_text("TOKEN\n")
+    monkeypatch.setattr(os_sandbox, "homes", lambda: [os.path.realpath(tmp_path / "account")])
+    real = os.path.realpath
+    for asked in (prefix, prefix / "bin"):
+        _argv, granted, masked = platform_wrap(tmp_path, monkeypatch, "darwin", [str(asked)])
+        assert granted == [], "outside the home nothing is allowed again: it is open"
+        assert masked == sorted([real(prefix / ".condarc"), real(prefix / "conda-meta/state"),
+                                 real(prefix / "envs/py/.condarc")])
+
+
+def test_on_linux_a_conda_root_in_a_system_directory_is_masked(tmp_path, monkeypatch):
+    """bwrap binds /usr whole, so a conda root there is visible whether or
+    not it is granted: its masked files are covered, found among
+    /usr/local's children, or as the root of a granted environment."""
+    usr = tmp_path / "usr"
+    found = a_conda_root(usr / "local" / "miniconda3")
+    granted = a_conda_root(usr / "share" / "deep" / "conda")
+    monkeypatch.setattr(os_sandbox, "_LINUX_SYSTEM", (str(usr),))
+    monkeypatch.setattr(os_sandbox, "_SYSTEM_CONDA_PARENTS", (str(usr), str(usr / "local")))
+    monkeypatch.setattr(os_sandbox, "homes", lambda: [os.path.realpath(tmp_path / "account")])
+    argv, _granted, masked = platform_wrap(tmp_path, monkeypatch, "linux",
+                                           [str(granted / "bin")])
+    real = os.path.realpath
+    assert masked == sorted(real(prefix / name) for prefix in (found, granted)
+                            for name in (".condarc", "conda-meta/state"))
+    assert min(argv.index(path) for path in masked) > argv.index(real(usr))
+    assert max(argv.index(path) for path in masked) < argv.index("--dev")
+
+
+def test_a_gate_walks_each_grant_once(tmp_path, monkeypatch):
+    """wrap() is called for the self-test, the canary and every run, and
+    each walk is cached for the gate's length (walks_cached)."""
+    walked = []
+    real_walked = os_sandbox._walked
+
+    def counting(grant):
+        walked.append(grant)
+        return real_walked(grant)
+
+    monkeypatch.setattr(os_sandbox, "_walked", counting)
+    monkeypatch.setattr(green_gate, "OS_SANDBOX", Unconfined())
+    gate(tmp_path, f"{PY} -c pass")
+    assert walked, "nothing was walked"
+    assert len(walked) == len(set(walked)), sorted(walked)
+    walked.clear()
+    with os_sandbox.walks_cached():
+        for _ in range(3):
+            os_sandbox._granted([str(Path(sys.prefix))])
+    assert len(walked) == len(set(walked)) <= 1
+
+
 case_insensitive = pytest.mark.skipif(
     not os.path.exists(os.path.realpath(tempfile.gettempdir()).upper()),
     reason="the case-variant tests need a case-insensitive file system (macOS's default)")
@@ -661,8 +893,8 @@ def test_a_case_or_alias_variant_of_a_refused_path_is_refused(tmp_path, monkeypa
 def test_a_case_variant_of_a_granted_path_is_granted_as_spelled_on_disk(tmp_path, monkeypatch):
     home = made_home(tmp_path, monkeypatch)
     real = os.path.realpath(home)
-    assert os_sandbox._granted([real.upper() + "/.PYENV/VERSIONS"]) == \
-        [os.path.join(real, ".pyenv", "versions")]
+    assert os_sandbox._granted([real.upper() + "/.PYENV/VERSIONS/3.12.1"]) == \
+        [os.path.join(real, ".pyenv", "versions", "3.12.1")]
 
 
 @pytest.mark.parametrize("where", ["/tmp", "/var/run", "/private/tmp"])

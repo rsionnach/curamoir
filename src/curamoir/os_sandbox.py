@@ -45,10 +45,13 @@ sandbox) is OsSandboxUnavailable naming the check.
 Commands are argv lists throughout, never a shell string: the research on
 this bead found that a command smuggled through a string ran unsandboxed.
 
-A conda environment is granted only its bin and lib (_conda_parts), and
-the files in a granted venv or prefix that may hold an index's or a
-channel's token (pip.conf, .condarc, conda-meta/state: _MASKED) are masked:
-denied on macOS, /dev/null over them on Linux.
+A conda environment is granted only its bin and lib (_conda_parts). Each
+grant is walked (_walk: bounded, no link followed) and refused whole if it
+holds a conda environment, or a venv anywhere but its top or envs/<name>,
+or is too large to walk; every file in it that may hold an index's or a
+channel's token (pip.conf, .condarc, .npmrc, conda-meta/state: _MASKED),
+and those of the conda environment each grant is in, are masked: denied
+on macOS, /dev/null over them on Linux.
 
 Limits, stated: on macOS, reads OUTSIDE the user's home stay open (system
 libraries, /opt, /usr/local, other volumes), and a run can still read
@@ -59,6 +62,7 @@ denies them; the other checks still prove the sandbox is on.
 """
 
 import contextlib
+import contextvars
 import os
 import pwd
 import secrets
@@ -204,6 +208,29 @@ class OsSandboxUnavailable(Exception):
     into a refusal: the test command is never run unsandboxed."""
 
 
+#: The walks of the gate in progress (walks_cached), or None: wrap() is
+#: called for the self-test, the canary and each run, on the same grants.
+_walks = contextvars.ContextVar("curamoir_os_sandbox_walks", default=None)
+
+
+@contextlib.contextmanager
+def walks_cached():
+    """Within it, each grant is walked (_walk) once: green_gate holds one
+    for a whole gate, wrap() and self_test() (as their decorator) one for
+    their own call. Nested, the outer one's walks are used. Safe for a
+    gate's length: a run cannot write to a grant (writes go only to the
+    clone and the run's directory)."""
+    if _walks.get() is not None:
+        yield
+        return
+    token = _walks.set({})
+    try:
+        yield
+    finally:
+        _walks.reset(token)
+
+
+@walks_cached()
 def wrap(argv, *, clone, run_dir, read_only=(), loopback=False):
     """`argv` prefixed so it runs confined (module docstring): writes only
     in `clone` and `run_dir` (both resolved to real paths), reads under the
@@ -384,9 +411,12 @@ _CREDENTIAL_TREES = tuple(os.path.join(*parts.split("/")) for parts in (
 #: managers keep installed toolchains, never their whole root (~/.cargo
 #: holds credentials.toml, ~/.pyenv and ~/.asdf shims and plugins):
 #: ~/.pyenv/versions, ~/.nvm/versions, ~/.asdf/installs, ~/.volta/tools,
-#: ~/.rustup/toolchains, ~/.cargo/bin, ~/.rbenv/versions,
-#: ~/.sdkman/candidates, ~/.local/share/uv/python and
-#: ~/.local/share/mise/installs. Besides these, a Python venv (a directory
+#: ~/.rustup/toolchains, ~/.rbenv/versions, ~/.sdkman/candidates,
+#: ~/.local/share/uv/python and ~/.local/share/mise/installs. Only what is
+#: IN one (a version, ~/.pyenv/versions/3.12.1, or anything in it), never
+#: the directory itself: it holds every version, one of which may be a
+#: conda root (versions/miniconda3-latest). ~/.cargo/bin (_TOOL_DIRS) holds
+#: tools, not versions, and is granted itself. Besides these, a Python venv (a directory
 #: holding pyvenv.cfg, and anything in it), a conda environment's bin or lib
 #: (never its root: _conda_parts) and anything in a `node_modules` (the
 #: checkout's own, which is where the gate's PATH and NODE_PATH point).
@@ -394,8 +424,9 @@ _CREDENTIAL_TREES = tuple(os.path.join(*parts.split("/")) for parts in (
 #: granted and fails: the base is red or the command not runnable.
 _TOOLCHAIN_DIRS = tuple(os.path.join(*parts.split("/")) for parts in (
     ".pyenv/versions", ".nvm/versions", ".asdf/installs", ".volta/tools", ".rustup/toolchains",
-    ".cargo/bin", ".rbenv/versions", ".sdkman/candidates", ".local/share/uv/python",
+    ".rbenv/versions", ".sdkman/candidates", ".local/share/uv/python",
     ".local/share/mise/installs"))
+_TOOL_DIRS = (os.path.join(".cargo", "bin"),)
 
 #: Never granted, nor anything in them, nor anything holding them (/var,
 #: /private): where host daemons keep their Unix sockets, and a read-only
@@ -409,9 +440,11 @@ _SOCKET_TREES = ("/tmp", "/var/tmp", "/run", "/var/run", "/dev/shm", "/private/t
 _KERNEL_TREES = ("/dev", "/proc", "/sys")
 
 #: What _granted refuses, said where a refusal is reported.
-REFUSAL_RULE = ("under a home only a toolchain directory, a venv, a conda environment's "
+REFUSAL_RULE = ("under a home only a toolchain version, a venv, a conda environment's "
                 "bin or lib or a node_modules is granted, never a credential tree; nor a "
-                "socket or kernel directory, nor anything holding a home or one of those")
+                "socket or kernel directory, nor anything holding a home or one of those, "
+                "nor a directory holding a conda environment or a nested venv, or too large "
+                "to check")
 
 #: Of a conda environment (a prefix holding conda-meta/: a conda root, or
 #: one of its envs/<name>), all that is ever granted: the root holds
@@ -422,9 +455,21 @@ _CONDA_GRANTED = ("bin", "lib")
 #: Files that may hold an index's or a channel's token, masked wherever
 #: they are in a granted path (_masked): pip's site configuration
 #: ($VIRTUAL_ENV/pip.conf, pip.ini on Windows), an upload's .pypirc,
-#: conda's per-prefix .condarc (or condarc) and environment variables.
-_MASKED = (".condarc", "condarc", "pip.conf", "pip.ini", ".pypirc",
-           os.path.join("conda-meta", "state"))
+#: conda's (and mamba's) per-prefix .condarc, condarc and .mambarc and its
+#: environment variables (conda-meta/state), npm's global configuration
+#: (<prefix>/etc/npmrc) and a project's .npmrc. And every file in a
+#: directory of _MASKED_DIRS: conda's per-prefix condarc.d/.
+_MASKED = (".condarc", "condarc", ".mambarc", "pip.conf", "pip.ini", ".pypirc", ".npmrc",
+           os.path.join("conda-meta", "state"), os.path.join("etc", "npmrc"))
+_MASKED_DIRS = ("condarc.d",)
+
+#: A grant's walk (_walk): how deep and over how many entries in all it
+#: reads before it gives up. A grant it gives up on is refused, never
+#: granted partly checked. A scandir walk reads about 3us an entry (a uv
+#: CPython, ~2,500 entries, in under 10ms on macOS 14); the cap is under a
+#: second, and a node_modules beyond it is refused.
+_WALK_DEPTH = 64
+_WALK_ENTRIES = 200_000
 
 
 def _granted(paths):
@@ -436,7 +481,9 @@ def _granted(paths):
     node_modules), and never anything in or holding a credential tree
     (_CREDENTIAL_TREES). A conda environment's prefix is translated here,
     the one place every grant passes (_conda_parts): to its bin and lib,
-    so its root is never granted, whoever asked for it. Each
+    so its root is never granted, whoever asked for it. And never a
+    directory _walk refuses (one holding a conda environment or a nested
+    venv, or too large to walk). Each
     comparison is by identity (device, inode) of the path and its parents,
     so neither case (`~/.SSH` on a case-insensitive volume) nor an alias
     (/System/Volumes/Data/Users/...) slips past. A refused path is left out,
@@ -448,7 +495,7 @@ def _granted(paths):
         if not path or not os.path.isabs(path) or not os.path.exists(path):
             continue
         for real in _conda_parts(_canonical(path)):
-            if real != "/" and not _refused(real, every_home):
+            if real != "/" and not _refused(real, every_home) and _walk(real) is not None:
                 found.add(real)
     return sorted(found)
 
@@ -480,22 +527,138 @@ def _conda_prefix(path):
         path = parent
 
 
-def _masked(granted):
-    """The files of _MASKED, resolved, sorted, in each `granted` directory
-    and in each of its envs/<name> (pyenv-virtualenv's venvs inside a
-    granted version, a conda root's environments): what a run must not
-    read though their directory is granted. Only those that exist."""
-    found = set()
-    for path in granted:
-        places = [path]
+def _walk(grant):
+    """The masked files (_MASKED, _MASKED_DIRS; resolved) anywhere in
+    `grant` (a resolved directory or file), or None: the grant is refused
+    (_granted). Refused when the walk finds a conda environment
+    (conda-meta) anywhere in it: its root would be granted, which
+    _conda_parts never does; or a venv (pyvenv.cfg) anywhere but the
+    grant's top and its envs/<name> (pyenv-virtualenv's venvs in a
+    version), whose own pip.conf the walk would mask but which no grant of
+    a toolchain needs; or when a directory cannot be listed (an unlistable
+    one may still be read by name), or the walk passes _WALK_DEPTH or
+    _WALK_ENTRIES. No link is followed: what one points to is read by its
+    own path, which is denied unless granted (and walked) itself or
+    outside the home on macOS (open, as stated). A grant in a system
+    directory (_LINUX_SYSTEM: bound whole on Linux, outside the home on
+    macOS) is not walked, as the walk could not hide it: only its top's
+    masked files are found (_fixed_masks)."""
+    cache = _walks.get()
+    if cache is not None and grant in cache:
+        return cache[grant]
+    if not os.path.isdir(grant):
+        found = (grant,) if _is_masked(tuple(grant.split(os.sep))) else ()
+    elif _in_system(grant):
+        found = tuple(_fixed_masks(grant))
+    else:
+        found = _walked(grant)
+    if cache is not None:
+        cache[grant] = found
+    return found
+
+
+def _walked(grant):
+    """_walk's walk of the directory `grant`: a tuple, or None (refused)."""
+    found, pending, entries = set(), [(grant, ())], 0
+    while pending:
+        directory, parts = pending.pop()
+        try:
+            with os.scandir(directory) as listing:
+                children = list(listing)
+        except OSError:
+            return None
+        entries += len(children)
+        if entries > _WALK_ENTRIES:
+            return None
+        for child in children:
+            if child.name == "conda-meta":
+                return None
+            if child.name == "pyvenv.cfg" and parts and \
+                    not (len(parts) == 2 and parts[0] == "envs"):
+                return None
+            try:
+                is_directory = child.is_dir(follow_symlinks=False)
+            except OSError:
+                return None
+            if is_directory:
+                if len(parts) + 1 > _WALK_DEPTH:
+                    return None
+                pending.append((child.path, (*parts, child.name)))
+            elif _is_masked((*parts, child.name)) and os.path.isfile(child.path):
+                found.add(_canonical(child.path))
+    return tuple(sorted(found))
+
+
+def _is_masked(parts):
+    """Whether a file at `parts` (its path's components) is one of _MASKED
+    or in one of _MASKED_DIRS."""
+    if len(parts) >= 2 and parts[-2] in _MASKED_DIRS:
+        return True
+    return any(tuple(name.split(os.sep)) == tuple(parts[-len(name.split(os.sep)):])
+               for name in _MASKED)
+
+
+def _fixed_masks(place):
+    """The masked files (_MASKED, every file of _MASKED_DIRS) at `place`'s
+    top, resolved: where pip, conda and npm look in a prefix."""
+    found = []
+    for name in _MASKED:
+        candidate = os.path.join(place, name)
+        if os.path.isfile(candidate):
+            found.append(_canonical(candidate))
+    for name in _MASKED_DIRS:
         with contextlib.suppress(OSError):
-            envs = os.path.join(path, "envs")
+            directory = os.path.join(place, name)
+            found += [_canonical(os.path.join(directory, entry))
+                      for entry in os.listdir(directory)
+                      if os.path.isfile(os.path.join(directory, entry))]
+    return found
+
+
+def _in_system(path):
+    """Whether `path` (resolved) is in one of _LINUX_SYSTEM (by its real
+    path: /bin is /usr/bin on a merged-/usr system)."""
+    return any(os.path.isdir(root) and _inside(path, os.path.realpath(root))
+               for root in _LINUX_SYSTEM)
+
+
+#: Linux: where a conda root is looked for under the system directories
+#: bwrap binds whole (its children: /usr/local/miniconda3), as no grant
+#: need name it to be visible. One deeper is not looked for (a stated
+#: limit); macOS's reads outside the home are open anyway.
+_SYSTEM_CONDA_PARENTS = ("/usr", "/usr/local")
+
+
+def _masked(granted):
+    """The files a run must not read though they are visible to it,
+    resolved, sorted: those _walk found in each of `granted`; and those at
+    the top of the conda environment (_conda_prefix) each grant is in and
+    of each of its envs/<name> (_fixed_masks: .condarc, conda-meta/state),
+    on macOS wherever it is (outside the home its root is readable), on
+    Linux where bwrap shows it whole (in a system directory), with those of
+    a conda root under _SYSTEM_CONDA_PARENTS. Masks are by path: a hard
+    link to a masked file is not masked, but writes to a grant are denied,
+    so no run can make one. Only files that exist."""
+    linux = sys.platform.startswith("linux")
+    found = set()
+    prefixes = set()
+    for path in granted:
+        found.update(_walk(path) or ())
+        prefix = _conda_prefix(path)
+        if prefix is not None and (not linux or _in_system(prefix)):
+            prefixes.add(prefix)
+    if linux:
+        for parent in _SYSTEM_CONDA_PARENTS:
+            with contextlib.suppress(OSError):
+                prefixes.update(os.path.join(parent, name) for name in os.listdir(parent)
+                                if os.path.isdir(os.path.join(parent, name, "conda-meta")))
+    for prefix in prefixes:
+        places = [prefix]
+        with contextlib.suppress(OSError):
+            envs = os.path.join(prefix, "envs")
             places += [os.path.join(envs, name) for name in os.listdir(envs)]
         for place in places:
-            for name in _MASKED:
-                candidate = os.path.join(place, name)
-                if os.path.isfile(candidate):
-                    found.add(_canonical(candidate))
+            found.update(_fixed_masks(place))
     return sorted(found)
 
 
@@ -534,7 +697,12 @@ def _refused(path, every_home):
 def _allowlisted(path, lineage, home, home_id):
     """Whether `path` (under `home`) is in a toolchain directory, a venv, a
     conda environment's bin or lib, or a node_modules (_TOOLCHAIN_DIRS)."""
+    me = _identity(path)
     for directory in _TOOLCHAIN_DIRS:
+        identity = _identity(os.path.join(home, directory))
+        if identity is not None and identity in lineage and identity != me:
+            return True  # in it, never the directory itself
+    for directory in _TOOL_DIRS:
         identity = _identity(os.path.join(home, directory))
         if identity is not None and identity in lineage:
             return True
@@ -625,6 +793,7 @@ def _inside(path, root):
     return os.path.commonpath([root, path]) == root
 
 
+@walks_cached()
 def self_test(clone, run_dir, env=None, read_only=(), loopback=False):
     """Prove, through wrap() with the same `read_only` and `loopback`, that
     the sandbox confines here: every check of _CHECKS. `env` is the probe's

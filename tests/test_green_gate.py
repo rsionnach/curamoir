@@ -1227,4 +1227,7 @@ def test_a_command_not_runnable_names_what_the_sandbox_did_not_grant(tmp_path, m
         result = run_test_gate(sandbox, fix(sandbox, {"src/a.py": "a = 2\n"}))
 
     assert result.strategy == ABANDONED and result.cause == "command_not_runnable"
-    assert f"the OS sandbox did not grant {os.path.realpath(home / 'bin')}" in result.why
+    # Among others, maybe: the real user base is outside the fake home and
+    # may be refused for its own reasons (a uv tool's venv in ~/.local).
+    refused = result.why.split("the OS sandbox did not grant ", 1)[1].split(" (", 1)[0]
+    assert os.path.realpath(home / "bin") in refused.split(", ")

@@ -721,7 +721,8 @@ def _read_only(env):
     roots, as os_sandbox._granted keeps them (under a home only its
     allowlist: toolchain directories, a venv, a conda environment's bin
     and lib, a node_modules; never a credential tree, a socket directory or
-    a home; and a token-bearing pip.conf or .condarc in one masked).
+    a home, nor one holding a conda environment or a nested venv; and a
+    token-bearing pip.conf, .condarc or npmrc in one masked).
     Read-only, and only the paths named, so a tool on PATH whose link points
     elsewhere under the home (outside these) cannot be read and fails:
     then the base is red or the command not runnable, and no PR opens."""
@@ -944,6 +945,9 @@ def reduce_scope(candidates, trials):
 
 # --- the gate -------------------------------------------------------------------------
 
+# Each grant is walked once a gate (os_sandbox.walks_cached), not once for
+# each of the self-test, the canary and every run.
+@os_sandbox.walks_cached()
 def run_test_gate(sandbox, verdict, paths=None):
     """E3-R4 for one sweep: run the base's test command in `sandbox` with
     the fix `verdict` (fix_scope.verify_fix's, ok, with paths) accepted,
