@@ -173,9 +173,11 @@ before any of the features:
 - **A kill switch.** `touch .curamoir/PAUSE` and every scheduled job stops.
 - **A spend ceiling.** Month-to-date cost is computed from the ledger before
   each run. If a run would overspend, it refuses to start.
-- **Destructive commands are blocked.** During a job, `git reset --hard`,
-  `git push --force`, `rm -rf` and similar commands are refused, and each refusal
-  names the safe alternative.
+- **Destructive mistakes are caught.** During a job, `git reset --hard`,
+  `git push --force`, `rm -rf`, a redirect that empties its own input and
+  similar commands are refused, and each refusal names the safe alternative.
+  This guard catches an agent's honest mistakes; it is not what keeps a
+  hostile agent in (see below).
 - **An open-PR cap.** You will never come back to a wall of PRs.
 - **The sweep's test run is OS-sandboxed.** Before opening a PR the sweep runs
   your tests on its fixes, in a throwaway clone, under `sandbox-exec` (macOS)
@@ -191,19 +193,33 @@ before any of the features:
   home directory.
 - **Redaction** on everything it writes.
 
+### Where the security boundary is
+
+What keeps an agent that has gone wrong, by accident or because something it
+read told it to, from harming your machine or your repository is not the
+command guard but these, each enforced in code and tested:
+
+- **No job's agent has a shell.** The sweep's fix agent and its scan get only
+  Read, Grep, Glob and Edit. Any other tool, Bash above all, is refused when
+  the job is set up, and a shell will only ever be given to a job that runs
+  under an operating-system sandbox.
+- **It works in a throwaway clone, never your checkout.** The git cúramóir
+  runs there is hardened: no hooks, filters, diff drivers, pager or other
+  configuration the clone could plant ever run, and a planted `.git` or
+  `.gitattributes`, in any case, refuses the run. Only the reviewed patch
+  of the files in scope leaves the clone; anything else the agent touched is
+  put back or refuses the run.
+- **Your tests run OS-sandboxed** when the sweep checks its fixes (above).
+
 It has four known limits:
 
-- **Guards are a ratchet against drift, not a security boundary.** A Claude Code
-  hook that times out fails *open*, so a guard that hangs stops protecting.
-- **The command policy stops code written at call time, not code written to a
-  file.** During a job it refuses inline code (`bash -c`, `python -c`,
-  `node -e`, `make --eval`), including through a runner such as `uv run`;
-  packages and images fetched and run (`pnpm dlx`, `uv tool run`,
-  `docker run`); and configuration whose value can be a command: `git -c`,
-  `git config` writes beyond a few safe keys, and environment variables beyond
-  a short list. It does not stop the agent writing a file and running it
-  through an allowed runner (`pytest`, `make`, `go run`, a script). The sweep's
-  scope review of every changed file is what bounds that.
+- **The command guard catches mistakes, not a hostile agent.** It refuses
+  destructive commands an agent might honestly type, along with inline code
+  and other constructions it cannot read, and it fails closed on anything it
+  cannot judge. But a shell and its tools offer more routes than a list of
+  rules can close, so it is deliberately not the security boundary: that is
+  why no job's agent has a shell (above). A Claude Code hook that times out
+  fails *open*; the guard is bounded well inside its 5-second budget.
 - **Redaction is pattern-based.** It catches the shapes it knows. That reduces
   exposure but doesn't guarantee nothing leaks.
 - **The command denylist knows a job only by its signals.** It enforces only
@@ -218,7 +234,8 @@ It has four known limits:
   until you clear it; the denial says so, and `/curamoir:status` and
   `/curamoir:doctor` say whether the lock looks stale. The sweep's fix step
   runs Claude Code in restricted mode, which loads no plugin, so it loads the
-  denylist hook through its own settings (it has no Bash tool today). Any
+  denylist hook through its own settings (it has no Bash tool, and cannot be
+  given one without an OS sandbox). Any
   non-empty `CURAMOIR_JOB` counts, `0` and `false` included, so do not export
   it in your own shell.
 

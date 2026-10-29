@@ -22,6 +22,20 @@ Scope is E0-R5's: this applies during a cúramóir job. The developer's own
 commands in their own session are their business, except while the supervisor
 lock exists (hooks/destructive.py says why).
 
+**What it is for** (the user's re-scope, 2026-10-28). This guard catches an
+agent's HONEST destructive mistakes, names the safe alternative, and never
+fails open: any input it cannot judge, or that makes it raise, is refused.
+It is not the security boundary against a hostile agent. A shell and its
+tools offer more routes than any list of rules can close (nine hardening
+rounds kept finding new ones), so the boundary is elsewhere and enforced in
+code: no job's agent has a shell (fix_step.SHELL_FREE_TOOLS, cm-xq9), it
+works in a throwaway clone whose git is hardened and from which only the
+reviewed patch leaves (git_guard, fix_scope, cm-3b2), and the tests the
+sweep runs on its edits run under an OS sandbox (os_sandbox, cm-p2f). The
+hardening below is kept because it was built and tested, and because it
+also catches mistakes; a hostile-only channel found in it is recorded for
+the boundary (bead cm-d71), not answered with another rule here.
+
 **What it stops, and what it does not** (cm-hve, a decision of 2026-10-28).
 It stops code composed at call time: a shell's or interpreter's inline code,
 however it is reached (directly, through a package runner such as `uv run` or
@@ -45,9 +59,8 @@ and then runs through an allowlisted runner: `pytest`, `make`, `go run`,
 `cargo run` or `bash script.sh` run whatever the repository holds at that
 moment, the agent's edits included. Telling a reviewed file from one written a
 moment ago would not close that, since a test file is one too. What bounds it
-is the sweep's scope review of every changed path (fix_scope), and, beneath
-that, the README's word: guards are a ratchet against drift, not a security
-boundary.
+is the sweep's scope review of every changed path (fix_scope), and the
+boundary above.
 
 **Where it lives.** This module is the pipeline and what every program shares:
 the unverifiable constructions, the environment and heredoc rules, ALLOWED (the
