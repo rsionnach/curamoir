@@ -496,11 +496,11 @@ def test_wrap_on_linux_binds_only_what_the_run_needs(tmp_path, monkeypatch):
                                   ".kube/cache"])
 def test_no_credential_tree_is_granted(tmp_path, monkeypatch, tree):
     """Nothing in or under a credential tree of a home is granted, on either
-    platform: _granted drops it before wrap() builds the profile or binds."""
+    platform: granted() drops it before wrap() builds the profile or binds."""
     home = tmp_path / "home"
     (home / tree).mkdir(parents=True)
     monkeypatch.setattr(os_sandbox, "homes", lambda: [os.path.realpath(home)])
-    assert os_sandbox._granted([str(home / tree)]) == []
+    assert os_sandbox.granted([str(home / tree)]) == []
 
 
 @pytest.mark.parametrize("tree", [".pypirc", ".pip", ".condarc"])
@@ -514,7 +514,7 @@ def test_a_venv_inside_pip_or_condas_user_configuration_is_not_granted(tmp_path,
     (home / tree / "v").mkdir(parents=True)
     (home / tree / "v" / "pyvenv.cfg").write_text("")
     monkeypatch.setattr(os_sandbox, "homes", lambda: [os.path.realpath(home)])
-    assert os_sandbox._granted([str(home / tree / "v")]) == []
+    assert os_sandbox.granted([str(home / tree / "v")]) == []
 
 
 @pytest.mark.parametrize("holder", [".local", ".local/share", ".config/..", "."])
@@ -523,7 +523,7 @@ def test_no_path_holding_a_credential_tree_is_granted(tmp_path, monkeypatch, hol
     (home / ".local/share/keyrings").mkdir(parents=True)
     (home / ".config").mkdir()
     monkeypatch.setattr(os_sandbox, "homes", lambda: [os.path.realpath(home)])
-    assert os_sandbox._granted([str(home / holder)]) == []
+    assert os_sandbox.granted([str(home / holder)]) == []
 
 
 GRANTED_UNDER_A_HOME = (".pyenv/versions/3.12.1", ".pyenv/versions/3.12.1/lib",
@@ -561,7 +561,7 @@ def made_home(tmp_path, monkeypatch):
 def test_under_a_home_only_a_toolchain_venv_or_node_modules_is_granted(tmp_path, monkeypatch,
                                                                        path):
     home = made_home(tmp_path, monkeypatch)
-    assert os_sandbox._granted([str(home / path)]) == [os.path.realpath(home / path)]
+    assert os_sandbox.granted([str(home / path)]) == [os.path.realpath(home / path)]
 
 
 @pytest.mark.parametrize("path", REFUSED_UNDER_A_HOME)
@@ -570,14 +570,14 @@ def test_nothing_else_under_a_home_is_granted(tmp_path, monkeypatch, path):
     shim directory, a PATH directory of the user's, a checkout outside its
     venv: none is in the allowlist."""
     home = made_home(tmp_path, monkeypatch)
-    assert os_sandbox._granted([str(home / path)]) == []
+    assert os_sandbox.granted([str(home / path)]) == []
 
 
 @pytest.mark.parametrize("where", ["home", "outside"])
 def test_a_conda_environment_is_granted_only_its_bin_and_lib(tmp_path, monkeypatch, where):
     """A conda root holds .condarc (channel tokens), conda-meta/state (`conda
     env config vars`), etc/conda/activate.d, pkgs and every other
-    environment: asked for a root or an environment, _granted gives only
+    environment: asked for a root or an environment, granted() gives only
     that one's bin and lib; asked for anything else of it, nothing. Under
     the home or outside it (what Linux binds)."""
     home = tmp_path / "account"
@@ -591,13 +591,13 @@ def test_a_conda_environment_is_granted_only_its_bin_and_lib(tmp_path, monkeypat
     (root / "pkgs").mkdir()
     (root / ".condarc").write_text("channels: [https://t/TOKEN/conda]\n")
     real = os.path.realpath
-    assert os_sandbox._granted([str(root)]) == [real(root / "bin"), real(root / "lib")]
+    assert os_sandbox.granted([str(root)]) == [real(root / "bin"), real(root / "lib")]
     asked = [str(root / part) for part in (
         "", "bin", "lib/python3.12", "envs", "envs/py", "envs/other/conda-meta", "conda-meta",
         "conda-meta/state", "etc", "etc/conda", "pkgs", ".condarc", "include")]
-    assert os_sandbox._granted(asked) == sorted(real(root / part) for part in (
+    assert os_sandbox.granted(asked) == sorted(real(root / part) for part in (
         "bin", "lib", "lib/python3.12", "envs/py/bin", "envs/py/lib"))
-    assert os_sandbox._ungranted([str(root)]) == []
+    assert os_sandbox.ungranted([str(root)]) == []
 
 
 def test_a_home_holding_conda_meta_is_not_granted_its_bin(tmp_path, monkeypatch):
@@ -605,7 +605,7 @@ def test_a_home_holding_conda_meta_is_not_granted_its_bin(tmp_path, monkeypatch)
     for part in ("conda-meta", "bin", "lib"):
         (home / part).mkdir(parents=True)
     monkeypatch.setattr(os_sandbox, "homes", lambda: [os.path.realpath(home)])
-    assert os_sandbox._granted([str(home), str(home / "bin"), str(home / "lib")]) == []
+    assert os_sandbox.granted([str(home), str(home / "bin"), str(home / "lib")]) == []
 
 
 def tokens_in_granted_places(tmp_path, monkeypatch):
@@ -724,7 +724,7 @@ def test_a_toolchain_directory_holding_a_conda_root_grants_only_that_roots_bin_a
     # anyway); Linux: the root is not bound, so there is nothing to mask.
     assert masked == (sorted([real(prefix / ".condarc"), real(prefix / "conda-meta/state")])
                       if platform == "darwin" else [])
-    assert os_sandbox._ungranted([str(pyenv), str(asdf)]) == [real(asdf), real(pyenv)]
+    assert os_sandbox.ungranted([str(pyenv), str(asdf)]) == [real(asdf), real(pyenv)]
 
 
 @pytest.mark.parametrize("platform", ["darwin", "linux"])
@@ -780,9 +780,9 @@ def test_a_grant_too_large_to_walk_is_refused(tmp_path, monkeypatch, cap, value)
     for name in "cdefg":
         (version / name).write_text("")
     monkeypatch.setattr(os_sandbox, "homes", lambda: [os_sandbox._canonical(str(home))])
-    assert os_sandbox._granted([str(version)]) == [os.path.realpath(version)]
+    assert os_sandbox.granted([str(version)]) == [os.path.realpath(version)]
     monkeypatch.setattr(os_sandbox, cap, value)
-    assert os_sandbox._granted([str(version)]) == []
+    assert os_sandbox.granted([str(version)]) == []
 
 
 @pytest.mark.skipif(os.geteuid() == 0, reason="root lists a directory whatever its mode")
@@ -795,7 +795,7 @@ def test_a_grant_holding_a_directory_that_cannot_be_listed_is_refused(tmp_path, 
     monkeypatch.setattr(os_sandbox, "homes", lambda: [os_sandbox._canonical(str(home))])
     hidden.chmod(0o311)
     try:
-        assert os_sandbox._granted([str(hidden.parent)]) == []
+        assert os_sandbox.granted([str(hidden.parent)]) == []
     finally:
         hidden.chmod(0o755)
 
@@ -808,7 +808,7 @@ def test_a_link_in_a_grant_is_not_followed(tmp_path, monkeypatch):
     version.mkdir(parents=True)
     (version / "elsewhere").symlink_to(a_conda_root(tmp_path / "conda"))
     monkeypatch.setattr(os_sandbox, "homes", lambda: [os_sandbox._canonical(str(home))])
-    assert os_sandbox._granted([str(version)]) == [os.path.realpath(version)]
+    assert os_sandbox.granted([str(version)]) == [os.path.realpath(version)]
 
 
 def test_the_macos_profile_masks_an_interpreters_conda_root_outside_the_home(tmp_path,
@@ -864,7 +864,7 @@ def test_a_gate_walks_each_grant_once(tmp_path, monkeypatch):
     walked.clear()
     with os_sandbox.walks_cached():
         for _ in range(3):
-            os_sandbox._granted([str(Path(sys.prefix))])
+            os_sandbox.granted([str(Path(sys.prefix))])
     assert len(walked) == len(set(walked)) <= 1
 
 
@@ -886,14 +886,14 @@ def test_a_case_or_alias_variant_of_a_refused_path_is_refused(tmp_path, monkeypa
     real = os.path.realpath(home)
     path = variant.format(home=real, HOME=real.upper(), data=os_sandbox._DATA_VOLUME + real)
     assert os.path.exists(path)
-    assert os_sandbox._granted([path]) == []
+    assert os_sandbox.granted([path]) == []
 
 
 @case_insensitive
 def test_a_case_variant_of_a_granted_path_is_granted_as_spelled_on_disk(tmp_path, monkeypatch):
     home = made_home(tmp_path, monkeypatch)
     real = os.path.realpath(home)
-    assert os_sandbox._granted([real.upper() + "/.PYENV/VERSIONS/3.12.1"]) == \
+    assert os_sandbox.granted([real.upper() + "/.PYENV/VERSIONS/3.12.1"]) == \
         [os.path.join(real, ".pyenv", "versions", "3.12.1")]
 
 
@@ -906,10 +906,10 @@ def test_nothing_under_tmp_or_run_is_granted(where):
     if where.endswith("tmp"):
         made = tempfile.mkdtemp(dir=where)
         try:
-            assert os_sandbox._granted([made]) == []
+            assert os_sandbox.granted([made]) == []
         finally:
             os.rmdir(made)
-    assert os_sandbox._granted([where]) == []
+    assert os_sandbox.granted([where]) == []
 
 
 @pytest.mark.parametrize("where", ["/", "/var", "/private", "/private/var", "/dev",
@@ -923,7 +923,7 @@ def test_nothing_holding_or_in_a_socket_or_kernel_tree_is_granted(monkeypatch, w
     if not os.path.exists(where):
         pytest.skip(f"{where} does not exist on this machine")
     monkeypatch.setattr(os_sandbox, "homes", lambda: [])
-    assert os_sandbox._granted([where]) == []
+    assert os_sandbox.granted([where]) == []
 
 
 @pytest.mark.parametrize("trees", ["_SOCKET_TREES", "_KERNEL_TREES"])
@@ -936,7 +936,7 @@ def test_a_tree_is_refused_in_both_directions(tmp_path, monkeypatch, trees, wher
     monkeypatch.setattr(os_sandbox, trees, (os.path.realpath(tmp_path / "var" / "run"),))
     monkeypatch.setattr(os_sandbox, "homes", lambda: [os.path.realpath(tmp_path / "home")])
     expected = [os.path.realpath(tmp_path / where)] if where == "var/lib" else []
-    assert os_sandbox._granted([str(tmp_path / where)]) == expected
+    assert os_sandbox.granted([str(tmp_path / where)]) == expected
 
 
 def linux_wrap(tmp_path, monkeypatch, read_only=()):
@@ -1014,7 +1014,7 @@ def test_the_tool_comes_from_a_system_directory_never_path(tmp_path, monkeypatch
 
 @pytest.mark.parametrize("platform", ["darwin", "linux"])
 def test_no_home_is_unavailable_never_a_silent_pass(tmp_path, monkeypatch, platform):
-    """With no home, _granted has none to refuse (nor its credential trees):
+    """With no home, granted() has none to refuse (nor its credential trees):
     refused on Linux as on macOS."""
     monkeypatch.setattr(sys, "platform", platform)
     monkeypatch.setattr(os_sandbox, "_is_executable", lambda path: True)
@@ -1192,7 +1192,7 @@ def test_a_conda_interpreter_is_granted_to_the_probe(tmp_path, monkeypatch, root
         os_sandbox.self_test(tmp_path / "c", tmp_path / "r")
     assert len(seen) == 1
     prefix = os.path.realpath(home / root)
-    assert os_sandbox._granted(asked[0]) == [f"{prefix}/bin", f"{prefix}/lib"]
+    assert os_sandbox.granted(asked[0]) == [f"{prefix}/bin", f"{prefix}/lib"]
 
 
 GOOD = {"clone": "ok", "outside": "denied", "net": "blocked", "unix_outside": "blocked",

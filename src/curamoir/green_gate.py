@@ -75,11 +75,16 @@ minus a denylist, so a credential whose name announces nothing (a token in
 `SSH_AUTH_SOCK` or `KUBECONFIG`. Kept: USER, LOGNAME, LANG, TZ and LC_*,
 and the version managers' roots (PYENV_ROOT, ASDF_DATA_DIR, ASDF_DIR,
 VOLTA_HOME, NVM_DIR; directories, not secrets), defaulted to their place
-under the real HOME when unset, so a pyenv, asdf or volta shim on PATH
-still finds its installs. PYTHONUSERBASE is the user base that PATH's
-`python3` reports in the sweep's own environment, so a pytest installed
-with `pip install --user` (macOS's /usr/bin/python3 has no other) is still
-found under the fresh HOME.
+under the real HOME when unset; and PYTHONUSERBASE, the user base that
+PATH's `python3` reports in the sweep's own environment (the fresh HOME
+would otherwise move it). They let a shim (pyenv's, asdf's, volta's) find
+its installs and a `pip install --user` pytest be found, but only where
+the OS sandbox grants the root or user base, which is outside the home
+(/opt/pyenv, a shared user base). Under a home neither is granted
+(os_sandbox.granted grants only a manager's installed versions, and
+~/Library is a credential tree), so there such a shim or `--user` tool
+fails: the base is red or the command not runnable, and a not-runnable
+refusal names what was not granted.
 Built: PATH (the reused venv's bin and `node_modules/.bin` first, then the
 user's PATH whole: PATH names directories, not secrets, and pruning those
 under $HOME would break a pyenv, nvm or ~/.local python3 while protecting
@@ -101,14 +106,18 @@ HOME and TMPDIR); no reads under the user's home but the paths the run
 needs (_read_only); no network (on macOS not even loopback unless the
 base's `sweep.test_loopback` is true); no connection to a Unix socket
 outside those two; on macOS no Mach service that acts outside the sandbox
-(LaunchServices, launchd, AppleEvents, mDNSResponder). macOS uses `sandbox-exec` with the shipped profile
-(os_sandbox.sb), Linux bubblewrap (`bwrap`, which needs unprivileged user
-namespaces); any other platform, or the tool missing, refuses. Before the
-first run of each gate, os_sandbox.self_test proves it through the same
-argv path (os_sandbox._CHECKS: writes, network, DNS, Unix sockets, reads
-under the home, and on macOS launchd and LaunchServices). On Linux the run
-sees only the system directories and what _read_only names (PATH, the venv
-and its interpreter, the version managers), read-only. Failing either is a GateError, so the sweep refuses
+(LaunchServices, launchd, AppleEvents, mDNSResponder). macOS uses
+`sandbox-exec` with the shipped profile (os_sandbox.sb), Linux bubblewrap
+(`bwrap`, which needs unprivileged user namespaces); any other platform,
+or the tool missing, refuses. Before the first run of each gate,
+os_sandbox.self_test proves it through the same argv path
+(os_sandbox._CHECKS: writes, network, DNS, Unix sockets, reads under the
+home, hard links into the run's directory, the home's Data-volume alias,
+masked token files in a grant, loopback, and on macOS launchd and
+LaunchServices). On Linux the run sees only the system directories and
+what _read_only names (PATH, the venv and its interpreter, a version
+manager's installed versions), read-only. If no sandbox is available or
+its self-test fails, that is a GateError, so the sweep refuses
 (TEST_GATE, "the test command was not run: no OS sandbox ..."): there is
 no unsandboxed fallback. OS_SANDBOX is the seam tests replace.
 
@@ -600,9 +609,12 @@ def sandbox_environment(source, root=None, src=False):
     checkout in the reused venv cannot shadow the fixed code. Plus
     PYTHONDONTWRITEBYTECODE=1 and CI=true; PYTHONUSERBASE is the user
     base of that PATH's `python3` (_user_base) and the version managers'
-    roots are kept (_VERSION_MANAGER_ROOTS), so a `pip install --user`
-    pytest and a pyenv or asdf shim still resolve under the fresh HOME and
-    TMPDIR that are added per run (_run_command), each removed after it."""
+    roots are kept (_VERSION_MANAGER_ROOTS), which the fresh HOME and
+    TMPDIR added per run (_run_command, each removed after it) would
+    otherwise move. A `pip install --user` pytest or a pyenv or asdf shim
+    then resolves only where the OS sandbox grants that root or user base:
+    outside the home, never under it (module docstring, "The
+    environment")."""
     env = {key: value for key, value in os.environ.items()
            if key in _INHERITED or key.startswith("LC_")}
     env["PYTHONDONTWRITEBYTECODE"] = "1"
@@ -715,24 +727,32 @@ def _wrapped(argv, sandbox, scratch, env, loopback):
 def _read_only(env):
     """What a run may read that the OS sandbox otherwise hides
     (os_sandbox.wrap's `read_only`; on macOS, anything under the user's
-    home; on Linux, anything but the system directories): PATH's
-    directories, the reused venv and the installation its interpreter links
-    to (_installation), NODE_PATH, the user base and the version managers'
-    roots, as os_sandbox._granted keeps them (under a home only its
-    allowlist: toolchain directories, a venv, a conda environment's bin
-    and lib, a node_modules; never a credential tree, a socket directory or
-    a home, nor one holding a conda environment or a nested venv; and a
-    token-bearing pip.conf, .condarc or npmrc in one masked).
-    Read-only, and only the paths named, so a tool on PATH whose link points
-    elsewhere under the home (outside these) cannot be read and fails:
-    then the base is red or the command not runnable, and no PR opens."""
-    return os_sandbox._granted(_wanted(env))
+    home; on Linux, anything but the system directories): of what the run
+    asks for (_wanted: PATH's directories, the reused venv and the
+    installation its interpreter links to, NODE_PATH, the user base and the
+    version managers' roots), what os_sandbox.granted allows; its docstring
+    is the rule set. Read-only, and only the paths named, so a tool on PATH
+    whose link points elsewhere under the home (outside these) cannot be
+    read and fails: then the base is red or the command not runnable, and
+    no PR opens.
+
+    WHY filtered here, though wrap() filters again: wrap() is the
+    guarantee (every grant passes os_sandbox.granted there, whoever calls
+    it); filtering here too keeps the gate's side on the same rules as
+    _not_granted, which names what was asked for (_wanted) but refused
+    (os_sandbox.ungranted), so a refusal can say why a tool could not be
+    run and what it names is exactly what the run did not get."""
+    return os_sandbox.granted(_wanted(env))
 
 
 def _wanted(env):
-    """Every absolute path _read_only asks os_sandbox._granted for."""
+    """Every absolute path _read_only asks os_sandbox.granted for."""
     paths = [entry for name in ("PATH", "NODE_PATH")
              for entry in env.get(name, "").split(os.pathsep)]
+    # The user base and the version managers' roots are asked for though
+    # one under a home is never granted (os_sandbox.granted): one outside
+    # it (/opt/pyenv, a shared PYTHONUSERBASE) is, and a shim or a
+    # `--user` tool there then works.
     paths += [env.get(name, "") for name in ("VIRTUAL_ENV", "PYTHONUSERBASE",
                                              *_VERSION_MANAGER_ROOTS)]
     venv = env.get("VIRTUAL_ENV")
@@ -766,11 +786,11 @@ def _installation(interpreter):
     resolved binary, which for a binary in ~/bin is the home itself and for
     one planted in a credential tree is that tree. So only a real
     installation (lib/pythonX.Y beside a python, lib/node_modules beside
-    node) is offered, and os_sandbox._granted then grants one under a home
-    only inside a toolchain directory (its allowlist), and of a conda
-    environment's prefix only its bin and lib (never the root, with its
-    .condarc and other environments). A refused prefix is left out
-    silently: a run that needed it fails, so no PR opens."""
+    node) is offered, and os_sandbox.granted then decides what of it may be
+    read (its docstring has the rules: under a home, only a toolchain
+    directory's version; of a conda prefix, only its bin and lib). A
+    refused prefix is left out silently: a run that needed it fails, so no
+    PR opens."""
     prefix = os.path.dirname(os.path.dirname(os.path.realpath(interpreter)))
     lib = os.path.join(prefix, "lib")
     if os.path.basename(interpreter) == "node":
@@ -1068,11 +1088,13 @@ def _not_granted(env):
     """What the OS sandbox would not grant of what a run asked to read
     (_wanted), said plainly: a test tool there could not be run. "" when
     all was granted."""
-    refused = os_sandbox._ungranted(_wanted(env))
+    refused = os_sandbox.ungranted(_wanted(env))
     if not refused:
         return ""
     return (f"; the OS sandbox did not grant {', '.join(refused)} "
-            f"({os_sandbox.REFUSAL_RULE}), so a tool there could not be run")
+            f"({os_sandbox.REFUSAL_RULE}), so a tool there could not be run; install the "
+            "test tool outside your home, in one of those toolchain directories, or in a "
+            "venv or node_modules")
 
 
 def _not_runnable(runs):

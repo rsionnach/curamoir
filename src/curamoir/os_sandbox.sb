@@ -1,7 +1,9 @@
 ;; cúramóir's macOS sandbox for the E3-R4 test run (os_sandbox.wrap, cm-p2f):
 ;; the static part. wrap() appends the rules that depend on the run (reads
-;; under HOME, loopback) and passes the whole text with `sandbox-exec -p`,
-;; with -D CLONE=<realpath> -D RUN=<realpath> and one -D per path it names.
+;; under HOME denied and the grants allowed again, each masked token file of
+;; a grant denied again, loopback; os_sandbox._darwin_rules) and passes the
+;; whole text with `sandbox-exec -p`, with -D CLONE=<realpath>
+;; -D RUN=<realpath> and one -D per path it names.
 ;; Parameters MUST be real paths (/private/tmp, not /tmp): the kernel matches
 ;; the resolved path. In SBPL a later rule wins over an earlier one.
 ;;
@@ -19,7 +21,9 @@
 ;; Unix sockets: a test may make its own (multiprocessing, node IPC), but
 ;; may connect only to one inside the clone or the run's directory, never to
 ;; a daemon's socket elsewhere (a docker socket, an ssh agent). One filter
-;; per rule: a rule naming two subpaths matched neither when tested.
+;; per rule here: a network-outbound rule naming two subpaths matched
+;; neither when tested. The limit was seen with network filters (and is
+;; kept for file-link below); file-write* takes several filters in one rule.
 (allow network* (local unix-socket))
 (deny network-outbound (remote unix-socket))
 (allow network-outbound (remote unix-socket (subpath (param "CLONE"))))
@@ -54,7 +58,7 @@
 ;; by path) into the writable directories is denied, and could not be read
 ;; back through its new, allowed path. The write rules below already refuse
 ;; such a link on 14.2 (the source must be writable); this rule does not
-;; depend on that. One filter per rule, as above.
+;; depend on that. One filter per rule, as for the sockets above.
 (deny file-link)
 (allow file-link (subpath (param "CLONE")))
 (allow file-link (subpath (param "RUN")))

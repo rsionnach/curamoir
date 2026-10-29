@@ -183,7 +183,8 @@ before any of the features:
   your tests on its fixes, in a throwaway clone, under `sandbox-exec` (macOS)
   or `bwrap` (Linux). The tests can write only inside that clone and their own
   temporary directory; cannot read your home directory beyond what the run
-  needs (the reused venv and interpreter, PATH, version managers); have no
+  needs (the reused venv and interpreter, PATH, a version manager's installed
+  versions; never a credential directory such as `~/.ssh` or `~/.config`); have no
   network (on macOS not even loopback unless `sweep.test_loopback: true` is
   committed, for a suite that starts a local server); and reach no daemon's
   socket and, on macOS, no system service that acts outside the sandbox

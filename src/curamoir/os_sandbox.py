@@ -10,30 +10,30 @@ socket; no service that acts outside the sandbox.
 
 - **macOS**: `sandbox-exec -p <profile> -D CLONE=... -D RUN=... -D ...`,
   the profile being os_sandbox.sb (shipped beside this module: network,
-  Unix sockets, Mach services, signals, writes) plus the rules wrap()
-  builds for this run (_darwin_rules): reads under the user's home (and
-  its /System/Volumes/Data alias) denied except `read_only`, CLONE and RUN
-  (and the metadata of the directories above them, so a path can be
-  resolved), and loopback when `loopback`. Hard links only within CLONE
-  and RUN, so no file of the home's gets an allowed second name.
-  Every path is a `-D` parameter, never spliced into the profile text.
-  sandbox-exec is deprecated but present on every macOS release, and has no
-  supported command-line successor (Chromium and Bazel use it).
+  Unix sockets, Mach services, signals, hard links, writes) plus the rules
+  wrap() builds for this run (_darwin_rules): reads under the user's home
+  (and its /System/Volumes/Data alias) denied except what granted()
+  allows, CLONE and RUN (and the metadata of the directories above them,
+  so a path can be resolved); each masked file denied again; and loopback
+  when `loopback`. Hard links only within CLONE and RUN, so no file of the
+  home's gets an allowed second name. Every path is a `-D` parameter,
+  never spliced into the profile text. sandbox-exec is deprecated but
+  present on every macOS release, and has no supported command-line
+  successor (Chromium and Bazel use it).
 - **Linux**: bubblewrap (`bwrap`), deny by default: a fresh root holding
   only the system directories (/usr, /bin, /sbin, /lib*), the parts of /etc
-  a runtime reads (_LINUX_ETC), a fresh /tmp, /dev and /proc, `read_only`
-  (never the home directory itself or anything holding it, nor a socket or
-  kernel tree or anything in or holding one; bound before /dev, /proc and
-  /tmp, so those stay the run's own) read-only, and
-  the clone and the run's directory writable; new network, pid and IPC
-  namespaces (`--unshare-net`: a private loopback that reaches nothing of
-  the host's, and no host abstract socket). Nothing else of the host is
-  there, so no host socket (/run, /var/run, the home directory) either.
-  bwrap needs unprivileged user namespaces; where they are off (a hardened
-  kernel, Ubuntu 24.04's AppArmor restriction without bwrap's profile), it
-  exits non-zero and self_test() says so. This line has NOT been run on
-  this project's development machine (macOS); cm-xy9.7 verifies it on
-  Linux, and its self-test is what proves it wherever it runs.
+  a runtime reads (_LINUX_ETC), what granted() allows of `read_only`
+  (read-only, each masked file covered by /dev/null), a fresh /dev, /proc
+  and /tmp, and the clone and the run's directory writable (wrap() gives
+  the order and why); new network, pid and IPC namespaces
+  (`--unshare-net`: a private loopback that reaches nothing of the host's,
+  and no host abstract socket). Nothing else of the host is there, so no
+  host socket (/run, /var/run, the home directory) either. bwrap needs
+  unprivileged user namespaces; where they are off (a hardened kernel,
+  Ubuntu 24.04's AppArmor restriction without bwrap's profile), it exits
+  non-zero and self_test() says so. This line has NOT been run on this
+  project's development machine (macOS); cm-xy9.7 verifies it on Linux,
+  and its self-test is what proves it wherever it runs.
 - **Anything else**, or the tool missing: OsSandboxUnavailable. Nothing
   here falls back to running unsandboxed: the gate refuses instead.
 
@@ -45,24 +45,22 @@ sandbox) is OsSandboxUnavailable naming the check.
 Commands are argv lists throughout, never a shell string: the research on
 this bead found that a command smuggled through a string ran unsandboxed.
 
-A conda environment is granted only its bin and lib (_conda_parts). Each
-grant is walked (_walk: bounded, no link followed) and refused whole if it
-holds a conda environment, or a venv anywhere but its top or envs/<name>,
-or is too large to walk; every file in it that may hold an index's or a
-channel's token (pip.conf, .condarc, .npmrc, conda-meta/state: _MASKED),
-and those of the conda environment each grant is in, are masked: denied
-on macOS, /dev/null over them on Linux.
+What of `read_only` a run may read is decided in one place, granted():
+its docstring is the one full list of the rules, and REFUSAL_RULE says
+them to the user. A grant's files that may hold a token (_MASKED: pip.conf,
+.condarc, .npmrc, conda-meta/state) stay unreadable (_masked): denied on
+macOS, covered by /dev/null on Linux.
 
 Limits, stated: on macOS, reads OUTSIDE the user's home stay open (system
-libraries, /opt, /usr/local, other volumes), and a run can still read
-what it was granted under the home (the reused venv; never a home, nor
-anything in or holding a credential tree, _CREDENTIAL_TREES). A machine that is
-offline passes the network and DNS checks without proving the sandbox
-denies them; the other checks still prove the sandbox is on. Grants are
-walked once, before a gate's runs (_walk): a token file the user's own
-processes add to a grant mid-gate (`npm install`, `pip config set --site`
-in the source checkout) is not masked for the rest of that gate; nothing
-inside the sandbox can write a grant.
+libraries, /opt, /usr/local, other volumes), and a run can still read what
+it was granted under the home (the reused venv; never a home, nor anything
+in or holding a credential tree). A machine that is offline passes the
+network and DNS checks without proving the sandbox denies them; the other
+checks still prove the sandbox is on. Grants are walked once, before a
+gate's runs (_walk): a token file the user's own processes add to a grant
+mid-gate (`npm install`, `pip config set --site` in the source checkout) is
+not masked for the rest of that gate; nothing inside the sandbox can write
+a grant.
 """
 
 import contextlib
@@ -90,6 +88,28 @@ _LINUX_SYSTEM = ("/usr", "/bin", "/sbin", "/lib", "/lib32", "/lib64", "/libx32")
 _LINUX_ETC = ("/etc/ld.so.cache", "/etc/ld.so.conf", "/etc/ld.so.conf.d", "/etc/passwd",
               "/etc/group", "/etc/nsswitch.conf", "/etc/localtime", "/etc/hosts",
               "/etc/ssl", "/etc/ca-certificates", "/etc/pki", "/etc/alternatives")
+
+#: Linux: where a conda root is looked for under the system directories
+#: bwrap binds whole (its children: /usr/local/miniconda3), as no grant
+#: need name it to be visible. One deeper is not looked for (a stated
+#: limit); macOS's reads outside the home are open anyway.
+_SYSTEM_CONDA_PARENTS = ("/usr", "/usr/local")
+
+#: Where the sandbox tools are taken from: fixed system locations, never the
+#: sweep's PATH (a directory early on it could hold a `sandbox-exec` that
+#: confines nothing). /usr/local/bin is root's on a Linux system.
+_SANDBOX_EXEC = ("/usr/bin/sandbox-exec",)
+_BWRAP = ("/usr/bin/bwrap", "/bin/bwrap", "/usr/local/bin/bwrap")
+
+#: macOS's Data volume, where /Users (and /private, /opt, /usr/local) really
+#: live: a home is also reachable as /System/Volumes/Data/<home>, through
+#: the firmlink. On macOS 14.2 the kernel matches the canonical /Users path
+#: whichever spelling was opened (tested: a read through the alias, through
+#: /.vol/<device>/<inode> and through /Volumes/Macintosh HD is denied by the
+#: /Users rule, and a rule naming the alias matches nothing), so the alias
+#: rule _darwin_rules adds is a second line should a release match the
+#: path as given; self_test's `home_alias` check proves the alias denied.
+_DATA_VOLUME = "/System/Volumes/Data"
 
 #: The self-test's probe, run by /bin/sh. $1 a file to create in the clone,
 #: $2 one to create outside the clone and the run's directory, $3 the
@@ -272,6 +292,16 @@ def wrap(argv, *, clone, run_dir, read_only=(), loopback=False):
                                        + ", ".join(os.path.dirname(p) for p in _BWRAP)
                                        + "; install it (e.g. `apt install bubblewrap`)")
         _require_home()
+        # The mounts, in order. bwrap applies them in turn and a later one
+        # covers an earlier one at the same or an enclosing path, so the
+        # order is the policy: (1) the system directories and (2) the parts
+        # of /etc, read-only; (3) the grants, read-only; (4) each masked
+        # file, /dev/null over it, after the grant holding it; (5) the run's
+        # own /dev, /proc and /tmp, after the grants, so nothing granted can
+        # stand in for them (granted() refuses those trees besides); (6) the
+        # clone and the run's directory, writable, last: mkdtemp makes both
+        # in the system temporary directory, usually /tmp, so they must come
+        # after (5)'s tmpfs or it would hide them.
         line = [tool]
         for path in _LINUX_SYSTEM:
             try:
@@ -284,16 +314,12 @@ def wrap(argv, *, clone, run_dir, read_only=(), loopback=False):
                                            f"be bound: {error}") from error
         for path in _LINUX_ETC:
             line += ["--ro-bind-try", path, path]
-        # The grants before --dev, --proc and --tmpfs: a later mount covers an
-        # earlier one, so the run's own /dev, /proc and /tmp always win over
-        # anything granted (which _granted refuses besides).
-        granted = _granted(read_only)
-        for path in granted:
+        grants = granted(read_only)
+        for path in grants:
             line += ["--ro-bind-try", path, path]
-        # Each masked file after the grant holding it: a later mount covers
-        # an earlier one. --ro-bind, not -try: a mask that cannot be made
-        # fails the run rather than leaving the file readable.
-        for path in _masked(granted):
+        # --ro-bind, not -try: a mask that cannot be made fails the run
+        # rather than leaving the file readable.
+        for path in _masked(grants):
             line += ["--ro-bind", "/dev/null", path]
         line += ["--dev", "/dev", "--proc", "/proc", "--tmpfs", "/tmp"]
         return [*line, "--bind", clone, clone, "--bind", run_dir, run_dir,
@@ -304,19 +330,12 @@ def wrap(argv, *, clone, run_dir, read_only=(), loopback=False):
 
 
 def _require_home():
-    """OsSandboxUnavailable when no home directory is found: _granted then
+    """OsSandboxUnavailable when no home directory is found: granted() then
     has none to refuse (nor its credential trees), and on macOS reads under
     it cannot be denied."""
     if not homes():
         raise OsSandboxUnavailable("no home directory was found, so reads under it cannot "
                                    "be denied, nor a grant of it or its credentials refused")
-
-
-#: Where the sandbox tools are taken from: fixed system locations, never the
-#: sweep's PATH (a directory early on it could hold a `sandbox-exec` that
-#: confines nothing). /usr/local/bin is root's on a Linux system.
-_SANDBOX_EXEC = ("/usr/bin/sandbox-exec",)
-_BWRAP = ("/usr/bin/bwrap", "/bin/bwrap", "/usr/local/bin/bwrap")
 
 
 def _is_executable(path):
@@ -397,7 +416,7 @@ def homes():
 
 #: Where a home keeps credentials (keys, tokens, keychains, cloud and
 #: cluster logins), relative to it: nothing in one, and nothing holding one,
-#: is ever granted (_granted). All of ~/.config: gh, gcloud, git's
+#: is ever granted (granted()). All of ~/.config: gh, gcloud, git's
 #: credential store and many more keep tokens there, and no version
 #: manager installs a toolchain there (mise's live in ~/.local/share/mise).
 #: All of ~/Library: keychains, cookies, application tokens (a macOS
@@ -410,26 +429,21 @@ _CREDENTIAL_TREES = tuple(os.path.join(*parts.split("/")) for parts in (
     ".condarc"))
 
 
-#: Under a home, the ONLY directories whose contents may be granted (an
-#: allowlist; the credential trees above are a second check): where version
-#: managers keep installed toolchains, never their whole root (~/.cargo
-#: holds credentials.toml, ~/.pyenv and ~/.asdf shims and plugins):
-#: ~/.pyenv/versions, ~/.nvm/versions, ~/.asdf/installs, ~/.volta/tools,
-#: ~/.rustup/toolchains, ~/.rbenv/versions, ~/.sdkman/candidates,
-#: ~/.local/share/uv/python and ~/.local/share/mise/installs. Only what is
-#: IN one (a version, ~/.pyenv/versions/3.12.1, or anything in it), never
-#: the directory itself: it holds every version, one of which may be a
-#: conda root (versions/miniconda3-latest). ~/.cargo/bin (_TOOL_DIRS) holds
-#: tools, not versions, and is granted itself. Besides these, a Python venv (a directory
-#: holding pyvenv.cfg, and anything in it), a conda environment's bin or lib
-#: (never its root: _conda_parts) and anything in a `node_modules` (the
-#: checkout's own, which is where the gate's PATH and NODE_PATH point).
-#: A shim (pyenv's, asdf's, volta's) that reads its manager's root is not
-#: granted and fails: the base is red or the command not runnable.
+#: Under a home, where version managers keep their installed versions:
+#: what is IN one of these (a version, ~/.pyenv/versions/3.12.1, or
+#: anything in it) is on the allowlist (_allowlisted; granted() has the
+#: whole rule set). Never the manager's whole root (~/.cargo holds
+#: credentials.toml, ~/.pyenv and ~/.asdf their shims and plugins), and
+#: never the directory itself: it holds every version, one of which may be a
+#: conda root (versions/miniconda3-latest). So a shim (pyenv's, asdf's,
+#: volta's) that reads its manager's root is not granted and fails: the
+#: base is red or the command not runnable.
 _TOOLCHAIN_DIRS = tuple(os.path.join(*parts.split("/")) for parts in (
     ".pyenv/versions", ".nvm/versions", ".asdf/installs", ".volta/tools", ".rustup/toolchains",
     ".rbenv/versions", ".sdkman/candidates", ".local/share/uv/python",
     ".local/share/mise/installs"))
+#: Under a home, directories of tools rather than versions, granted
+#: themselves as well as anything in them.
 _TOOL_DIRS = (os.path.join(".cargo", "bin"),)
 
 #: Never granted, nor anything in them, nor anything holding them (/var,
@@ -443,12 +457,19 @@ _SOCKET_TREES = ("/tmp", "/var/tmp", "/run", "/var/run", "/dev/shm", "/private/t
 #: macOS too, where reads outside the home are open anyway.
 _KERNEL_TREES = ("/dev", "/proc", "/sys")
 
-#: What _granted refuses, said where a refusal is reported.
-REFUSAL_RULE = ("under a home only a toolchain version, a venv, a conda environment's "
-                "bin or lib or a node_modules is granted, never a credential tree; nor a "
-                "socket or kernel directory, nor anything holding a home or one of those, "
-                "nor a directory holding a conda environment or a nested venv, or too large "
-                "to check")
+#: granted()'s rules, said to the user where a refusal is reported (the
+#: directories named from the constants, so the message cannot drift from
+#: them).
+REFUSAL_RULE = (
+    "under a home only an installed version in a toolchain directory ("
+    + ", ".join("~/" + directory for directory in _TOOLCHAIN_DIRS) + "), "
+    + ", ".join("~/" + directory for directory in _TOOL_DIRS)
+    + ", a venv, a conda environment's bin or lib, or a node_modules, or anything in one, "
+    "is granted; of a conda environment anywhere only its bin and lib; never a home or "
+    "anything holding one, nor anything in or holding a credential tree (~/.ssh, "
+    "~/.config, ~/Library, ...) or a socket or kernel directory (/tmp, /run, /dev, "
+    "/proc, ...); nor a directory holding a conda environment or a nested venv, holding "
+    "a directory that cannot be listed, or too large to check")
 
 #: Of a conda environment (a prefix holding conda-meta/: a conda root, or
 #: one of its envs/<name>), all that is ever granted: the root holds
@@ -478,40 +499,61 @@ _WALK_DEPTH = 64
 _WALK_ENTRIES = 2_000_000
 
 
-def _granted(paths):
-    """The `read_only` paths a run may read: absolute, existing, resolved
-    (_canonical), and never `/`, a socket or kernel tree (_SOCKET_TREES,
-    _KERNEL_TREES) or anything in or holding one, a home or anything
-    holding one, nor, under a home, anything but the allowlist
-    (_TOOLCHAIN_DIRS, a venv, a conda environment's bin or lib, a
-    node_modules), and never anything in or holding a credential tree
-    (_CREDENTIAL_TREES). A conda environment's prefix is translated here,
-    the one place every grant passes (_conda_parts): to its bin and lib,
-    so its root is never granted, whoever asked for it. And never a
-    directory _walk refuses (one holding a conda environment or a nested
-    venv, or too large to walk). Each
-    comparison is by identity (device, inode) of the path and its parents,
-    so neither case (`~/.SSH` on a case-insensitive volume) nor an alias
-    (/System/Volumes/Data/Users/...) slips past. A refused path is left out,
-    silently: the run then cannot read it, and fails if it needed it.
-    Sorted and deduplicated."""
+def granted(paths):
+    """Those of `paths` (wrap()'s `read_only`) a run may read, resolved,
+    sorted and deduplicated. This docstring is THE list of the rules: the
+    module docstring, REFUSAL_RULE and green_gate point here. Each path
+    goes through, in order:
+
+    1. It must be absolute and exist; anything else is dropped.
+    2. It is resolved (_canonical: realpath, and on macOS the kernel's own
+       spelling).
+    3. In a conda environment it is translated (_conda_parts): the prefix
+       becomes its bin and lib, and anything else of the environment is
+       dropped. Here, the one place every grant passes, so a conda root is
+       never granted whoever asked for it.
+    4. It is never `/`.
+    5. It is refused by where it is (_refused_by_place): in or holding a
+       socket or kernel tree; a home, or holding one; in or holding a
+       credential tree (_CREDENTIAL_TREES); or under a home but not on the
+       allowlist (_allowlisted): in a toolchain directory (_TOOLCHAIN_DIRS,
+       never the directory itself), ~/.cargo/bin or in it (_TOOL_DIRS), a
+       venv (a directory holding pyvenv.cfg) or in one, a conda
+       environment's bin or lib or in one (never the home's own), or a
+       node_modules or in one. Outside every home, nothing more is asked.
+    6. It is refused by what it holds (_walk gives None): a conda
+       environment anywhere in it; a venv anywhere but its top or
+       envs/<name>; a directory that cannot be listed; or more than
+       _WALK_DEPTH deep or _WALK_ENTRIES entries ("too large to check").
+       A grant in a system directory is not walked (_walk says why).
+
+    Step 5 compares by identity (device, inode) of the path and its
+    parents, so neither case (`~/.SSH` on a case-insensitive volume) nor an
+    alias (/System/Volumes/Data/Users/...) slips past. A refused path is
+    left out silently: the run cannot read it, and fails if it needed it
+    (green_gate names it, through ungranted()). What stays unreadable
+    inside a grant is _masked's."""
     found = set()
     every_home = homes()
     for path in paths:
         if not path or not os.path.isabs(path) or not os.path.exists(path):
             continue
         for real in _conda_parts(_canonical(path)):
-            if real != "/" and not _refused(real, every_home) and _walk(real) is not None:
+            if real == "/" or _refused_by_place(real, every_home):
+                continue
+            if _walk(real) is not None:
                 found.add(real)
     return sorted(found)
 
 
 def _conda_parts(path):
-    """`path` (resolved) as it may be granted: outside any conda environment
-    [path]; the environment's prefix (_conda_prefix) its bin and lib
-    (_CONDA_GRANTED) where they exist; anything in those [path]; anything
-    else of the prefix (conda-meta, etc, pkgs, envs, include, .condarc)
-    nothing."""
+    """`path` (resolved) as the list of what of it may be granted:
+
+    - outside any conda environment: [path];
+    - the environment's prefix (_conda_prefix) itself: its bin and lib
+      (_CONDA_GRANTED), those that exist;
+    - in the environment: [path] if it is in its bin or lib, else []
+      (conda-meta, etc, pkgs, envs, include, .condarc are never granted)."""
     prefix = _conda_prefix(path)
     if prefix is None:
         return [path]
@@ -534,25 +576,36 @@ def _conda_prefix(path):
 
 
 def _walk(grant):
-    """The masked files (_MASKED, _MASKED_DIRS; resolved) anywhere in
-    `grant` (a resolved directory or file), or None: the grant is refused
-    (_granted). Refused when the walk finds a conda environment
-    (conda-meta) anywhere in it: its root would be granted, which
-    _conda_parts never does; or a venv (pyvenv.cfg) anywhere but the
-    grant's top and its envs/<name> (pyenv-virtualenv's venvs in a
-    version), whose own pip.conf the walk would mask but which no grant of
-    a toolchain needs; or when a directory cannot be listed (an unlistable
-    one may still be read by name), or the walk passes _WALK_DEPTH or
-    _WALK_ENTRIES. No link is followed: what one points to is read by its
-    own path, which is denied unless granted (and walked) itself or
-    outside the home on macOS (open, as stated). A grant in a system
-    directory (_LINUX_SYSTEM: bound whole on Linux, outside the home on
-    macOS) is not walked, as the walk could not hide it: only its top's
-    masked files are found (_fixed_masks)."""
+    """What `grant` (a resolved directory or file) holds, as granted()
+    step 6 and _masked need it. Two answers:
+
+    - None: the grant is REFUSED. The walk found a conda environment
+      (conda-meta) anywhere in it, whose root would be granted, which
+      _conda_parts never allows; or a venv (pyvenv.cfg) anywhere but the
+      grant's top and its envs/<name> (pyenv-virtualenv's venvs in a
+      version), whose own pip.conf would need masking though no grant of a
+      toolchain needs it; or a directory it cannot list (an unlistable one
+      may still be read by name); or it passed _WALK_DEPTH or
+      _WALK_ENTRIES.
+    - a tuple: the grant may be read, and these are the files in it to
+      mask (_MASKED, _MASKED_DIRS; resolved), possibly none.
+
+    No link is followed: what one points to is read by its own path, which
+    is denied unless granted (and walked) itself, or outside the home on
+    macOS (open, as stated). Two kinds of grant are not walked. A single
+    file has nothing in it: it is its own mask when it is a token file. A
+    grant inside a system directory (_LINUX_SYSTEM) is visible to the run
+    whatever is decided here (Linux binds the whole system directory;
+    macOS leaves reads outside the home open), so refusing it would hide
+    nothing: only the token files at its top are masked (_fixed_masks),
+    and it is never refused for holding a conda environment or a venv."""
     cache = _walks.get()
     if cache is not None and grant in cache:
         return cache[grant]
     if not os.path.isdir(grant):
+        # A file granted by name: masked when it is itself a token file
+        # (a venv's pip.conf asked for directly), so granting it reads
+        # nothing.
         found = (grant,) if _is_masked(tuple(grant.split(os.sep))) else ()
     elif _in_system(grant):
         found = tuple(_fixed_masks(grant))
@@ -628,27 +681,27 @@ def _in_system(path):
                for root in _LINUX_SYSTEM)
 
 
-#: Linux: where a conda root is looked for under the system directories
-#: bwrap binds whole (its children: /usr/local/miniconda3), as no grant
-#: need name it to be visible. One deeper is not looked for (a stated
-#: limit); macOS's reads outside the home are open anyway.
-_SYSTEM_CONDA_PARENTS = ("/usr", "/usr/local")
-
-
-def _masked(granted):
+def _masked(grants):
     """The files a run must not read though they are visible to it,
-    resolved, sorted: those _walk found in each of `granted`; and those at
-    the top of the conda environment (_conda_prefix) each grant is in and
-    of each of its envs/<name> (_fixed_masks: .condarc, conda-meta/state),
-    on macOS wherever it is (outside the home its root is readable), on
-    Linux where bwrap shows it whole (in a system directory), with those of
-    a conda root under _SYSTEM_CONDA_PARENTS. Masks are by path: a hard
-    link to a masked file is not masked, but writes to a grant are denied,
-    so no run can make one. Only files that exist."""
+    resolved, sorted; only files that exist. Three sources:
+
+    - those _walk found in each of `grants`;
+    - those at the top of the conda environment (_conda_prefix) each grant
+      is in, and of each of its envs/<name> (_fixed_masks: .condarc,
+      conda-meta/state). On macOS for every such prefix: outside the home
+      its top is readable. On Linux only for a prefix in a system
+      directory, which bwrap binds whole: any other prefix is visible only
+      through grants, and of it granted() grants only bin and lib, so its
+      top files are not in the sandbox to mask;
+    - on Linux, those of a conda root under _SYSTEM_CONDA_PARENTS, visible
+      with the system directory though no grant names it.
+
+    Masks are by path: a hard link to a masked file is not masked, but
+    writes to a grant are denied, so no run can make one."""
     linux = sys.platform.startswith("linux")
     found = set()
     prefixes = set()
-    for path in granted:
+    for path in grants:
         found.update(_walk(path) or ())
         prefix = _conda_prefix(path)
         if prefix is not None and (not linux or _in_system(prefix)):
@@ -668,15 +721,26 @@ def _masked(granted):
     return sorted(found)
 
 
-def _ungranted(paths):
+def ungranted(paths):
     """Those of `paths` (absolute, existing; resolved, sorted, deduplicated)
-    that _granted refuses: what a run cannot read, to name in a refusal."""
+    that granted() refuses: what a run cannot read, to name in a refusal."""
     return sorted({_canonical(path) for path in paths
                    if path and os.path.isabs(path) and os.path.exists(path)
-                   and not _granted([path])})
+                   and not granted([path])})
 
 
-def _refused(path, every_home):
+def _refused_by_place(path, every_home):
+    """Whether `path` (resolved) is refused for where it is: granted()
+    step 5. Not the whole check: a conda environment's parts (step 3) and
+    what the path holds (step 6, _walk) are decided elsewhere. Refused, in
+    this order, when it is:
+
+    1. in or holding a socket or kernel tree (_SOCKET_TREES,
+       _KERNEL_TREES), by either spelling of it (the tree, or its
+       /System/Volumes/Data alias on macOS);
+    2. a home of `every_home`, or a directory holding one;
+    3. in or holding one of a home's credential trees (_near_credentials);
+    4. under a home but not on its allowlist (_allowlisted)."""
     lineage = _lineage(path)
     me = _identity(path)
     for tree in (*_SOCKET_TREES, *_KERNEL_TREES):
@@ -701,8 +765,10 @@ def _refused(path, every_home):
 
 
 def _allowlisted(path, lineage, home, home_id):
-    """Whether `path` (under `home`) is in a toolchain directory, a venv, a
-    conda environment's bin or lib, or a node_modules (_TOOLCHAIN_DIRS)."""
+    """Whether `path` (under `home`) is on the home's allowlist (granted()
+    step 5): in a toolchain directory (_TOOLCHAIN_DIRS, not the directory
+    itself), ~/.cargo/bin or in it (_TOOL_DIRS), or a venv, a conda
+    environment's bin or lib, or a node_modules, or in one."""
     me = _identity(path)
     for directory in _TOOLCHAIN_DIRS:
         identity = _identity(os.path.join(home, directory))
@@ -758,14 +824,14 @@ def _darwin_rules(clone, run_dir, read_only, loopback):
         params.append((name, value))
         return f'(param "{name}")'
 
-    granted = _granted(read_only)
+    grants = granted(read_only)
     under = []
     for home in homes():
         rules.append(f"(deny file-read* (subpath {param('HOME', home)}))")
         alias = _DATA_VOLUME + home
         if not _inside(home, _DATA_VOLUME) and os.path.isdir(alias):
             rules.append(f"(deny file-read* (subpath {param('ALIAS', alias)}))")
-        allowed = [p for p in [*granted, clone, run_dir] if _inside(p, home)]
+        allowed = [p for p in [*grants, clone, run_dir] if _inside(p, home)]
         under.extend((home, path) for path in allowed)
     metadata = set()
     for home, path in under:
@@ -776,23 +842,12 @@ def _darwin_rules(clone, run_dir, read_only, loopback):
             parent = os.path.dirname(parent)
     for directory in sorted(metadata):
         rules.append(f"(allow file-read-metadata (literal {param('META', directory)}))")
-    for path in _masked(granted):
+    for path in _masked(grants):
         rules.append(f"(deny file-read* (literal {param('MASK', path)}))")
     if loopback:
         rules += ['(allow network-bind network-inbound (local ip "localhost:*"))',
                   '(allow network-outbound (remote ip "localhost:*"))']
     return "\n" + "\n".join(rules) + "\n", params
-
-
-#: macOS's Data volume, where /Users (and /private, /opt, /usr/local) really
-#: live: a home is also reachable as /System/Volumes/Data/<home>, through
-#: the firmlink. On macOS 14.2 the kernel matches the canonical /Users path
-#: whichever spelling was opened (tested: a read through the alias, through
-#: /.vol/<device>/<inode> and through /Volumes/Macintosh HD is denied by the
-#: /Users rule, and a rule naming the alias matches nothing), so the alias
-#: rule _darwin_rules adds is a second line should a release match the
-#: path as given; self_test's `home_alias` check proves the alias denied.
-_DATA_VOLUME = "/System/Volumes/Data"
 
 
 def _inside(path, root):
@@ -810,12 +865,13 @@ def self_test(clone, run_dir, env=None, read_only=(), loopback=False):
     # grant fails every check as "did not run", so it is said plainly here.
     python = os.path.realpath(sys.executable)
     interpreter = [os.path.dirname(python), os.path.realpath(sys.base_prefix)]
-    refused = _ungranted(interpreter)
+    refused = ungranted(interpreter)
     if refused:
         raise OsSandboxUnavailable(
             f"the sweep's Python ({python}) cannot be granted to the sandbox: "
             f"{', '.join(refused)} is refused ({REFUSAL_RULE}), so the self-test's probe "
-            "cannot run in it; run the sweep with a Python installed elsewhere")
+            "cannot run in it; run the sweep with a Python installed outside your home or "
+            "in one of those toolchain directories (or a venv made from one)")
     token = secrets.token_hex(6)
     in_clone = os.path.join(clone_real, f".curamoir-os-sandbox-probe-{token}")
     inside_socket = os.path.join(run_real, f"s{token}")
@@ -876,7 +932,7 @@ def _mask_target(read_only):
     try to read: one the host reads non-empty, so an empty read inside is
     the mask (Linux's /dev/null) and not the file. "" where there is none:
     the check is then not asked, as nothing is masked to prove."""
-    for path in _masked(_granted(read_only)):
+    for path in _masked(granted(read_only)):
         try:
             with open(path, "rb") as handle:
                 if handle.read(1):
@@ -946,9 +1002,10 @@ def _home_target():
 #: it is unreadable as /System/Volumes/Data/<path> too (asked on macOS
 #: where that alias exists); `masked_read`, that a masked file in a granted
 #: venv or prefix (pip.conf, .condarc) is unreadable though its directory is
-#: granted (asked when one exists); `launchctl` and
-#: `launchservices` (macOS), that neither a launchd job nor an app can be
-#: started outside the sandbox. `loopback` is checked against the setting.
+#: granted (asked when one exists); `launchctl` and `launchservices`
+#: (macOS), that neither a launchd job nor an app can be started outside
+#: the sandbox; `loopback` (macOS), that 127.0.0.1 is reachable exactly when
+#: asked for.
 _CHECKS = (
     ("clone", "ok", "a write inside the clone did not succeed"),
     ("outside", "denied", "a write outside the clone and the run's directory was not denied"),
