@@ -58,7 +58,11 @@ libraries, /opt, /usr/local, other volumes), and a run can still read
 what it was granted under the home (the reused venv; never a home, nor
 anything in or holding a credential tree, _CREDENTIAL_TREES). A machine that is
 offline passes the network and DNS checks without proving the sandbox
-denies them; the other checks still prove the sandbox is on.
+denies them; the other checks still prove the sandbox is on. Grants are
+walked once, before a gate's runs (_walk): a token file the user's own
+processes add to a grant mid-gate (`npm install`, `pip config set --site`
+in the source checkout) is not masked for the rest of that gate; nothing
+inside the sandbox can write a grant.
 """
 
 import contextlib
@@ -465,11 +469,13 @@ _MASKED_DIRS = ("condarc.d",)
 
 #: A grant's walk (_walk): how deep and over how many entries in all it
 #: reads before it gives up. A grant it gives up on is refused, never
-#: granted partly checked. A scandir walk reads about 3us an entry (a uv
-#: CPython, ~2,500 entries, in under 10ms on macOS 14); the cap is under a
-#: second, and a node_modules beyond it is refused.
+#: granted partly checked. A scandir walk reads about 3-6us an entry (a uv
+#: CPython, ~2,500 entries, in under 10ms on macOS 14), and each grant is
+#: walked once a gate (walks_cached). The cap is sized for a monorepo's
+#: node_modules (150-400k entries is common): about 12s at worst, once; a
+#: tree beyond it is refused, and the refusal says it was too large to check.
 _WALK_DEPTH = 64
-_WALK_ENTRIES = 200_000
+_WALK_ENTRIES = 2_000_000
 
 
 def _granted(paths):
