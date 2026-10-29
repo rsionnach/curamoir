@@ -5,9 +5,15 @@
 2. Every destructive rule's ADVICE pinned by its text, as a literal string
    here and not imported from the code, so a rule that keeps refusing but
    loses or swaps its advice fails a test (`git branch -d -f` must get the
-   deletion advice, not the branch-move one).
-3. The package.json size bound observable: valid JSON padded past the bound
-   is unknown scripts, not read.
+   deletion advice, not the branch-move one). Rules the allowlist refuses
+   first (`git update-ref`, `git filter-branch`, `rm --no-preserve-root`)
+   are pinned through a wrapper, the only way their advice reaches an agent
+   (round 14). Both of the hook's fail-closed paths are pinned too:
+   pretooluse's own and policy.py's.
+3. The package.json size bound observable, at the exact bound and one byte
+   past it.
+4. The routing of a wrapped command to the destructive rule's advice holds
+   only for a DESTRUCTIVE denial (round 14).
 """
 
 import io
@@ -33,6 +39,8 @@ EMPTIED = "write to a new file, then mv it over, as two separate commands"
 SETTINGS = "say in the PR what should change; a job does not change the repository's settings"
 BRANCH = "leave the branch; say in the PR what should be deleted"
 API = "a job reads GitHub with gh api; it does not change it"
+EDIT_TOOL = "edit the file with the Edit tool, which keeps the old content"
+OWN_STATE = "leave .curamoir/ to cúramóir; a job writes through /curamoir: commands"
 
 
 # --- 1: an explicit force is not excused by a lease ------------------------------
@@ -121,6 +129,26 @@ ADVICE = [
     ("command git push --force", D, LEASE),
     ("GIT_DIR=x git reset --hard", D, STASH),
     ("FOO=1 git branch -D x", D, "git branch -d"),
+    # Round 14: the rest of the destructive pass, and sed's in-place forms.
+    ("find . -delete", D, "find the paths first, then delete the ones you mean by name"),
+    ("find . -exec cat {} ;", D, "find the paths first, then act on them by name"),
+    ("git restore a.py", D, STASH_PATH),
+    ("git reflog expire --all", D, "git reflog"),
+    ("git gc --prune=now", D, "git gc --auto"),
+    ("git worktree remove -f x", D, "git worktree remove (without --force)"),
+    ("git submodule deinit -f x", D, "git submodule deinit (without -f)"),
+    ("echo x > src/curamoir/cli.py", D, EDIT_TOOL),
+    ("cp a src/curamoir/cli.py", D, EDIT_TOOL),
+    # Reachable only through a wrapper: the allowlist refuses the bare form
+    # first (update-ref and filter-branch are not git subcommands it lists).
+    ("timeout 5 git update-ref -d refs/heads/x", D, "git branch -d"),
+    ("timeout 5 git filter-branch x", D, "git filter-repo on a clone, reviewed before pushing"),
+    ("timeout 5 rm -r --no-preserve-root /", D, "delete named paths without --no-preserve-root"),
+    ("echo x > .curamoir/ledger.jsonl", D, OWN_STATE),
+    ("timeout 5 mv a .curamoir/x", D, OWN_STATE),
+    ("sed -i.bak s/a/b/ x", N, DELETION),
+    ("sed -ni.bak p x", N, DELETION),
+    ("sed --in-pl s/a/b/ x", N, DELETION),
 ]
 
 
@@ -155,6 +183,32 @@ def test_a_judging_exception_in_a_job_says_simplify(monkeypatch):
     assert "simplify the command" in _main(json.dumps(payload))
 
 
+def test_the_hooks_own_fallback_says_simplify(monkeypatch, tmp_path):
+    """pretooluse's own fail-closed path, not policy.py's: judge_command
+    itself raises."""
+    monkeypatch.setenv("CURAMOIR_JOB", "sweep")
+    monkeypatch.setenv("CURAMOIR_USE_DCG", "0")
+
+    def broken(*args, **kwargs):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(pretooluse, "judge_command", broken)
+    payload = {"tool_name": "Bash", "tool_input": {"command": "git status"},
+               "cwd": str(tmp_path)}
+    reason = _main(json.dumps(payload))
+    assert "simplify the command" in reason and "RuntimeError" in reason
+
+
+def test_a_wrapped_command_keeps_the_wrappers_refusal_unless_the_rule_is_destructive():
+    """The routing to the destructive rule's advice is for DESTRUCTIVE denials
+    only. Fifty-one `rm` words make the destructive pass refuse UNVERIFIABLE
+    (too many to check); that must not replace the wrapper's own refusal."""
+    decision = judge_command("timeout 5 echo " + "rm " * 51, in_job=True)
+    assert decision.deny
+    assert decision.category == N, decision
+    assert "timeout" in decision.reason
+
+
 # --- 3: the package.json size bound ------------------------------------------------
 
 def test_valid_package_json_padded_past_the_bound_is_not_read(tmp_path):
@@ -168,3 +222,18 @@ def test_valid_package_json_within_the_bound_is_read(tmp_path):
     body = json.dumps({"scripts": {"build": "tsc"}}).encode()
     (tmp_path / "package.json").write_bytes(body + b" " * 100)
     assert pretooluse._package_scripts(tmp_path, "yarn run build") == frozenset({"build"})
+
+
+def _padded(size):
+    body = json.dumps({"scripts": {"build": "tsc"}}).encode()
+    return body + b" " * (size - len(body))
+
+
+def test_package_json_of_exactly_the_bound_is_read(tmp_path):
+    (tmp_path / "package.json").write_bytes(_padded(pretooluse.MAX_PACKAGE_JSON_BYTES))
+    assert pretooluse._package_scripts(tmp_path, "yarn run build") == frozenset({"build"})
+
+
+def test_package_json_one_byte_over_the_bound_is_not_read(tmp_path):
+    (tmp_path / "package.json").write_bytes(_padded(pretooluse.MAX_PACKAGE_JSON_BYTES + 1))
+    assert pretooluse._package_scripts(tmp_path, "yarn run build") is None
