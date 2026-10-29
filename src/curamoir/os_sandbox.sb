@@ -1,32 +1,51 @@
-;; cúramóir's macOS sandbox for the E3-R4 test run (os_sandbox.wrap, cm-p2f).
-;;
-;; Run as: sandbox-exec -f os_sandbox.sb -D CLONE=<realpath> -D RUN=<realpath> argv...
-;; Both parameters MUST be real paths (/private/tmp, not /tmp): the kernel
-;; matches the resolved path, so a symlinked parameter matches nothing.
+;; cúramóir's macOS sandbox for the E3-R4 test run (os_sandbox.wrap, cm-p2f):
+;; the static part. wrap() appends the rules that depend on the run (reads
+;; under HOME, loopback) and passes the whole text with `sandbox-exec -p`,
+;; with -D CLONE=<realpath> -D RUN=<realpath> and one -D per path it names.
+;; Parameters MUST be real paths (/private/tmp, not /tmp): the kernel matches
+;; the resolved path. In SBPL a later rule wins over an earlier one.
 ;;
 ;; Allow by default, then deny what matters: a deny-by-default profile is
-;; fragile across macOS releases (exit 71 for ordinary tools). Reads stay
-;; open (the reused venv, system libraries); writes are confined to the
-;; clone and the run's directory (its HOME and TMPDIR); the network is
-;; loopback only. Exit 65 or 71 from sandbox-exec itself means the profile
-;; or the exec failed; any other exit is the child's.
+;; fragile across macOS releases (exit 71 for ordinary tools). Exit 65 or 71
+;; from sandbox-exec itself means the profile or the exec failed; any other
+;; exit is the child's.
 
 (version 1)
 (allow default)
 
-;; Network: loopback only (a test's own server and client), no remote host.
+;; Network: none. Loopback is added by wrap() only with sweep.test_loopback.
 (deny network*)
-(allow network-bind network-inbound (local ip "localhost:*"))
-(allow network-outbound (remote ip "localhost:*"))
 
 ;; Unix sockets: a test may make its own (multiprocessing, node IPC), but
 ;; may connect only to one inside the clone or the run's directory, never to
-;; a daemon's socket elsewhere (a docker socket, an ssh agent, a launchd
-;; service). One filter per rule: a rule naming two subpaths matches neither.
+;; a daemon's socket elsewhere (a docker socket, an ssh agent). One filter
+;; per rule: a rule naming two subpaths matched neither when tested.
 (allow network* (local unix-socket))
 (deny network-outbound (remote unix-socket))
 (allow network-outbound (remote unix-socket (subpath (param "CLONE"))))
 (allow network-outbound (remote unix-socket (subpath (param "RUN"))))
+
+;; Mach IPC: a service reached by name acts OUTSIDE the sandbox with the
+;; user's rights (LaunchServices opens apps, launchd runs submitted jobs,
+;; mDNSResponder resolves names: an exfiltration channel). Deny every lookup
+;; but the one a test runtime was found to need (python, pytest,
+;; multiprocessing, node and its fork IPC, git, all run under this profile):
+;; opendirectoryd's libinfo, which getpwuid() (os.userInfo, ~ expansion)
+;; uses. No service may be registered, and no AppleEvent sent.
+(deny mach-lookup)
+(allow mach-lookup (global-name "com.apple.system.opendirectoryd.libinfo"))
+(deny mach-register)
+(deny appleevent-send)
+
+;; Signals only within this sandbox: never another process of the user's.
+(deny signal)
+(allow signal (target same-sandbox))
+
+;; The tools that act through those services, denied by path as well.
+(deny process-exec
+  (literal "/usr/bin/open")
+  (literal "/bin/launchctl")
+  (literal "/usr/bin/osascript"))
 
 ;; Files: write only inside the clone and the run's directory, plus the
 ;; device files every process writes to.

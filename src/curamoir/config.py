@@ -135,6 +135,11 @@ DEFAULTS = {
         # single offender among max_files_per_pr (20) fixes (green_gate); it
         # needs about 2 + 2*ceil(log2(max_files_per_pr)).
         "max_test_runs": 12,
+        # cm-p2f (os_sandbox): on macOS the test run gets no network at all,
+        # loopback included, unless this is true (a suite that starts its own
+        # local server). Linux's run always has a private loopback that
+        # reaches nothing of the host's.
+        "test_loopback": False,
         # DEC-5 (E3-R1b, curamoir.tier1): scan for violations of principles
         # that have no rule yet, on models.cheap, once per base commit.
         "tier1_scan": True,
@@ -212,7 +217,7 @@ SCHEMA = {
     "sweep": {
         "max_open_prs": COUNT, "max_files_per_pr": COUNT,
         "test_command": STRING, "test_timeout_seconds": TIMEOUT_SECONDS, "max_test_runs": COUNT,
-        "tier1_scan": BOOLEAN, "exclude": STRING_LIST,
+        "test_loopback": BOOLEAN, "tier1_scan": BOOLEAN, "exclude": STRING_LIST,
     },
     "promotion": {"fix_threshold": PROMOTION_FIX_THRESHOLD,
                   "window_days": PROMOTION_WINDOW_DAYS},

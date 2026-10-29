@@ -28,6 +28,7 @@ import os
 import shutil
 import socket
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -65,6 +66,16 @@ real_sandbox = pytest.mark.skipif(
     reason=(f"no OS sandbox on {sys.platform}: these run only on macOS (sandbox-exec) or "
             "Linux with bwrap installed" if _TOOL is None else
             f"{_TOOL} is not on PATH on this {sys.platform} machine"))
+
+
+@pytest.fixture(autouse=True)
+def tests_venv_is_the_reused_one(monkeypatch):
+    """The commands here name this interpreter (PY) by its path. The OS
+    sandbox lets a run read under the home only what the gate grants
+    (green_gate._read_only), which follows VIRTUAL_ENV: name this venv, as
+    an activated one would be, so its interpreter's install is granted."""
+    if sys.prefix != sys.base_prefix:
+        monkeypatch.setenv("VIRTUAL_ENV", sys.prefix)
 
 
 @pytest.fixture
@@ -175,18 +186,82 @@ def test_a_host_unix_socket_is_unreachable(tmp_path):
 
 
 @real_sandbox
-def test_loopback_home_tmpdir_and_a_local_socket_work(tmp_path):
+def test_home_tmpdir_and_a_local_socket_work(tmp_path):
     probe = tmp_path / "probe.py"
     probe.write_text(
         "import os, socket\n"
-        "server = socket.socket(); server.bind(('127.0.0.1', 0)); server.listen(1)\n"
-        "socket.create_connection(server.getsockname(), timeout=3).close()\n"
         "path = os.path.join(os.environ['TMPDIR'], 's')\n"
         "u = socket.socket(socket.AF_UNIX); u.bind(path); u.listen(1)\n"
         "socket.socket(socket.AF_UNIX).connect(path)\n"
         "open(os.path.join(os.environ['HOME'], 'h'), 'w').write('ok')\n")
     result = gate(tmp_path, f"{PY} {probe}")
     assert result.strategy == GREEN, result.runs[-1].tail
+
+
+LOOPBACK = ("import socket, sys\n"
+            "try:\n"
+            "    server = socket.socket(); server.bind(('127.0.0.1', 0)); server.listen(1)\n"
+            "    socket.create_connection(server.getsockname(), timeout=3).close()\n"
+            "except OSError:\n    print('loopback=denied')\nelse:\n    print('loopback=ok')\n")
+
+
+@real_sandbox
+@pytest.mark.parametrize("allowed", [False, True])
+def test_loopback_follows_sweep_test_loopback(tmp_path, allowed):
+    """macOS denies loopback unless the base's config allows it; Linux's
+    private loopback is always there (and reaches nothing of the host's)."""
+    probe = tmp_path / "loopback.py"
+    probe.write_text(LOOPBACK)
+    extra = "  test_loopback: true\n" if allowed else ""
+    repo = repo_of(tmp_path, THREE, f"{PY} {probe}", extra=extra)
+    with prepare_sandbox(repo, "HEAD", parent=tmp_path) as sandbox:
+        result = run_test_gate(sandbox, fix(sandbox, {"src/a.py": "a = 2\n"}))
+    assert result.strategy == GREEN, result.runs[-1].tail
+    works = allowed or sys.platform != "darwin"
+    assert f"loopback={'ok' if works else 'denied'}" in result.runs[-1].tail
+
+
+@real_sandbox
+def test_the_users_home_is_unreadable(tmp_path):
+    """The account's home (~/.ssh, keychains, tokens), not the run's fresh
+    HOME: a listing of it fails, while the granted venv still runs."""
+    home = os_sandbox.homes()[0]
+    result = gate(tmp_path, f"if ls {home} >/dev/null 2>&1; then exit 1; fi; {PY} -c pass")
+    assert result.strategy == GREEN, result.runs[-1].tail
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="Mach services, launchd and "
+                                                    f"LaunchServices are macOS's; this is "
+                                                    f"{sys.platform}")
+@real_sandbox
+def test_no_service_acting_outside_the_sandbox_is_reachable(tmp_path):
+    """launchd (launchctl), LaunchServices (`open`), AppleEvents
+    (osascript) and mDNSResponder (DNS) act outside the sandbox: none is
+    reachable. Each attempt is harmless if it were not denied (a version
+    query, a look-up, a name resolution)."""
+    probe = tmp_path / "ipc.py"
+    probe.write_text(
+        "import ctypes, socket, subprocess\n"
+        "for tool in (['/bin/launchctl', 'version'], ['/usr/bin/osascript', '-e', '1'],\n"
+        "             ['/usr/bin/open', '-h']):\n"
+        "    try:\n"
+        "        ran = subprocess.run(tool, capture_output=True).returncode == 0\n"
+        "    except OSError:\n"
+        "        ran = False\n"
+        "    print(tool[0], 'ran' if ran else 'denied')\n"
+        "lib = ctypes.CDLL('/usr/lib/libSystem.B.dylib')\n"
+        "port = ctypes.c_uint(0); bp = ctypes.c_uint.in_dll(lib, 'bootstrap_port')\n"
+        "for name in (b'com.apple.coreservices.launchservicesd', b'com.apple.mDNSResponder'):\n"
+        "    print(name.decode(), 'reached' if lib.bootstrap_look_up(bp, name,\n"
+        "          ctypes.byref(port)) == 0 else 'denied')\n"
+        "try:\n    socket.getaddrinfo('example.com', 443); print('dns resolved')\n"
+        "except OSError:\n    print('dns denied')\n")
+    result = gate(tmp_path, f"{PY} {probe}")
+    tail = result.runs[-1].tail
+    assert result.strategy == GREEN, tail
+    assert "ran" not in tail.split() and "reached" not in tail.split() and \
+        "resolved" not in tail.split(), tail
+    assert tail.count("denied") == 6, tail
 
 
 @real_sandbox
@@ -212,33 +287,63 @@ def test_wrap_on_macos_is_sandbox_exec_with_real_paths(tmp_path, monkeypatch):
     link = tmp_path / "link"
     link.symlink_to(tmp_path / "c")
     argv = os_sandbox.wrap(["/bin/sh", "-c", "x"], clone=link, run_dir=tmp_path)
-    assert argv == ["/usr/bin/sandbox-exec", "-f", os_sandbox.PROFILE,
-                    "-D", f"CLONE={os.path.realpath(tmp_path / 'c')}",
-                    "-D", f"RUN={os.path.realpath(tmp_path)}", "/bin/sh", "-c", "x"]
+    assert argv[:2] == ["/usr/bin/sandbox-exec", "-p"]
+    assert argv[2].startswith(Path(os_sandbox.PROFILE).read_text(encoding="utf-8"))
+    assert argv[3:7] == ["-D", f"CLONE={os.path.realpath(tmp_path / 'c')}",
+                         "-D", f"RUN={os.path.realpath(tmp_path)}"]
+    assert argv[-3:] == ["/bin/sh", "-c", "x"]
+    assert "localhost" not in argv[2], "loopback is off by default"
 
 
-def test_wrap_on_linux_is_bwrap_masking_socket_places(tmp_path, monkeypatch):
+def test_the_macos_profile_denies_the_home_but_the_granted_paths(tmp_path, monkeypatch):
+    """Every path reaches the profile as a -D parameter, never as text."""
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setattr(os_sandbox.shutil, "which", lambda name: f"/usr/bin/{name}")
+    home = tmp_path / 'ho"me'
+    venv = home / "work" / ".venv"
+    venv.mkdir(parents=True)
+    monkeypatch.setattr(os_sandbox, "homes", lambda: [os.path.realpath(home)])
+    argv = os_sandbox.wrap(["true"], clone=tmp_path / "c", run_dir=tmp_path / "r",
+                           read_only=[str(venv), str(home), "/"], loopback=True)
+    profile = argv[2]
+    params = dict(argv[i + 1].split("=", 1) for i, arg in enumerate(argv) if arg == "-D")
+    assert str(home) not in profile and str(venv) not in profile
+    real = os.path.realpath
+
+    def named(prefix, path):
+        [name] = [n for n, v in params.items() if n.startswith(prefix) and v == real(path)]
+        return name
+
+    assert f'(deny file-read* (subpath (param "{named("HOME", home)}")))' in profile
+    assert f'(allow file-read* (subpath (param "{named("READ", venv)}")))' in profile
+    for directory in (home, home / "work"):
+        assert f'(allow file-read-metadata (literal (param "{named("META", directory)}")))' \
+            in profile
+    assert profile.count("(allow file-read* ") == 1, "the home itself was granted"
+    assert profile.index("(deny file-read*") < profile.index("(allow file-read*")
+    assert '(remote ip "localhost:*")' in profile
+
+
+def test_wrap_on_linux_binds_only_what_the_run_needs(tmp_path, monkeypatch):
     monkeypatch.setattr(sys, "platform", "linux")
     monkeypatch.setattr(os_sandbox.shutil, "which", lambda name: f"/usr/bin/{name}")
     home = tmp_path / "home"
     (home / ".pyenv").mkdir(parents=True)
-    monkeypatch.setenv("HOME", str(home))
-    monkeypatch.delenv("XDG_RUNTIME_DIR", raising=False)
+    monkeypatch.setattr(os_sandbox, "homes", lambda: [os.path.realpath(home)])
     clone, run = tmp_path / "c", tmp_path / "r"
     argv = os_sandbox.wrap(["/bin/sh"], clone=clone, run_dir=run,
-                           read_only=[str(home / ".pyenv"), str(home), "relative", ""])
+                           read_only=[str(home / ".pyenv"), str(home), "/", "relative", ""])
     clone, run = os.path.realpath(clone), os.path.realpath(run)
-    assert argv[:2] == ["/usr/bin/bwrap", "--ro-bind"]
-    assert argv[-2:] == ["--", "/bin/sh"]
+    assert argv[0] == "/usr/bin/bwrap" and argv[-2:] == ["--", "/bin/sh"]
     pairs = list(itertools.pairwise(argv))
-    for masked in ("/tmp", "/run", os.path.realpath(home)):
-        assert ("--tmpfs", masked) in pairs
+    assert ("--ro-bind", "/") not in pairs, "the whole root is visible"
+    assert ("--tmpfs", "/tmp") in pairs
     assert ("--ro-bind-try", os.path.realpath(home / ".pyenv")) in pairs
-    assert ("--ro-bind-try", os.path.realpath(home)) not in pairs, "HOME was unmasked"
+    assert ("--ro-bind-try", os.path.realpath(home)) not in pairs, "the home was granted"
+    assert ("--ro-bind-try", "/") not in pairs
     for flag in ("--unshare-net", "--unshare-pid", "--unshare-ipc", "--die-with-parent"):
         assert flag in argv
     assert ("--bind", clone) in pairs and ("--bind", run) in pairs
-    assert argv.index("--bind") > max(i for i, a in enumerate(argv) if a == "--tmpfs")
 
 
 @pytest.mark.parametrize("platform", ["win32", "freebsd14", "cygwin"])
@@ -307,18 +412,42 @@ def test_a_sandbox_that_does_not_confine_fails_its_self_test(tmp_path, monkeypat
     assert list((tmp_path / "c").iterdir()) == []
 
 
-@pytest.mark.parametrize("said, why", [
-    ({}, "printed nothing"),
+GOOD = {"clone": "ok", "outside": "denied", "net": "blocked", "unix_outside": "blocked",
+        "unix_inside": "ok", "dns": "failed", "home_read": "denied", "launchctl": "denied",
+        "launchservices": "denied", "loopback": "denied"}
+
+
+@pytest.mark.parametrize("change, why", [
+    (None, "printed nothing"),
     ({"clone": "denied"}, "inside the clone did not succeed"),
-    ({"clone": "ok", "outside": "denied", "net": "connected"}, "1.1.1.1:53 was not denied"),
-    ({"clone": "ok", "outside": "denied", "net": "blocked", "unix_outside": "connected"},
-     "Unix socket outside"),
-    ({"clone": "ok", "outside": "denied", "net": "blocked", "unix_outside": "blocked",
-      "unix_inside": "denied"}, "inside the run's directory did not work"),
-    ({"clone": "ok", "outside": "denied"}, "the net check did not run"),
+    ({"outside": "ok"}, "outside the clone and the run's directory was not denied"),
+    ({"net": "connected"}, "1.1.1.1:53 was not denied"),
+    ({"unix_outside": "connected"}, "Unix socket outside"),
+    ({"unix_inside": "denied"}, "inside the run's directory did not work"),
+    ({"dns": "resolved"}, "a host name was resolved"),
+    ({"home_read": "read"}, "under the user's home directory was readable"),
+    ({"launchctl": "ran"}, "/bin/launchctl ran"),
+    ({"launchservices": "reached"}, "LaunchServices"),
+    ({"loopback": "ok"}, "loopback was reachable though sweep.test_loopback is false"),
+    ({"dns": None}, "the dns check did not run"),
 ])
-def test_each_failed_check_is_named(said, why):
-    assert why in os_sandbox._failed_check(said)
+def test_each_failed_check_is_named(change, why):
+    said = {} if change is None else {k: v for k, v in {**GOOD, **change}.items()
+                                      if v is not None}
+    assert os_sandbox._failed_check(GOOD, platform="darwin") == ""
+    assert why in os_sandbox._failed_check(said, platform="darwin")
+
+
+def test_with_loopback_allowed_the_self_test_wants_it_working():
+    assert "did not work" in os_sandbox._failed_check(GOOD, loopback=True, platform="darwin")
+    assert os_sandbox._failed_check({**GOOD, "loopback": "ok"}, loopback=True,
+                                    platform="darwin") == ""
+
+
+def test_linux_asks_neither_launchd_nor_loopback():
+    linux = {k: v for k, v in GOOD.items()
+             if k not in ("launchctl", "launchservices", "loopback")}
+    assert os_sandbox._failed_check(linux, platform="linux") == ""
 
 
 def test_a_failed_self_test_refuses_the_gate_and_runs_nothing(tmp_path, monkeypatch,
@@ -360,3 +489,14 @@ def test_every_run_goes_through_wrap(tmp_path, monkeypatch, no_project_command):
     assert all(argv[:len(PREFIX)] == PREFIX for argv in no_project_command)
     run_dirs = [run_dir for _, _, run_dir in stand_in.wrapped]
     assert len(set(run_dirs)) == len(run_dirs), "a run reused another's directory"
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="the profile's home rules are macOS's; "
+                                                    f"this is {sys.platform}")
+@real_sandbox
+def test_a_profile_that_leaves_the_home_readable_fails_its_self_test(tmp_path, monkeypatch):
+    monkeypatch.setattr(os_sandbox, "_darwin_rules", lambda *_args: ("\n", []))
+    (tmp_path / "c").mkdir()
+    (tmp_path / "r").mkdir()
+    with pytest.raises(os_sandbox.OsSandboxUnavailable, match="under the user's home"):
+        os_sandbox.self_test(tmp_path / "c", tmp_path / "r")

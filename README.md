@@ -179,11 +179,16 @@ before any of the features:
 - **An open-PR cap.** You will never come back to a wall of PRs.
 - **The sweep's test run is OS-sandboxed.** Before opening a PR the sweep runs
   your tests on its fixes, in a throwaway clone, under `sandbox-exec` (macOS)
-  or `bwrap` (Linux): the tests can write only inside that clone and their own
-  temporary directory, and cannot reach the network beyond loopback. The
-  sandbox is self-tested before every run; where it is missing or fails, the
-  sweep refuses rather than run the tests unconfined. The tests can still
-  read what you can read.
+  or `bwrap` (Linux). The tests can write only inside that clone and their own
+  temporary directory; cannot read your home directory beyond what the run
+  needs (the reused venv and interpreter, PATH, version managers); have no
+  network (on macOS not even loopback unless `sweep.test_loopback: true` is
+  committed, for a suite that starts a local server); and reach no daemon's
+  socket and, on macOS, no system service that acts outside the sandbox
+  (`open`, `launchctl`, AppleEvents, DNS). The sandbox is self-tested before
+  every gate; where it is missing or fails, the sweep refuses rather than run
+  the tests unconfined. On macOS the tests can still read files outside your
+  home directory.
 - **Redaction** on everything it writes.
 
 It has four known limits:

@@ -20,9 +20,9 @@ class Unconfined:
         self.wrapped = []
         self.self_tests = []
 
-    def wrap(self, argv, *, clone, run_dir, read_only=()):
+    def wrap(self, argv, *, clone, run_dir, **_options):
         self.wrapped.append((list(argv), str(clone), str(run_dir)))
         return [*PREFIX, *argv]
 
-    def self_test(self, clone, run_dir, env=None, read_only=()):
+    def self_test(self, clone, run_dir, env=None, **_options):
         self.self_tests.append((str(clone), str(run_dir)))

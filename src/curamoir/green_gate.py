@@ -97,17 +97,18 @@ the output is captured, not shown, and the command is run by `/bin/sh`.
 **The OS sandbox** (cm-p2f; os_sandbox): every run, the canary's
 included, is wrapped by os_sandbox.wrap, so the kernel confines it: writes
 only inside the clone and the run's own scratch directory (which holds its
-HOME and TMPDIR), no network but loopback, no connection to a Unix socket
-outside those two. macOS uses `sandbox-exec` with the shipped profile
+HOME and TMPDIR); no reads under the user's home but the paths the run
+needs (_read_only); no network (on macOS not even loopback unless the
+base's `sweep.test_loopback` is true); no connection to a Unix socket
+outside those two; on macOS no Mach service that acts outside the sandbox
+(LaunchServices, launchd, AppleEvents, mDNSResponder). macOS uses `sandbox-exec` with the shipped profile
 (os_sandbox.sb), Linux bubblewrap (`bwrap`, which needs unprivileged user
 namespaces); any other platform, or the tool missing, refuses. Before the
 first run of each gate, os_sandbox.self_test proves it through the same
-argv path (a write in the clone succeeds, one outside fails, a connect to
-1.1.1.1:53 fails, a connect to a Unix socket listening outside fails, one
-inside works). On Linux, the places host sockets live (/tmp, /run, HOME,
-XDG_RUNTIME_DIR) are hidden and what the run reads from them (_read_only:
-PATH, the venv and its interpreter, the version managers) is bound back
-read-only. Failing either is a GateError, so the sweep refuses
+argv path (os_sandbox._CHECKS: writes, network, DNS, Unix sockets, reads
+under the home, and on macOS launchd and LaunchServices). On Linux the run
+sees only the system directories and what _read_only names (PATH, the venv
+and its interpreter, the version managers), read-only. Failing either is a GateError, so the sweep refuses
 (TEST_GATE, "the test command was not run: no OS sandbox ..."): there is
 no unsandboxed fallback. OS_SANDBOX is the seam tests replace.
 
@@ -178,11 +179,12 @@ front (memory without bound on a large repository) or git between runs.
 **Limits, stated rather than hidden.**
 
 - The tests run the fixed code, which the fix agent wrote, as the user,
-  confined by the OS sandbox (above): it can still READ what the user can
-  (the reused venv must be readable, and so is the rest of the disk), but
-  cannot write outside the clone and the run's directory nor send what it
-  read anywhere. The allowlist keeps the user's credentials out of its
-  environment; the sandbox keeps them from leaving.
+  confined by the OS sandbox (above). On macOS it can still READ outside
+  the user's home (system files, /opt, other volumes) and what it was
+  granted inside it (the reused venv), but cannot write outside the clone
+  and the run's directory nor send what it read anywhere. The allowlist
+  keeps the user's credentials out of its environment; the sandbox keeps
+  the home's files out of its reach.
 - The OS sandbox exists on macOS and Linux only; elsewhere, or with the
   tool missing, or with Linux's unprivileged user namespaces off, the gate
   refuses (no test command runs, no PR).
@@ -310,7 +312,8 @@ class GateCommand:
     """The test command resolve_test_command chose: `command` (None when
     there is none), `source` ("config" or "detected"), the `timeout` and
     `max_runs` from the base's config, and, when there is no command, its
-    `cause` and `why`."""
+    `cause` and `why`. `loopback` is the base's sweep.test_loopback: whether
+    the OS sandbox lets the run use loopback (os_sandbox.wrap)."""
 
     command: Optional[str]
     source: Optional[str]
@@ -318,6 +321,7 @@ class GateCommand:
     max_runs: int
     cause: Optional[str] = None
     why: str = ""
+    loopback: bool = False
 
 
 @dataclass(frozen=True)
@@ -485,13 +489,14 @@ def resolve_test_command(sandbox):
                                f"the base commit's {_CONFIG} cannot be loaded, so its test "
                                f"command is unknown: {error}")
     timeout, max_runs = sweep["test_timeout_seconds"], sweep["max_test_runs"]
+    loopback = sweep.get("test_loopback", False) is True
     configured = sweep["test_command"].strip()
     if configured:
-        return GateCommand(configured, "config", timeout, max_runs)
+        return GateCommand(configured, "config", timeout, max_runs, loopback=loopback)
     detected, why = _detect(sandbox)
     if detected is None:
         return GateCommand(None, None, timeout, max_runs, NO_TEST_COMMAND, why)
-    return GateCommand(detected, "detected", timeout, max_runs)
+    return GateCommand(detected, "detected", timeout, max_runs, loopback=loopback)
 
 
 def _base_names(sandbox):
@@ -635,7 +640,7 @@ def sandbox_environment(source, root=None, src=False):
     return env
 
 
-def _run_command(sandbox, argv, env, timeout, paths=()):
+def _run_command(sandbox, argv, env, timeout, paths=(), loopback=False):
     """One run of `argv` in the sandbox, confined by the OS sandbox
     (OS_SANDBOX.wrap: writes only in the clone and this run's scratch
     directory, no network): a GateRun. HOME and TMPDIR are a fresh
@@ -646,7 +651,7 @@ def _run_command(sandbox, argv, env, timeout, paths=()):
     scratch = tempfile.mkdtemp(prefix="curamoir-test-run-")
     try:
         env = _scratch_env(sandbox, env, scratch)
-        wrapped = _wrapped(argv, sandbox, scratch, env)
+        wrapped = _wrapped(argv, sandbox, scratch, env, loopback)
         started = time.monotonic()
         try:
             # 4 bytes per character: UTF-8's widest, so the last _TAIL
@@ -687,34 +692,54 @@ def _scratch_env(sandbox, env, scratch):
 _NO_SANDBOX = "the test command was not run: no OS sandbox confines it here"
 
 
-def _wrapped(argv, sandbox, scratch, env):
+def _wrapped(argv, sandbox, scratch, env, loopback):
     """`argv` wrapped in the OS sandbox for the clone and `scratch`;
     GateError (the sweep refuses, TEST_GATE) where there is none. Never
     the bare argv: there is no unsandboxed fallback."""
     try:
         return OS_SANDBOX.wrap(argv, clone=str(sandbox.path), run_dir=scratch,
-                               read_only=_read_only(env))
+                               read_only=_read_only(env), loopback=loopback)
     except os_sandbox.OsSandboxUnavailable as error:
         raise GateError(f"{_NO_SANDBOX}: {error}") from error
 
 
 def _read_only(env):
-    """What a run reads from places Linux's sandbox masks (os_sandbox.wrap's
-    `read_only`): PATH's directories, the reused venv and the installation
-    its interpreter links to, NODE_PATH, the user base and the version
-    managers' roots. Read-only, and only the paths named; macOS ignores it."""
+    """What a run may read that the OS sandbox otherwise hides
+    (os_sandbox.wrap's `read_only`; on macOS, anything under the user's
+    home; on Linux, anything but the system directories): PATH's
+    directories, the reused venv and the installation its interpreter links
+    to, NODE_PATH, the user base and the version managers' roots.
+    Read-only, and only the paths named, so a tool on PATH whose link points
+    elsewhere under the home (outside these) cannot be read and fails:
+    then the base is red or the command not runnable, and no PR opens."""
     paths = [entry for name in ("PATH", "NODE_PATH")
              for entry in env.get(name, "").split(os.pathsep)]
     paths += [env.get(name, "") for name in ("VIRTUAL_ENV", "PYTHONUSERBASE",
                                              *_VERSION_MANAGER_ROOTS)]
     venv = env.get("VIRTUAL_ENV")
-    if venv:
-        interpreter = os.path.realpath(os.path.join(venv, "bin", "python3"))
-        paths.append(os.path.dirname(os.path.dirname(interpreter)))
+    interpreters = [os.path.join(venv, "bin", "python3")] if venv else []
+    # An interpreter on PATH is often a link into an installation elsewhere
+    # (a venv's python3 into uv's or pyenv's, a node into nvm's): the run
+    # must read that installation, or exec fails and the shell silently
+    # moves on to the next python3 on PATH.
+    for directory in env.get("PATH", "").split(os.pathsep):
+        if os.path.isabs(directory):
+            interpreters += [os.path.join(directory, name) for name in _INTERPRETERS]
+            # A venv's bin on PATH: its site-packages are next to it.
+            if os.path.isfile(os.path.join(os.path.dirname(directory), "pyvenv.cfg")):
+                paths.append(os.path.dirname(directory))
+    for interpreter in interpreters:
+        if os.path.islink(interpreter):
+            real = os.path.realpath(interpreter)
+            paths.append(os.path.dirname(os.path.dirname(real)))
     return [path for path in paths if path and os.path.isabs(path)]
 
 
-def _sandbox_self_test(sandbox, env):
+#: The interpreters on PATH whose installation _read_only grants.
+_INTERPRETERS = ("python3", "python", "node")
+
+
+def _sandbox_self_test(sandbox, env, loopback):
     """OS_SANDBOX.self_test for this gate's clone, with a scratch directory
     and environment shaped like a run's; GateError if it fails. Run once per
     gate, before the manifest is taken (its probe file in the clone is
@@ -724,7 +749,7 @@ def _sandbox_self_test(sandbox, env):
         try:
             OS_SANDBOX.self_test(str(sandbox.path), scratch,
                                  env=_scratch_env(sandbox, env, scratch),
-                                 read_only=_read_only(env))
+                                 read_only=_read_only(env), loopback=loopback)
         except os_sandbox.OsSandboxUnavailable as error:
             raise GateError(f"{_NO_SANDBOX}: {error}") from error
     finally:
@@ -765,7 +790,7 @@ def _inside(path, root):
     return os.path.commonpath([root, path]) == root
 
 
-def _canary(sandbox, env, timeout, names):
+def _canary(sandbox, env, timeout, names, loopback=False):
     """(outside, said): what `python3`, in the tests' environment with cwd
     the sandbox, resolves from the source checkout ahead of the sandbox, as
     (what, where) pairs, and the GateResult.canary text.
@@ -778,7 +803,7 @@ def _canary(sandbox, env, timeout, names):
     outside the sandbox (a meta-path finder, which sys.path does not show).
     No python3, or output that is not the canary's, checks nothing."""
     run = _run_command(sandbox, ["/bin/sh", "-c", 'exec python3 -c "$0" "$@"', _CANARY, *names],
-                       env, timeout)
+                       env, timeout, loopback=loopback)
     try:
         report = json.loads(run.stdout_tail.strip().splitlines()[-1])
         path, found = report["path"], report["found"]
@@ -903,7 +928,7 @@ def run_test_gate(sandbox, verdict, paths=None):
                               src=any(name.startswith("src/") for name in names))
     # Before anything of the project's runs, and before the manifest: no
     # proven OS sandbox, no run (GateError, the sweep refuses).
-    _sandbox_self_test(sandbox, env)
+    _sandbox_self_test(sandbox, env, chosen.loopback)
     git_state = snapshot_git_state(sandbox)
     held = _held(every)
     manifest = _tree(str(sandbox.path), held)
@@ -919,7 +944,8 @@ def run_test_gate(sandbox, verdict, paths=None):
                           dropped or tuple(DroppedFix(path, why) for path in candidates),
                           tuple(runs), why, canary)
 
-    outside, canary = _canary(sandbox, env, chosen.timeout, import_names(names))
+    outside, canary = _canary(sandbox, env, chosen.timeout, import_names(names),
+                              chosen.loopback)
     settle()
     if outside:
         result = abandoned(IMPORTS_THE_CHECKOUT, "the test environment resolves " + "; ".join(
@@ -931,7 +957,7 @@ def run_test_gate(sandbox, verdict, paths=None):
     def run(subset):
         _write_states(sandbox.path, {p: fixed[p] if p in subset else base[p] for p in every})
         runs.append(_run_command(sandbox, ["/bin/sh", "-c", chosen.command], env,
-                                 chosen.timeout, subset))
+                                 chosen.timeout, subset, chosen.loopback))
         settle()
         return runs[-1].passed
 

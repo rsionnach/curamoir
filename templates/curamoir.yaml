@@ -114,6 +114,12 @@ sweep:
   # 2 + 2*ceil(log2(max_files_per_pr)), so raise it if you raise
   # max_files_per_pr. What is untested is dropped.
   max_test_runs: 12
+  # The test run is OS-sandboxed (macOS sandbox-exec, Linux bwrap): it can
+  # write only in the sweep's clone and its own temporary directory, and has
+  # no network. On macOS that includes loopback; true allows 127.0.0.1/::1
+  # for a suite that starts its own local server. Linux's run always has a
+  # private loopback that reaches nothing on your machine.
+  test_loopback: false
   # Tier 1 (E3-R1): also look for violations of principles that have no rule
   # yet, on models.cheap, and tag each fix with its principle id so the
   # promotion ladder can count it. Only principles at `tier: principle` that
