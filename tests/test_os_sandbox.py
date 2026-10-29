@@ -11,7 +11,7 @@ Three groups:
    prove: a write outside the clone fails, an outbound connect fails, a
    host Unix socket is unreachable, while a pytest run in the clone,
    loopback, HOME/TMPDIR writes and a socket in TMPDIR all work.
-2. **Fail closed**: with the tool unavailable (shutil.which, sys.platform)
+2. **Fail closed**: with the tool unavailable (_is_executable, sys.platform)
    the gate raises GateError and the sweep refuses TEST_GATE, and no test
    command ran (run_in_group is never called).
 3. **A self-test failure** (wrap() made a pass-through, so the probe runs
@@ -25,9 +25,9 @@ checks, so what the sandbox blocked is observed, not assumed.
 
 import itertools
 import os
-import shutil
 import socket
 import sys
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -62,10 +62,10 @@ else:
     _TOOL = None
 
 real_sandbox = pytest.mark.skipif(
-    _TOOL is None or shutil.which(_TOOL) is None,
+    _TOOL is None or os_sandbox.tool_path() is None,
     reason=(f"no OS sandbox on {sys.platform}: these run only on macOS (sandbox-exec) or "
             "Linux with bwrap installed" if _TOOL is None else
-            f"{_TOOL} is not on PATH on this {sys.platform} machine"))
+            f"{_TOOL} is not installed in a system directory on this {sys.platform} machine"))
 
 
 @pytest.fixture(autouse=True)
@@ -108,7 +108,8 @@ def gate(tmp_path, command):
 def test_macos_has_sandbox_exec():
     """Never skipped on macOS: the real-sandbox tests below cannot be
     skipped there by a missing tool without this failing."""
-    assert shutil.which("sandbox-exec"), "macOS without sandbox-exec: the gate would refuse"
+    assert os_sandbox.tool_path() == "/usr/bin/sandbox-exec", \
+        "macOS without sandbox-exec: the gate would refuse"
     assert os.path.isfile(os_sandbox.PROFILE)
 
 
@@ -131,7 +132,7 @@ def test_a_test_command_cannot_write_outside_the_clone(tmp_path, no_project_comm
     result = gate(tmp_path, f"echo pwned > {outside}; true")
     assert result.strategy == GREEN
     assert not outside.exists(), "the test command wrote outside the clone"
-    assert no_project_command and all(argv[0] == shutil.which(_TOOL)
+    assert no_project_command and all(argv[0] == os_sandbox.tool_path()
                                       for argv in no_project_command)
 
 
@@ -314,7 +315,7 @@ def test_a_pytest_suite_in_the_clone_passes(tmp_path):
 
 def test_wrap_on_macos_is_sandbox_exec_with_real_paths(tmp_path, monkeypatch):
     monkeypatch.setattr(sys, "platform", "darwin")
-    monkeypatch.setattr(os_sandbox.shutil, "which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(os_sandbox, "_is_executable", lambda path: True)
     (tmp_path / "c").mkdir()
     link = tmp_path / "link"
     link.symlink_to(tmp_path / "c")
@@ -333,10 +334,11 @@ def test_wrap_on_macos_is_sandbox_exec_with_real_paths(tmp_path, monkeypatch):
 def test_the_macos_profile_denies_the_home_but_the_granted_paths(tmp_path, monkeypatch):
     """Every path reaches the profile as a -D parameter, never as text."""
     monkeypatch.setattr(sys, "platform", "darwin")
-    monkeypatch.setattr(os_sandbox.shutil, "which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(os_sandbox, "_is_executable", lambda path: True)
     home = tmp_path / 'ho"me'
     venv = home / "work" / ".venv"
     venv.mkdir(parents=True)
+    (venv / "pyvenv.cfg").write_text("")
     monkeypatch.setattr(os_sandbox, "homes", lambda: [os.path.realpath(home)])
     argv = os_sandbox.wrap(["true"], clone=tmp_path / "c", run_dir=tmp_path / "r",
                            read_only=[str(venv), str(home), "/"], loopback=True)
@@ -367,19 +369,22 @@ def test_the_macos_profile_denies_the_home_but_the_granted_paths(tmp_path, monke
 
 def test_wrap_on_linux_binds_only_what_the_run_needs(tmp_path, monkeypatch):
     monkeypatch.setattr(sys, "platform", "linux")
-    monkeypatch.setattr(os_sandbox.shutil, "which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(os_sandbox, "_is_executable", lambda path: True)
     home = tmp_path / "home"
-    (home / ".pyenv").mkdir(parents=True)
+    versions = home / ".pyenv" / "versions"
+    versions.mkdir(parents=True)
     monkeypatch.setattr(os_sandbox, "homes", lambda: [os.path.realpath(home)])
     clone, run = tmp_path / "c", tmp_path / "r"
     argv = os_sandbox.wrap(["/bin/sh"], clone=clone, run_dir=run,
-                           read_only=[str(home / ".pyenv"), str(home), "/", "relative", ""])
+                           read_only=[str(versions), str(home / ".pyenv"), str(home), "/",
+                                      "relative", ""])
     clone, run = os.path.realpath(clone), os.path.realpath(run)
     assert argv[0] == "/usr/bin/bwrap" and argv[-2:] == ["--", "/bin/sh"]
     pairs = list(itertools.pairwise(argv))
     assert ("--ro-bind", "/") not in pairs, "the whole root is visible"
     assert ("--tmpfs", "/tmp") in pairs
-    assert ("--ro-bind-try", os.path.realpath(home / ".pyenv")) in pairs
+    assert ("--ro-bind-try", os.path.realpath(versions)) in pairs
+    assert ("--ro-bind-try", os.path.realpath(home / ".pyenv")) not in pairs
     assert ("--ro-bind-try", os.path.realpath(home)) not in pairs, "the home was granted"
     assert ("--ro-bind-try", "/") not in pairs
     for flag in ("--unshare-net", "--unshare-pid", "--unshare-ipc", "--die-with-parent"):
@@ -409,15 +414,86 @@ def test_no_path_holding_a_credential_tree_is_granted(tmp_path, monkeypatch, hol
     assert os_sandbox._granted([str(home / holder)]) == []
 
 
-def test_an_installation_beside_the_credential_trees_is_granted(tmp_path, monkeypatch):
+GRANTED_UNDER_A_HOME = (".pyenv/versions", ".pyenv/versions/3.12.1/lib", ".nvm/versions/node",
+                        ".asdf/installs/python", ".volta/tools/image", ".rustup/toolchains/x",
+                        ".cargo/bin", ".rbenv/versions/3.3", ".sdkman/candidates/java",
+                        ".local/share/uv/python/cpython-3.12", ".local/share/mise/installs/node",
+                        "work/proj/.venv", "work/proj/.venv/bin", "work/proj/node_modules",
+                        "work/proj/node_modules/.bin")
+REFUSED_UNDER_A_HOME = (".pyenv", ".pyenv/shims", ".cargo", ".cargo/registry", ".nvm",
+                        ".local/share/uv", ".local/bin", ".bun/bin", "bin", "work", "work/proj",
+                        "work/proj/src", ".configs")
+
+
+def made_home(tmp_path, monkeypatch):
+    """A fake home holding every path of both lists above (work/proj/.venv a
+    venv: it holds pyvenv.cfg) and a keyring; homes() is it alone."""
     home = tmp_path / "home"
-    granted = [home / ".local/share/uv/python/cpython-3.12", home / ".pyenv",
-               home / "work/.venv", home / ".configs"]
-    for path in [*granted, home / ".local/share/keyrings"]:
-        path.mkdir(parents=True)
-    monkeypatch.setattr(os_sandbox, "homes", lambda: [os.path.realpath(home)])
-    assert os_sandbox._granted(map(str, granted)) == sorted(os.path.realpath(p)
-                                                             for p in granted)
+    for path in (*GRANTED_UNDER_A_HOME, *REFUSED_UNDER_A_HOME, ".local/share/keyrings"):
+        (home / path).mkdir(parents=True, exist_ok=True)
+    (home / "work/proj/.venv/pyvenv.cfg").write_text("")
+    monkeypatch.setattr(os_sandbox, "homes", lambda: [os_sandbox._canonical(str(home))])
+    return home
+
+
+@pytest.mark.parametrize("path", GRANTED_UNDER_A_HOME)
+def test_under_a_home_only_a_toolchain_venv_or_node_modules_is_granted(tmp_path, monkeypatch,
+                                                                       path):
+    home = made_home(tmp_path, monkeypatch)
+    assert os_sandbox._granted([str(home / path)]) == [os.path.realpath(home / path)]
+
+
+@pytest.mark.parametrize("path", REFUSED_UNDER_A_HOME)
+def test_nothing_else_under_a_home_is_granted(tmp_path, monkeypatch, path):
+    """A version manager's whole root (~/.cargo holds credentials.toml), a
+    shim directory, a PATH directory of the user's, a checkout outside its
+    venv: none is in the allowlist."""
+    home = made_home(tmp_path, monkeypatch)
+    assert os_sandbox._granted([str(home / path)]) == []
+
+
+case_insensitive = pytest.mark.skipif(
+    not os.path.exists(os.path.realpath(tempfile.gettempdir()).upper()),
+    reason="the case-variant tests need a case-insensitive file system (macOS's default)")
+
+
+@case_insensitive
+@pytest.mark.parametrize("variant", ["{home}/.SSH", "{home}/.CONFIG/gh", "{HOME}/.ssh",
+                                     "{HOME}/work/proj", "{HOME}", "{data}/.ssh", "{data}"])
+def test_a_case_or_alias_variant_of_a_refused_path_is_refused(tmp_path, monkeypatch, variant):
+    """On a case-insensitive volume `~/.SSH` is ~/.ssh, and the Data
+    volume's firmlink is another spelling of the home: compared by identity
+    (device, inode), each is refused as its plain spelling is."""
+    home = made_home(tmp_path, monkeypatch)
+    (home / ".ssh").mkdir()
+    (home / ".config/gh").mkdir(parents=True)
+    real = os.path.realpath(home)
+    path = variant.format(home=real, HOME=real.upper(), data=os_sandbox._DATA_VOLUME + real)
+    assert os.path.exists(path)
+    assert os_sandbox._granted([path]) == []
+
+
+@case_insensitive
+def test_a_case_variant_of_a_granted_path_is_granted_as_spelled_on_disk(tmp_path, monkeypatch):
+    home = made_home(tmp_path, monkeypatch)
+    real = os.path.realpath(home)
+    assert os_sandbox._granted([real.upper() + "/.PYENV/VERSIONS"]) == \
+        [os.path.join(real, ".pyenv", "versions")]
+
+
+@pytest.mark.parametrize("where", ["/tmp", "/var/run", "/private/tmp"])
+def test_nothing_under_tmp_or_run_is_granted(where):
+    """A read-only bind does not stop connect() to a socket in it (Linux),
+    and /tmp, /run and /var/run are where host daemons keep theirs."""
+    if not os.path.isdir(where):
+        pytest.skip(f"{where} does not exist on this machine")
+    if where.endswith("tmp"):
+        made = tempfile.mkdtemp(dir=where)
+        try:
+            assert os_sandbox._granted([made]) == []
+        finally:
+            os.rmdir(made)
+    assert os_sandbox._granted([where]) == []
 
 
 @pytest.mark.parametrize("platform", ["win32", "freebsd14", "cygwin"])
@@ -430,8 +506,40 @@ def test_wrap_elsewhere_is_unavailable(tmp_path, monkeypatch, platform):
 @pytest.mark.parametrize("platform, tool", [("darwin", "sandbox-exec"), ("linux", "bwrap")])
 def test_wrap_without_the_tool_is_unavailable(tmp_path, monkeypatch, platform, tool):
     monkeypatch.setattr(sys, "platform", platform)
-    monkeypatch.setattr(os_sandbox.shutil, "which", lambda name: None)
+    monkeypatch.setattr(os_sandbox, "_is_executable", lambda path: False)
     with pytest.raises(os_sandbox.OsSandboxUnavailable, match=tool):
+        os_sandbox.wrap(["true"], clone=tmp_path, run_dir=tmp_path)
+
+
+@pytest.mark.parametrize("platform, tool", [("darwin", "/usr/bin/sandbox-exec"),
+                                            ("linux", "/usr/bin/bwrap")])
+def test_the_tool_comes_from_a_system_directory_never_path(tmp_path, monkeypatch, platform,
+                                                          tool):
+    """A `sandbox-exec` or `bwrap` first on PATH (the sweep's environment)
+    is never the one run: only the fixed system locations are looked at."""
+    planted = tmp_path / "bin"
+    planted.mkdir()
+    for name in ("sandbox-exec", "bwrap"):
+        (planted / name).write_text("#!/bin/sh\nexec \"$@\"\n")
+        (planted / name).chmod(0o755)
+    monkeypatch.setenv("PATH", f"{planted}{os.pathsep}{os.environ['PATH']}")
+    monkeypatch.setattr(sys, "platform", platform)
+    monkeypatch.setattr(os_sandbox, "homes", lambda: [os.path.realpath(tmp_path / "h")])
+    looked = []
+    monkeypatch.setattr(os_sandbox, "_is_executable", lambda path: looked.append(path) or True)
+    argv = os_sandbox.wrap(["true"], clone=tmp_path, run_dir=tmp_path)
+    assert argv[0] == tool
+    assert looked and all(not path.startswith(str(planted)) for path in looked)
+    monkeypatch.setattr(os_sandbox, "_is_executable", lambda path: False)
+    with pytest.raises(os_sandbox.OsSandboxUnavailable):
+        os_sandbox.wrap(["true"], clone=tmp_path, run_dir=tmp_path)
+
+
+def test_on_macos_no_home_is_unavailable_never_a_silent_pass(tmp_path, monkeypatch):
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setattr(os_sandbox, "_is_executable", lambda path: True)
+    monkeypatch.setattr(os_sandbox, "homes", lambda: [])
+    with pytest.raises(os_sandbox.OsSandboxUnavailable, match="home"):
         os_sandbox.wrap(["true"], clone=tmp_path, run_dir=tmp_path)
 
 
@@ -446,7 +554,7 @@ def test_wrap_takes_argv_never_a_string(tmp_path):
 def test_without_an_os_sandbox_the_gate_refuses_and_runs_nothing(
         tmp_path, monkeypatch, no_project_command, unavailable):
     if unavailable == "no tool":
-        monkeypatch.setattr(os_sandbox.shutil, "which", lambda name: None)
+        monkeypatch.setattr(os_sandbox, "_is_executable", lambda path: False)
     else:
         monkeypatch.setattr(sys, "platform", "sunos5")
     ran = tmp_path / "ran"
@@ -457,7 +565,7 @@ def test_without_an_os_sandbox_the_gate_refuses_and_runs_nothing(
 
 def test_without_an_os_sandbox_the_sweep_refuses_test_gate(tmp_path, no_real_gh, monkeypatch,
                                                            no_project_command):
-    monkeypatch.setattr(os_sandbox.shutil, "which", lambda name: None)
+    monkeypatch.setattr(os_sandbox, "_is_executable", lambda path: False)
     repo = checkout(tmp_path, NO_BARE_PRINT, config=GATE)
     claude, _ = fixer(tmp_path)
 
@@ -484,6 +592,59 @@ def test_a_sandbox_that_does_not_confine_fails_its_self_test(tmp_path, monkeypat
                        match="a write outside the clone and the run's directory was not denied"):
         os_sandbox.self_test(tmp_path / "c", tmp_path / "r")
     assert list((tmp_path / "c").iterdir()) == []
+
+
+def recording_wrap(seen):
+    def wrap(argv, **_kwargs):
+        seen.append(list(argv))
+        return [*PREFIX, *argv]
+    return wrap
+
+
+def probe_dirs():
+    """The self-test's outside directories now in the account's home."""
+    home = os_sandbox.homes()[0]
+    return {name for name in os.listdir(home) if name.startswith(".curamoir-osbx-")}
+
+
+def test_the_outside_probe_is_in_the_home_where_nothing_masks_it(tmp_path, monkeypatch):
+    """Not under /tmp, which bwrap replaces with an empty tmpfs (a write or
+    connect there fails for want of the path, proving nothing): in the
+    account's home, which both sandboxes really deny. Removed after."""
+    seen = []
+    monkeypatch.setattr(os_sandbox, "wrap", recording_wrap(seen))
+    (tmp_path / "c").mkdir()
+    (tmp_path / "r").mkdir()
+    before = probe_dirs()
+    with pytest.raises(os_sandbox.OsSandboxUnavailable):
+        os_sandbox.self_test(tmp_path / "c", tmp_path / "r")
+    [argv] = seen
+    home = os_sandbox.homes()[0]
+    in_outside, listening = argv[5], argv[7]
+    for path in (in_outside, listening):
+        assert os.path.dirname(os.path.dirname(path)) == home, path
+        assert not path.startswith(("/tmp", "/private/tmp"))
+    assert probe_dirs() == before
+
+
+@pytest.mark.parametrize("failing", ["mkdtemp", "_home_target"])
+def test_a_self_test_that_cannot_be_set_up_is_unavailable_and_leaves_nothing(
+        tmp_path, monkeypatch, failing):
+    def broken(*_args, **_kwargs):
+        raise PermissionError(13, "denied by the test")
+
+    if failing == "mkdtemp":
+        monkeypatch.setattr(os_sandbox.tempfile, "mkdtemp", broken)
+    else:
+        monkeypatch.setattr(os_sandbox, "_home_target", broken)
+    monkeypatch.setattr(os_sandbox, "wrap", unconfined_wrap)
+    (tmp_path / "c").mkdir()
+    (tmp_path / "r").mkdir()
+    before = probe_dirs()
+    with pytest.raises(os_sandbox.OsSandboxUnavailable, match="could not be set up"):
+        os_sandbox.self_test(tmp_path / "c", tmp_path / "r")
+    assert probe_dirs() == before
+    assert list((tmp_path / "c").iterdir()) == [] and list((tmp_path / "r").iterdir()) == []
 
 
 GOOD = {"clone": "ok", "outside": "denied", "net": "blocked", "unix_outside": "blocked",

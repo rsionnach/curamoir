@@ -201,12 +201,15 @@ def wrap(argv, *, clone, run_dir, read_only=(), loopback=False):
     argv = list(argv)
     if not argv or not all(isinstance(arg, str) for arg in argv):
         raise ValueError("wrap takes a non-empty argv list of strings")
-    clone, run_dir = os.path.realpath(str(clone)), os.path.realpath(str(run_dir))
+    clone, run_dir = _canonical(str(clone)), _canonical(str(run_dir))
     if sys.platform == "darwin":
-        tool = shutil.which("sandbox-exec")
+        tool = tool_path("darwin")
         if tool is None:
-            raise OsSandboxUnavailable("sandbox-exec is not on PATH (macOS ships it as "
-                                       "/usr/bin/sandbox-exec)")
+            raise OsSandboxUnavailable("/usr/bin/sandbox-exec is missing (macOS ships it "
+                                       "there; no other copy is ever used)")
+        if not homes():
+            raise OsSandboxUnavailable("no home directory was found, so reads under it "
+                                       "cannot be denied")
         try:
             with open(PROFILE, encoding="utf-8") as handle:
                 static = handle.read()
@@ -219,10 +222,11 @@ def wrap(argv, *, clone, run_dir, read_only=(), loopback=False):
             line += ["-D", f"{name}={value}"]
         return [*line, *argv]
     if sys.platform.startswith("linux"):
-        tool = shutil.which("bwrap")
+        tool = tool_path("linux")
         if tool is None:
-            raise OsSandboxUnavailable("bubblewrap (bwrap) is not installed; install it "
-                                       "(e.g. `apt install bubblewrap`)")
+            raise OsSandboxUnavailable("bubblewrap (bwrap) is not installed in "
+                                       + ", ".join(os.path.dirname(p) for p in _BWRAP)
+                                       + "; install it (e.g. `apt install bubblewrap`)")
         line = [tool]
         for path in _LINUX_SYSTEM:
             if os.path.islink(path):
@@ -241,6 +245,74 @@ def wrap(argv, *, clone, run_dir, read_only=(), loopback=False):
                                "sandbox-exec and Linux bwrap)")
 
 
+#: Where the sandbox tools are taken from: fixed system locations, never the
+#: sweep's PATH (a directory early on it could hold a `sandbox-exec` that
+#: confines nothing). /usr/local/bin is root's on a Linux system.
+_SANDBOX_EXEC = ("/usr/bin/sandbox-exec",)
+_BWRAP = ("/usr/bin/bwrap", "/bin/bwrap", "/usr/local/bin/bwrap")
+
+
+def _is_executable(path):
+    return os.path.isfile(path) and os.access(path, os.X_OK)
+
+
+def tool_path(platform=None):
+    """The sandbox tool for `platform` (default this one) from its fixed
+    locations, or None."""
+    platform = platform or sys.platform
+    if platform == "darwin":
+        candidates = _SANDBOX_EXEC
+    elif platform.startswith("linux"):
+        candidates = _BWRAP
+    else:
+        return None
+    return next((path for path in candidates if _is_executable(path)), None)
+
+
+def _canonical(path):
+    """`path` resolved: realpath, and on macOS the kernel's own spelling of
+    it (F_GETPATH: the case on disk, /Users not its Data-volume alias), the
+    path the sandbox matches rules against. realpath where it cannot be
+    opened (it does not exist, or is unreadable)."""
+    real = os.path.realpath(path)
+    if sys.platform != "darwin":
+        return real
+    try:
+        import fcntl
+        handle = os.open(real, os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC)
+    except (ImportError, OSError):
+        return real
+    try:
+        spelled = fcntl.fcntl(handle, fcntl.F_GETPATH, bytes(1024))
+    except (OSError, AttributeError):
+        return real
+    finally:
+        os.close(handle)
+    return os.fsdecode(spelled.split(b"\0", 1)[0]) or real
+
+
+def _identity(path):
+    try:
+        found = os.stat(path)
+    except OSError:
+        return None
+    return found.st_dev, found.st_ino
+
+
+def _lineage(path):
+    """The identities (device, inode) of `path` and every directory above
+    it: what `path` is inside, whatever its spelling (case, firmlink)."""
+    found = set()
+    while True:
+        identity = _identity(path)
+        if identity is not None:
+            found.add(identity)
+        parent = os.path.dirname(path)
+        if parent == path:
+            return found
+        path = parent
+
+
 def homes():
     """The user's home directories, real paths: the account's (pwd) and
     $HOME when it differs; never `/`."""
@@ -250,7 +322,7 @@ def homes():
         candidates.insert(0, pwd.getpwuid(os.getuid()).pw_dir)
     for value in candidates:
         if value and os.path.isabs(value) and os.path.isdir(value):
-            real = os.path.realpath(value)
+            real = _canonical(value)
             if real != "/" and real not in found:
                 found.append(real)
     return found
@@ -267,28 +339,97 @@ _CREDENTIAL_TREES = (".ssh", ".aws", ".gnupg", ".config", os.path.join(".local",
                      "keyrings"), "Library", ".netrc", ".docker", ".kube")
 
 
+#: Under a home, the ONLY directories whose contents may be granted (an
+#: allowlist; the credential trees above are a second check): where version
+#: managers keep installed toolchains, never their whole root (~/.cargo
+#: holds credentials.toml, ~/.pyenv and ~/.asdf shims and plugins):
+#: ~/.pyenv/versions, ~/.nvm/versions, ~/.asdf/installs, ~/.volta/tools,
+#: ~/.rustup/toolchains, ~/.cargo/bin, ~/.rbenv/versions,
+#: ~/.sdkman/candidates, ~/.local/share/uv/python and
+#: ~/.local/share/mise/installs. Besides these, a Python venv (a directory
+#: holding pyvenv.cfg, and anything in it) and anything in a `node_modules`
+#: (the checkout's own, which is where the gate's PATH and NODE_PATH point).
+#: A shim (pyenv's, asdf's, volta's) that reads its manager's root is not
+#: granted and fails: the base is red or the command not runnable.
+_TOOLCHAIN_DIRS = tuple(os.path.join(*parts.split("/")) for parts in (
+    ".pyenv/versions", ".nvm/versions", ".asdf/installs", ".volta/tools", ".rustup/toolchains",
+    ".cargo/bin", ".rbenv/versions", ".sdkman/candidates", ".local/share/uv/python",
+    ".local/share/mise/installs"))
+
+#: Never granted, nor anything under them: where host daemons keep their
+#: Unix sockets, and a read-only bind (Linux) does not stop connect() to a
+#: socket inode.
+_SOCKET_TREES = ("/tmp", "/var/tmp", "/run", "/var/run", "/dev/shm", "/private/tmp",
+                 "/private/var/tmp", "/private/var/run")
+
+
 def _granted(paths):
-    """The `read_only` paths a run may read: absolute, existing, real, and
-    never `/`, one that is or holds a home directory (granting that would
-    grant everything in it), nor one in or holding a home's credential tree
-    (_CREDENTIAL_TREES). A refused path is left out, silently: the run then
-    cannot read it, and fails if it needed it. Sorted and deduplicated."""
+    """The `read_only` paths a run may read: absolute, existing, resolved
+    (_canonical), and never `/`, a socket tree (_SOCKET_TREES) or anything
+    in one, a home or anything holding one, nor, under a home, anything
+    but the allowlist (_TOOLCHAIN_DIRS, a venv, a node_modules), and never
+    anything in or holding a credential tree (_CREDENTIAL_TREES). Each
+    comparison is by identity (device, inode) of the path and its parents,
+    so neither case (`~/.SSH` on a case-insensitive volume) nor an alias
+    (/System/Volumes/Data/Users/...) slips past. A refused path is left out,
+    silently: the run then cannot read it, and fails if it needed it.
+    Sorted and deduplicated."""
     found = set()
+    every_home = homes()
     for path in paths:
         if not path or not os.path.isabs(path) or not os.path.exists(path):
             continue
-        real = os.path.realpath(path)
-        if real == "/" or any(_inside(home, real) or _near_credentials(real, home)
-                              for home in homes()):
+        real = _canonical(path)
+        if real == "/" or _refused(real, every_home):
             continue
         found.add(real)
     return sorted(found)
 
 
-def _near_credentials(path, home):
-    """Whether `path` (real) is in or holds one of `home`'s credential trees."""
+def _refused(path, every_home):
+    lineage = _lineage(path)
+    me = _identity(path)
+    for tree in _SOCKET_TREES:
+        if _identity(tree) in lineage or _inside(path, tree):
+            return True
+    for home in every_home:
+        home_id = _identity(home)
+        if home_id is None:
+            continue
+        if me in _lineage(home):
+            return True  # the home itself, or a directory holding it
+        if _near_credentials(path, lineage, me, home):
+            return True
+        if home_id in lineage and not _allowlisted(path, lineage, home, home_id):
+            return True
+    return False
+
+
+def _allowlisted(path, lineage, home, home_id):
+    """Whether `path` (under `home`) is in a toolchain directory, a venv or
+    a node_modules (_TOOLCHAIN_DIRS)."""
+    for directory in _TOOLCHAIN_DIRS:
+        identity = _identity(os.path.join(home, directory))
+        if identity is not None and identity in lineage:
+            return True
+    while _identity(path) not in (home_id, None):
+        if os.path.basename(path) == "node_modules" or \
+                os.path.isfile(os.path.join(path, "pyvenv.cfg")):
+            return True
+        parent = os.path.dirname(path)
+        if parent == path:
+            break
+        path = parent
+    return False
+
+
+def _near_credentials(path, lineage, me, home):
+    """Whether `path` is in or holds one of `home`'s credential trees."""
     for tree in _CREDENTIAL_TREES:
         tree = os.path.join(home, tree)
+        identity = _identity(tree)
+        if identity is not None and (identity in lineage or me in _lineage(tree)):
+            return True
         if _inside(path, tree) or _inside(tree, path):
             return True
     return False
@@ -350,26 +491,21 @@ def self_test(clone, run_dir, env=None, read_only=(), loopback=False):
     the sandbox confines here: every check of _CHECKS. `env` is the probe's
     environment (default the current one). OsSandboxUnavailable naming the
     failed check; nothing is left behind either way."""
-    clone_real, run_real = os.path.realpath(str(clone)), os.path.realpath(str(run_dir))
-    # Short: a Unix socket's path is limited to about 100 bytes, so a deep
-    # TMPDIR falls back to /tmp (outside the clone and the run's directory
-    # all the same, which the check below holds it to).
-    outside = tempfile.mkdtemp(prefix="cm-osbx-")
-    if len(os.path.join(outside, "s")) > 100:
-        os.rmdir(outside)
-        outside = tempfile.mkdtemp(prefix="cm-osbx-", dir="/tmp")
+    clone_real, run_real = _canonical(str(clone)), _canonical(str(run_dir))
     token = secrets.token_hex(6)
     in_clone = os.path.join(clone_real, f".curamoir-os-sandbox-probe-{token}")
-    in_outside = os.path.join(outside, "probe")
-    listening = os.path.join(outside, "s")
     inside_socket = os.path.join(run_real, f"s{token}")
     link_to = os.path.join(run_real, f"l{token}")
-    home_target, made = _home_target()
-    alias = ""
-    if sys.platform == "darwin" and home_target and os.path.exists(_DATA_VOLUME + home_target):
-        alias = _DATA_VOLUME + home_target
-    server = None
+    outside = in_outside = listening = made = server = None
     try:
+        outside = _outside_directory()
+        in_outside = os.path.join(outside, "probe")
+        listening = os.path.join(outside, "s")
+        home_target, made = _home_target()
+        alias = ""
+        if sys.platform == "darwin" and home_target and \
+                os.path.exists(_DATA_VOLUME + home_target):
+            alias = _DATA_VOLUME + home_target
         if any(_inside(os.path.realpath(outside), root) for root in (clone_real, run_real)):
             raise OsSandboxUnavailable(f"the self-test's outside directory {outside} is inside "
                                        "the clone or the run's directory, so it proves nothing")
@@ -408,7 +544,30 @@ def self_test(clone, run_dir, env=None, read_only=(), loopback=False):
             if path:
                 with contextlib.suppress(FileNotFoundError):
                     os.unlink(path)
-        shutil.rmtree(outside, ignore_errors=True)
+        if outside is not None:
+            shutil.rmtree(outside, ignore_errors=True)
+
+
+def _outside_directory():
+    """A fresh directory for the probe's outside write and host socket, in
+    the account's home: visible on the host and not masked by the sandbox's
+    own view (bwrap mounts an empty /tmp, where a write or connect would
+    fail for want of the path and prove nothing), and denied by both
+    sandboxes. Its socket path must fit in about 100 bytes; where the home
+    is unwritable or too deep, the temporary directory (then /tmp) instead,
+    which on Linux proves less. OSError if none can be made."""
+    for where in (*homes()[:1], None, "/tmp"):
+        try:
+            made = tempfile.mkdtemp(prefix=".curamoir-osbx-" if where else "cm-osbx-",
+                                    dir=where)
+        except OSError:
+            if where is None or where == "/tmp":
+                raise
+            continue
+        if len(os.path.join(made, "s")) <= 100:
+            return made
+        os.rmdir(made)
+    raise OSError("no directory short enough for a Unix socket's path")
 
 
 def _home_target():

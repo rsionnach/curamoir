@@ -1098,8 +1098,7 @@ def granted_prefixes(home, on_path):
     (".pyenv/versions/3.12.1", "python3", "lib/python3.12"),
     (".local/share/uv/python/cpython-3.12", "python3", "lib/python3.12"),
     (".nvm/versions/node/v20.1.0", "node", "lib/node_modules"),
-    (".pyenv", "python3", "lib/python3.12"),
-    ("work/tools/py", "python", "lib/python3.13t"),
+    (".pyenv/versions/3.13.0t", "python", "lib/python3.13t"),
 ])
 def test_an_interpreters_installation_is_granted(fake_home, prefix, name, marker):
     on_path = installed(fake_home, prefix, name, marker)
@@ -1108,12 +1107,13 @@ def test_an_interpreters_installation_is_granted(fake_home, prefix, name, marker
 
 @pytest.mark.parametrize("prefix, name, marker, why", [
     ("", "python3", "lib/python3.12", "the home itself (~/bin/python3)"),
-    ("tools", "python3", "lib/python3.12", "a direct child of the home, not a version "
-                                           "manager's root"),
-    ("work/py", "python3", None, "no lib/pythonX.Y: not an installation"),
-    ("work/py", "python3", "lib/node_modules", "a python beside node's lib"),
-    ("work/node", "node", "lib/python3.12", "a node without lib/node_modules"),
-    ("work/py", "python3", "lib/pythonista", "lib/python<not a version>"),
+    ("tools", "python3", "lib/python3.12", "a direct child of the home"),
+    (".pyenv", "python3", "lib/python3.12", "a version manager's whole root"),
+    ("work/tools/py", "python3", "lib/python3.12", "under the home, not a toolchain's"),
+    (".pyenv/versions/x", "python3", None, "no lib/pythonX.Y: not an installation"),
+    (".pyenv/versions/x", "python3", "lib/node_modules", "a python beside node's lib"),
+    (".nvm/versions/x", "node", "lib/python3.12", "a node without lib/node_modules"),
+    (".pyenv/versions/x", "python3", "lib/pythonista", "lib/python<not a version>"),
     (".ssh/py", "python3", "lib/python3.12", "under ~/.ssh"),
     ("Library/py", "python3", "lib/python3.12", "under ~/Library"),
     (".config/mise/py", "python3", "lib/python3.12", "under ~/.config"),
@@ -1127,3 +1127,42 @@ def test_a_prefix_outside_the_home_is_granted_when_it_is_an_installation(fake_ho
     framework = tmp_path / "Frameworks" / "3.12"
     on_path = installed(tmp_path, framework.relative_to(tmp_path))
     assert granted_prefixes(fake_home, on_path) == [os.path.realpath(framework)]
+
+
+# --- the self-test's setup failing is a refusal ----------------------------------------
+
+class _NoSandboxNeeded:
+    """A stand-in sandbox with only the clone's path."""
+
+    def __init__(self, path):
+        self.path = path
+
+
+@pytest.mark.parametrize("failing", ["mkdtemp", "_scratch_env"])
+def test_a_self_test_that_cannot_be_set_up_is_a_gate_error(tmp_path, monkeypatch, failing):
+    """Making the scratch directory or its HOME/TMPDIR failing (a full or
+    read-only disk) refuses the gate (GateError, TEST_GATE) rather than
+    escaping as an OSError; whatever was made is removed."""
+    made = []
+
+    def broken(*_args, **_kwargs):
+        raise PermissionError(13, "denied by the test")
+
+    if failing == "mkdtemp":
+        fake = type("fake_tempfile", (), {"mkdtemp": staticmethod(broken)})
+        monkeypatch.setattr(green_gate, "tempfile", fake)
+    else:
+        real_mkdtemp = green_gate.tempfile.mkdtemp
+
+        def mkdtemp(**kwargs):
+            made.append(real_mkdtemp(dir=tmp_path, **kwargs))
+            return made[-1]
+
+        fake = type("fake_tempfile", (), {"mkdtemp": staticmethod(mkdtemp)})
+        monkeypatch.setattr(green_gate, "tempfile", fake)
+        monkeypatch.setattr(green_gate, "_scratch_env", broken)
+    with pytest.raises(GateError, match="no OS sandbox confines it here: the sandbox "
+                                        "self-test could not be set up"):
+        green_gate._sandbox_self_test(_NoSandboxNeeded(tmp_path / "clone"), {}, False)
+    assert all(not os.path.exists(path) for path in made)
+    assert made or failing == "mkdtemp"

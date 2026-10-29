@@ -709,8 +709,9 @@ def _read_only(env):
     home; on Linux, anything but the system directories): PATH's
     directories, the reused venv and the installation its interpreter links
     to (_installation), NODE_PATH, the user base and the version managers'
-    roots, as os_sandbox._granted keeps them (real, existing, never a home
-    nor in or holding a credential tree).
+    roots, as os_sandbox._granted keeps them (under a home only its
+    allowlist: toolchain directories, a venv, a node_modules; never a
+    credential tree, a socket directory or a home).
     Read-only, and only the paths named, so a tool on PATH whose link points
     elsewhere under the home (outside these) cannot be read and fails:
     then the base is red or the command not runnable, and no PR opens."""
@@ -741,13 +742,6 @@ _INTERPRETERS = ("python3", "python", "node")
 #: What marks an installation prefix, per interpreter: a CPython's
 #: lib/pythonX.Y (X.Yt for a free-threaded build), node's lib/node_modules.
 _PYTHON_LIB = re.compile(r"python\d+\.\d+t?")
-#: The only direct children of a home granted as an installation prefix:
-#: version managers' roots (pyenv, nvm, asdf, volta, rustup, cargo, rbenv,
-#: sdkman). uv's and mise's live deeper (~/.local/share/uv, .../mise), so
-#: this rule does not reach them; ~/.local itself holds keyrings and is
-#: refused by os_sandbox._granted.
-_VERSION_MANAGER_DIRS = (".pyenv", ".nvm", ".asdf", ".volta", ".rustup", ".cargo", ".rbenv",
-                         ".sdkman")
 
 
 def _installation(interpreter):
@@ -756,9 +750,9 @@ def _installation(interpreter):
     resolved binary, which for a binary in ~/bin is the home itself and for
     one planted in a credential tree is that tree. So only a real
     installation (lib/pythonX.Y beside a python, lib/node_modules beside
-    node) is granted, never a home, and a direct child of a home only if it
-    is a version manager's root (_VERSION_MANAGER_DIRS). A refused prefix
-    is left out silently: a run that needed it fails, so no PR opens."""
+    node) is offered, and os_sandbox._granted then grants one under a home
+    only inside a toolchain directory (its allowlist). A refused prefix is
+    left out silently: a run that needed it fails, so no PR opens."""
     prefix = os.path.dirname(os.path.dirname(os.path.realpath(interpreter)))
     lib = os.path.join(prefix, "lib")
     if os.path.basename(interpreter) == "node":
@@ -772,10 +766,6 @@ def _installation(interpreter):
         if not any(_PYTHON_LIB.fullmatch(name) and os.path.isdir(os.path.join(lib, name))
                    for name in names):
             return None
-    for home in os_sandbox.homes():
-        if prefix == home or (os.path.dirname(prefix) == home
-                              and os.path.basename(prefix) not in _VERSION_MANAGER_DIRS):
-            return None
     return prefix
 
 
@@ -784,16 +774,21 @@ def _sandbox_self_test(sandbox, env, loopback):
     and environment shaped like a run's; GateError if it fails. Run once per
     gate, before the manifest is taken (its probe file in the clone is
     removed again) and before any command of the project's."""
-    scratch = tempfile.mkdtemp(prefix="curamoir-test-run-")
+    scratch = None
     try:
         try:
+            scratch = tempfile.mkdtemp(prefix="curamoir-test-run-")
             OS_SANDBOX.self_test(str(sandbox.path), scratch,
                                  env=_scratch_env(sandbox, env, scratch),
                                  read_only=_read_only(env), loopback=loopback)
         except os_sandbox.OsSandboxUnavailable as error:
             raise GateError(f"{_NO_SANDBOX}: {error}") from error
+        except OSError as error:
+            raise GateError(f"{_NO_SANDBOX}: the sandbox self-test could not be set up: "
+                            f"{error}") from error
     finally:
-        remove_tree(scratch, what="the sandbox self-test's scratch directory")
+        if scratch is not None:
+            remove_tree(scratch, what="the sandbox self-test's scratch directory")
 
 
 # --- the canary -----------------------------------------------------------------------
