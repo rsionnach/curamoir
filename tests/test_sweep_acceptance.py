@@ -342,3 +342,88 @@ def test_a_fix_that_breaks_a_test_is_left_out_of_a_reduced_pr(tmp_path, no_real_
     assert not any(BILLING in fix for fix in fix_lines(body))
     assert items(body, "### Files left for the next run") == [
         f"- `{BILLING}` (dropped by the test gate)"]
+
+
+# --- E14.1 (cm-2qp.1): the runner kind, through the real runner ----------------------------
+
+#: The green sweep's job line keys, and its PR body (the base written
+#: <BASE>), as commit 3f50a3f (and this branch before E14.1) writes them in
+#: test_one_sweep_opens_one_green_pr_fixing_all_five. Captured from that
+#: code.
+PRE_E14_SWEEP_KEYS = frozenset({
+    "at", "cost_usd", "ended", "fix_summary", "fixes", "found_delta", "held_for_open_prs",
+    "input_tokens", "job", "kind", "message", "model", "open_sweep_prs", "outcome",
+    "output_tokens", "pr", "reason", "run_id", "started", "sync", "sync_reason",
+    "test_gate", "tier1", "work"})
+PRE_E14_SWEEP_BODY = (
+    "<!-- curamoir-sweep base=<BASE> -->\n## curamoir sweep\n\n5 fixes of 3 principles at "
+    "base `<BASE>`, in 3 files. Each fix is listed with its principle id; the sweep's "
+    "ledger line records every one.\n\n### Fixes\n"
+    "- `errors-carry-context` `no-unchained-raise` `src/sample/core/billing.py` line 37\n"
+    "- `errors-carry-context` `no-unchained-raise` `src/sample/web/handlers.py` line 31\n"
+    "- `no-file-variant-proliferation` `no-variant-module` `src/sample/web/handlers_v2.py` "
+    "line 1 (deleted by the runner's remedy, not edited)\n"
+    "- `structured-logging` `no-bare-print` `src/sample/core/billing.py` line 15\n"
+    "- `structured-logging` `no-bare-print` `src/sample/web/handlers.py` line 22\n\n"
+    "### Test gate\ntests green with all 3 fixed file(s) (1 run)\nNothing was dropped.\n\n"
+    "### Files left for the next run\nNone.\n\n### Remedies skipped\nNone.\n\n"
+    "### Promotion candidates\nNone yet: promotion candidates come from the promotion "
+    "ladder (E4-R1, E4-R2), which has not landed.\n\n### Grade\nnot graded yet (Epic 7)\n")
+
+
+def test_with_no_runner_variable_the_sweep_is_the_pre_e14_sweep_plus_runner_local(
+        tmp_path, no_real_gh, monkeypatch):
+    """§8 acceptance 3, for the sweep: no runner variable is the local
+    runner, and the line and the PR are what they were before E14.1 but for
+    the line's `runner: local`."""
+    repo = sample(tmp_path)
+    base = base_of(repo)
+    stand_in(tmp_path, monkeypatch)
+
+    ran = runner.run_job(repo, "sweep", now=lambda: NOW, environ={})
+    line = job_lines(repo)[-1]
+
+    assert ran.exit_code == runner.EXIT_SUCCESS, ran.sentence
+    assert set(line) == PRE_E14_SWEEP_KEYS | {"runner"}
+    assert line["runner"] == "local"
+    [create] = creates(no_real_gh)
+    assert create["body_file_content"].replace(base, "<BASE>") == PRE_E14_SWEEP_BODY
+
+
+def test_a_session_puts_its_transcript_link_on_the_line_and_in_the_pr_body(
+        tmp_path, no_real_gh, monkeypatch):
+    """E14.1: CLAUDE_CODE_REMOTE_SESSION_ID's `cse_` id is the
+    claude.ai/code/session_ link, on the line and in the PR a reviewer
+    reads (§8 acceptance 2)."""
+    repo = sample(tmp_path)
+    base = base_of(repo)
+    stand_in(tmp_path, monkeypatch)
+    link = "https://claude.ai/code/session_01AbCdEf"
+
+    ran = runner.run_job(repo, "sweep", now=lambda: NOW, environ={
+        "CURAMOIR_RUNNER": "hosted", "CLAUDE_CODE_REMOTE": "true",
+        "CLAUDE_CODE_REMOTE_SESSION_ID": "cse_01AbCdEf"})
+    line = job_lines(repo)[-1]
+
+    assert ran.exit_code == runner.EXIT_SUCCESS, ran.sentence
+    assert (line["runner"], line["transcript"]) == ("hosted", link)
+    [create] = creates(no_real_gh)
+    body = create["body_file_content"]
+    assert f"Transcript of the run that opened this PR: {link}" in body.splitlines()
+    assert parse_sweep_marker(body) == base
+
+
+def test_an_invalid_session_id_is_unavailable_on_the_line_and_left_out_of_the_pr_body(
+        tmp_path, no_real_gh, monkeypatch):
+    repo = sample(tmp_path)
+    stand_in(tmp_path, monkeypatch)
+
+    ran = runner.run_job(repo, "sweep", now=lambda: NOW, environ={
+        "CLAUDE_CODE_REMOTE_SESSION_ID": "cse_x](https://evil.example)"})
+    line = job_lines(repo)[-1]
+
+    assert ran.exit_code == runner.EXIT_SUCCESS, ran.sentence
+    assert line["transcript"].startswith("unavailable (")
+    assert "evil" not in line["transcript"]
+    body = creates(no_real_gh)[0]["body_file_content"]
+    assert "Transcript" not in body and "evil" not in body

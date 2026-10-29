@@ -51,6 +51,11 @@ class Reason(str, Enum):
                                          # carry a file (curamoir.sweep_job)
     PUBLISH = "publish"                  # E3-R3: publish refused before anything was
                                          # pushed (publish.PublishRefused)
+    RUNNER = "runner"                    # E14.1: CURAMOIR_RUNNER cannot be honoured:
+                                         # `hosted` with no hosted marker, or no runner
+                                         # kind at all (config.RunnerDeclarationError;
+                                         # refused through job_guard's gateway, never
+                                         # Degraded)
 
     # Guard-layer failures. An unrecorded guard failure is a silent loss of
     # enforcement, so both are ledgered (DEC-5).

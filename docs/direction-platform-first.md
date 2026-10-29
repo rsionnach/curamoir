@@ -28,7 +28,7 @@ Of 164 commits, 60 are guard, policy or sandbox work; of the 53 since 27 October
 | Spend | subscription quota / per-run billing; ledger records tokens | ledger prices tokens; monthly ceiling |
 | Memory between runs | none: the in-repo handoff and ledger are the only continuity | the checkout |
 
-The runner kind is declared, never inferred: `CURAMOIR_RUNNER=hosted` is set by the workflow template and the Routine prompt and by nothing else. Absent, the runner is `local` and every guard runs as today. A `hosted` claim on a machine that is not one (no `GITHUB_ACTIONS`, no Routine marker) is refused, not downgraded.
+The runner kind is declared, never inferred: `CURAMOIR_RUNNER=hosted` is set by the workflow template and the Routine prompt and by nothing else. Absent, the runner is `local` and every guard runs as today. `hosted` is accepted only with a hosted marker: `CLAUDE_CODE_REMOTE=true` (set in every Claude Code cloud session, which is where a Routine runs), or `GITHUB_ACTIONS=true` together with `RUNNER_ENVIRONMENT=github-hosted` (a self-hosted runner or `act` is not a disposable VM, so it runs as `local`). A `hosted` claim on a machine that is not one, or any other value, is refused, not downgraded, and the refusal never echoes the value.
 
 ## 4. What is not rolled back, and why
 
@@ -45,7 +45,7 @@ Deleting tested boundary code saves nothing; the cost of this code is the harden
 | R | Requirement | Touches |
 |---|---|---|
 | R1 | `/curamoir:schedule` (local cron/launchd writer) is removed from the roadmap. The row leaves the README; no bead builds it. | README |
-| R2 | `CURAMOIR_RUNNER` is read by `config`/`job_guard`; `hosted` is accepted only with a hosted marker present (`GITHUB_ACTIONS=true`, or the Routine marker once known); otherwise refused with the reason on the job line. | `config.py`, `job_guard.py`, tests |
+| R2 | `CURAMOIR_RUNNER` is read by `config`/`job_guard`; `hosted` is accepted only with a hosted marker present (`CLAUDE_CODE_REMOTE=true`, or `GITHUB_ACTIONS=true` with `RUNNER_ENVIRONMENT=github-hosted`); otherwise, or for any other value, refused with the reason on the job line, never echoing the value. | `config.py`, `job_guard.py`, tests |
 | R3 | `green_gate` on `hosted` runs the test command directly in the clone; `os_sandbox.wrap` and `self_test` are bypassed only on `hosted`. On `local`, unchanged: no unsandboxed fallback. | `green_gate.py` (the `OS_SANDBOX` seam), tests |
 | R4 | `fix_step` on `hosted` drops the fresh-`HOME` / `--restricted` / `--settings` isolation and runs `claude -p` with the clone-scoped permission rules only; Bash may be in the tool list on `hosted`. `cm-xq9` ("no shell without an OS sandbox") is satisfied by the VM. | `fix_step.py`, tests |
 | R5 | `templates/github/curamoir-sweep.yml`: a workflow with `schedule:` (cron) and `workflow_dispatch`, checkout, `uv`, `curamoir run sweep`, `CURAMOIR_RUNNER=hosted`, secrets documented (`ANTHROPIC_API_KEY` or the subscription OAuth token where the terms permit unattended use). `/curamoir:init` offers to write it. | `templates/`, `scaffold.py`, `commands/init.md` |

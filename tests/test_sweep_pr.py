@@ -1178,3 +1178,61 @@ def test_scope_dropped_paths_are_left_for_the_next_run_one_line_per_path_and_kin
         # The first line a kind names is shown (line 3, not 9).
         "- `src/b.py` (dropped: an edit outside E3-R2's scope, outside_violation, line 3)",
         "- `src/c.py` (dropped: an edit outside E3-R2's scope, &lt;kind> &#91;x](y))"]
+
+
+# --- E14.1 (cm-2qp.1): the transcript link -------------------------------------------------
+
+SESSION_URL = "https://claude.ai/code/session_01AbCdEf-gh_23"
+
+
+def test_with_no_transcript_link_the_body_is_as_before(green):
+    """§8 acceptance 3: a run with no session (every local run) sends the
+    body it sent before E14.1."""
+    assert body_of(green, transcript_url=None) == body_of(green)
+    assert "claude.ai" not in body_of(green) and "Transcript" not in body_of(green)
+
+
+def test_the_transcript_link_is_a_line_after_the_header(green):
+    body = body_of(green, transcript_url=SESSION_URL)
+
+    lines = body.splitlines()
+    header = lines.index("## curamoir sweep") + 2
+    assert lines[header].startswith("5 fixes of 3 principles")
+    assert lines[header + 1:header + 4] == [
+        "", f"Transcript of the run that opened this PR: {SESSION_URL}", ""]
+    # Everything else is the body without the link.
+    without = body.replace(f"\nTranscript of the run that opened this PR: {SESSION_URL}\n", "")
+    assert without == body_of(green)
+    assert parse_sweep_marker(body) == green.base
+
+
+def test_the_transcript_link_is_never_cut(green):
+    body = body_of(green, transcript_url=SESSION_URL, limit=github_size(body_of(green)) + 60)
+
+    assert SESSION_URL in body
+
+
+@pytest.mark.parametrize("url", [
+    "https://claude.ai/code/session_abc\n### Forged",
+    "https://evil.example/code/session_abc",
+    "https://claude.ai/code/cse_abc",
+    "https://claude.ai/code/session_a b",
+    "https://claude.ai/code/session_",
+    "session_abc",
+])
+def test_a_transcript_url_that_is_not_a_session_link_is_refused(green, url):
+    """config.transcript_url only makes well-formed links; anything else
+    reaching here is a caller's bug, refused like the body's other
+    contradictory inputs (a ValueError; the sweep records a failure)."""
+    with pytest.raises(ValueError, match="transcript"):
+        body_of(green, transcript_url=url)
+
+
+def test_a_session_link_naming_the_marker_word_is_left_out(green):
+    """_compose makes MARKER_WORD inert on every line but the marker, which
+    would change the link into one to another session: no link instead."""
+    url = "https://claude.ai/code/session_x-curamoir-sweep-y"
+
+    body = body_of(green, transcript_url=url)
+
+    assert body == body_of(green)

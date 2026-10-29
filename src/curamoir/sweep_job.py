@@ -640,8 +640,11 @@ class _Fix:
         gate_fields = gate.ledger_fields()
         try:
             # One day (owner.day) for the branch, the title and the message.
+            # The transcript link is the run's (E14.1): resolved once by
+            # job_guard.run_guarded and handed down on the JobRun.
             body = final_body(records, sandbox.work_list, gate, sandbox.base, remedies.skipped,
-                              left_out, scope_dropped=dropped)
+                              left_out, scope_dropped=dropped,
+                              transcript_url=self.run.runner.transcript_url)
             branch = sweep_branch(owner.branch_prefix, owner.day, sandbox.base)
             title = pr_title(records, gate, owner.day)
             message = commit_message(records, gate, owner.day, sandbox.base)

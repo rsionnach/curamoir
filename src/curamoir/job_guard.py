@@ -71,6 +71,38 @@ a `monthly_ceiling_usd: 5` beside an unrelated typo would then run under
 the default $15 ceiling, a guard loosened without anybody being told
 (lint's `_configured_threshold` refuses the same thing).
 
+**The runner kind** (E14.1, cm-2qp.1; docs/direction-platform-first.md
+§3, §5 R2). `run_guarded` resolves it ONCE, as the run starts, with
+config.resolve_runner over `environ` (os.environ unless its caller,
+curamoir.runner's `run_job`, passes one): CURAMOIR_RUNNER unset, empty or
+`local` is local; `hosted` is hosted with CLAUDE_CODE_REMOTE=true, or with
+GITHUB_ACTIONS=true on a RUNNER_ENVIRONMENT=github-hosted runner (a
+self-hosted runner is not a disposable VM; the comment on
+config.RUNNER_ENVIRONMENT_VARIABLE says why). The body receives it as
+`run.runner` (JobRun), so the steps that differ by runner kind
+(green_gate, E14.2; fix_step, E14.3) are handed it rather than reading the
+environment themselves. Every job line of a run
+that resolved carries `runner: local|hosted`, and `transcript` when a cloud
+session id is set: the claude.ai link, or `unavailable (<why>)` when the
+id gives none (config.session_transcript). JobRun writes both itself, on
+every line whatever ends the run (a paused, refused or crashed run says
+where it ran too), and they are reserved fields no step can replace.
+
+A declaration the run cannot honour (`hosted` with no hosted marker, or any
+other value, which is never echoed) is REFUSED with reason `runner` and the
+declaration's message, never downgraded to local: the job's line (with no
+`runner` field: none resolved) and the gateway's guard line say why. WHERE in the order: after
+the kill switch and the lock, in the slot an invalid config is refused in,
+and before the config is read. After the kill switch, because it is the
+operator's switch and E10-R1 puts it first: a paused repository reads as
+paused whatever else is wrong. After the lock, because E10-R1 puts the lock
+before every check of what the run is configured to do, and the invalid
+config's refusal already sits there; taking and releasing the lock is
+harmless on either runner kind. Before the budget, the cap and the config,
+because the runner kind decides which boundary the run is behind, and
+nothing after it can be judged until that is known. It adds no step to the
+order: it refuses in the slot where an invalid config is refused.
+
 **Not `DefaultBranchGuard`.** It inspects the CURRENT branch of
 `context.repo`, and the sweep starts from the developer's checkout, which is
 usually on the default branch: it would refuse every sweep. The sweep never
@@ -147,7 +179,13 @@ from curamoir.guards import (
 )
 from curamoir.guards.lock import create_lock, forget_lock, lock_bytes, lock_file
 from curamoir.budget import PriceTable
-from curamoir.config import ConfigError
+from curamoir.config import (
+    ConfigError,
+    RunnerDeclarationError,
+    resolve_runner,
+    session_transcript,
+    transcript_fields,
+)
 from curamoir.job_run import REFUSED, JobRun
 from curamoir.ledger import repo_ledger
 from curamoir.repo_config import strict_config
@@ -340,7 +378,7 @@ def skip_sync(run):
 
 
 def job_gateway(repo, open_pr_listing, *, lock, now=None, repo_labels=None,
-                opens_prs=True):
+                opens_prs=True, runner_error=None):
     """The gateway a job passes before it starts, built from `repo`'s config.
 
     `repo` must be an inspectable root (run_guarded checks it first). Guard
@@ -352,8 +390,18 @@ def job_gateway(repo, open_pr_listing, *, lock, now=None, repo_labels=None,
     None checks the PAUSE file alone. `lock` is the run's LockSlot, and is
     required: the caller must release the slot the gateway acquires, so the
     gateway never makes one of its own that nobody would release.
+    `runner_error`, a config.RunnerDeclarationError, refuses the job after
+    the lock in place of everything after it (module docstring, "The
+    runner kind").
     """
     kill_switch_and_lock = [KillSwitch(repo_labels), lock]
+    if runner_error is not None:
+        # Before the config is read: what the run is decides which boundary
+        # holds it, so a declaration that cannot be honoured is the first
+        # thing wrong with it, and a config problem is reported only after
+        # the declaration is fixed.
+        return Gateway(guards=[*kill_switch_and_lock, _refuse_runner(runner_error)],
+                       ledger=repo_ledger(repo))
     try:
         config = strict_config(repo)
     except ConfigError as invalid:
@@ -410,8 +458,27 @@ def _refuse_invalid_config(invalid, opens_prs=True):
     return invalid_config
 
 
+def _refuse_runner(declaration_error):
+    """The guard that refuses a run whose CURAMOIR_RUNNER cannot be honoured,
+    with the declaration's own message (config.resolve_runner)."""
+
+    def runner_declaration(_context):
+        return Refusal(reason=Reason.RUNNER, message=str(declaration_error))
+
+    return runner_declaration
+
+
+def _resolve_runner(environ):
+    """(Runner, None), or (None, the RunnerDeclarationError) for a
+    declaration the run cannot honour."""
+    try:
+        return resolve_runner(environ), None
+    except RunnerDeclarationError as error:
+        return None, error
+
+
 def run_guarded(repo, job, open_pr_listing, body, *, now=None, repo_labels=None,
-                opens_prs=True):
+                opens_prs=True, environ=None):
     """Run `body(run)` for `job` behind `job_gateway(repo, ...)`, inside one
     `JobRun` writing to the repo's own ledger, and return a GuardedRun.
 
@@ -429,6 +496,10 @@ def run_guarded(repo, job, open_pr_listing, body, *, now=None, repo_labels=None,
     must return an aware UTC datetime and must not raise: a raise as the
     run starts writes no job line, and a naive value is not checked.
     `repo_labels` is passed to the kill switch (job_gateway).
+
+    `environ` is the environment the runner kind is declared in (module
+    docstring, "The runner kind"): os.environ when None. It is read once,
+    before anything runs; the body gets the result as `run.runner`.
 
     It sets os.environ['CURAMOIR_JOB'] to `job` for the run and restores
     the value before it on every exit (module docstring, Ordering 5), so it
@@ -456,6 +527,17 @@ def run_guarded(repo, job, open_pr_listing, body, *, now=None, repo_labels=None,
         print(f"cúramóir did not run {job!r}: {unusable}, so its guards cannot look "
               "and there is no ledger to record it in.", file=sys.stderr)
         return GuardedRun(outcome=UNUSABLE_ROOT)
+
+    # E14.1: the runner kind, resolved once for the run, here and nowhere
+    # below. A pure read of a mapping, so it is safe outside the `try`.
+    environ = os.environ if environ is None else environ
+    runner, runner_error = _resolve_runner(environ)
+    if runner is not None:
+        runner_fields = runner.ledger_fields()
+    else:
+        # Refused: the line claims no kind, but the transcript of a refused
+        # cloud run is the one most worth a link.
+        runner_fields = transcript_fields(*session_transcript(environ))
 
     # Ordering (do not reorder):
     # 1. TerminationSignals is outermost, so the replaced handlers come back,
@@ -485,11 +567,14 @@ def run_guarded(repo, job, open_pr_listing, body, *, now=None, repo_labels=None,
             # Ordering 5a: set it for the run.
             os.environ[JOB_VARIABLE] = job
             # HoldOnExit AFTER JobRun: it exits first (Ordering 2).
-            with JobRun(repo_ledger(context.repo), job, now=now) as run, \
+            # runner_fields: on the line whatever ends the run, and reserved
+            # (job_run.RESERVED_FIELDS), so the body cannot replace them.
+            with JobRun(repo_ledger(context.repo), job, now=now, runner=runner,
+                        runner_fields=runner_fields) as run, \
                     HoldOnExit(signals):
                 gateway = job_gateway(context.repo, open_pr_listing, now=now,
                                       repo_labels=repo_labels, lock=lock,
-                                      opens_prs=opens_prs)
+                                      opens_prs=opens_prs, runner_error=runner_error)
                 body_ran = False
 
                 def action():

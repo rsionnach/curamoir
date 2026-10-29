@@ -63,6 +63,13 @@ refusing.
   so the label check degrades there (a guard line says so) where gh's
   own resolution may have found the repository.
 
+**The runner kind** (E14.1, cm-2qp.1). `run_job` passes its `environ`
+through to run_guarded, which uses os.environ when it is None and resolves
+the runner kind once with config.resolve_runner, the one reader of
+CURAMOIR_RUNNER and the hosted markers (job_guard's "The runner kind"). A
+declaration that cannot be honoured is a refusal, reason `runner`, so
+EXIT_REFUSED with the reason in the sentence.
+
 **Exit codes**, one per GuardedRun outcome a scheduler must tell apart:
 EXIT_SUCCESS, EXIT_FAILURE (the body failed, crashed, or reported nothing,
 which job_run calls UNKNOWN: a bug, not a success), EXIT_REFUSED (a guard or
@@ -184,7 +191,8 @@ NOT_YET_BUILT = {
 }
 
 
-def run_job(repo, name, *, open_pr_listing=None, repo_labels=None, now=None):
+def run_job(repo, name, *, open_pr_listing=None, repo_labels=None, now=None,
+            environ=None):
     """Run the job registered as `name` against `repo` and return a RunReport.
 
     `open_pr_listing`, when given, replaces the job's registered listing
@@ -194,6 +202,10 @@ def run_job(repo, name, *, open_pr_listing=None, repo_labels=None, now=None):
     which every job gets (module docstring, "gh, by default").
     `now` is run_guarded's: the run's one clock, which the sweep's body
     reads too (module docstring, "The sweep").
+    `environ` is the environment the runner kind is declared in
+    (CURAMOIR_RUNNER and the hosted markers; job_guard's "The runner
+    kind"): os.environ when None. This is the entry point, so it is the
+    one place a test or an embedding caller hands a different one in.
     """
     job = JOBS.get(name)
     if job is None:
@@ -218,6 +230,7 @@ def run_job(repo, name, *, open_pr_listing=None, repo_labels=None, now=None):
             root, name, open_pr_listing,
             lambda run: job.body(root, run),
             now=now, repo_labels=repo_labels, opens_prs=job.opens_prs,
+            environ=environ,
         )
     except (Exception, SystemExit, Terminated) as crash:
         # SystemExit too: a body calling sys.exit(0) has a `failure` line
