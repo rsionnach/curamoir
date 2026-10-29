@@ -869,9 +869,9 @@ def self_test(clone, run_dir, env=None, read_only=(), loopback=False):
     if refused:
         raise OsSandboxUnavailable(
             f"the sweep's Python ({python}) cannot be granted to the sandbox: "
-            f"{', '.join(refused)} is refused ({REFUSAL_RULE}), so the self-test's probe "
-            "cannot run in it; run the sweep with a Python installed outside your home or "
-            "in one of those toolchain directories (or a venv made from one)")
+            f"{', '.join(refused)} is refused, so the self-test's probe cannot run in it; "
+            "run the sweep with a Python installed outside your home or as a toolchain's "
+            f"installed version (or a venv made from one). The rule: {REFUSAL_RULE}")
     token = secrets.token_hex(6)
     in_clone = os.path.join(clone_real, f".curamoir-os-sandbox-probe-{token}")
     inside_socket = os.path.join(run_real, f"s{token}")

@@ -1229,5 +1229,5 @@ def test_a_command_not_runnable_names_what_the_sandbox_did_not_grant(tmp_path, m
     assert result.strategy == ABANDONED and result.cause == "command_not_runnable"
     # Among others, maybe: the real user base is outside the fake home and
     # may be refused for its own reasons (a uv tool's venv in ~/.local).
-    refused = result.why.split("the OS sandbox did not grant ", 1)[1].split(" (", 1)[0]
+    refused = result.why.split("the OS sandbox did not grant ", 1)[1].split(", so a tool", 1)[0]
     assert os.path.realpath(home / "bin") in refused.split(", ")

@@ -1091,10 +1091,10 @@ def _not_granted(env):
     refused = os_sandbox.ungranted(_wanted(env))
     if not refused:
         return ""
-    return (f"; the OS sandbox did not grant {', '.join(refused)} "
-            f"({os_sandbox.REFUSAL_RULE}), so a tool there could not be run; install the "
-            "test tool outside your home, in one of those toolchain directories, or in a "
-            "venv or node_modules")
+    return (f"; the OS sandbox did not grant {', '.join(refused)}, "
+            "so a tool there could not be run; install the test tool outside your home, "
+            "in a toolchain's installed version, or in a venv or node_modules. The rule: "
+            f"{os_sandbox.REFUSAL_RULE}")
 
 
 def _not_runnable(runs):
