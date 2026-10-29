@@ -221,6 +221,38 @@ def test_loopback_follows_sweep_test_loopback(tmp_path, allowed):
     assert f"loopback={'ok' if works else 'denied'}" in result.runs[-1].tail
 
 
+@pytest.mark.skipif(sys.platform != "darwin", reason="hard links into the run and the Data "
+                                                    "volume's alias are macOS's paths to "
+                                                    f"the home; this is {sys.platform}")
+@real_sandbox
+def test_the_home_is_not_reachable_by_a_hard_link_nor_its_data_volume_alias(tmp_path):
+    """A file of the account's home cannot be hard-linked into the clone (and
+    read through the link) nor read as /System/Volumes/Data/<path>, while a
+    hard link inside the clone still works. The canary is removed after."""
+    home = os_sandbox.homes()[0]
+    canary = Path(home) / f".curamoir-link-probe-{os.getpid()}"
+    canary.write_text("secret\n")
+    try:
+        probe = tmp_path / "link.py"
+        probe.write_text(
+            "import os, sys\n"
+            "canary = sys.argv[1]\n"
+            "def attempt(name, action):\n"
+            "    try:\n        action(); print(name, 'worked')\n"
+            "    except OSError:\n        print(name, 'denied')\n"
+            "attempt('home_link', lambda: (os.link(canary, 'x'), open('x').read()))\n"
+            "attempt('alias', lambda: open('/System/Volumes/Data' + canary).read())\n"
+            "open('own', 'w').write('mine')\n"
+            "attempt('own_link', lambda: os.link('own', 'own2'))\n")
+        result = gate(tmp_path, f"{PY} {probe} {canary}")
+    finally:
+        canary.unlink()
+    tail = result.runs[-1].tail
+    assert result.strategy == GREEN, tail
+    assert "home_link denied" in tail and "alias denied" in tail, tail
+    assert "own_link worked" in tail, tail
+
+
 @real_sandbox
 def test_the_users_home_is_unreadable(tmp_path):
     """The account's home (~/.ssh, keychains, tokens), not the run's fresh
@@ -293,6 +325,9 @@ def test_wrap_on_macos_is_sandbox_exec_with_real_paths(tmp_path, monkeypatch):
                          "-D", f"RUN={os.path.realpath(tmp_path)}"]
     assert argv[-3:] == ["/bin/sh", "-c", "x"]
     assert "localhost" not in argv[2], "loopback is off by default"
+    for rule in ('(deny file-link)', '(allow file-link (subpath (param "CLONE")))',
+                 '(allow file-link (subpath (param "RUN")))'):
+        assert rule in argv[2]
 
 
 def test_the_macos_profile_denies_the_home_but_the_granted_paths(tmp_path, monkeypatch):
@@ -315,6 +350,12 @@ def test_the_macos_profile_denies_the_home_but_the_granted_paths(tmp_path, monke
         return name
 
     assert f'(deny file-read* (subpath (param "{named("HOME", home)}")))' in profile
+    # tmp_path is under /private, a firmlink: the home's Data-volume alias exists.
+    alias = os_sandbox._DATA_VOLUME + real(home)
+    assert os.path.isdir(alias)
+    [alias_name] = [n for n, v in params.items() if n.startswith("ALIAS") and v == alias]
+    assert f'(deny file-read* (subpath (param "{alias_name}")))' in profile
+    assert profile.index(alias_name) < profile.index("(allow file-read*")
     assert f'(allow file-read* (subpath (param "{named("READ", venv)}")))' in profile
     for directory in (home, home / "work"):
         assert f'(allow file-read-metadata (literal (param "{named("META", directory)}")))' \
@@ -344,6 +385,39 @@ def test_wrap_on_linux_binds_only_what_the_run_needs(tmp_path, monkeypatch):
     for flag in ("--unshare-net", "--unshare-pid", "--unshare-ipc", "--die-with-parent"):
         assert flag in argv
     assert ("--bind", clone) in pairs and ("--bind", run) in pairs
+
+
+@pytest.mark.parametrize("tree", [".ssh", ".aws", ".gnupg", ".config", ".config/gh",
+                                  ".config/mise", ".local/share/keyrings", "Library",
+                                  "Library/Python/3.12", ".netrc", ".docker", ".kube",
+                                  ".kube/cache"])
+def test_no_credential_tree_is_granted(tmp_path, monkeypatch, tree):
+    """Nothing in or under a credential tree of a home is granted, on either
+    platform: _granted drops it before wrap() builds the profile or binds."""
+    home = tmp_path / "home"
+    (home / tree).mkdir(parents=True)
+    monkeypatch.setattr(os_sandbox, "homes", lambda: [os.path.realpath(home)])
+    assert os_sandbox._granted([str(home / tree)]) == []
+
+
+@pytest.mark.parametrize("holder", [".local", ".local/share", ".config/..", "."])
+def test_no_path_holding_a_credential_tree_is_granted(tmp_path, monkeypatch, holder):
+    home = tmp_path / "home"
+    (home / ".local/share/keyrings").mkdir(parents=True)
+    (home / ".config").mkdir()
+    monkeypatch.setattr(os_sandbox, "homes", lambda: [os.path.realpath(home)])
+    assert os_sandbox._granted([str(home / holder)]) == []
+
+
+def test_an_installation_beside_the_credential_trees_is_granted(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    granted = [home / ".local/share/uv/python/cpython-3.12", home / ".pyenv",
+               home / "work/.venv", home / ".configs"]
+    for path in [*granted, home / ".local/share/keyrings"]:
+        path.mkdir(parents=True)
+    monkeypatch.setattr(os_sandbox, "homes", lambda: [os.path.realpath(home)])
+    assert os_sandbox._granted(map(str, granted)) == sorted(os.path.realpath(p)
+                                                             for p in granted)
 
 
 @pytest.mark.parametrize("platform", ["win32", "freebsd14", "cygwin"])
@@ -413,8 +487,9 @@ def test_a_sandbox_that_does_not_confine_fails_its_self_test(tmp_path, monkeypat
 
 
 GOOD = {"clone": "ok", "outside": "denied", "net": "blocked", "unix_outside": "blocked",
-        "unix_inside": "ok", "dns": "failed", "home_read": "denied", "launchctl": "denied",
-        "launchservices": "denied", "loopback": "denied"}
+        "unix_inside": "ok", "dns": "failed", "home_read": "denied", "home_link": "denied",
+        "home_alias": "denied", "launchctl": "denied", "launchservices": "denied",
+        "loopback": "denied"}
 
 
 @pytest.mark.parametrize("change, why", [
@@ -426,6 +501,9 @@ GOOD = {"clone": "ok", "outside": "denied", "net": "blocked", "unix_outside": "b
     ({"unix_inside": "denied"}, "inside the run's directory did not work"),
     ({"dns": "resolved"}, "a host name was resolved"),
     ({"home_read": "read"}, "under the user's home directory was readable"),
+    ({"home_link": "linked"}, "a hard link to a file under the user's home"),
+    ({"home_alias": "read"}, "/System/Volumes/Data"),
+    ({"home_link": None}, "the home_link check did not run"),
     ({"launchctl": "ran"}, "/bin/launchctl ran"),
     ({"launchservices": "reached"}, "LaunchServices"),
     ({"loopback": "ok"}, "loopback was reachable though sweep.test_loopback is false"),
@@ -434,8 +512,17 @@ GOOD = {"clone": "ok", "outside": "denied", "net": "blocked", "unix_outside": "b
 def test_each_failed_check_is_named(change, why):
     said = {} if change is None else {k: v for k, v in {**GOOD, **change}.items()
                                       if v is not None}
-    assert os_sandbox._failed_check(GOOD, platform="darwin") == ""
-    assert why in os_sandbox._failed_check(said, platform="darwin")
+    assert os_sandbox._failed_check(GOOD, platform="darwin", link=True, alias=True) == ""
+    assert why in os_sandbox._failed_check(said, platform="darwin", link=True, alias=True)
+
+
+def test_the_link_and_alias_checks_are_asked_only_when_the_probe_can_make_them():
+    """No file of the home's to link (an unwritable home: the probe lists the
+    directory instead), no alias (not macOS, or no Data volume): not asked."""
+    said = {k: v for k, v in GOOD.items() if k not in ("home_link", "home_alias")}
+    assert os_sandbox._failed_check(said, platform="darwin") == ""
+    assert "home_link" in os_sandbox._failed_check(said, platform="darwin", link=True)
+    assert "home_alias" in os_sandbox._failed_check(said, platform="darwin", alias=True)
 
 
 def test_with_loopback_allowed_the_self_test_wants_it_working():

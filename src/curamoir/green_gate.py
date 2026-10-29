@@ -708,7 +708,9 @@ def _read_only(env):
     (os_sandbox.wrap's `read_only`; on macOS, anything under the user's
     home; on Linux, anything but the system directories): PATH's
     directories, the reused venv and the installation its interpreter links
-    to, NODE_PATH, the user base and the version managers' roots.
+    to (_installation), NODE_PATH, the user base and the version managers'
+    roots, as os_sandbox._granted keeps them (real, existing, never a home
+    nor in or holding a credential tree).
     Read-only, and only the paths named, so a tool on PATH whose link points
     elsewhere under the home (outside these) cannot be read and fails:
     then the base is red or the command not runnable, and no PR opens."""
@@ -730,13 +732,51 @@ def _read_only(env):
                 paths.append(os.path.dirname(directory))
     for interpreter in interpreters:
         if os.path.islink(interpreter):
-            real = os.path.realpath(interpreter)
-            paths.append(os.path.dirname(os.path.dirname(real)))
-    return [path for path in paths if path and os.path.isabs(path)]
+            paths.append(_installation(interpreter))
+    return os_sandbox._granted(path for path in paths if path and os.path.isabs(path))
 
 
 #: The interpreters on PATH whose installation _read_only grants.
 _INTERPRETERS = ("python3", "python", "node")
+#: What marks an installation prefix, per interpreter: a CPython's
+#: lib/pythonX.Y (X.Yt for a free-threaded build), node's lib/node_modules.
+_PYTHON_LIB = re.compile(r"python\d+\.\d+t?")
+#: The only direct children of a home granted as an installation prefix:
+#: version managers' roots (pyenv, nvm, asdf, volta, rustup, cargo, rbenv,
+#: sdkman). uv's and mise's live deeper (~/.local/share/uv, .../mise), so
+#: this rule does not reach them; ~/.local itself holds keyrings and is
+#: refused by os_sandbox._granted.
+_VERSION_MANAGER_DIRS = (".pyenv", ".nvm", ".asdf", ".volta", ".rustup", ".cargo", ".rbenv",
+                         ".sdkman")
+
+
+def _installation(interpreter):
+    """The installation prefix `interpreter` (a link) resolves into, to be
+    granted, or None. WHY checked: the prefix is two levels above the
+    resolved binary, which for a binary in ~/bin is the home itself and for
+    one planted in a credential tree is that tree. So only a real
+    installation (lib/pythonX.Y beside a python, lib/node_modules beside
+    node) is granted, never a home, and a direct child of a home only if it
+    is a version manager's root (_VERSION_MANAGER_DIRS). A refused prefix
+    is left out silently: a run that needed it fails, so no PR opens."""
+    prefix = os.path.dirname(os.path.dirname(os.path.realpath(interpreter)))
+    lib = os.path.join(prefix, "lib")
+    if os.path.basename(interpreter) == "node":
+        if not os.path.isdir(os.path.join(lib, "node_modules")):
+            return None
+    else:
+        try:
+            names = os.listdir(lib)
+        except OSError:
+            return None
+        if not any(_PYTHON_LIB.fullmatch(name) and os.path.isdir(os.path.join(lib, name))
+                   for name in names):
+            return None
+    for home in os_sandbox.homes():
+        if prefix == home or (os.path.dirname(prefix) == home
+                              and os.path.basename(prefix) not in _VERSION_MANAGER_DIRS):
+            return None
+    return prefix
 
 
 def _sandbox_self_test(sandbox, env, loopback):

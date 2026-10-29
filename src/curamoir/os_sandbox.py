@@ -11,9 +11,11 @@ socket; no service that acts outside the sandbox.
 - **macOS**: `sandbox-exec -p <profile> -D CLONE=... -D RUN=... -D ...`,
   the profile being os_sandbox.sb (shipped beside this module: network,
   Unix sockets, Mach services, signals, writes) plus the rules wrap()
-  builds for this run (_darwin_rules): reads under the user's home denied
-  except `read_only`, CLONE and RUN (and the metadata of the directories
-  above them, so a path can be resolved), and loopback when `loopback`.
+  builds for this run (_darwin_rules): reads under the user's home (and
+  its /System/Volumes/Data alias) denied except `read_only`, CLONE and RUN
+  (and the metadata of the directories above them, so a path can be
+  resolved), and loopback when `loopback`. Hard links only within CLONE
+  and RUN, so no file of the home's gets an allowed second name.
   Every path is a `-D` parameter, never spliced into the profile text.
   sandbox-exec is deprecated but present on every macOS release, and has no
   supported command-line successor (Chromium and Bazel use it).
@@ -43,7 +45,8 @@ this bead found that a command smuggled through a string ran unsandboxed.
 
 Limits, stated: on macOS, reads OUTSIDE the user's home stay open (system
 libraries, /opt, /usr/local, other volumes), and a run can still read
-what it was granted under the home (the reused venv). A machine that is
+what it was granted under the home (the reused venv; never a home, nor
+anything in or holding a credential tree, _CREDENTIAL_TREES). A machine that is
 offline passes the network and DNS checks without proving the sandbox
 denies them; the other checks still prove the sandbox is on.
 """
@@ -91,10 +94,12 @@ exec "$python" -I -S -c "$SOCKET_PROBE" "$@"
 """
 
 #: The probe's Python half: argv is the outside socket, a socket path in the
-#: run's directory, and a file or directory under the user's home to read.
+#: run's directory, a file or directory under the user's home to read, where
+#: in the run's directory to hard-link it to, and its path through the Data
+#: volume's firmlink ("" where there is none).
 _SOCKET_PROBE = """
 import os, socket, sys
-outside, inside, home = sys.argv[1:4]
+outside, inside, home, link_to, alias = sys.argv[1:6]
 
 def check(name, attempt, good, bad):
     try:
@@ -141,11 +146,20 @@ def loopback():
 def dns():
     socket.getaddrinfo("example.com", 443)
 
-def home_read():
-    if os.path.isdir(home):
-        os.listdir(home)
+def read(path):
+    if not path:
+        raise OSError("nothing to read")
+    if os.path.isdir(path):
+        os.listdir(path)
     else:
-        open(home, "rb").read()
+        open(path, "rb").read()
+
+def home_link():
+    os.link(home, link_to)
+    try:
+        open(link_to, "rb").read()
+    finally:
+        os.unlink(link_to)
 
 def launchservices():
     import ctypes
@@ -161,7 +175,9 @@ check("unix_outside", unix_outside, "connected", "blocked")
 check("unix_inside", unix_inside, "ok", "denied")
 check("loopback", loopback, "ok", "denied")
 check("dns", dns, "resolved", "failed")
-check("home_read", home_read, "read", "denied")
+check("home_read", lambda: read(home), "read", "denied")
+check("home_link", home_link, "linked", "denied")
+check("home_alias", lambda: read(alias), "read", "denied")
 if sys.platform == "darwin":
     check("launchservices", launchservices, "reached", "denied")
 """
@@ -240,19 +256,42 @@ def homes():
     return found
 
 
+#: Where a home keeps credentials (keys, tokens, keychains, cloud and
+#: cluster logins), relative to it: nothing in one, and nothing holding one,
+#: is ever granted (_granted). All of ~/.config: gh, gcloud, git's
+#: credential store and many more keep tokens there, and no version
+#: manager installs a toolchain there (mise's live in ~/.local/share/mise).
+#: All of ~/Library: keychains, cookies, application tokens (a macOS
+#: framework Python's user base, ~/Library/Python/X.Y, is refused with it).
+_CREDENTIAL_TREES = (".ssh", ".aws", ".gnupg", ".config", os.path.join(".local", "share",
+                     "keyrings"), "Library", ".netrc", ".docker", ".kube")
+
+
 def _granted(paths):
     """The `read_only` paths a run may read: absolute, existing, real, and
-    never `/` nor one that is or holds a home directory (granting that would
-    grant everything in it). Sorted and deduplicated."""
+    never `/`, one that is or holds a home directory (granting that would
+    grant everything in it), nor one in or holding a home's credential tree
+    (_CREDENTIAL_TREES). A refused path is left out, silently: the run then
+    cannot read it, and fails if it needed it. Sorted and deduplicated."""
     found = set()
     for path in paths:
         if not path or not os.path.isabs(path) or not os.path.exists(path):
             continue
         real = os.path.realpath(path)
-        if real == "/" or any(_inside(home, real) for home in homes()):
+        if real == "/" or any(_inside(home, real) or _near_credentials(real, home)
+                              for home in homes()):
             continue
         found.add(real)
     return sorted(found)
+
+
+def _near_credentials(path, home):
+    """Whether `path` (real) is in or holds one of `home`'s credential trees."""
+    for tree in _CREDENTIAL_TREES:
+        tree = os.path.join(home, tree)
+        if _inside(path, tree) or _inside(tree, path):
+            return True
+    return False
 
 
 def _darwin_rules(clone, run_dir, read_only, loopback):
@@ -271,6 +310,9 @@ def _darwin_rules(clone, run_dir, read_only, loopback):
     under = []
     for home in homes():
         rules.append(f"(deny file-read* (subpath {param('HOME', home)}))")
+        alias = _DATA_VOLUME + home
+        if not _inside(home, _DATA_VOLUME) and os.path.isdir(alias):
+            rules.append(f"(deny file-read* (subpath {param('ALIAS', alias)}))")
         allowed = [p for p in [*_granted(read_only), clone, run_dir] if _inside(p, home)]
         under.extend((home, path) for path in allowed)
     metadata = set()
@@ -286,6 +328,17 @@ def _darwin_rules(clone, run_dir, read_only, loopback):
         rules += ['(allow network-bind network-inbound (local ip "localhost:*"))',
                   '(allow network-outbound (remote ip "localhost:*"))']
     return "\n" + "\n".join(rules) + "\n", params
+
+
+#: macOS's Data volume, where /Users (and /private, /opt, /usr/local) really
+#: live: a home is also reachable as /System/Volumes/Data/<home>, through
+#: the firmlink. On macOS 14.2 the kernel matches the canonical /Users path
+#: whichever spelling was opened (tested: a read through the alias, through
+#: /.vol/<device>/<inode> and through /Volumes/Macintosh HD is denied by the
+#: /Users rule, and a rule naming the alias matches nothing), so the alias
+#: rule _darwin_rules adds is a second line should a release match the
+#: path as given; self_test's `home_alias` check proves the alias denied.
+_DATA_VOLUME = "/System/Volumes/Data"
 
 
 def _inside(path, root):
@@ -310,7 +363,11 @@ def self_test(clone, run_dir, env=None, read_only=(), loopback=False):
     in_outside = os.path.join(outside, "probe")
     listening = os.path.join(outside, "s")
     inside_socket = os.path.join(run_real, f"s{token}")
+    link_to = os.path.join(run_real, f"l{token}")
     home_target, made = _home_target()
+    alias = ""
+    if sys.platform == "darwin" and home_target and os.path.exists(_DATA_VOLUME + home_target):
+        alias = _DATA_VOLUME + home_target
     server = None
     try:
         if any(_inside(os.path.realpath(outside), root) for root in (clone_real, run_real)):
@@ -321,7 +378,8 @@ def self_test(clone, run_dir, env=None, read_only=(), loopback=False):
         server.listen(1)
         python = os.path.realpath(sys.executable)
         argv = wrap(["/bin/sh", "-c", _PROBE, "curamoir-os-sandbox-probe", in_clone,
-                     in_outside, python, listening, inside_socket, home_target or "/nonexistent"],
+                     in_outside, python, listening, inside_socket, home_target or "/nonexistent",
+                     link_to, alias],
                     clone=clone_real, run_dir=run_real, loopback=loopback,
                     read_only=[*read_only, os.path.dirname(python),
                                os.path.realpath(sys.base_prefix)])
@@ -333,7 +391,8 @@ def self_test(clone, run_dir, env=None, read_only=(), loopback=False):
             raise OsSandboxUnavailable(f"the sandbox self-test could not run: {error}") from error
         said = dict(line.split("=", 1) for line in
                     done.stdout.decode("utf-8", "replace").splitlines() if "=" in line)
-        why = _failed_check(said, loopback=loopback, home=home_target is not None)
+        why = _failed_check(said, loopback=loopback, home=home_target is not None,
+                            link=made is not None, alias=bool(alias))
         if why:
             detail = done.stderr.decode("utf-8", "replace").strip()[-500:]
             raise OsSandboxUnavailable(
@@ -345,7 +404,7 @@ def self_test(clone, run_dir, env=None, read_only=(), loopback=False):
     finally:
         if server is not None:
             server.close()
-        for path in (in_clone, in_outside, listening, inside_socket, made):
+        for path in (in_clone, in_outside, listening, inside_socket, link_to, made):
             if path:
                 with contextlib.suppress(FileNotFoundError):
                     os.unlink(path)
@@ -376,7 +435,11 @@ def _home_target():
 #: daemon's socket (docker, an ssh agent) is not; `unix_inside`, that the
 #: run's own sockets (multiprocessing, node IPC) work; `dns`, that no name
 #: resolves (mDNSResponder, an exfiltration channel); `home_read`, that the
-#: user's home (~/.ssh, keychains, tokens) is unreadable; `launchctl` and
+#: user's home (~/.ssh, keychains, tokens) is unreadable; `home_link`, that
+#: a file of it cannot be hard-linked into the run's directory to be read
+#: there (asked when the probe made a file in the home); `home_alias`, that
+#: it is unreadable as /System/Volumes/Data/<path> too (asked on macOS
+#: where that alias exists); `launchctl` and
 #: `launchservices` (macOS), that neither a launchd job nor an app can be
 #: started outside the sandbox. `loopback` is checked against the setting.
 _CHECKS = (
@@ -389,6 +452,10 @@ _CHECKS = (
     ("dns", "failed", "a host name was resolved"),
 )
 _HOME_CHECK = ("home_read", "denied", "a file under the user's home directory was readable")
+_LINK_CHECK = ("home_link", "denied", "a hard link to a file under the user's home was made "
+                                      "in the run's directory and read through it")
+_ALIAS_CHECK = ("home_alias", "denied", "a file under the user's home was readable through "
+                                        "the Data volume's alias (/System/Volumes/Data/...)")
 _DARWIN_CHECKS = (
     ("launchctl", "denied", "/bin/launchctl ran (it could submit a job outside the sandbox)"),
     ("launchservices", "denied", "LaunchServices (com.apple.coreservices.launchservicesd) "
@@ -396,13 +463,19 @@ _DARWIN_CHECKS = (
 )
 
 
-def _failed_check(said, loopback=False, home=True, platform=None):
-    """Which check `said` (the probe's name=value lines) fails, or ""."""
+def _failed_check(said, loopback=False, home=True, platform=None, link=False, alias=False):
+    """Which check `said` (the probe's name=value lines) fails, or "".
+    `home`, `link` and `alias` say whether the probe had a home to read, a
+    file of it to link and an alias of it to read."""
     if not said:
         return "the sandboxed probe printed nothing, so the sandbox did not start"
     checks = list(_CHECKS)
     if home:
         checks.append(_HOME_CHECK)
+    if link:
+        checks.append(_LINK_CHECK)
+    if alias:
+        checks.append(_ALIAS_CHECK)
     if (platform or sys.platform) == "darwin":
         checks.extend(_DARWIN_CHECKS)
         checks.append(("loopback", "ok", "loopback did not work though sweep.test_loopback "

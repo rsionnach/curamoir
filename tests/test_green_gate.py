@@ -36,7 +36,7 @@ from pathlib import Path
 
 import pytest
 
-from curamoir import git_guard
+from curamoir import git_guard, green_gate, os_sandbox
 from curamoir.config import ConfigError, load_config
 from curamoir.fix_scope import ScopeVerdict, lint_sandbox, verify_fix
 from curamoir.git_guard import prepare_sandbox, snapshot_git_state
@@ -1058,3 +1058,72 @@ def test_a_fixture_sweep_whose_one_fix_breaks_the_tests_opens_a_pr_without_it(tm
                            capture_output=True, env={**os.environ,
                                                      "PYTHONDONTWRITEBYTECODE": "1"})
     assert green.returncode == 0, green.stdout.decode() + green.stderr.decode()
+
+
+# --- what a run may read: the installation an interpreter links into -------------------
+# Fixture provenance: fake homes and installations built in tmp_path (a
+# `lib/python3.12` or `lib/node_modules` marks an installation); the home is
+# os_sandbox.homes() monkeypatched, so nothing of the developer's is read.
+
+def installed(home, prefix, name="python3", marker="lib/python3.12"):
+    """A PATH directory holding `name`, a link to `prefix`/bin/`name`
+    (prefix relative to `home`), with `marker` made in the prefix when
+    given. Returns the PATH directory."""
+    root = home / prefix
+    (root / "bin").mkdir(parents=True, exist_ok=True)
+    (root / "bin" / name).write_text("")
+    if marker:
+        (root / marker).mkdir(parents=True, exist_ok=True)
+    on_path = home.parent / f"path-{str(prefix).replace('/', '-')}-{name}"
+    on_path.mkdir(exist_ok=True)
+    (on_path / name).symlink_to(root / "bin" / name)
+    return on_path
+
+
+@pytest.fixture
+def fake_home(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setattr(os_sandbox, "homes", lambda: [os.path.realpath(home)])
+    return home
+
+
+def granted_prefixes(home, on_path):
+    """The paths _read_only grants, other than PATH's own directory."""
+    return [p for p in green_gate._read_only({"PATH": str(on_path)})
+            if p != os.path.realpath(on_path)]
+
+
+@pytest.mark.parametrize("prefix, name, marker", [
+    (".pyenv/versions/3.12.1", "python3", "lib/python3.12"),
+    (".local/share/uv/python/cpython-3.12", "python3", "lib/python3.12"),
+    (".nvm/versions/node/v20.1.0", "node", "lib/node_modules"),
+    (".pyenv", "python3", "lib/python3.12"),
+    ("work/tools/py", "python", "lib/python3.13t"),
+])
+def test_an_interpreters_installation_is_granted(fake_home, prefix, name, marker):
+    on_path = installed(fake_home, prefix, name, marker)
+    assert granted_prefixes(fake_home, on_path) == [os.path.realpath(fake_home / prefix)]
+
+
+@pytest.mark.parametrize("prefix, name, marker, why", [
+    ("", "python3", "lib/python3.12", "the home itself (~/bin/python3)"),
+    ("tools", "python3", "lib/python3.12", "a direct child of the home, not a version "
+                                           "manager's root"),
+    ("work/py", "python3", None, "no lib/pythonX.Y: not an installation"),
+    ("work/py", "python3", "lib/node_modules", "a python beside node's lib"),
+    ("work/node", "node", "lib/python3.12", "a node without lib/node_modules"),
+    ("work/py", "python3", "lib/pythonista", "lib/python<not a version>"),
+    (".ssh/py", "python3", "lib/python3.12", "under ~/.ssh"),
+    ("Library/py", "python3", "lib/python3.12", "under ~/Library"),
+    (".config/mise/py", "python3", "lib/python3.12", "under ~/.config"),
+])
+def test_no_other_prefix_is_granted(fake_home, prefix, name, marker, why):
+    on_path = installed(fake_home, prefix, name, marker)
+    assert granted_prefixes(fake_home, on_path) == [], why
+
+
+def test_a_prefix_outside_the_home_is_granted_when_it_is_an_installation(fake_home, tmp_path):
+    framework = tmp_path / "Frameworks" / "3.12"
+    on_path = installed(tmp_path, framework.relative_to(tmp_path))
+    assert granted_prefixes(fake_home, on_path) == [os.path.realpath(framework)]

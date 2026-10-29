@@ -47,6 +47,18 @@
   (literal "/bin/launchctl")
   (literal "/usr/bin/osascript"))
 
+;; Hard links: only between paths inside the clone and the run's directory.
+;; The kernel checks file-link against BOTH the link's source and its new
+;; name (tested on macOS 14.2: a rule naming either one denies the link), so
+;; a link from anywhere else (a file under the home, whose reads are denied
+;; by path) into the writable directories is denied, and could not be read
+;; back through its new, allowed path. The write rules below already refuse
+;; such a link on 14.2 (the source must be writable); this rule does not
+;; depend on that. One filter per rule, as above.
+(deny file-link)
+(allow file-link (subpath (param "CLONE")))
+(allow file-link (subpath (param "RUN")))
+
 ;; Files: write only inside the clone and the run's directory, plus the
 ;; device files every process writes to.
 (deny file-write*)
