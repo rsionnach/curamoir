@@ -647,10 +647,19 @@ def _run_command(sandbox, argv, env, timeout, paths=(), loopback=False):
     directory each inside that scratch directory, outside the clone and
     removed afterwards, so a run neither reads the user's dotfiles (an
     `.npmrc` token, a git credential helper) nor hands state to the next
-    run. GateError, and nothing run, if no OS sandbox is available."""
-    scratch = tempfile.mkdtemp(prefix="curamoir-test-run-")
+    run. GateError, and nothing run, if no OS sandbox is available or the
+    scratch directory cannot be made (only what was made is removed)."""
     try:
-        env = _scratch_env(sandbox, env, scratch)
+        scratch = tempfile.mkdtemp(prefix="curamoir-test-run-")
+    except OSError as error:
+        raise GateError(f"the test run's scratch directory could not be made: {error}") \
+            from error
+    try:
+        try:
+            env = _scratch_env(sandbox, env, scratch)
+        except OSError as error:
+            raise GateError(f"the test run's HOME and TMPDIR could not be made: {error}") \
+                from error
         wrapped = _wrapped(argv, sandbox, scratch, env, loopback)
         started = time.monotonic()
         try:
@@ -699,7 +708,7 @@ def _wrapped(argv, sandbox, scratch, env, loopback):
     try:
         return OS_SANDBOX.wrap(argv, clone=str(sandbox.path), run_dir=scratch,
                                read_only=_read_only(env), loopback=loopback)
-    except os_sandbox.OsSandboxUnavailable as error:
+    except (os_sandbox.OsSandboxUnavailable, OSError) as error:
         raise GateError(f"{_NO_SANDBOX}: {error}") from error
 
 
@@ -715,6 +724,11 @@ def _read_only(env):
     Read-only, and only the paths named, so a tool on PATH whose link points
     elsewhere under the home (outside these) cannot be read and fails:
     then the base is red or the command not runnable, and no PR opens."""
+    return os_sandbox._granted(_wanted(env))
+
+
+def _wanted(env):
+    """Every absolute path _read_only asks os_sandbox._granted for."""
     paths = [entry for name in ("PATH", "NODE_PATH")
              for entry in env.get(name, "").split(os.pathsep)]
     paths += [env.get(name, "") for name in ("VIRTUAL_ENV", "PYTHONUSERBASE",
@@ -734,7 +748,7 @@ def _read_only(env):
     for interpreter in interpreters:
         if os.path.islink(interpreter):
             paths.append(_installation(interpreter))
-    return os_sandbox._granted(path for path in paths if path and os.path.isabs(path))
+    return [path for path in paths if path and os.path.isabs(path)]
 
 
 #: The interpreters on PATH whose installation _read_only grants.
@@ -1022,7 +1036,8 @@ def run_test_gate(sandbox, verdict, paths=None):
             result = abandoned(COMMAND_NOT_RUNNABLE, (
                 f"the test command `{chosen.command}` could not be run (exit "
                 f"{runs[-1].code}: no such command or test runner, or it could not be "
-                "executed), so nothing was tested: " + runs[-1].tail.strip()[-300:]))
+                "executed), so nothing was tested" + _not_granted(env) + ": "
+                + runs[-1].tail.strip()[-300:]))
         elif not green_base:
             result = abandoned(BASE_RED, "the tests fail at the base commit itself, with no fix "
                                          "applied, so they cannot tell a good fix from a bad one")
@@ -1040,6 +1055,17 @@ def run_test_gate(sandbox, verdict, paths=None):
                     "every fixed file was tested on top of the green base, and each one "
                     "alone turns the tests red"), dropped)
     return _finish(sandbox, git_state, every, fixed, base, result.kept, result)
+
+
+def _not_granted(env):
+    """What the OS sandbox would not grant of what a run asked to read
+    (_wanted), said plainly: a test tool there could not be run. "" when
+    all was granted."""
+    refused = os_sandbox._ungranted(_wanted(env))
+    if not refused:
+        return ""
+    return (f"; the OS sandbox did not grant {', '.join(refused)} "
+            f"({os_sandbox.REFUSAL_RULE}), so a tool there could not be run")
 
 
 def _not_runnable(runs):

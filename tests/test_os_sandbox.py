@@ -419,7 +419,8 @@ GRANTED_UNDER_A_HOME = (".pyenv/versions", ".pyenv/versions/3.12.1/lib", ".nvm/v
                         ".cargo/bin", ".rbenv/versions/3.3", ".sdkman/candidates/java",
                         ".local/share/uv/python/cpython-3.12", ".local/share/mise/installs/node",
                         "work/proj/.venv", "work/proj/.venv/bin", "work/proj/node_modules",
-                        "work/proj/node_modules/.bin")
+                        "work/proj/node_modules/.bin", "miniconda3", "miniconda3/bin",
+                        "anaconda3/lib", "miniforge3/envs/py", "mambaforge/bin")
 REFUSED_UNDER_A_HOME = (".pyenv", ".pyenv/shims", ".cargo", ".cargo/registry", ".nvm",
                         ".local/share/uv", ".local/bin", ".bun/bin", "bin", "work", "work/proj",
                         "work/proj/src", ".configs")
@@ -496,6 +497,67 @@ def test_nothing_under_tmp_or_run_is_granted(where):
     assert os_sandbox._granted([where]) == []
 
 
+@pytest.mark.parametrize("where", ["/", "/var", "/private", "/private/var", "/dev",
+                                   "/dev/null", "/proc", "/proc/self", "/sys",
+                                   "/System/Volumes/Data", "/System/Volumes/Data/private"])
+def test_nothing_holding_or_in_a_socket_or_kernel_tree_is_granted(monkeypatch, where):
+    """/var holds /var/run (a read-only bind of it exposes the host's
+    sockets on Linux), and a host /dev or /proc granted would be bound over
+    the run's own (/proc/<pid>/root is the host's every file). No home, so
+    none holding a home is what refuses it."""
+    if not os.path.exists(where):
+        pytest.skip(f"{where} does not exist on this machine")
+    monkeypatch.setattr(os_sandbox, "homes", lambda: [])
+    assert os_sandbox._granted([where]) == []
+
+
+@pytest.mark.parametrize("trees", ["_SOCKET_TREES", "_KERNEL_TREES"])
+@pytest.mark.parametrize("where", ["var", "var/run", "var/run/docker", "var/lib"])
+def test_a_tree_is_refused_in_both_directions(tmp_path, monkeypatch, trees, where):
+    """A stand-in tree (tmp/var/run): what holds it and what is in it are
+    refused, and a sibling (var/lib) is not."""
+    for path in ("var/run/docker", "var/lib"):
+        (tmp_path / path).mkdir(parents=True)
+    monkeypatch.setattr(os_sandbox, trees, (os.path.realpath(tmp_path / "var" / "run"),))
+    monkeypatch.setattr(os_sandbox, "homes", lambda: [os.path.realpath(tmp_path / "home")])
+    expected = [os.path.realpath(tmp_path / where)] if where == "var/lib" else []
+    assert os_sandbox._granted([str(tmp_path / where)]) == expected
+
+
+def linux_wrap(tmp_path, monkeypatch, read_only=()):
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr(os_sandbox, "_is_executable", lambda path: True)
+    monkeypatch.setattr(os_sandbox, "homes", lambda: [os.path.realpath(tmp_path / "home")])
+    return os_sandbox.wrap(["/bin/sh"], clone=tmp_path / "c", run_dir=tmp_path / "r",
+                           read_only=read_only)
+
+
+def test_on_linux_the_runs_own_dev_proc_and_tmp_are_mounted_after_every_grant(
+        tmp_path, monkeypatch):
+    """A later bwrap mount covers an earlier one: the run's own /dev, /proc
+    and /tmp come last, so nothing granted can stand in for them."""
+    (tmp_path / "tool").mkdir()
+    argv = linux_wrap(tmp_path, monkeypatch, read_only=[str(tmp_path / "tool")])
+    grant = argv.index(os.path.realpath(tmp_path / "tool"))
+    assert argv[grant - 1] == "--ro-bind-try"
+    for mount in ("--dev", "--proc", "--tmpfs"):
+        assert argv.index(mount) > grant, f"{mount} is mounted before a grant"
+
+
+def test_on_linux_a_system_directory_that_cannot_be_read_is_unavailable(tmp_path, monkeypatch):
+    """An OSError building the binds (a link that cannot be read) is the
+    sandbox being unavailable, never an exception the sweep does not catch."""
+    def broken(path):
+        raise PermissionError(13, "denied by the test")
+
+    link = tmp_path / "lib"
+    link.symlink_to(tmp_path)
+    monkeypatch.setattr(os_sandbox, "_LINUX_SYSTEM", (str(link),))
+    monkeypatch.setattr(os_sandbox.os, "readlink", broken)
+    with pytest.raises(os_sandbox.OsSandboxUnavailable, match="cannot be read"):
+        linux_wrap(tmp_path, monkeypatch)
+
+
 @pytest.mark.parametrize("platform", ["win32", "freebsd14", "cygwin"])
 def test_wrap_elsewhere_is_unavailable(tmp_path, monkeypatch, platform):
     monkeypatch.setattr(sys, "platform", platform)
@@ -535,8 +597,11 @@ def test_the_tool_comes_from_a_system_directory_never_path(tmp_path, monkeypatch
         os_sandbox.wrap(["true"], clone=tmp_path, run_dir=tmp_path)
 
 
-def test_on_macos_no_home_is_unavailable_never_a_silent_pass(tmp_path, monkeypatch):
-    monkeypatch.setattr(sys, "platform", "darwin")
+@pytest.mark.parametrize("platform", ["darwin", "linux"])
+def test_no_home_is_unavailable_never_a_silent_pass(tmp_path, monkeypatch, platform):
+    """With no home, _granted has none to refuse (nor its credential trees):
+    refused on Linux as on macOS."""
+    monkeypatch.setattr(sys, "platform", platform)
     monkeypatch.setattr(os_sandbox, "_is_executable", lambda path: True)
     monkeypatch.setattr(os_sandbox, "homes", lambda: [])
     with pytest.raises(os_sandbox.OsSandboxUnavailable, match="home"):
@@ -645,6 +710,64 @@ def test_a_self_test_that_cannot_be_set_up_is_unavailable_and_leaves_nothing(
         os_sandbox.self_test(tmp_path / "c", tmp_path / "r")
     assert probe_dirs() == before
     assert list((tmp_path / "c").iterdir()) == [] and list((tmp_path / "r").iterdir()) == []
+
+
+def test_a_canary_that_cannot_be_written_is_not_left_in_the_home(tmp_path, monkeypatch):
+    """The probe's file in the home is removed when writing it fails, and
+    the home's listing is asked instead."""
+    home = tmp_path / "account"  # not tmp_path/home: isolated_home's HOME
+    home.mkdir()
+    monkeypatch.setattr(os_sandbox, "homes", lambda: [os.path.realpath(home)])
+    real_mkstemp = os_sandbox.tempfile.mkstemp
+
+    def read_only_mkstemp(**kwargs):
+        handle, path = real_mkstemp(**kwargs)
+        os.close(handle)
+        return os.open(path, os.O_RDONLY), path
+
+    monkeypatch.setattr(os_sandbox.tempfile, "mkstemp", read_only_mkstemp)
+    assert os_sandbox._home_target() == (os.path.realpath(home), None)
+    assert list(home.iterdir()) == []
+
+
+def a_python(tmp_path, monkeypatch, prefix):
+    """sys.executable and sys.base_prefix a Python installed at `prefix`
+    under a fake home (homes() is it alone); the fake home."""
+    home = tmp_path / "account"  # not tmp_path/home: isolated_home's HOME
+    (home / prefix / "bin").mkdir(parents=True)
+    (home / prefix / "bin" / "python3").write_text("")
+    monkeypatch.setattr(os_sandbox, "homes", lambda: [os.path.realpath(home)])
+    monkeypatch.setattr(sys, "executable", str(home / prefix / "bin" / "python3"))
+    monkeypatch.setattr(sys, "base_prefix", str(home / prefix))
+    (tmp_path / "c").mkdir()
+    (tmp_path / "r").mkdir()
+    return home
+
+
+def test_an_interpreter_the_sandbox_will_not_grant_is_said_plainly(tmp_path, monkeypatch):
+    """Not "the net check did not run": the sweep's own Python is refused
+    (here a directory of the home's that is not a toolchain's), so the
+    probe cannot run, and nothing is made or run."""
+    seen = []
+    monkeypatch.setattr(os_sandbox, "wrap", recording_wrap(seen))
+    home = a_python(tmp_path, monkeypatch, "tools/py")
+    with pytest.raises(os_sandbox.OsSandboxUnavailable,
+                       match=r"the sweep's Python .* cannot be granted to the sandbox"):
+        os_sandbox.self_test(tmp_path / "c", tmp_path / "r")
+    assert seen == []
+    assert sorted(p.name for p in home.iterdir()) == ["tools"]
+
+
+@pytest.mark.parametrize("root", ["miniconda3", "anaconda3", "miniforge3", "mambaforge"])
+def test_a_conda_interpreter_is_granted_to_the_probe(tmp_path, monkeypatch, root):
+    """conda's base Python has no pyvenv.cfg: its install root is in the
+    allowlist, so the self-test runs its probe with it."""
+    seen = []
+    monkeypatch.setattr(os_sandbox, "wrap", recording_wrap(seen))
+    a_python(tmp_path, monkeypatch, root)
+    with pytest.raises(os_sandbox.OsSandboxUnavailable, match="self-test failed"):
+        os_sandbox.self_test(tmp_path / "c", tmp_path / "r")
+    assert len(seen) == 1
 
 
 GOOD = {"clone": "ok", "outside": "denied", "net": "blocked", "unix_outside": "blocked",

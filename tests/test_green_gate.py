@@ -1166,3 +1166,52 @@ def test_a_self_test_that_cannot_be_set_up_is_a_gate_error(tmp_path, monkeypatch
         green_gate._sandbox_self_test(_NoSandboxNeeded(tmp_path / "clone"), {}, False)
     assert all(not os.path.exists(path) for path in made)
     assert made or failing == "mkdtemp"
+
+
+# --- a run's setup failing is a refusal -----------------------------------------------
+
+@pytest.mark.parametrize("failing", ["mkdtemp", "_scratch_env", "wrap"])
+def test_a_run_that_cannot_be_set_up_is_a_gate_error(tmp_path, monkeypatch, failing):
+    """The scratch directory, its HOME/TMPDIR or the wrap failing with an
+    OSError refuses the gate (GateError, which the sweep turns into a
+    TEST_GATE refusal) rather than escaping; whatever was made is removed
+    and nothing runs."""
+    made, ran = [], []
+
+    def broken(*_args, **_kwargs):
+        raise PermissionError(13, "denied by the test")
+
+    real_mkdtemp = green_gate.tempfile.mkdtemp
+
+    def mkdtemp(**kwargs):
+        made.append(real_mkdtemp(dir=tmp_path, **kwargs))
+        return made[-1]
+
+    fake = type("fake_tempfile", (), {"mkdtemp": staticmethod(
+        broken if failing == "mkdtemp" else mkdtemp)})
+    monkeypatch.setattr(green_gate, "tempfile", fake)
+    if failing == "_scratch_env":
+        monkeypatch.setattr(green_gate, "_scratch_env", broken)
+    elif failing == "wrap":
+        monkeypatch.setattr(green_gate.OS_SANDBOX, "wrap", broken)
+    monkeypatch.setattr(green_gate, "run_in_group", lambda *a, **k: ran.append(a))
+    with pytest.raises(GateError, match="denied by the test"):
+        green_gate._run_command(_NoSandboxNeeded(tmp_path / "clone"), ["true"], {}, 10)
+    assert all(not os.path.exists(path) for path in made)
+    assert (made == []) == (failing == "mkdtemp")
+    assert ran == []
+
+
+def test_a_command_not_runnable_names_what_the_sandbox_did_not_grant(tmp_path, monkeypatch):
+    """A test tool in a directory of the home's that is not a toolchain's
+    (~/bin) cannot be read in the sandbox: the refusal says so plainly."""
+    home = tmp_path / "home"
+    (home / "bin").mkdir(parents=True)
+    monkeypatch.setattr(os_sandbox, "homes", lambda: [os.path.realpath(home)])
+    monkeypatch.setenv("PATH", f"{home / 'bin'}{os.pathsep}{os.environ['PATH']}")
+    repo = repo_of(tmp_path, THREE, "no-such-test-runner-xyz -q")
+    with prepare_sandbox(repo, "HEAD", parent=tmp_path) as sandbox:
+        result = run_test_gate(sandbox, fix(sandbox, {"src/a.py": "a = 2\n"}))
+
+    assert result.strategy == ABANDONED and result.cause == "command_not_runnable"
+    assert f"the OS sandbox did not grant {os.path.realpath(home / 'bin')}" in result.why

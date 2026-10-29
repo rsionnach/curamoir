@@ -22,7 +22,9 @@ socket; no service that acts outside the sandbox.
 - **Linux**: bubblewrap (`bwrap`), deny by default: a fresh root holding
   only the system directories (/usr, /bin, /sbin, /lib*), the parts of /etc
   a runtime reads (_LINUX_ETC), a fresh /tmp, /dev and /proc, `read_only`
-  (never the home directory itself or anything holding it) read-only, and
+  (never the home directory itself or anything holding it, nor a socket or
+  kernel tree or anything in or holding one; bound before /dev, /proc and
+  /tmp, so those stay the run's own) read-only, and
   the clone and the run's directory writable; new network, pid and IPC
   namespaces (`--unshare-net`: a private loopback that reaches nothing of
   the host's, and no host abstract socket). Nothing else of the host is
@@ -207,9 +209,7 @@ def wrap(argv, *, clone, run_dir, read_only=(), loopback=False):
         if tool is None:
             raise OsSandboxUnavailable("/usr/bin/sandbox-exec is missing (macOS ships it "
                                        "there; no other copy is ever used)")
-        if not homes():
-            raise OsSandboxUnavailable("no home directory was found, so reads under it "
-                                       "cannot be denied")
+        _require_home()
         try:
             with open(PROFILE, encoding="utf-8") as handle:
                 static = handle.read()
@@ -227,22 +227,39 @@ def wrap(argv, *, clone, run_dir, read_only=(), loopback=False):
             raise OsSandboxUnavailable("bubblewrap (bwrap) is not installed in "
                                        + ", ".join(os.path.dirname(p) for p in _BWRAP)
                                        + "; install it (e.g. `apt install bubblewrap`)")
+        _require_home()
         line = [tool]
         for path in _LINUX_SYSTEM:
-            if os.path.islink(path):
-                line += ["--symlink", os.readlink(path), path]
-            elif os.path.isdir(path):
-                line += ["--ro-bind", path, path]
+            try:
+                if os.path.islink(path):
+                    line += ["--symlink", os.readlink(path), path]
+                elif os.path.isdir(path):
+                    line += ["--ro-bind", path, path]
+            except OSError as error:
+                raise OsSandboxUnavailable(f"the system directory {path} cannot be read to "
+                                           f"be bound: {error}") from error
         for path in _LINUX_ETC:
             line += ["--ro-bind-try", path, path]
-        line += ["--dev", "/dev", "--proc", "/proc", "--tmpfs", "/tmp"]
+        # The grants before --dev, --proc and --tmpfs: a later mount covers an
+        # earlier one, so the run's own /dev, /proc and /tmp always win over
+        # anything granted (which _granted refuses besides).
         for path in _granted(read_only):
             line += ["--ro-bind-try", path, path]
+        line += ["--dev", "/dev", "--proc", "/proc", "--tmpfs", "/tmp"]
         return [*line, "--bind", clone, clone, "--bind", run_dir, run_dir,
                 "--unshare-net", "--unshare-pid", "--unshare-ipc",
                 "--die-with-parent", "--new-session", "--chdir", clone, "--", *argv]
     raise OsSandboxUnavailable(f"no OS sandbox is supported on {sys.platform!r} (only macOS "
                                "sandbox-exec and Linux bwrap)")
+
+
+def _require_home():
+    """OsSandboxUnavailable when no home directory is found: _granted then
+    has none to refuse (nor its credential trees), and on macOS reads under
+    it cannot be denied."""
+    if not homes():
+        raise OsSandboxUnavailable("no home directory was found, so reads under it cannot "
+                                   "be denied, nor a grant of it or its credentials refused")
 
 
 #: Where the sandbox tools are taken from: fixed system locations, never the
@@ -345,8 +362,11 @@ _CREDENTIAL_TREES = (".ssh", ".aws", ".gnupg", ".config", os.path.join(".local",
 #: holds credentials.toml, ~/.pyenv and ~/.asdf shims and plugins):
 #: ~/.pyenv/versions, ~/.nvm/versions, ~/.asdf/installs, ~/.volta/tools,
 #: ~/.rustup/toolchains, ~/.cargo/bin, ~/.rbenv/versions,
-#: ~/.sdkman/candidates, ~/.local/share/uv/python and
-#: ~/.local/share/mise/installs. Besides these, a Python venv (a directory
+#: ~/.sdkman/candidates, ~/.local/share/uv/python,
+#: ~/.local/share/mise/installs, and conda's install roots (~/miniconda3,
+#: ~/anaconda3, ~/miniforge3, ~/mambaforge: an interpreter there has no
+#: pyvenv.cfg, so without them the sweep's own conda Python is refused and no
+#: gate can run). Besides these, a Python venv (a directory
 #: holding pyvenv.cfg, and anything in it) and anything in a `node_modules`
 #: (the checkout's own, which is where the gate's PATH and NODE_PATH point).
 #: A shim (pyenv's, asdf's, volta's) that reads its manager's root is not
@@ -354,21 +374,32 @@ _CREDENTIAL_TREES = (".ssh", ".aws", ".gnupg", ".config", os.path.join(".local",
 _TOOLCHAIN_DIRS = tuple(os.path.join(*parts.split("/")) for parts in (
     ".pyenv/versions", ".nvm/versions", ".asdf/installs", ".volta/tools", ".rustup/toolchains",
     ".cargo/bin", ".rbenv/versions", ".sdkman/candidates", ".local/share/uv/python",
-    ".local/share/mise/installs"))
+    ".local/share/mise/installs", "miniconda3", "anaconda3", "miniforge3", "mambaforge"))
 
-#: Never granted, nor anything under them: where host daemons keep their
-#: Unix sockets, and a read-only bind (Linux) does not stop connect() to a
-#: socket inode.
+#: Never granted, nor anything in them, nor anything holding them (/var,
+#: /private): where host daemons keep their Unix sockets, and a read-only
+#: bind (Linux) does not stop connect() to a socket inode.
 _SOCKET_TREES = ("/tmp", "/var/tmp", "/run", "/var/run", "/dev/shm", "/private/tmp",
                  "/private/var/tmp", "/private/var/run")
+#: Never granted either, in or holding: the kernel's trees. bwrap gives the
+#: run its own /dev and /proc, and a host one bound over them would be the
+#: host's devices and every process's root (/proc/<pid>/root). Refused on
+#: macOS too, where reads outside the home are open anyway.
+_KERNEL_TREES = ("/dev", "/proc", "/sys")
+
+#: What _granted refuses, said where a refusal is reported.
+REFUSAL_RULE = ("under a home only a toolchain directory, a venv, a conda install or a "
+                "node_modules is granted, never a credential tree; nor a socket or kernel "
+                "directory, nor anything holding a home or one of those")
 
 
 def _granted(paths):
     """The `read_only` paths a run may read: absolute, existing, resolved
-    (_canonical), and never `/`, a socket tree (_SOCKET_TREES) or anything
-    in one, a home or anything holding one, nor, under a home, anything
-    but the allowlist (_TOOLCHAIN_DIRS, a venv, a node_modules), and never
-    anything in or holding a credential tree (_CREDENTIAL_TREES). Each
+    (_canonical), and never `/`, a socket or kernel tree (_SOCKET_TREES,
+    _KERNEL_TREES) or anything in or holding one, a home or anything
+    holding one, nor, under a home, anything but the allowlist
+    (_TOOLCHAIN_DIRS, a venv, a node_modules), and never anything in or
+    holding a credential tree (_CREDENTIAL_TREES). Each
     comparison is by identity (device, inode) of the path and its parents,
     so neither case (`~/.SSH` on a case-insensitive volume) nor an alias
     (/System/Volumes/Data/Users/...) slips past. A refused path is left out,
@@ -386,11 +417,24 @@ def _granted(paths):
     return sorted(found)
 
 
+def _ungranted(paths):
+    """Those of `paths` (absolute, existing; resolved, sorted, deduplicated)
+    that _granted refuses: what a run cannot read, to name in a refusal."""
+    return sorted({_canonical(path) for path in paths
+                   if path and os.path.isabs(path) and os.path.exists(path)
+                   and not _granted([path])})
+
+
 def _refused(path, every_home):
     lineage = _lineage(path)
     me = _identity(path)
-    for tree in _SOCKET_TREES:
-        if _identity(tree) in lineage or _inside(path, tree):
+    for tree in (*_SOCKET_TREES, *_KERNEL_TREES):
+        if _in_or_holding(path, lineage, me, tree):
+            return True
+        # Its Data-volume spelling (macOS: /System/Volumes/Data/private/tmp),
+        # so a path holding the tree only through the firmlink is caught.
+        alias = _DATA_VOLUME + tree
+        if os.path.exists(alias) and _in_or_holding(path, lineage, me, alias):
             return True
     for home in every_home:
         home_id = _identity(home)
@@ -425,14 +469,18 @@ def _allowlisted(path, lineage, home, home_id):
 
 def _near_credentials(path, lineage, me, home):
     """Whether `path` is in or holds one of `home`'s credential trees."""
-    for tree in _CREDENTIAL_TREES:
-        tree = os.path.join(home, tree)
-        identity = _identity(tree)
-        if identity is not None and (identity in lineage or me in _lineage(tree)):
-            return True
-        if _inside(path, tree) or _inside(tree, path):
-            return True
-    return False
+    return any(_in_or_holding(path, lineage, me, os.path.join(home, tree))
+               for tree in _CREDENTIAL_TREES)
+
+
+def _in_or_holding(path, lineage, me, tree):
+    """Whether `path` (its `lineage` and identity `me`) is `tree`, is in it
+    or holds it: by identity, so neither case nor an alias slips past, and
+    by spelling, for a tree that does not exist (yet)."""
+    identity = _identity(tree)
+    if identity is not None and (identity in lineage or me in _lineage(tree)):
+        return True
+    return _inside(path, tree) or _inside(tree, path)
 
 
 def _darwin_rules(clone, run_dir, read_only, loopback):
@@ -492,6 +540,16 @@ def self_test(clone, run_dir, env=None, read_only=(), loopback=False):
     environment (default the current one). OsSandboxUnavailable naming the
     failed check; nothing is left behind either way."""
     clone_real, run_real = _canonical(str(clone)), _canonical(str(run_dir))
+    # The probe runs the sweep's own interpreter: one the sandbox will not
+    # grant fails every check as "did not run", so it is said plainly here.
+    python = os.path.realpath(sys.executable)
+    interpreter = [os.path.dirname(python), os.path.realpath(sys.base_prefix)]
+    refused = _ungranted(interpreter)
+    if refused:
+        raise OsSandboxUnavailable(
+            f"the sweep's Python ({python}) cannot be granted to the sandbox: "
+            f"{', '.join(refused)} is refused ({REFUSAL_RULE}), so the self-test's probe "
+            "cannot run in it; run the sweep with a Python installed elsewhere")
     token = secrets.token_hex(6)
     in_clone = os.path.join(clone_real, f".curamoir-os-sandbox-probe-{token}")
     inside_socket = os.path.join(run_real, f"s{token}")
@@ -512,13 +570,11 @@ def self_test(clone, run_dir, env=None, read_only=(), loopback=False):
         server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         server.bind(listening)
         server.listen(1)
-        python = os.path.realpath(sys.executable)
         argv = wrap(["/bin/sh", "-c", _PROBE, "curamoir-os-sandbox-probe", in_clone,
                      in_outside, python, listening, inside_socket, home_target or "/nonexistent",
                      link_to, alias],
                     clone=clone_real, run_dir=run_real, loopback=loopback,
-                    read_only=[*read_only, os.path.dirname(python),
-                               os.path.realpath(sys.base_prefix)])
+                    read_only=[*read_only, *interpreter])
         probe_env = dict(os.environ if env is None else env, SOCKET_PROBE=_SOCKET_PROBE)
         try:
             done = subprocess.run(argv, cwd=clone_real, env=probe_env, stdin=subprocess.DEVNULL,
@@ -582,8 +638,16 @@ def _home_target():
         handle, path = tempfile.mkstemp(prefix=".curamoir-read-probe-", dir=found[0])
     except OSError:
         return found[0], None
-    with os.fdopen(handle, "w") as out:
-        out.write("a canary the sandboxed self-test must not read\n")
+    try:
+        os.write(handle, b"a canary the sandboxed self-test must not read\n")
+    except OSError:
+        # Not left in the home: the listing is asked instead, as when the
+        # file cannot be made.
+        with contextlib.suppress(OSError):
+            os.unlink(path)
+        return found[0], None
+    finally:
+        os.close(handle)
     return path, path
 
 
