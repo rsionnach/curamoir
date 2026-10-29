@@ -52,13 +52,14 @@ from datetime import datetime, timezone
 
 import pytest
 
-from curamoir import publish, runner, sweep_job
+from curamoir import green_gate, publish, runner, sweep_job
 from curamoir.budget import UNRECORDED, month_to_date
 from curamoir.fix_counts import AGENT, REMEDY
 from curamoir.green_gate import GREEN, REDUCED
 from curamoir.idempotence import DUPLICATE_OPEN_PR, NO_WORK, WORK, parse_sweep_marker
 from curamoir.job_run import FAILURE, SUCCESS
 from curamoir.ledger import parse_ledger_timestamp, repo_ledger
+from tests.os_sandbox_stand_in import Absent, Unconfined
 from tests.test_lint import ALL_REGEX_RULES
 from tests.test_sweep_job import (  # noqa: F401  (isolated_home is an autouse fixture)
     GH_REPO,
@@ -427,3 +428,44 @@ def test_an_invalid_session_id_is_unavailable_on_the_line_and_left_out_of_the_pr
     assert "evil" not in line["transcript"]
     body = creates(no_real_gh)[0]["body_file_content"]
     assert "Transcript" not in body and "evil" not in body
+
+
+# --- E14.2 (cm-2qp.2): the test gate by runner kind, through the real runner ---------------
+
+#: The `test_gate` field's keys as 3f50a3f's GateResult.ledger_fields writes
+#: them: neither runner kind adds or drops one (the job line's `runner`
+#: says which boundary the gate ran under).
+PRE_E14_TEST_GATE_KEYS = frozenset({
+    "strategy", "cause", "why", "command", "command_source", "kept", "dropped", "runs",
+    "canary"})
+
+
+@pytest.mark.parametrize("environ, hosted", [
+    ({}, False),
+    ({"CURAMOIR_RUNNER": "hosted", "CLAUDE_CODE_REMOTE": "true"}, True),
+], ids=["no-runner-variable", "hosted"])
+def test_the_gate_is_wrapped_on_the_local_runner_and_bare_on_the_hosted_one(
+        tmp_path, no_real_gh, monkeypatch, environ, hosted):
+    """§5 R3 end to end: `run.runner` reaches the gate. A hosted sweep's
+    gate never asks the OS sandbox (Absent would refuse it); a sweep with no
+    runner variable self-tests once and wraps every run, as at 3f50a3f.
+    Both open the green PR, with the pre-E14 test_gate fields."""
+    stand_in_sandbox = Absent() if hosted else Unconfined()
+    monkeypatch.setattr(green_gate, "OS_SANDBOX", stand_in_sandbox)
+    repo = sample(tmp_path)
+    stand_in(tmp_path, monkeypatch)
+
+    ran = runner.run_job(repo, "sweep", now=lambda: NOW, environ=environ)
+    line = job_lines(repo)[-1]
+
+    assert ran.exit_code == runner.EXIT_SUCCESS, ran.sentence
+    assert line["runner"] == ("hosted" if hosted else "local")
+    assert line["test_gate"]["strategy"] == GREEN
+    assert set(line["test_gate"]) == PRE_E14_TEST_GATE_KEYS
+    assert len(creates(no_real_gh)) == 1
+    runs = len(line["test_gate"]["runs"])
+    if hosted:
+        assert stand_in_sandbox.self_tests == [] and stand_in_sandbox.wrapped == []
+    else:
+        assert len(stand_in_sandbox.self_tests) == 1
+        assert len(stand_in_sandbox.wrapped) == runs + 1  # + the canary

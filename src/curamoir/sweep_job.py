@@ -599,7 +599,7 @@ class _Fix:
         trimmed_nfc = {nfc(path) for path in trimmed}
         left_out = [path for path in verdict.paths if nfc(path) not in trimmed_nfc]
         try:
-            gate = run_test_gate(sandbox, verdict, paths=trimmed)
+            gate = run_test_gate(sandbox, verdict, paths=trimmed, runner=self.run.runner)
         except GateError as error:
             owner.refuse(Reason.TEST_GATE, f"the test gate could not answer: {error}")
             return

@@ -37,7 +37,7 @@ from pathlib import Path
 import pytest
 
 from curamoir import git_guard, green_gate, os_sandbox
-from curamoir.config import ConfigError, load_config
+from curamoir.config import LOCAL_RUNNER, ConfigError, Runner, RunnerKind, load_config
 from curamoir.fix_scope import ScopeVerdict, lint_sandbox, verify_fix
 from curamoir.git_guard import prepare_sandbox, snapshot_git_state
 from curamoir.green_gate import (
@@ -59,7 +59,7 @@ from curamoir.job_run import JobRun
 from curamoir.ledger import Ledger
 from curamoir.remedies import apply_file_remedies
 from tests.conftest import committed_sample
-from tests.os_sandbox_stand_in import Unconfined
+from tests.os_sandbox_stand_in import PREFIX, Absent, Unconfined
 from tests.test_fix_scope import git_repo as files_repo
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -75,6 +75,22 @@ def unconfined_os_sandbox(monkeypatch):
     stand_in = Unconfined()
     monkeypatch.setattr(green_gate, "OS_SANDBOX", stand_in)
     return stand_in
+
+
+HOSTED = Runner(RunnerKind.HOSTED)
+
+
+@pytest.fixture(params=["local", "hosted"])
+def gate_runner(request, monkeypatch):
+    """The runner (config.Runner) a test's gate runs on (cm-2qp.2,
+    direction §5 R3), with the OS sandbox stand-in to match: local keeps
+    the autouse Unconfined (every run wrapped, the self-test asked), hosted
+    gets Absent, whose wrap() and self_test() raise, so a hosted gate that asked either
+    would refuse: what passes on hosted ran unwrapped and unself-tested."""
+    if request.param == "local":
+        return LOCAL_RUNNER
+    monkeypatch.setattr(green_gate, "OS_SANDBOX", Absent())
+    return HOSTED
 
 
 def config(command, extra=""):
@@ -357,7 +373,8 @@ def tree_digest(root):
     return found
 
 
-def test_the_command_runs_in_the_sandbox_with_the_sources_environment(tmp_path, monkeypatch):
+def test_the_command_runs_in_the_sandbox_with_the_sources_environment(tmp_path, monkeypatch,
+                                                                      gate_runner):
     out = tmp_path / "seen"
     command = ('printf "%s\\n" "$VIRTUAL_ENV" "$(pwd -P)" "$(command -v python3)" '
                '"$NODE_PATH" "$PYTHONDONTWRITEBYTECODE" "${GIT_DIR-unset}" '
@@ -375,7 +392,7 @@ def test_the_command_runs_in_the_sandbox_with_the_sources_environment(tmp_path, 
         monkeypatch.setenv("GIT_DIR", "/nonexistent")
         monkeypatch.setenv("PYTHONHOME", "/bogus")
         verdict = fix(sandbox, {"src/a.py": "a = 2\n"})
-        run_test_gate(sandbox, verdict)
+        run_test_gate(sandbox, verdict, runner=gate_runner)
         cwd = os.path.realpath(sandbox.path)
 
     (virtual_env, seen_cwd, python, node_path, no_bytecode, git_dir, python_home,
@@ -408,7 +425,8 @@ ALLOWED = {"PATH", "HOME", "TMPDIR", "USER", "LOGNAME", "LANG", "TZ", "VIRTUAL_E
            "PWD", "OLDPWD", "SHLVL", "_"}
 
 
-def test_the_test_command_sees_only_an_allowlisted_environment(tmp_path, monkeypatch):
+def test_the_test_command_sees_only_an_allowlisted_environment(tmp_path, monkeypatch,
+                                                               gate_runner):
     seen = tmp_path / "env"
     command = f'env > {seen}; echo "$HOME" > {seen}.home; echo "$TMPDIR" > {seen}.tmp; ' \
               'touch "$HOME/x" "$TMPDIR/y"'
@@ -418,7 +436,8 @@ def test_the_test_command_sees_only_an_allowlisted_environment(tmp_path, monkeyp
                         "ANTHROPIC_API_KEY": "s3cret-e", "LC_ALL": "C"}.items():
         monkeypatch.setenv(name, value)
     with prepare_sandbox(repo, "HEAD", parent=tmp_path) as sandbox:
-        result = run_test_gate(sandbox, fix(sandbox, {"src/a.py": "a = 2\n"}))
+        result = run_test_gate(sandbox, fix(sandbox, {"src/a.py": "a = 2\n"}),
+                               runner=gate_runner)
         root = os.path.realpath(sandbox.path)
 
     assert result.strategy == GREEN
@@ -539,26 +558,29 @@ PKG_TEST = "python3 -c 'import pkg, sys; sys.exit(0 if pkg.x == 1 else 1)'"
 PKG = {"src/pkg/__init__.py": "x = 1\n", "src/pkg/other.py": "y = 1\n", "pyproject.toml": ""}
 
 
-def test_an_editable_install_of_the_checkout_does_not_test_the_unfixed_code(tmp_path):
+def test_an_editable_install_of_the_checkout_does_not_test_the_unfixed_code(tmp_path,
+                                                                             gate_runner):
     """A plain path `.pth` (pip -e, hatch's `_editable_impl_*`) puts the
     CHECKOUT's src on sys.path; the sandbox's src on PYTHONPATH comes first."""
     repo = repo_of(tmp_path, PKG, PKG_TEST)
     venv_with_pth(repo, str(repo / "src") + "\n")
     with prepare_sandbox(repo, "HEAD", parent=tmp_path) as sandbox:
         verdict = fix(sandbox, {"src/pkg/__init__.py": "x = 2\n", "src/pkg/other.py": "y = 2\n"})
-        result = run_test_gate(sandbox, verdict)
+        result = run_test_gate(sandbox, verdict, runner=gate_runner)
 
     assert result.strategy == REDUCED, [run.tail for run in result.runs]
     assert result.kept == ("src/pkg/other.py",)
 
 
-def test_an_import_that_still_resolves_to_the_checkout_abandons_the_sweep(tmp_path):
+def test_an_import_that_still_resolves_to_the_checkout_abandons_the_sweep(tmp_path,
+                                                                          gate_runner):
     """An editable hook that puts the checkout FIRST on sys.path (old
     setuptools' easy-install.pth does) beats PYTHONPATH: the canary sees it."""
     repo = repo_of(tmp_path, PKG, PKG_TEST)
     venv_with_pth(repo, f"import sys; sys.path.insert(0, {str(repo / 'src')!r})\n")
     with prepare_sandbox(repo, "HEAD", parent=tmp_path) as sandbox:
-        result = run_test_gate(sandbox, fix(sandbox, {"src/pkg/__init__.py": "x = 2\n"}))
+        result = run_test_gate(sandbox, fix(sandbox, {"src/pkg/__init__.py": "x = 2\n"}),
+                               runner=gate_runner)
 
     assert result.strategy == ABANDONED
     assert result.cause == "imports_the_checkout"
@@ -682,14 +704,14 @@ def test_a_rewrite_that_restores_size_and_mtime_is_still_drift(tmp_path):
 
 # --- output ---------------------------------------------------------------------------
 
-def test_a_timeout_is_red_and_kills_the_process_group(tmp_path):
+def test_a_timeout_is_red_and_kills_the_process_group(tmp_path, gate_runner):
     pids = tmp_path / "pids"
     command = f"sleep 30 & echo $! >> {pids}; wait"
     repo = repo_of(tmp_path, THREE, command, extra="  test_timeout_seconds: 1\n")
     with prepare_sandbox(repo, "HEAD", parent=tmp_path) as sandbox:
         verdict = fix(sandbox, {"src/a.py": "a = 2\n"})
         started = time.monotonic()
-        result = run_test_gate(sandbox, verdict)
+        result = run_test_gate(sandbox, verdict, runner=gate_runner)
 
     assert time.monotonic() - started < 20
     # Timing out at the base and with the fix says the budget is too small,
@@ -1231,3 +1253,131 @@ def test_a_command_not_runnable_names_what_the_sandbox_did_not_grant(tmp_path, m
     # may be refused for its own reasons (a uv tool's venv in ~/.local).
     refused = result.why.split("the OS sandbox did not grant ", 1)[1].split(", so a tool", 1)[0]
     assert os.path.realpath(home / "bin") in refused.split(", ")
+
+
+# --- cm-2qp.2: the runner kind (direction §3, §5 R3) ------------------------------------
+# On the local runner the OS sandbox is the boundary: self-tested once per
+# gate, every run wrapped, and no sandbox means no run. On the hosted runner
+# the disposable VM is: the command runs in the clone unwrapped, with
+# everything else (canary, allowlist, scratch HOME/TMPDIR, timeout, process
+# group, scope reduction) as on local. The parametrized tests above
+# (gate_runner) hold the environment, the canary and the timeout to both.
+
+@pytest.mark.parametrize("given", [{}, {"runner": LOCAL_RUNNER},
+                                   {"runner": Runner(RunnerKind.LOCAL, "https://x")}],
+                         ids=["no-kind-given", "local", "local-with-transcript"])
+def test_on_the_local_runner_the_gate_self_tests_and_wraps_every_run(
+        tmp_path, monkeypatch, unconfined_os_sandbox, given):
+    """No kind given is local, the hardened path: one self-test, then the
+    canary and every run (base and bisection included) wrapped."""
+    calls = []
+    real = green_gate.run_in_group
+    monkeypatch.setattr(green_gate, "run_in_group",
+                        lambda argv, *a, **k: calls.append(list(argv)) or real(argv, *a, **k))
+    repo = repo_of(tmp_path, THREE, RED_IF_BROKEN)
+    with prepare_sandbox(repo, "HEAD", parent=tmp_path) as sandbox:
+        result = run_test_gate(sandbox, fix(sandbox, {"src/a.py": "a = 2\n",
+                                                      "src/b.py": "BROKEN\n"}), **given)
+
+    assert result.strategy == REDUCED and result.kept == ("src/a.py",)
+    assert len(unconfined_os_sandbox.self_tests) == 1
+    assert len(unconfined_os_sandbox.wrapped) == len(result.runs) + 1 == len(calls)
+    assert all(argv[:len(PREFIX)] == PREFIX for argv in calls)
+
+
+def test_on_the_hosted_runner_nothing_is_wrapped_or_self_tested_and_the_canary_runs(
+        tmp_path, monkeypatch):
+    """Absent raises on wrap() and self_test(): the hosted gate asks
+    neither, runs the canary and each run's bare `/bin/sh -c` argv in the
+    clone, and still reduces scope."""
+    absent = Absent()
+    monkeypatch.setattr(green_gate, "OS_SANDBOX", absent)
+    calls = []
+    real = green_gate.run_in_group
+
+    def spy(argv, *args, **kwargs):
+        calls.append((list(argv), kwargs["cwd"]))
+        return real(argv, *args, **kwargs)
+
+    monkeypatch.setattr(green_gate, "run_in_group", spy)
+    repo = repo_of(tmp_path, THREE, RED_IF_BROKEN)
+    with prepare_sandbox(repo, "HEAD", parent=tmp_path) as sandbox:
+        result = run_test_gate(sandbox, fix(sandbox, {"src/a.py": "a = 2\n",
+                                                      "src/b.py": "BROKEN\n"}), runner=HOSTED)
+        clone = str(sandbox.path)
+
+    assert result.strategy == REDUCED and result.kept == ("src/a.py",)
+    assert absent.self_tests == [] and absent.wrapped == []
+    assert len(calls) == len(result.runs) + 1, "the canary and every run, nothing else"
+    assert result.canary.startswith(("checked: sys.path", "skipped: "))
+    canary, *runs = calls
+    assert canary[0][:3] == ["/bin/sh", "-c", 'exec python3 -c "$0" "$@"']
+    assert all(argv == ["/bin/sh", "-c", RED_IF_BROKEN] for argv, _ in runs)
+    assert all(cwd == clone for _, cwd in calls)
+
+
+@pytest.mark.parametrize("given", [{}, {"runner": LOCAL_RUNNER}], ids=["no-kind-given", "local"])
+def test_on_the_local_runner_no_os_sandbox_refuses_and_runs_nothing(
+        tmp_path, monkeypatch, given):
+    """No unsandboxed fallback (cm-p2f), unchanged by cm-2qp.2: on local, a
+    self-test that fails (Absent's raises, as the real one does) is a
+    GateError and nothing of the project's runs, not a bare run."""
+    absent = Absent()
+    monkeypatch.setattr(green_gate, "OS_SANDBOX", absent)
+    ran = []
+    monkeypatch.setattr(green_gate, "run_in_group", lambda *a, **k: ran.append(a))
+    marker = tmp_path / "ran"
+    repo = repo_of(tmp_path, THREE, f"touch {marker}")
+    with prepare_sandbox(repo, "HEAD", parent=tmp_path) as sandbox, \
+            pytest.raises(GateError, match="no OS sandbox confines it here"):
+        run_test_gate(sandbox, fix(sandbox, {"src/a.py": "a = 2\n"}), **given)
+
+    assert len(absent.self_tests) == 1 and absent.wrapped == []
+    assert ran == [] and not marker.exists()
+
+
+class _WrapUnavailable(Unconfined):
+    """A sandbox whose self-test passes and whose wrap() then finds none:
+    the tool gone between the two (cm-2qp.2's excellence review)."""
+
+    def wrap(self, argv, *, clone, run_dir, read_only=(), loopback=False):
+        self.wrapped.append((list(argv), str(clone), str(run_dir)))
+        raise os_sandbox.OsSandboxUnavailable("wrap found no OS sandbox (the test's stand-in)")
+
+
+@pytest.mark.parametrize("given", [{}, {"runner": LOCAL_RUNNER}], ids=["no-kind-given", "local"])
+def test_on_the_local_runner_a_wrap_that_fails_after_a_passing_self_test_runs_nothing(
+        tmp_path, monkeypatch, given):
+    """No unsandboxed fallback at the wrap either, through run_test_gate:
+    the self-test passed, the first wrap() (the canary's) raises, and the
+    gate refuses with the hosted hint, having run nothing."""
+    stand_in = _WrapUnavailable()
+    monkeypatch.setattr(green_gate, "OS_SANDBOX", stand_in)
+    ran = []
+    monkeypatch.setattr(green_gate, "run_in_group", lambda *a, **k: ran.append(a))
+    marker = tmp_path / "ran"
+    repo = repo_of(tmp_path, THREE, f"touch {marker}")
+    with prepare_sandbox(repo, "HEAD", parent=tmp_path) as sandbox, \
+            pytest.raises(GateError, match=r"no OS sandbox confines it here: wrap found no OS "
+                                           r"sandbox .*declare CURAMOIR_RUNNER=hosted$"):
+        run_test_gate(sandbox, fix(sandbox, {"src/a.py": "a = 2\n"}), **given)
+
+    assert len(stand_in.self_tests) == 1 and len(stand_in.wrapped) == 1
+    assert ran == [] and not marker.exists()
+
+
+def test_on_the_hosted_runner_a_command_not_runnable_does_not_blame_the_os_sandbox(
+        tmp_path, monkeypatch):
+    """The local refusal names what the OS sandbox did not grant; on hosted
+    there is none, so the reason must not say there was."""
+    monkeypatch.setattr(green_gate, "OS_SANDBOX", Absent())
+    home = tmp_path / "home"
+    (home / "bin").mkdir(parents=True)
+    monkeypatch.setattr(os_sandbox, "homes", lambda: [os.path.realpath(home)])
+    monkeypatch.setenv("PATH", f"{home / 'bin'}{os.pathsep}{os.environ['PATH']}")
+    repo = repo_of(tmp_path, THREE, "no-such-test-runner-xyz -q")
+    with prepare_sandbox(repo, "HEAD", parent=tmp_path) as sandbox:
+        result = run_test_gate(sandbox, fix(sandbox, {"src/a.py": "a = 2\n"}), runner=HOSTED)
+
+    assert result.strategy == ABANDONED and result.cause == "command_not_runnable"
+    assert "OS sandbox" not in result.why and "did not grant" not in result.why
