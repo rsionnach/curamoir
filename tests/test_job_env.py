@@ -31,7 +31,8 @@ import time
 import pytest
 
 from curamoir import job_guard
-from curamoir.fix_step import run_fix_step
+from curamoir.config import LOCAL_RUNNER, Runner, RunnerKind
+from curamoir.fix_step import fix_tools, run_fix_step
 from curamoir.git_guard import prepare_sandbox
 from curamoir.job_guard import LockSlot, run_guarded
 from curamoir.runner import EXIT_FAILURE, EXIT_REFUSED, EXIT_SUCCESS, run_job
@@ -434,23 +435,33 @@ open({log!r}, "w").write(json.dumps({{"answers": answers, "events": sorted(setti
 """
 
 
+@pytest.mark.parametrize("hosted", [False, True], ids=["local", "hosted"])
 def test_the_fix_steps_own_settings_load_the_denylist_that_denies_rm_rf(
-        repo, tmp_path, monkeypatch):
+        repo, tmp_path, monkeypatch, hosted):
     """cm-60c's acceptance test: through run_guarded and the fix step's real
     spawn into a lockless clone, the hook the fix step's argv registers (and
     nothing a plugin would add) denies `rm -rf`. A CLAUDE_PLUGIN_ROOT left in
-    the environment by some other plugin does not send it elsewhere."""
+    the environment by some other plugin does not send it elsewhere. On the
+    hosted runner too (cm-2qp.3, user decision 2026-10-29), where the fix
+    agent has Bash: the denylist --settings still load, under --restricted."""
     committed(repo)
     monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", str(tmp_path / "some-other-plugin"))
     log = tmp_path / "hooks.json"
     script = stand_in_claude(tmp_path, SETTINGS_LOADING_CLAUDE.format(log=str(log)))
+    runner = Runner(RunnerKind.HOSTED) if hosted else LOCAL_RUNNER
+    argvs = []
 
     def body(run):
         with prepare_sandbox(repo.repo, "HEAD", parent=tmp_path) as sandbox:
-            run_fix_step(sandbox, "p", model="m", claude=str(script))
+            argvs.append(run_fix_step(sandbox, "p", model="m", claude=str(script),
+                                      tools=fix_tools(runner), runner=runner).argv)
         run.succeeded("fixed")
 
     run_guarded(repo.repo, "sweep", listing(), body, now=october)
+
+    (argv,) = argvs
+    assert "--restricted" in argv
+    assert ("Bash" in argv[argv.index("--tools") + 1]) is hosted
 
     seen = json.loads(log.read_text(encoding="utf-8"))
     assert seen["events"] == ["PreToolUse"]

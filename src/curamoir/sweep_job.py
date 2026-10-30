@@ -49,8 +49,11 @@ the remedies, then the fix step on what is left for the agent, its review
 `sweep.max_files_per_pr` and the test gate, the fix records, the patch of
 exactly `gate.paths_for_pr`, the PR's text (sweep_pr: final_body, the
 branch, the title and the commit message), and ONE publish.publish. The
-fix agent runs once, in the sandbox, with fix_step.FIX_TOOLS (no shell),
-and never in the user's checkout; nothing is ever re-run there.
+fix agent runs once, in the sandbox, with fix_step.fix_tools(run.runner)
+(FIX_TOOLS, no shell, on the local runner; HOSTED_FIX_TOOLS, with Bash, on
+the hosted one, cm-2qp.3), and never in the user's checkout; nothing is
+ever re-run there. Both model calls, the scan's and the fix step's, are
+given `run.runner`, so each builds its command line for the run's kind.
 
 **What each outcome writes.** A refusal carries no `found_delta`,
 decision fields, `fixes` or snapshot (fix_scope step 2a); it keeps the
@@ -180,11 +183,12 @@ from curamoir.fix_step import (
     DEFAULT_TIMEOUT,
     FixStepRun,
     fix_prompt,
+    fix_tools,
     run_fix_step,
     usable_number,
 )
 from curamoir.git_guard import GitGuardError, git, prepare_sandbox, snapshot_git_state
-from curamoir.green_gate import ABANDONED, GateError, run_test_gate
+from curamoir.green_gate import ABANDONED, GateError, resolve_test_command, run_test_gate
 from curamoir.guards.reasons import Reason
 from curamoir.guards.result import Refusal
 from curamoir.idempotence import UNKNOWN, pr_field, sweep_decision
@@ -203,6 +207,23 @@ from curamoir.tier1 import (
     trim_pr_paths,
     with_findings,
 )
+
+
+def _hosted_test_command(sandbox, runner):
+    """The test command the hosted fix prompt names (fix_step.fix_prompt's
+    `test_command`, cm-2qp.3): the base's, as the gate itself resolves it
+    (green_gate.resolve_test_command), on the hosted runner only; None on
+    the local runner (whose prompt names none and whose run is unchanged),
+    and None when it cannot be resolved, which tells the agent to run no
+    tests. The gate resolves it again for itself; nothing here decides what
+    it runs."""
+    if not runner.hosted:
+        return None
+    try:
+        return resolve_test_command(sandbox).command
+    except (GateError, GitGuardError):
+        return None
+
 
 #: The `claude` executable a SweepTools made with no `claude` uses (module
 #: docstring, "Which `claude`"): the seam the registered body is pointed at
@@ -480,7 +501,8 @@ class _Sweep:
                                       run.ledger.entries(), model=model,
                                       timeout=self.tools.scan_timeout,
                                       claude=self.tools.claude,
-                                      before_call=partial(self.note_scan_pending, model))
+                                      before_call=partial(self.note_scan_pending, model),
+                                      runner=run.runner)
             except ScanRefused as error:
                 self.tier1_state = error
                 self.note_cost(model)
@@ -532,12 +554,16 @@ class _Fix:
         agent_work = remedies.for_agent(sandbox.work_list)
         # Steps 4 and 5: the fix step, then its review.
         if agent_work.items or agent_work.tier1:
-            prompt = fix_prompt(agent_work, base_principles(sandbox))
+            prompt = fix_prompt(agent_work, base_principles(sandbox), runner=self.run.runner,
+                                test_command=_hosted_test_command(sandbox, self.run.runner))
             options = {} if tools.fix_timeout is None else {"timeout": tools.fix_timeout}
+            # The toolset and the argv follow the run's runner (cm-2qp.3):
+            # Bash only on the hosted runner.
             fix_run = run_fix_step(sandbox, prompt, model=self.model, claude=tools.claude,
+                                   tools=fix_tools(self.run.runner),
                                    before_call=partial(owner.note_cost, self.model,
                                                        pending=True),
-                                   **options)
+                                   runner=self.run.runner, **options)
             owner.note_cost(self.model, fix_run=fix_run)
             unfinished = _unfinished(fix_run)
             if unfinished:
