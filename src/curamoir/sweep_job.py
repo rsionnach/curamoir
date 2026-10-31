@@ -49,9 +49,11 @@ the remedies, then the fix step on what is left for the agent, its review
 `sweep.max_files_per_pr` and the test gate, the fix records, the patch of
 exactly `gate.paths_for_pr`, the PR's text (sweep_pr: final_body, the
 branch, the title and the commit message), and ONE publish.publish. The
-fix agent runs once, in the sandbox, with fix_step.fix_tools(run.runner)
-(FIX_TOOLS, no shell, on the local runner; HOSTED_FIX_TOOLS, with Bash, on
-the hosted one, cm-2qp.3), and never in the user's checkout; nothing is
+fix agent runs once, in the sandbox, with fix_step.fix_tools(run.runner,
+the base's test command) (FIX_TOOLS, no shell, on the local runner;
+HOSTED_FIX_TOOLS, with Bash for that command alone, on the hosted one,
+cm-2qp.3 and cm-2qp.12, and FIX_TOOLS there too when there is no command
+a rule can name), and never in the user's checkout; nothing is
 ever re-run there. Both model calls, the scan's and the fix step's, are
 given `run.runner`, so each builds its command line for the run's kind.
 
@@ -62,7 +64,10 @@ The scope fields (cm-9ab): `scope` is the FIRST review's verdict, on a
 SCOPE refusal and on the SANDBOX refusal of a file that could not be
 dropped; `scope_after_drop` is the second review's, on a SCOPE refusal
 after files were dropped; `scope_dropped` (the dropped breaches) is on
-every line of a run that dropped files, whatever its outcome. Every other
+every line of a run that dropped files, whatever its outcome. On the
+hosted runner, every line of a run whose fix agent was called carries
+`fix_bash` (FIX_BASH_FIELD, cm-2qp.12): the command its Bash was approved
+for, or why it had none; the local line has no such field. Every other
 line from step 3 on carries the decision's fields (Decision.ledger_fields),
 `found_delta`, the tier1 field and, once the gate ran, its `test_gate`;
 the snapshot follows it.
@@ -184,6 +189,7 @@ from curamoir.fix_step import (
     FixStepRun,
     fix_prompt,
     fix_tools,
+    offered_test_command,
     run_fix_step,
     usable_number,
 )
@@ -208,15 +214,33 @@ from curamoir.tier1 import (
     with_findings,
 )
 
+#: The job line's field saying what the hosted fix agent's Bash was
+#: (cm-2qp.12), and its two values when there was none. Only fixed text in
+#: that case: a command no rule can name is never echoed, since it may hold
+#: a secret or bytes a reader would misread.
+FIX_BASH_FIELD = "fix_bash"
+FIX_BASH_NO_COMMAND = "none (no test command)"
+FIX_BASH_NOT_NAMEABLE = "none (not nameable as a rule)"
+
+
+def _fix_bash(test_command):
+    """FIX_BASH_FIELD's value for the hosted fix step given `test_command`
+    (_hosted_test_command's): the command as its rules name it
+    (fix_step.offered_test_command), or a fixed reason."""
+    if not test_command:
+        return FIX_BASH_NO_COMMAND
+    return offered_test_command(test_command) or FIX_BASH_NOT_NAMEABLE
+
 
 def _hosted_test_command(sandbox, runner):
-    """The test command the hosted fix prompt names (fix_step.fix_prompt's
-    `test_command`, cm-2qp.3): the base's, as the gate itself resolves it
-    (green_gate.resolve_test_command), on the hosted runner only; None on
-    the local runner (whose prompt names none and whose run is unchanged),
-    and None when it cannot be resolved, which tells the agent to run no
-    tests. The gate resolves it again for itself; nothing here decides what
-    it runs."""
+    """The test command the hosted fix prompt names and the fix step's Bash
+    rule approves (fix_step.fix_prompt's, fix_tools' and run_fix_step's
+    `test_command`, cm-2qp.3, cm-2qp.12): the base's, as the gate itself
+    resolves it (green_gate.resolve_test_command), on the hosted runner
+    only; None on the local runner (whose prompt names none and whose run
+    is unchanged), and None when it cannot be resolved, which tells the
+    agent to run no tests and gives it no Bash. The gate resolves it again
+    for itself; nothing here decides what it runs."""
     if not runner.hosted:
         return None
     try:
@@ -554,16 +578,22 @@ class _Fix:
         agent_work = remedies.for_agent(sandbox.work_list)
         # Steps 4 and 5: the fix step, then its review.
         if agent_work.items or agent_work.tier1:
+            test_command = _hosted_test_command(sandbox, self.run.runner)
             prompt = fix_prompt(agent_work, base_principles(sandbox), runner=self.run.runner,
-                                test_command=_hosted_test_command(sandbox, self.run.runner))
+                                test_command=test_command)
             options = {} if tools.fix_timeout is None else {"timeout": tools.fix_timeout}
-            # The toolset and the argv follow the run's runner (cm-2qp.3):
-            # Bash only on the hosted runner.
+            if self.run.runner.hosted:
+                owner.run.note(**{FIX_BASH_FIELD: _fix_bash(test_command)})
+            # The toolset and the argv follow the run's runner (cm-2qp.3)
+            # and the base's test command (cm-2qp.12): Bash only on the
+            # hosted runner, approved for that command alone, and none
+            # without one.
             fix_run = run_fix_step(sandbox, prompt, model=self.model, claude=tools.claude,
-                                   tools=fix_tools(self.run.runner),
+                                   tools=fix_tools(self.run.runner, test_command),
                                    before_call=partial(owner.note_cost, self.model,
                                                        pending=True),
-                                   runner=self.run.runner, **options)
+                                   runner=self.run.runner, test_command=test_command,
+                                   **options)
             owner.note_cost(self.model, fix_run=fix_run)
             unfinished = _unfinished(fix_run)
             if unfinished:

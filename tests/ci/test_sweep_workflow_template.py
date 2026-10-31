@@ -193,6 +193,16 @@ def test_the_template_cites_no_internal_ids_or_module_names(text):
     assert "beads" not in text
 
 
+def test_the_exposure_comment_says_to_add_no_other_secrets(text):
+    """The fix agent's process drops only the run's GitHub and Actions
+    tokens, by name, so the template tells the user not to hand the sweep
+    step any other secret."""
+    comment = " ".join(line.lstrip("# ") for line in text.split("\n")
+                       if line.startswith("#"))
+    assert "Add no other secrets to the sweep step's `env:`" in comment
+    assert "reaches it" in comment
+
+
 def test_the_cron_comment_leads_with_cost(text):
     comment = text.split("  schedule:\n", 1)[1].split("- cron:", 1)[0]
     assert comment.index("API money") < comment.index("Routine")

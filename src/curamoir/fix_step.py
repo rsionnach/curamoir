@@ -85,11 +85,35 @@ the result as if the prompt had said nothing.
   and dontAsk turns a prompt into a refusal — so no deny list of sensitive
   paths is needed for the default case: the fence is the allow list, and
   everything outside it is denied without being named. On the hosted
-  runner the list also carries the tool-level `Bash` rule (_BASH_RULE),
-  the one bare name in it: path rules could not fence Bash anyway, since
-  rules "don't apply to … arbitrary subprocesses" (same page), so there
-  the fence for Bash is the VM and the `--settings` denylist, which runs
-  before the rule (_BASH_RULE's comment cites the docs).
+  runner the list also carries a Bash rule, `Bash(<test command> *)`, one
+  per part of a command joined with `&&` (bash_rules, cm-2qp.12): the
+  base's test command alone or with arguments after it (the tests for the
+  edited files). What runs without a prompt is
+  then that command plus Claude Code's built-in read-only commands (`ls`,
+  `cat`, `grep`, `find`, `cd` …), which "run without a permission prompt in
+  every mode", minus git, denied below; a compound command runs only if
+  every part is one of these, since Claude Code splits it. With no test
+  command, or one no rule can name safely, there is no Bash at all
+  (fix_tools). The `--settings` denylist still runs before the rule
+  (_BASH_RULE_TEMPLATE's comment cites the docs). Unlike the Read/Edit
+  rules, this rule is not a fence: rules "don't apply to … arbitrary
+  subprocesses" (same page), and the test command runs repository code
+  the agent may edit, so it can run anything. It narrows what the agent is
+  approved to type; the fence for Bash is the VM.
+- `--disallowedTools` carries `Bash(git *)` (HOSTED_BASH_DENY_RULES) on
+  the hosted runner, with Bash: the built-in read-only set includes "read-
+  only forms of `git`", and "The set is not configurable; to require a
+  prompt for one of these commands, add an `ask` or `deny` rule for it"
+  (same page, "Read-only commands"); a deny rule "matches past any leading
+  assignment" (same page, "Wrappers"), and the trailing ` *` also matches a
+  bare `git`. WHY: a `git status` or `git diff` can rewrite `.git/index`,
+  which refuses the whole run (GIT_INTERNALS_CHANGED; cm-t5j), and the
+  prompt's "do not run git" is not the fence. It stops the form the agent
+  usually writes, not `/usr/bin/git` or `sh -c 'git …'` ("isn't a security
+  boundary around the program", same page). Those are not read-only
+  commands and match no allow rule, so dontAsk refuses them; a test suite
+  that runs git itself is not reached by the rule. The local argv has no
+  Bash and no such rule.
 - `--disallowedTools` also carries repo_deny_rules: Read and Edit of the
   repo's `.git`. The allow rule above covers `.git/`, where an edit is code
   the next git command runs and `git diff` never shows it; "Rules are
@@ -173,7 +197,9 @@ the disposable VM, which holds no developer's home and is discarded after
 the run, so cm-xq9's "no shell without an OS sandbox or a hosted runner"
 is met by the VM. Besides its prompt (below), the fix step's argv
 differs from the local runner's only by Bash in `--tools`
-(HOSTED_FIX_TOOLS, through fix_tools) and its allow rule (_BASH_RULE).
+(HOSTED_FIX_TOOLS, through fix_tools), its allow rules for the base's
+test command (bash_rules) and its deny rule for git (HOSTED_BASH_DENY_RULES);
+with no such command it is the local argv.
 Every other flag above is the same on both kinds; the `--restricted` and
 `--settings` bullets say why. The tier-1
 scan's argv is the local one exactly.
@@ -188,12 +214,18 @@ agent run the tests for the files it edited with Bash, and tell it not to
 run git, bd, gh, an install or anything that reaches the network, and that
 a CLAUDE.md or AGENTS.md telling it to commit, push, file or sync does not
 apply; SCOPE_LIMITS is the same text on both kinds. The environment
-follows it too: on hosted the fix step's process gets
+follows it too: on hosted the fix step's process loses the run's GitHub
+and Actions tokens (HOSTED_RUN_TOKEN_VARIABLES, cm-2qp.12), with Bash or
+without, keeping what `claude` authenticates with; with Bash it also gets
 HOSTED_TEST_ENVIRONMENT (no bytecode, no pytest cache, CI=true) and uv's
 project environment outside the clone with uv.lock frozen
-(UV_ENVIRONMENT_DIR), so a test run writes less into the clone; the only
-test command it is offered is the base's own (green_gate.resolve_test_command,
-which sweep_job passes in).
+(UV_ENVIRONMENT_DIR), so a test run writes less into the clone. The
+tier-1 scan's process is the local one exactly. The list is a fixed list
+of names, not a pattern: a secret the workflow passes under any other name
+(a PAT as GH_PAT, NPM_TOKEN, cloud credentials) reaches the agent. The
+only test command it is offered, and the only one its Bash rules approve,
+is the base's own (green_gate.resolve_test_command, which sweep_job
+passes in).
 
 The prompt is not the fence. Git state is held by the `git_state`
 snapshot: a git command that writes `.git` (the index included) or moves
@@ -209,13 +241,18 @@ and time limits (DEFAULT_MAX_TURNS, DEFAULT_TIMEOUT) are the local
 runner's, which is why the prompt asks for the edited files' tests only.
 
 Limits on the hosted runner (decision bead cm-2qp.11): the fix agent's
-Bash runs as the runner's own user and shares the VM and the run's token
-with the sweep. It can read what the runner's processes hold (on Actions,
-the run's GITHUB_TOKEN and ANTHROPIC_API_KEY in their environment) and can
-leave a process behind that reaches the run's later steps, the publish
-included; the denylist refuses the commands it knows, and nothing confines
-the ones it does not. The boundary there is the disposable VM and the
-scope of the run's token.
+Bash runs as the runner's own user on the sweep's VM and can reach the
+run's token. Its own environment does not hold the run's GitHub and
+Actions tokens (HOSTED_RUN_TOKEN_VARIABLES), but that does NOT stop it
+reading the sweep's: as the same user it can read the parent's
+/proc/<pid>/environ (on Actions, GITHUB_TOKEN and ANTHROPIC_API_KEY), and
+it keeps ANTHROPIC_API_KEY itself, which `claude` needs. Its Bash rule
+approves only the test command, but that command runs repository code the
+agent may edit, so it can still run anything, and leave a process behind
+that reaches the run's later steps, the publish included; the denylist
+refuses the commands it knows, and nothing confines the ones it does not.
+The boundary there is the disposable VM and the scope of the run's token;
+cm-2qp.11 stays open.
 
 **The residual risk on the local runner, stated plainly.** The sandbox is
 a directory, not an operating-system sandbox: the fence around the fix
@@ -246,6 +283,7 @@ Syntax that imports on 3.9, like sweep.py.
 import json
 import math
 import os
+import re
 import shlex
 import subprocess
 from dataclasses import dataclass
@@ -310,8 +348,9 @@ DEFAULT_TIMEOUT = 1800
 FIX_TOOLS = ("Read", "Grep", "Glob", "Edit")
 
 #: The fix agent's whole toolset on the hosted runner (cm-2qp.3; module
-#: docstring, "On the hosted runner"): FIX_TOOLS and Bash, so the agent can
-#: run the project's own commands in the VM that is its boundary.
+#: docstring, "On the hosted runner"): FIX_TOOLS and Bash, approved by
+#: bash_rules for the base's test command alone; fix_tools gives it only
+#: when those rules exist (cm-2qp.12).
 HOSTED_FIX_TOOLS = (*FIX_TOOLS, "Bash")
 
 #: The only tools a job's agent may be given (cm-xq9, user decision
@@ -373,26 +412,197 @@ _ROOT_IN_COMMAND = '"${CLAUDE_PLUGIN_ROOT}"'
 #: tools the allow and deny rules name.
 _RULE_TOOLS = ("Read", "Edit")
 
-#: The allow rule that approves every Bash command: "To match all uses of a
-#: tool, use only the tool name without parentheses ... `Bash` Matches all
-#: Bash commands" (https://code.claude.com/docs/en/permissions, "Match all
-#: uses of a tool"). Under dontAsk an unapproved call is refused, so the
-#: hosted fix agent's Bash needs it. The PreToolUse denylist (`--settings`)
-#: still runs first: "A hook that exits with code 2 stops the tool call
-#: before permission rules are evaluated ... To run all Bash commands
-#: without prompts except for a few you want blocked, add `"Bash"` to your
-#: allow list and register a PreToolUse hook that rejects those specific
-#: commands" (same page, "Extend permissions with hooks").
-_BASH_RULE = "Bash"
+#: The hosted fix agent's one Bash allow rule (cm-2qp.12): the base's test
+#: command, alone or with arguments after it, so the agent can name the
+#: tests for the files it edited. "A `*` at the end, with a space before it,
+#: also matches the bare command", "The space before a trailing `*` is part
+#: of the rule" (`Bash(ls *)` matches `ls -la` and `ls`, not `lsof`), and
+#: "Claude Code matches everything before the first `*` as written"
+#: (https://code.claude.com/docs/en/permissions, "Wildcard patterns"; the
+#: legacy `Bash(ls:*)` "matches the same commands"). Not the bare `Bash`,
+#: which "Matches all Bash commands" (same page) although the prompt
+#: allows the test command alone. Under dontAsk anything else the agent
+#: runs is refused. The PreToolUse denylist (`--settings`) still runs first:
+#: "A hook that exits with code 2 stops the tool call before permission
+#: rules are evaluated" (same page, "Extend permissions with hooks").
+#: Compound commands are split: "a rule like `Bash(safe-cmd *)` won't give
+#: it permission to run the command `safe-cmd && other-cmd`. The recognized
+#: command separators are `&&`, `||`, `;`, `|`, `|&`, `&`, and newlines.
+#: Every subcommand must be allowed" (same page, "Compound commands"), so a
+#: test command joined with `&&` (as green_gate suggests for two detected
+#: ones) gets one rule per part (bash_rules).
+#: Besides it, Claude Code's built-in read-only commands run unprompted
+#: (module docstring, `--allowedTools`), git among them unless denied
+#: (HOSTED_BASH_DENY_RULES). The rule's spaces travel inside the one
+#: comma-separated --allowedTools value, as a repository path with a space
+#: does in repo_rules' rules. No test runs the real CLI, so what the rule
+#: approves was not checked against a model; re-check by hand.
+_BASH_RULE_TEMPLATE = "Bash({command} *)"
+
+#: The hosted fix step's Bash deny rules (cm-2qp.12): git, which the
+#: built-in read-only set would otherwise run unprompted (module docstring,
+#: `--disallowedTools`; cm-t5j).
+HOSTED_BASH_DENY_RULES = ("Bash(git *)",)
+
+#: What Claude Code strips from the front of a command before it matches a
+#: Bash rule: "a fixed set of wrappers … `timeout`, `time`, `nice`, `nohup`,
+#: and `stdbuf`, plus the shell builtins `command` and `builtin`, and zsh's
+#: `noglob`", and "Bare `xargs` is also stripped"
+#: (https://code.claude.com/docs/en/permissions, "Wrappers"). A rule that
+#: starts with one names a command no call is matched as, so it approves
+#: nothing: bash_rules refuses it.
+_STRIPPED_WRAPPERS = frozenset({"timeout", "time", "nice", "nohup", "stdbuf", "command",
+                                "builtin", "noglob", "xargs"})
+
+#: First words whose rule would approve ANY command, since the words after
+#: them are a command or a script: a shell (sh, bash, zsh, dash, ksh, mksh,
+#: ash, fish, csh, tcsh, busybox), `eval`, `source` and `.`, `exec`, an
+#: elevator (sudo, su, doas), `env`. Beside them the docs' "Exec wrappers"
+#: (`watch`, `setsid`, `ionice`, `flock`), which run a command too but which
+#: a prefix rule "can't auto-approve" (same page, "Exec wrappers and `find`
+#: actions"), so a rule for one would approve nothing. Refused
+#: (bash_rules), so the test command never approves a shell. A general
+#: runner (make, npx, `uv run`, an interpreter) still approves any target,
+#: package or code it is given, as the test command itself runs repository
+#: code; the VM boundary accepts that (module docstring, "Limits on the
+#: hosted runner").
+_GENERAL_COMMAND_RUNNERS = frozenset({
+    "sh", "bash", "zsh", "dash", "ksh", "mksh", "ash", "fish", "csh", "tcsh", "busybox",
+    "eval", "source", ".", "exec", "sudo", "su", "doas", "env",
+    "watch", "setsid", "ionice", "flock"})
+
+#: A leading `NAME=value` or `NAME+=value`. The docs' "Wrappers" section
+#: (same page) describes how a CALL is matched past an assignment: Claude
+#: Code "strips a leading assignment of certain known-safe environment
+#: variables", and "An allow rule won't match past an assignment of any
+#: other variable". It says nothing of a RULE that itself starts with one.
+#: Refusing such a command is therefore a fail-safe choice inferred from
+#: that section, not documented behaviour: to be checked against the real
+#: CLI on the dogfood run (recorded on cm-2qp.6). Its cost: the sample
+#: repository's documented `PYTHONPATH=src …` test command
+#: (fixtures/sample-repo/PLANTED.json) gets no Bash.
+_ASSIGNMENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\+?=")
+
+#: The one command separator bash_rules splits on: "Every subcommand must be
+#: allowed", so each part gets its own rule. Every other separator is in
+#: _NOT_IN_BASH_RULE and refused.
+_AND = "&&"
+
+#: What a part of a test command (between `&&`s) may not contain to be named
+#: by _BASH_RULE_TEMPLATE (bash_rules refuses it, and the hosted fix step
+#: then has no Bash): `(` and `)`, which delimit the rule; `*`, its
+#: wildcard; `,`, which would split the one --allowedTools value; and the
+#: shell's operators, substitutions, redirections, quotes, escape and
+#: comment, so each rule's text is one plain command as written: never a
+#: compound one other than `&&`'s (which Claude Code splits, so the rule
+#: would match no call), a substitution, or a quoted word whose matching
+#: the docs do not pin. A character that is not printable (a newline, a
+#: tab, U+2028, U+0085, a no-break space) is refused beside these. Fail
+#: safe: such a command is still the gate's to run; the agent is told to
+#: run no tests.
+_NOT_IN_BASH_RULE = frozenset("()*,;&|<>$`'\"\\#")
+
+#: Dropped from the hosted fix step's environment (cm-2qp.12), with Bash or
+#: without (not from the tier-1 scan's, which is the local one exactly:
+#: _keeps_run_tokens), so its Bash and the test command it runs (repository
+#: code) do not hold the run's GitHub token, gh's enterprise tokens or the
+#: Actions runtime, cache, results and OIDC request credentials. Where each
+#: name comes from:
+#: - GH_TOKEN, GITHUB_TOKEN, GH_ENTERPRISE_TOKEN, GITHUB_ENTERPRISE_TOKEN:
+#:   gh's authentication tokens, "in order of precedence", for github.com
+#:   and for a GitHub Enterprise Server host
+#:   (https://cli.github.com/manual/gh_help_environment).
+#: - ACTIONS_ID_TOKEN_REQUEST_TOKEN, ACTIONS_ID_TOKEN_REQUEST_URL: "the
+#:   runner provides" them to request a GitHub OIDC token (Anthropic's
+#:   GitHub Actions workload identity guide,
+#:   https://platform.claude.com/docs/en/manage-claude/wif-providers/github-actions).
+#:   That guide's route has the workflow request the token and hand the
+#:   client a file through ANTHROPIC_IDENTITY_TOKEN_FILE, so the fix step
+#:   needs neither.
+#: - ACTIONS_RUNTIME_TOKEN, ACTIONS_RUNTIME_URL, ACTIONS_CACHE_URL,
+#:   ACTIONS_RESULTS_URL: @actions/toolkit internals, undocumented (the
+#:   artifact, cache and results services' credentials and endpoints).
+#: A fixed list of names, not a pattern: a secret the workflow passes under
+#: any other name (a PAT as GH_PAT, NPM_TOKEN, cloud credentials) reaches
+#: the agent. Not `*_TOKEN`, which would also drop what `claude` may need
+#: (AWS_SESSION_TOKEN, AWS_BEARER_TOKEN_BEDROCK). Nothing in the fix step
+#: needs these:
+#: `claude` authenticates with ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN,
+#: CLAUDE_CODE_OAUTH_TOKEN and the provider variables
+#: (https://code.claude.com/docs/en/env-vars, which names no GitHub
+#: variable), all of which are kept, and gh and publish run in the sweep's
+#: own process, which keeps its environment. Not a fence: on the same VM
+#: and as the same user the agent can still read the sweep's own
+#: /proc/<pid>/environ (module docstring, "Limits on the hosted runner";
+#: cm-2qp.11).
+HOSTED_RUN_TOKEN_VARIABLES = frozenset({
+    "GITHUB_TOKEN", "GH_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN",
+    "ACTIONS_RUNTIME_TOKEN", "ACTIONS_RUNTIME_URL",
+    "ACTIONS_ID_TOKEN_REQUEST_TOKEN", "ACTIONS_ID_TOKEN_REQUEST_URL",
+    "ACTIONS_CACHE_URL", "ACTIONS_RESULTS_URL",
+})
 
 
-def fix_tools(runner):
+def bash_rules(test_command):
+    """The allow rules for `test_command` (the base's, as
+    green_gate.resolve_test_command gives it): one `Bash(<part> *)`
+    (_BASH_RULE_TEMPLATE) per part between `&&`s, each approving that part
+    alone or with arguments after it, its whitespace normalised (single
+    spaces, none around it). Empty when there is no command, or when any
+    part cannot be named safely in a rule (empty, _NOT_IN_BASH_RULE, a
+    character that is not printable), or would approve no call (a first
+    word Claude Code strips before matching, _STRIPPED_WRAPPERS, or a
+    leading assignment, _ASSIGNMENT; or `git`, which
+    HOSTED_BASH_DENY_RULES refuses whatever the allow rule says), or would
+    approve any command (_GENERAL_COMMAND_RUNNERS). The first word is
+    compared by its last path component, so `/usr/bin/git` and `/bin/sh`
+    are caught. A general runner (make, npx, `uv run`, an interpreter) is
+    not refused: its rule approves any target, package or code, which the
+    VM boundary accepts.
+
+    Three functions agree through offered_test_command, which this calls:
+    fix_tools gives Bash only when it names a command, fix_prompt offers
+    that command only then (else the no-tests sentence), and fix_step_argv
+    refuses Bash without rules. So the agent is offered a command exactly
+    when it may run it."""
+    command = offered_test_command(test_command)
+    if command is None:
+        return ()
+    # dict.fromkeys: a part named twice (`pytest && pytest`) is one rule,
+    # in first-seen order.
+    return tuple(dict.fromkeys(_BASH_RULE_TEMPLATE.format(command=part)
+                               for part in command.split(" && ")))
+
+
+def offered_test_command(test_command):
+    """`test_command` as the hosted prompt shows it and bash_rules names it:
+    its whitespace normalised and its `&&` parts joined by ` && `; None when
+    bash_rules would give no rule (its docstring has the cases)."""
+    command = (test_command or "").strip()
+    if not command or not command.isprintable():
+        return None
+    parts = [" ".join(part.split()) for part in command.split(_AND)]
+    for part in parts:
+        if not part or any(c in _NOT_IN_BASH_RULE for c in part):
+            return None
+        word = part.split()[0]
+        name = os.path.basename(word)
+        if (_ASSIGNMENT.match(word) or name in _STRIPPED_WRAPPERS
+                or name in _GENERAL_COMMAND_RUNNERS or name == "git"):
+            return None
+    return " && ".join(parts)
+
+
+def fix_tools(runner, test_command=None):
     """The fix agent's toolset for `runner` (a config.Runner, the run's
-    `run.runner`): HOSTED_FIX_TOOLS on `runner.hosted`, else FIX_TOOLS.
-    The one place the toolset is chosen by runner kind; sweep_job calls it.
-    run_fix_step's own default stays FIX_TOOLS on both kinds, so a caller
-    that names no toolset (the tier-1 scan names its own) gets no shell."""
-    return HOSTED_FIX_TOOLS if runner.hosted else FIX_TOOLS
+    `run.runner`) and `test_command` (sweep_job passes the base's on hosted):
+    HOSTED_FIX_TOOLS on `runner.hosted` when bash_rules can name the command
+    (cm-2qp.12: Bash is approved for that command alone, so with none there
+    is no Bash), else FIX_TOOLS. The one place the toolset is chosen;
+    sweep_job calls it. run_fix_step's own default stays FIX_TOOLS on both
+    kinds, so a caller that names no toolset (the tier-1 scan names its own)
+    gets no shell."""
+    return HOSTED_FIX_TOOLS if runner.hosted and bash_rules(test_command) else FIX_TOOLS
 
 
 #: What the fix prompt says about its job and commands on the local runner,
@@ -428,15 +638,16 @@ def _hosted_tests_sentence(test_command):
     command (`test_command`, as the gate resolves it for the base commit,
     which the caller passes in) is the one command the agent may run, and
     the one allowed use of a package manager; with none (none at the base,
-    or one that could not be resolved), it runs no tests.
+    one that could not be resolved, or one bash_rules cannot name, which
+    fix_prompt passes as None), it runs no tests.
 
     The command is shown through pr_markdown.code_span, which makes it one
     line and redacts what looks like a secret, so what the agent reads can
     differ from what the gate runs. Fail safe: the agent's run is only a
     check for itself, and the gate (green_gate.run_test_gate) decides."""
     if not test_command:
-        return ("No test command could be resolved for this repository, so do not run "
-                "tests, and do not run any package-manager or install command.")
+        return ("No test command is available to you, so do not run tests, and do not "
+                "run any package-manager or install command.")
     return ("To check your edits you may run the repository's test command, "
             f"{code_span(test_command)}, limited to the tests for the files you edited "
             "(not the whole suite: that is run after you finish); if the command cannot "
@@ -452,17 +663,21 @@ def fix_prompt(result, principles, *, runner=LOCAL_RUNNER, test_command=None):
     them with Bash, and what it must not do with them
     (_HOSTED_COMMANDS_SENTENCE), naming `test_command`, the base's test
     command as green_gate.resolve_test_command gives it (sweep_job passes
-    it on hosted; None says to run no tests); anything else, the default
+    it on hosted; None, or one bash_rules cannot name, says to run no tests,
+    as fix_tools then gives no Bash); anything else, the default
     included, is the local prompt, unchanged since 3f50a3f, and ignores
-    `test_command`. SCOPE_LIMITS is the same on both kinds. Nothing here
-    reads the clone."""
+    `test_command`. Without Bash (no command a rule can name) the hosted
+    prompt still forbids git, bd, gh and the network, so a later change
+    that hands it a shell is covered. SCOPE_LIMITS is the same on both
+    kinds. Nothing here reads the clone."""
     permitting = sorted(
         p.id for p in principles.principles if SIGNATURE_PERMISSION in p.permits)
     document = json.dumps(work_list_document(result), indent=2, ensure_ascii=False)
     return (
         "You are cúramóir's sweep: a janitor fixing mechanical violations that "
         "curamoir-lint has already found in this repository. You never redesign. "
-        + (_HOSTED_COMMANDS_SENTENCE.format(tests=_hosted_tests_sentence(test_command))
+        + (_HOSTED_COMMANDS_SENTENCE.format(tests=_hosted_tests_sentence(
+            offered_test_command(test_command)))
            if runner.hosted else _LOCAL_COMMANDS_SENTENCE)
         + "\n\n"
         + SCOPE_LIMITS
@@ -595,7 +810,7 @@ def pretooluse_settings(root=PLUGIN_ROOT):
 
 
 def fix_step_argv(prompt, model, repo, max_turns=DEFAULT_MAX_TURNS, claude="claude",
-                  tools=FIX_TOOLS, *, runner=LOCAL_RUNNER):
+                  tools=FIX_TOOLS, *, runner=LOCAL_RUNNER, test_command=None):
     """The `claude -p` command line for the fix step in `repo`. The prompt
     sits right after `-p`, as in the CLI reference's examples, and each
     list-valued flag takes one comma-separated value, so no flag can swallow
@@ -607,7 +822,12 @@ def fix_step_argv(prompt, model, repo, max_turns=DEFAULT_MAX_TURNS, claude="clau
 
     `tools` is the whole toolset; the allow rules follow it, so a toolset
     without Edit (the tier-1 scan's, curamoir.tier1.SCAN_TOOLS) approves no
-    edit either, and one with Bash gets the tool-level `Bash` rule. `runner`
+    edit either, and one with Bash gets bash_rules(`test_command`), the
+    base's test command and its extensions (cm-2qp.12): ValueError when
+    there is none, or none a rule can name, rather than Bash with no rule or
+    a bare one (fix_tools gives no Bash then); with Bash, --disallowedTools
+    also carries HOSTED_BASH_DENY_RULES (git). `test_command` is ignored for
+    a toolset without Bash. `runner`
     is the run's config.Runner (cm-2qp.3): it decides only which tools are
     permitted (module docstring, "On the hosted runner"). Every flag,
     `--restricted` and the denylist `--settings` included, is the same for
@@ -631,13 +851,24 @@ def fix_step_argv(prompt, model, repo, max_turns=DEFAULT_MAX_TURNS, claude="clau
             f"{', '.join(sorted(SHELL_FREE_TOOLS))} run without an OS sandbox, and "
             f"none is verified yet (cm-xq9, cm-4w5){hint}")
     allowed = tuple(tool for tool in _RULE_TOOLS if tool in tools)
-    rules = repo_rules(repo, allowed) + ([_BASH_RULE] if "Bash" in tools else [])
+    rules = repo_rules(repo, allowed)
+    if "Bash" in tools:
+        bash = bash_rules(test_command)
+        if not bash:
+            raise ValueError(
+                f"{test_command!r} cannot be named by an allow rule (or is None), so "
+                "Bash cannot be approved: pass fix_tools(runner, test_command) "
+                "(cm-2qp.12)")
+        rules.extend(bash)
+        denied = HOSTED_BASH_DENY_RULES
+    else:
+        denied = ()
     return [
         claude, "-p", prompt,
         "--model", model,
         "--tools", ",".join(tools),
         "--allowedTools", ",".join(rules),
-        "--disallowedTools", ",".join(["mcp__*", *repo_deny_rules(repo)]),
+        "--disallowedTools", ",".join(["mcp__*", *repo_deny_rules(repo), *denied]),
         "--strict-mcp-config",
         "--restricted",
         "--settings", json.dumps(pretooluse_settings()),
@@ -708,18 +939,22 @@ def usable_number(value):
 
 def run_fix_step(sandbox, prompt, model=None, timeout=DEFAULT_TIMEOUT,
                  max_turns=DEFAULT_MAX_TURNS, claude="claude", tools=FIX_TOOLS,
-                 before_call=None, *, runner=LOCAL_RUNNER):
+                 before_call=None, *, runner=LOCAL_RUNNER, test_command=None):
     """Run the fix step in `sandbox` (a git_guard.Sandbox) and return a
     FixStepRun: seam B's contract (module docstring, "The run_fix_step
     contract"). `model` defaults to `models.cheap` in the sandbox's config,
     which is the base commit's. `claude` is a seam for tests, which pass a
     stand-in script: no test calls a model. `tools` and `runner` are
-    fix_step_argv's: the sweep passes fix_tools(run.runner) and
-    run.runner, the tier-1 scan its read-only set and run.runner. Nothing
-    here reads the environment for the runner kind. On `runner.hosted`,
-    with Bash in `tools`, the process also gets HOSTED_TEST_ENVIRONMENT
-    (_hosted_environment); otherwise (the local runner, and the tier-1 scan
-    on either) the environment is as at 3f50a3f.
+    fix_step_argv's, and so is `test_command`, which its Bash rule names:
+    the sweep passes fix_tools(run.runner, command), run.runner and the
+    command, the tier-1 scan its read-only set and run.runner. Nothing
+    here reads the environment for the runner kind. On `runner.hosted` the
+    process loses HOSTED_RUN_TOKEN_VARIABLES, the run's GitHub and Actions
+    tokens (cm-2qp.12), unless its toolset is read-only (the tier-1 scan's;
+    _keeps_run_tokens), and with Bash in `tools` it also gets
+    HOSTED_TEST_ENVIRONMENT (_hosted_environment); otherwise (the local
+    runner, and the tier-1 scan on either) the environment is as at
+    3f50a3f.
 
     The sandbox is snapshotted (git_guard.snapshot_git_state) before the
     agent starts; fix_scope.verify_fix needs that snapshot. GitGuardError,
@@ -736,7 +971,7 @@ def run_fix_step(sandbox, prompt, model=None, timeout=DEFAULT_TIMEOUT,
     if model is None:
         model = config_value(path, "models", "cheap")
     argv = fix_step_argv(prompt, model, path, max_turns=max_turns, claude=claude, tools=tools,
-                         runner=runner)
+                         runner=runner, test_command=test_command)
     git_state = snapshot_git_state(sandbox)
     environment = scrubbed_environment()
     environment["PWD"] = path
@@ -745,6 +980,9 @@ def run_fix_step(sandbox, prompt, model=None, timeout=DEFAULT_TIMEOUT,
     # the denylist: the root the --settings name, always, on both runner
     # kinds (the --settings are loaded on both).
     environment["CLAUDE_PLUGIN_ROOT"] = str(PLUGIN_ROOT)
+    if not _keeps_run_tokens(runner, tools):
+        for name in HOSTED_RUN_TOKEN_VARIABLES:
+            environment.pop(name, None)
     if runner.hosted and "Bash" in tools:
         environment.update(_hosted_environment(environment, path))
     if before_call is not None:
@@ -759,6 +997,20 @@ def run_fix_step(sandbox, prompt, model=None, timeout=DEFAULT_TIMEOUT,
                           git_state=git_state)
     return FixStepRun(tuple(argv), result.returncode, _text(result.stdout),
                       _text(result.stderr), git_state=git_state)
+
+
+#: A read-only toolset (tier1.SCAN_TOOLS is one): the only call on the
+#: hosted runner whose process keeps the run's tokens (_keeps_run_tokens).
+_READ_ONLY_TOOLS = frozenset({"Read", "Grep", "Glob"})
+
+
+def _keeps_run_tokens(runner, tools):
+    """True when run_fix_step's process keeps HOSTED_RUN_TOKEN_VARIABLES: on
+    the local runner (as at 3f50a3f), and on hosted only for a read-only
+    toolset (the tier-1 scan, whose process is the local one exactly).
+    Fail closed: any other toolset on hosted, the fix step's with Bash or
+    without and any later one, loses them (cm-2qp.12)."""
+    return not runner.hosted or set(tools) <= _READ_ONLY_TOOLS
 
 
 def _hosted_environment(environment, clone):

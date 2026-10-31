@@ -43,13 +43,16 @@ from curamoir.fix_scope import (
 from curamoir.fix_step import (
     FIX_TOOLS,
     HOSTED_FIX_TOOLS,
+    HOSTED_RUN_TOKEN_VARIABLES,
     HOSTED_TEST_ENVIRONMENT,
     SCOPE_LIMITS,
     SHELL_FREE_TOOLS,
     FixStepRun,
+    bash_rules,
     fix_prompt,
     fix_step_argv,
     fix_tools,
+    offered_test_command,
     pretooluse_settings,
     repo_deny_rules,
     repo_rules,
@@ -293,8 +296,8 @@ LOGGED_ENVIRONMENT = (*HOSTED_TEST_ENVIRONMENT, "UV_FROZEN", "UV_PROJECT_ENVIRON
 def fake_claude(tmp_path, edits=(), writes=None, sleep=0, exit_code=0, background=None,
                 commands=()):
     """A stand-in for `claude`: records argv, cwd, the GIT_* variables it
-    was given and the HOSTED_TEST_ENVIRONMENT variables (as given, or None)
-    to a file beside it, replaces text in files of the directory it is run
+    was given, the HOSTED_TEST_ENVIRONMENT variables (as given, or None)
+    and the names of every variable it was given (`env`) to a file beside it, replaces text in files of the directory it is run
     in (`edits`: (path, old, new) triples), writes new files there
     (`writes`: path -> text), runs `commands` (shell commands, in order and
     to completion, as the hosted agent's Bash would), optionally starts
@@ -312,6 +315,7 @@ def fake_claude(tmp_path, edits=(), writes=None, sleep=0, exit_code=0, backgroun
         f"time.sleep({sleep})\n"
         f"open({str(log)!r}, 'w').write(json.dumps({{'argv': sys.argv[1:], 'cwd': os.getcwd(),\n"
         "    'git_env': sorted(k for k in os.environ if k.startswith('GIT_')),\n"
+        "    'env': sorted(os.environ),\n"
         "    'test_env': {k: os.environ.get(k)\n"
         f"                 for k in {sorted(LOGGED_ENVIRONMENT)!r}}}}}))\n"
         f"for path, old, new in {list(edits)!r}:\n"
@@ -435,7 +439,7 @@ def test_a_timed_out_fix_step_takes_its_whole_process_group_with_it(
     would start (one that leaves the group, setsid, is cm-2qp.11's)."""
     marker = tmp_path / "late"
     claude, _ = fake_claude(tmp_path, sleep=30, background=f"sleep 2; touch {marker}")
-    options = {"tools": HOSTED_FIX_TOOLS, "runner": HOSTED} if hosted else {}
+    options = HOSTED_FIX if hosted else {}
 
     run = run_fix_step(sandboxed, "p", model="m", claude=str(claude), timeout=1, **options)
     time.sleep(3)
@@ -575,6 +579,15 @@ def test_every_job_toolset_today_is_shell_free(tmp_path):
 #: marked run (tests/test_runner_kind.py holds the resolution itself).
 HOSTED = Runner(RunnerKind.HOSTED)
 
+#: A typical resolved test command (green_gate.resolve_test_command's), and
+#: the hosted fix step as sweep_job calls it for a base that has it: Bash,
+#: the hosted runner and the command its allow rule names (cm-2qp.12).
+PYTEST = "uv run pytest -q"
+HOSTED_FIX = {"tools": HOSTED_FIX_TOOLS, "runner": HOSTED, "test_command": PYTEST}
+
+#: What the hosted prompt says when the agent is offered no test command.
+NO_TESTS_SENTENCE = "No test command is available to you, so do not run tests"
+
 
 def pre_e14_argv(prompt, model, repo, tools, max_turns=60, claude="claude"):
     """fix_step_argv's command line as 3f50a3f's code built it (the last
@@ -625,24 +638,32 @@ def test_the_local_argv_is_the_pre_e14_argv(tmp_path, runner, tools):
 
 def test_the_hosted_fix_step_differs_from_local_only_by_bash_and_its_allow_rule(tmp_path):
     """§5 R4 as decided (2026-10-29, cm-2qp.3): on the hosted runner the
-    fix agent has Bash, approved by the tool-level `Bash` allow rule
-    (dontAsk refuses an unapproved call). Everything else is the local
+    fix agent has Bash, approved by one allow rule for the base's test
+    command and that command with arguments after it (cm-2qp.12; dontAsk
+    refuses an unapproved call), never the bare tool-level `Bash` rule
+    that approves every command. Everything else is the local
     runner's argv: --restricted (user decision: the clone's project
     settings and hooks never load), the E0-R5 denylist through --settings
     (cm-60c: without it `rm -rf build` ran), the clone-scoped Read/Edit
     rules and the .git deny rules."""
-    argv = fix_step_argv("the prompt", "m", tmp_path, tools=HOSTED_FIX_TOOLS, runner=HOSTED)
+    argv = fix_step_argv("the prompt", "m", tmp_path, **HOSTED_FIX)
 
     def value(flag):
         return argv[argv.index(flag) + 1]
 
     assert value("--tools").split(",") == ["Read", "Grep", "Glob", "Edit", "Bash"]
-    assert value("--allowedTools").split(",") == [*repo_rules(tmp_path), "Bash"]
+    assert value("--allowedTools").split(",") == [*repo_rules(tmp_path),
+                                                  "Bash(uv run pytest -q *)"]
+    assert "Bash" not in value("--allowedTools").split(",")
+    # git is a built-in read-only command, unprompted unless denied (cm-t5j).
+    assert value("--disallowedTools").split(",") == ["mcp__*", *repo_deny_rules(tmp_path),
+                                                     "Bash(git *)"]
     assert json.loads(value("--settings")) == pretooluse_settings()
     assert "--restricted" in argv
     local = pre_e14_argv("the prompt", "m", tmp_path, FIX_TOOLS)
     local[local.index("--tools") + 1] = value("--tools")
     local[local.index("--allowedTools") + 1] = value("--allowedTools")
+    local[local.index("--disallowedTools") + 1] = value("--disallowedTools")
     assert argv == local
 
 
@@ -658,13 +679,15 @@ def test_the_hosted_scan_argv_is_the_local_scan_argv(tmp_path):
     assert argv == pre_e14_argv("p", "m", tmp_path, SCAN_TOOLS)
 
 
-def test_the_toolset_follows_the_runner():
+def test_the_toolset_follows_the_runner_and_the_test_command():
     """sweep_job asks fix_tools for the fix agent's toolset: Bash only on
-    the hosted runner; anything not hosted (the default included) is the
-    shell-free FIX_TOOLS."""
-    assert fix_tools(HOSTED) == HOSTED_FIX_TOOLS == (*FIX_TOOLS, "Bash")
-    assert fix_tools(LOCAL_RUNNER) == FIX_TOOLS
-    assert fix_tools(Runner(RunnerKind.LOCAL, transcript_url="https://x")) == FIX_TOOLS
+    the hosted runner, and there only with a test command its allow rule
+    can name (cm-2qp.12); anything not hosted (the default included) is the
+    shell-free FIX_TOOLS, whatever the command."""
+    assert fix_tools(HOSTED, PYTEST) == HOSTED_FIX_TOOLS == (*FIX_TOOLS, "Bash")
+    assert fix_tools(HOSTED) == fix_tools(HOSTED, None) == FIX_TOOLS
+    assert fix_tools(LOCAL_RUNNER) == fix_tools(LOCAL_RUNNER, PYTEST) == FIX_TOOLS
+    assert fix_tools(Runner(RunnerKind.LOCAL, transcript_url="https://x"), PYTEST) == FIX_TOOLS
 
 
 def test_the_hosted_toolset_is_refused_on_the_local_runner(tmp_path):
@@ -712,7 +735,7 @@ def test_run_fix_step_builds_the_argv_for_its_runner(sandboxed, tmp_path):
     claude, _ = fake_claude(tmp_path)
 
     hosted = run_fix_step(sandboxed, "p", model="m", claude=str(claude),
-                          tools=HOSTED_FIX_TOOLS, runner=HOSTED)
+                          **HOSTED_FIX)
     local = run_fix_step(sandboxed, "p", model="m", claude=str(claude))
 
     assert "--restricted" in hosted.argv and "Bash" in hosted.argv[hosted.argv.index(
@@ -755,7 +778,8 @@ def test_neither_hosted_call_loads_the_clones_project_settings(tmp_path):
     with prepare_sandbox(repo, "HEAD", parent=tmp_path) as sandbox:
         assert (sandbox.path / ".claude" / "settings.json").is_file()
         runs = [run_fix_step(sandbox, "p", model="m", claude=str(claude), tools=tools,
-                             runner=HOSTED) for tools in (SCAN_TOOLS, HOSTED_FIX_TOOLS)]
+                             runner=HOSTED, test_command=PYTEST)
+                for tools in (SCAN_TOOLS, HOSTED_FIX_TOOLS)]
 
     for run in runs:
         assert run.exit_code == 0
@@ -865,7 +889,7 @@ def test_the_hosted_prompt_lets_the_agent_run_commands_and_says_what_not_to_do(
         assert "if the command cannot be limited to some tests, do not run it" in sentence
         assert "Do not run any other package-manager or install command" in sentence
     else:
-        assert "No test command could be resolved for this repository, so do not run tests" in (
+        assert "No test command is available to you, so do not run tests" in (
             sentence)
         assert "do not run any package-manager or install command" in sentence
 
@@ -901,8 +925,7 @@ def test_git_run_by_the_hosted_agent_refuses_the_whole_run(sandboxed, tmp_path, 
 
     claude, _ = fake_claude(tmp_path, edits=[LOGGER_FIX], commands=[command])
 
-    run = run_fix_step(sandboxed, "p", model="m", claude=str(claude), tools=HOSTED_FIX_TOOLS,
-                       runner=HOSTED)
+    run = run_fix_step(sandboxed, "p", model="m", claude=str(claude), **HOSTED_FIX)
     result = verify_fix(sandboxed, git_state=run.git_state)
 
     assert run.exit_code == 0
@@ -925,8 +948,7 @@ def test_the_hosted_fix_step_gets_the_test_environment_and_the_local_one_does_no
 
     run_fix_step(sandboxed, "p", model="m", claude=str(claude))
     local = json.loads(log.read_text(encoding="utf-8"))["test_env"]
-    run_fix_step(sandboxed, "p", model="m", claude=str(claude), tools=HOSTED_FIX_TOOLS,
-                 runner=HOSTED)
+    run_fix_step(sandboxed, "p", model="m", claude=str(claude), **HOSTED_FIX)
     hosted = json.loads(log.read_text(encoding="utf-8"))["test_env"]
 
     assert local == {"CI": None, "PYTEST_ADDOPTS": "-x", "PYTHONDONTWRITEBYTECODE": None,
@@ -945,8 +967,7 @@ def test_an_inherited_cache_off_is_not_added_twice(sandboxed, tmp_path, monkeypa
     monkeypatch.setenv("PYTEST_ADDOPTS", inherited)
     claude, log = fake_claude(tmp_path)
 
-    run_fix_step(sandboxed, "p", model="m", claude=str(claude), tools=HOSTED_FIX_TOOLS,
-                 runner=HOSTED)
+    run_fix_step(sandboxed, "p", model="m", claude=str(claude), **HOSTED_FIX)
 
     seen = json.loads(log.read_text(encoding="utf-8"))["test_env"]
     assert seen["PYTEST_ADDOPTS"] == inherited
@@ -972,31 +993,45 @@ def test_with_no_pytest_options_inherited_the_hosted_one_is_the_cache_off_alone(
     monkeypatch.delenv("PYTEST_ADDOPTS", raising=False)
     claude, log = fake_claude(tmp_path)
 
-    run_fix_step(sandboxed, "p", model="m", claude=str(claude), tools=HOSTED_FIX_TOOLS,
-                 runner=HOSTED)
+    run_fix_step(sandboxed, "p", model="m", claude=str(claude), **HOSTED_FIX)
 
     assert json.loads(log.read_text(encoding="utf-8"))["test_env"]["PYTEST_ADDOPTS"] == (
         "-p no:cacheprovider")
 
 
+#: A GitHub-token-shaped word (tests/test_redaction.py's own example).
+TOKEN_SHAPED = "ghp_0123456789abcdefghijklmnopqrstuvwxyz"
 #: A test command as a base's config could carry it: a newline, a backtick,
-#: and a GitHub-token-shaped word (tests/test_redaction.py's own example).
-AWKWARD_COMMAND = "pytest -q tests\n`echo` ghp_0123456789abcdefghijklmnopqrstuvwxyz"
+#: and a token-shaped word.
+AWKWARD_COMMAND = f"pytest -q tests\n`echo` {TOKEN_SHAPED}"
 
 
-def test_the_hosted_prompt_shows_the_command_one_lined_fenced_and_redacted(sandboxed):
-    """The command reaches the prompt through pr_markdown.code_span: one
-    line, fenced past its own backticks, a secret-looking word redacted."""
+def test_the_hosted_prompt_shows_the_command_redacted(sandboxed):
+    """The command reaches the prompt through pr_markdown.code_span, so a
+    secret-looking word in it is redacted. The allow rule names the command
+    as configured, so the agent's copy of a redacted command matches no
+    rule and is refused: fail safe (the gate decides)."""
     from curamoir.pr_markdown import code_span
 
+    command = f"pytest -q --token {TOKEN_SHAPED}"
     hosted = fix_prompt(sandboxed.work_list, base_principles(sandboxed), runner=HOSTED,
-                        test_command=AWKWARD_COMMAND)
+                        test_command=command)
     opening = hosted.split("\n\n", 1)[0]
 
-    assert code_span(AWKWARD_COMMAND) in opening
-    assert "\n" not in opening
-    assert "ghp_0123456789" not in hosted
-    assert f"`{AWKWARD_COMMAND}`" not in hosted
+    assert code_span(command) in opening
+    assert TOKEN_SHAPED not in hosted
+
+
+def test_a_command_no_rule_can_name_is_not_offered_in_the_hosted_prompt(sandboxed):
+    """A command with a newline or a backtick has no allow rule
+    (fix_step.bash_rules), so the hosted fix step has no Bash for it and the
+    prompt says, consistently, to run no tests; the command is not shown."""
+    hosted = fix_prompt(sandboxed.work_list, base_principles(sandboxed), runner=HOSTED,
+                        test_command=AWKWARD_COMMAND)
+
+    assert NO_TESTS_SENTENCE in flat(hosted)
+    assert "pytest -q tests" not in hosted and TOKEN_SHAPED not in hosted
+    assert fix_tools(HOSTED, AWKWARD_COMMAND) == FIX_TOOLS
 
 
 def test_a_real_base_with_no_test_command_tells_the_hosted_agent_to_run_no_tests(
@@ -1017,8 +1052,8 @@ def test_a_real_base_with_no_test_command_tells_the_hosted_agent_to_run_no_tests
                         test_command=command)
 
     assert command is None
-    assert ("No test command could be resolved for this repository, so do not run tests"
-            in flat(hosted))
+    assert NO_TESTS_SENTENCE in flat(hosted)
+    assert fix_tools(HOSTED, command) == FIX_TOOLS
 
 
 #: A quick run of the sample's own tests, as the hosted agent's Bash would
@@ -1038,7 +1073,7 @@ def test_the_hosted_environment_keeps_a_test_runs_debris_out_of_the_clone(
         monkeypatch.delenv(name, raising=False)
     edit = (BILLING, 'print("calculating line total")', 'print("calculating the line total")')
     claude, _ = fake_claude(tmp_path, edits=[edit], commands=[SAMPLE_TESTS])
-    options = {"tools": HOSTED_FIX_TOOLS, "runner": HOSTED} if hosted else {}
+    options = HOSTED_FIX if hosted else {}
 
     run = run_fix_step(sandboxed, "p", model="m", claude=str(claude), **options)
 
@@ -1050,6 +1085,230 @@ def test_the_hosted_environment_keeps_a_test_runs_debris_out_of_the_clone(
         assert BILLING in changes
         assert any("__pycache__" in path for path in changes)
         assert any(path.startswith(".pytest_cache/") for path in changes)
+
+
+# --- cm-2qp.12: Bash for the test command only, and no run tokens ------------------------
+
+@pytest.mark.parametrize("command, rules", [
+    ("uv run pytest -q", ["Bash(uv run pytest -q *)"]),
+    ("npm test", ["Bash(npm test *)"]),
+    ("  pytest  ", ["Bash(pytest *)"]),
+    ("uv  run   pytest", ["Bash(uv run pytest *)"]),
+    ("python -m pytest -p no:cacheprovider -o pythonpath=src",
+     ["Bash(python -m pytest -p no:cacheprovider -o pythonpath=src *)"]),
+    ("pytest -q && npm test", ["Bash(pytest -q *)", "Bash(npm test *)"]),
+    ("pytest&&npm  test", ["Bash(pytest *)", "Bash(npm test *)"]),
+    ("pytest && npm test && pytest", ["Bash(pytest *)", "Bash(npm test *)"]),
+], ids=["uv", "npm", "padded", "double-spaces", "colon-and-equals", "and", "and-unspaced",
+        "repeated-part"])
+def test_the_bash_rules_name_the_test_command_and_its_extensions(command, rules):
+    """The documented trailing wildcard with a space before it: the command
+    alone or with arguments after it (test paths), and no other command
+    ("Bash(ls *)" matches `ls -la` and `ls`, not `lsof`); whitespace
+    normalised; one rule per `&&` part, since "Every subcommand must be
+    allowed" (docs/en/permissions, "Compound commands")."""
+    assert list(bash_rules(command)) == rules
+
+
+def test_the_commands_green_gate_detects_or_suggests_get_rules():
+    """green_gate's own detected commands, and the `&&` join it suggests for
+    two of them (green_gate._detect's message), through the real constants."""
+    from curamoir.green_gate import NODE_COMMAND, PYTHON_COMMAND
+
+    assert bash_rules(PYTHON_COMMAND) == (f"Bash({PYTHON_COMMAND} *)",)
+    assert bash_rules(NODE_COMMAND) == (f"Bash({NODE_COMMAND} *)",)
+    both = f"{PYTHON_COMMAND} && {NODE_COMMAND}"
+    assert bash_rules(both) == (f"Bash({PYTHON_COMMAND} *)", f"Bash({NODE_COMMAND} *)")
+    assert offered_test_command(both) == both
+
+
+def test_the_prompt_offers_the_command_as_normalised_and_whole(sandboxed):
+    """The prompt shows what the rules name: single spaces, every `&&` part."""
+    hosted = fix_prompt(sandboxed.work_list, base_principles(sandboxed), runner=HOSTED,
+                        test_command="pytest  -q&&npm test")
+
+    assert "`pytest -q && npm test`" in hosted
+
+
+def test_an_and_command_gets_a_rule_per_part_in_the_argv(tmp_path):
+    argv = fix_step_argv("p", "m", tmp_path, tools=HOSTED_FIX_TOOLS, runner=HOSTED,
+                         test_command="pytest -q && npm test")
+
+    assert argv[argv.index("--allowedTools") + 1].split(",")[-2:] == [
+        "Bash(pytest -q *)", "Bash(npm test *)"]
+
+
+#: Commands that cannot be one prefix rule safely: a rule-syntax character
+#: (a `)` closes the rule, a `*` is a wildcard, a `,` splits --allowedTools'
+#: one value), a line break or other control character, a shell operator
+#: (Claude Code splits a compound command and matches each part, so the
+#: rule would name a command no call is), a substitution, a redirection, a
+#: quote or an escape, a comment; and a first word Claude Code strips before
+#: matching (a wrapper, or a leading assignment, which an allow rule does
+#: not match past), or `git`, which the hosted deny rule refuses: the rule
+#: would approve no call; a first word whose rule would approve any command
+#: (a shell, eval, source, exec, sudo, env), by path too; a character that
+#: is not printable (Unicode line and paragraph separators, NEL, a no-break
+#: space); and an `&&` command with any such part, or an empty one.
+UNRULABLE = ["PYTHONPATH=src python -m pytest", "PYTHONPATH=src/lib pytest", "PATH+=x pytest",
+             "CI=1 pytest", "timeout 300 pytest",
+             "sh run-tests", "bash -c true", "zsh x", "dash x", "eval pytest", "source env",
+             ". env", "exec pytest", "sudo pytest", "env pytest", "/bin/sh x",
+             "/usr/bin/git status", "fish -c x", "csh x", "tcsh x", "mksh x", "ash x",
+             "busybox sh", "su -c x", "doas pytest", "watch pytest", "setsid pytest",
+             "ionice pytest", "flock /tmp/l pytest", "pytest\u2028-q", "pytest\x85-q", "pytest\xa0-q",
+             "pytest && sh x", "pytest && git diff", "pytest &&", "&& pytest",
+             "pytest && && npm test", "pytest &&& npm test",
+             "time pytest", "nice pytest", "nohup pytest", "stdbuf -oL pytest",
+             "command pytest", "builtin pytest", "noglob pytest", "xargs pytest",
+             "git status", "git",
+             "pytest)", "pytest (x", "pytest *", "pytest -k a,b", "pytest\n-q", "pytest\t-q",
+             "pytest; true", "pytest | tee x", "pytest & x",
+             "pytest > out", "pytest < in", "pytest $(x)", "pytest ${X}", "pytest `x`",
+             "pytest -m 'not slow'", 'pytest -m "not slow"', "pytest \\x", "pytest # x",
+             "", "   "]
+
+
+@pytest.mark.parametrize("command", [*UNRULABLE, None])
+def test_with_no_command_a_rule_can_name_the_hosted_fix_step_gets_no_bash(
+        tmp_path, sandboxed, command):
+    """No test command, or one no allow rule can name safely: no rule, the
+    shell-free toolset (FIX_TOOLS) and the no-tests sentence, which say the
+    same thing; and the hosted toolset with that command is refused rather
+    than run with a bare `Bash` rule."""
+    assert bash_rules(command) == ()
+    assert offered_test_command(command) is None
+    assert fix_tools(HOSTED, command) == FIX_TOOLS
+    assert NO_TESTS_SENTENCE in flat(fix_prompt(sandboxed.work_list,
+                                                base_principles(sandboxed), runner=HOSTED,
+                                                test_command=command))
+    with pytest.raises(ValueError, match="Bash cannot be approved"):
+        fix_step_argv("p", "m", tmp_path, tools=HOSTED_FIX_TOOLS, runner=HOSTED,
+                      test_command=command)
+    argv = fix_step_argv("p", "m", tmp_path, tools=FIX_TOOLS, runner=HOSTED,
+                         test_command=command)
+    assert argv == pre_e14_argv("p", "m", tmp_path, FIX_TOOLS)
+
+
+def test_the_local_argv_ignores_the_test_command(tmp_path):
+    """On the local runner the command changes nothing: no Bash, 3f50a3f's
+    argv, and the hosted toolset is still refused by cm-xq9 first."""
+    argv = fix_step_argv("p", "m", tmp_path, tools=FIX_TOOLS, test_command=PYTEST)
+
+    assert argv == pre_e14_argv("p", "m", tmp_path, FIX_TOOLS)
+    with pytest.raises(ValueError, match="OS sandbox"):
+        fix_step_argv("p", "m", tmp_path, tools=HOSTED_FIX_TOOLS, test_command=PYTEST)
+
+
+#: Inherited by the stand-in run in the tests below: the run tokens the
+#: hosted fix step drops, and what `claude` itself authenticates with.
+CLAUDE_AUTHENTICATION = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN")
+
+
+def test_the_stripped_set_is_the_runs_github_and_actions_tokens():
+    """Named once (fix_step.HOSTED_RUN_TOKEN_VARIABLES), and none of what
+    `claude` authenticates with is in it. Sources, as the constant cites
+    them: gh's GH_TOKEN, GITHUB_TOKEN, GH_ENTERPRISE_TOKEN and
+    GITHUB_ENTERPRISE_TOKEN (cli.github.com/manual/gh_help_environment);
+    ACTIONS_ID_TOKEN_REQUEST_TOKEN and _URL (Anthropic's GitHub Actions
+    workload identity guide, whose route is ANTHROPIC_IDENTITY_TOKEN_FILE,
+    so the fix step needs neither); ACTIONS_RUNTIME_TOKEN, _RUNTIME_URL,
+    _CACHE_URL and _RESULTS_URL (@actions/toolkit internals,
+    undocumented)."""
+    expected = {
+        "GITHUB_TOKEN", "GH_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN",
+        "ACTIONS_RUNTIME_TOKEN", "ACTIONS_RUNTIME_URL", "ACTIONS_ID_TOKEN_REQUEST_TOKEN",
+        "ACTIONS_ID_TOKEN_REQUEST_URL", "ACTIONS_CACHE_URL", "ACTIONS_RESULTS_URL"}
+    assert expected == HOSTED_RUN_TOKEN_VARIABLES
+    assert not HOSTED_RUN_TOKEN_VARIABLES & set(CLAUDE_AUTHENTICATION)
+
+
+@pytest.mark.parametrize("call", ["hosted-fix", "hosted-fix-without-bash", "hosted-scan",
+                                  "local-fix"])
+def test_only_the_hosted_fix_step_loses_the_run_tokens(sandboxed, tmp_path, monkeypatch, call):
+    """cm-2qp.12: the hosted fix step's process (and so its Bash and the test
+    command it runs) is given none of the run's GitHub or Actions tokens,
+    with Bash or without (no test command a rule can name), and keeps what
+    `claude` authenticates with. The local fix step and the tier-1 scan (on
+    either runner) inherit them, as at 3f50a3f. Limit: the agent can still
+    read the sweep's own /proc/<pid>/environ (cm-2qp.11)."""
+    from curamoir.tier1 import SCAN_TOOLS
+
+    for name in (*HOSTED_RUN_TOKEN_VARIABLES, *CLAUDE_AUTHENTICATION):
+        monkeypatch.setenv(name, f"value-of-{name}")
+    for name in LOGGED_ENVIRONMENT:
+        monkeypatch.delenv(name, raising=False)
+    claude, log = fake_claude(tmp_path)
+    options = {"hosted-fix": HOSTED_FIX,
+               "hosted-fix-without-bash": {"tools": FIX_TOOLS, "runner": HOSTED},
+               "hosted-scan": {"tools": SCAN_TOOLS, "runner": HOSTED, "test_command": PYTEST},
+               "local-fix": {}}[call]
+
+    run_fix_step(sandboxed, "p", model="m", claude=str(claude), **options)
+
+    logged = json.loads(log.read_text(encoding="utf-8"))
+    seen = set(logged["env"])
+    assert set(CLAUDE_AUTHENTICATION) <= seen
+    # HOSTED_TEST_ENVIRONMENT stays with Bash alone.
+    assert (logged["test_env"]["UV_FROZEN"] == "1") is (call == "hosted-fix")
+    if call.startswith("hosted-fix"):
+        assert not seen & HOSTED_RUN_TOKEN_VARIABLES
+    else:
+        assert seen >= HOSTED_RUN_TOKEN_VARIABLES
+
+
+def test_the_list_is_fixed_names_so_another_secret_reaches_the_agent(
+        sandboxed, tmp_path, monkeypatch):
+    """HOSTED_RUN_TOKEN_VARIABLES is a fixed list, not a pattern (a `*_TOKEN`
+    one would drop AWS_SESSION_TOKEN, which `claude` may need): a secret the
+    workflow passes under another name, a PAT as GH_PAT, reaches the hosted
+    fix step. Pinned so the limit the docstring states stays true."""
+    monkeypatch.setenv("GH_PAT", "ghp_pat")
+    monkeypatch.setenv("AWS_SESSION_TOKEN", "aws")
+    claude, log = fake_claude(tmp_path)
+
+    run_fix_step(sandboxed, "p", model="m", claude=str(claude), **HOSTED_FIX)
+
+    assert {"GH_PAT", "AWS_SESSION_TOKEN"} <= set(
+        json.loads(log.read_text(encoding="utf-8"))["env"])
+
+
+@pytest.mark.parametrize("runner, tools, keeps", [
+    (LOCAL_RUNNER, FIX_TOOLS, True),
+    (LOCAL_RUNNER, ("Read", "Grep", "Glob"), True),
+    (HOSTED, ("Read", "Grep", "Glob"), True),
+    (HOSTED, ("Read",), True),
+    (HOSTED, FIX_TOOLS, False),
+    (HOSTED, HOSTED_FIX_TOOLS, False),
+    (HOSTED, ("Read", "Write"), False),
+    (HOSTED, ("Read", "WebFetch"), False),
+], ids=["local-fix", "local-scan", "hosted-scan", "hosted-read", "hosted-fix",
+        "hosted-fix-with-bash", "hosted-read-write", "hosted-read-web"])
+def test_only_a_read_only_toolset_keeps_the_run_tokens_on_hosted(runner, tools, keeps):
+    """Fail closed (cm-2qp.12): on hosted every toolset but a read-only one
+    (the tier-1 scan's) loses the tokens, including one that has neither
+    Edit nor Bash. cm-xq9 refuses such a toolset before any process starts,
+    so the predicate is tested directly."""
+    from curamoir.fix_step import _keeps_run_tokens
+    from curamoir.tier1 import SCAN_TOOLS
+
+    assert _keeps_run_tokens(runner, SCAN_TOOLS)
+    assert _keeps_run_tokens(runner, tools) is keeps
+
+
+def test_a_command_the_hosted_agent_runs_sees_no_run_token(sandboxed, tmp_path, monkeypatch):
+    """What the agent's Bash runs (the stand-in's `commands`, as the test
+    command would be) inherits the stripped environment."""
+    monkeypatch.setenv("GITHUB_TOKEN", "ghs_run_token")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-key")
+    seen = tmp_path / "seen"
+    claude, _ = fake_claude(tmp_path, commands=[
+        f'printf "%s|%s" "${{GITHUB_TOKEN-unset}}" "${{ANTHROPIC_API_KEY-unset}}" > {seen}'])
+
+    run = run_fix_step(sandboxed, "p", model="m", claude=str(claude), **HOSTED_FIX)
+
+    assert run.exit_code == 0, run.stderr
+    assert seen.read_text(encoding="utf-8") == "unset|sk-ant-key"
 
 
 # --- seam B: the run_fix_step contract (docs/direction-platform-first.md §7) ---------------
@@ -1086,7 +1345,7 @@ def test_run_fix_step_leaves_the_edit_in_the_clone_and_reports_its_spend(
     prompt = prompt_for(sandboxed)
 
     run = run_fix_step(sandboxed, prompt, model="m", claude=str(claude),
-                       tools=fix_tools(runner), runner=runner)
+                       tools=fix_tools(runner, PYTEST), runner=runner, test_command=PYTEST)
 
     assert run.started and run.exit_code == 0 and not run.timed_out
     assert run.payload()["usage"] == claude_payloads.USAGE

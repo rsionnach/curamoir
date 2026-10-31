@@ -42,6 +42,10 @@
 # fix agent run in the same VM, so treat it as readable by them (see
 # "Runner kinds and where the boundary is" in
 # https://github.com/rsionnach/curamoir/blob/HEAD/docs/direction-platform-first.md).
+# Add no other secrets to the sweep step's `env:`: the fix agent's process
+# drops only the run's GitHub and Actions tokens, by name, so a secret under
+# any other name (a personal access token, NPM_TOKEN, cloud credentials)
+# reaches it.
 
 name: curamoir sweep
 

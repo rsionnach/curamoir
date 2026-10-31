@@ -454,7 +454,8 @@ def test_the_fix_steps_own_settings_load_the_denylist_that_denies_rm_rf(
     def body(run):
         with prepare_sandbox(repo.repo, "HEAD", parent=tmp_path) as sandbox:
             argvs.append(run_fix_step(sandbox, "p", model="m", claude=str(script),
-                                      tools=fix_tools(runner), runner=runner).argv)
+                                      tools=fix_tools(runner, "pytest -q"), runner=runner,
+                                      test_command="pytest -q").argv)
         run.succeeded("fixed")
 
     run_guarded(repo.repo, "sweep", listing(), body, now=october)

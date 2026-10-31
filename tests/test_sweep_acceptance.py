@@ -75,8 +75,12 @@ from tests.test_sweep_job import (  # noqa: F401  (isolated_home is an autouse f
 from tests.test_tier1 import BILLING, ECC, EDITS, HANDLERS, VARIANT, fake_claude, findings_reply
 
 #: The sample's own test suite, run by this interpreter (which has pytest),
-#: as PLANTED.json's `test_command` is with `python3`.
-TEST_COMMAND = f"PYTHONPATH=src {shlex.quote(sys.executable)} -m pytest -q -p no:cacheprovider"
+#: as PLANTED.json's `test_command` is with `python3`. `src` is put on the
+#: path by pytest's own `pythonpath` option, not a leading PYTHONPATH=
+#: assignment, so the hosted fix step's Bash rule can name the command
+#: (fix_step.bash_rules refuses a leading assignment, cm-2qp.12).
+TEST_COMMAND = (f"{shlex.quote(sys.executable)} -m pytest -q -p no:cacheprovider "
+                "-o pythonpath=src")
 #: The three principles the planted violations break.
 PRINCIPLES = {"structured-logging", ECC, "no-file-variant-proliferation"}
 #: Every file the planted violations live in.
@@ -484,8 +488,9 @@ HOSTED_ENVIRON = {"CURAMOIR_RUNNER": "hosted", "CLAUDE_CODE_REMOTE": "true"}
 def test_the_fix_agent_has_bash_on_the_hosted_runner_and_not_on_the_local_one(
         tmp_path, no_real_gh, monkeypatch, environ, hosted):
     """§5 R4 end to end: `run.runner` reaches the fix step. A hosted sweep's
-    fix agent is given Bash, approved by the tool-level allow rule, with the
-    denylist --settings and --restricted; a sweep with no runner
+    fix agent is given Bash, approved by one allow rule for the base's test
+    command with arguments after it (cm-2qp.12; never the bare `Bash`), with
+    the denylist --settings and --restricted; a sweep with no runner
     variable runs 3f50a3f's command line (FIX_TOOLS, --restricted, no
     Bash). The prompt follows: only the hosted agent is told it may run
     commands. Both open the green PR."""
@@ -503,12 +508,18 @@ def test_the_fix_agent_has_bash_on_the_hosted_runner_and_not_on_the_local_one(
     assert "--settings" in argv and "--restricted" in argv
     prompt = argv[1]
     if hosted:
-        assert tools == [*FIX_TOOLS, "Bash"] and allowed[-1] == "Bash"
+        assert tools == [*FIX_TOOLS, "Bash"] and allowed[-1] == f"Bash({TEST_COMMAND} *)"
+        assert "Bash" not in allowed
+        assert argv[argv.index("--disallowedTools") + 1].split(",")[-1] == "Bash(git *)"
+        # The job line says what the agent's Bash was (cm-2qp.12).
+        assert job_lines(repo)[-1][sweep_job.FIX_BASH_FIELD] == TEST_COMMAND
         # The base's own test command, as the gate resolves it.
         assert f"you may run the repository's test command, `{TEST_COMMAND}`" in prompt
         assert "cannot run commands" not in prompt
     else:
         assert tools == list(FIX_TOOLS) and "Bash" not in allowed
+        assert "Bash(git *)" not in argv[argv.index("--disallowedTools") + 1]
+        assert sweep_job.FIX_BASH_FIELD not in job_lines(repo)[-1]  # the local line as was
         assert "You cannot run commands, and you do not need to" in prompt
 
 
@@ -591,7 +602,7 @@ def test_test_run_debris_in_the_clone_is_dropped_and_the_pr_still_opens(
     assert set(line["test_gate"]["kept"]) == set(FILES)  # the deletion of handlers_v2 too
 
 
-NO_TESTS_SENTENCE = "No test command could be resolved for this repository, so do not run tests"
+NO_TESTS_SENTENCE = "No test command is available to you, so do not run tests"
 
 
 def _no_command(sandbox):
@@ -607,25 +618,94 @@ def _git_fails(sandbox):
     raise GitGuardError("git ls-tree did not finish within 60 seconds")
 
 
-@pytest.mark.parametrize("resolve", [_no_command, _git_fails], ids=["no-command", "git-fails"])
-def test_a_hosted_fix_agent_with_no_resolvable_test_command_is_told_to_run_no_tests(
-        tmp_path, no_real_gh, monkeypatch, resolve):
+def _pipeline_command(sandbox):
+    """resolve_test_command as for a base whose configured command no allow
+    rule can name (a pipeline: fix_step.bash_rules)."""
+    from curamoir.green_gate import GateCommand
+
+    return GateCommand(f"{TEST_COMMAND} | cat", "config", 60, 3)
+
+
+@pytest.mark.parametrize("resolve, fix_bash", [
+    (_no_command, sweep_job.FIX_BASH_NO_COMMAND),
+    (_git_fails, sweep_job.FIX_BASH_NO_COMMAND),
+    (_pipeline_command, sweep_job.FIX_BASH_NOT_NAMEABLE),
+], ids=["no-command", "git-fails", "no-rule-for-it"])
+def test_a_hosted_fix_agent_with_no_resolvable_test_command_gets_no_bash(
+        tmp_path, no_real_gh, monkeypatch, resolve, fix_bash):
     """sweep_job asks green_gate.resolve_test_command for the command the
-    hosted prompt offers (sweep_job._hosted_test_command); none at the
-    base, or a git failure while resolving it, is no command, so the agent
-    is told to run no tests. The gate resolves its own, unaffected (its
-    module's function is not the one replaced here), and the PR opens."""
+    hosted prompt offers and its Bash rule names (sweep_job._hosted_test_command);
+    none at the base, a git failure while resolving it, or a command no
+    rule can name is no command: the agent is given no Bash at all (FIX_TOOLS,
+    no Bash rule, cm-2qp.12) and told to run no tests. The gate resolves its
+    own, unaffected (its module's function is not the one replaced here),
+    and the PR opens."""
     monkeypatch.setattr(green_gate, "OS_SANDBOX", Absent())
     monkeypatch.setattr(sweep_job, "resolve_test_command", resolve)
     repo = sample(tmp_path)
     _, log = stand_in(tmp_path, monkeypatch)
 
     ran = runner.run_job(repo, "sweep", now=lambda: NOW, environ=HOSTED_ENVIRON)
-    prompt = json.loads(log.read_text(encoding="utf-8"))["argv"][1]
+    argv = json.loads(log.read_text(encoding="utf-8"))["argv"]
+    prompt = argv[1]
 
     assert ran.exit_code == runner.EXIT_SUCCESS, ran.sentence
     assert NO_TESTS_SENTENCE in prompt and "you may run the repository's test command" not in (
         prompt)
+    assert argv[argv.index("--tools") + 1].split(",") == list(FIX_TOOLS)
+    assert not any(rule.startswith("Bash")
+                   for rule in argv[argv.index("--allowedTools") + 1].split(","))
+    # The job line gives a fixed reason, never the command no rule can name.
+    line = job_lines(repo)[-1]
+    assert line[sweep_job.FIX_BASH_FIELD] == fix_bash
+
+
+@pytest.mark.parametrize("command, value", [
+    ("pytest  -q &&npm test", "pytest -q && npm test"),
+    (None, "none (no test command)"),
+    ("", "none (no test command)"),
+    ("pytest -q\n`echo` ghp_0123456789abcdefghijklmnopqrstuvwxyz",
+     "none (not nameable as a rule)"),
+], ids=["normalised", "none", "empty", "unnameable"])
+def test_the_fix_bash_field_names_the_command_or_a_fixed_reason(command, value):
+    """FIX_BASH_FIELD's value: the command as the rules name it, or fixed
+    text, never a command no rule can name (it may hold a secret)."""
+    assert sweep_job._fix_bash(command) == value
+
+
+#: The run tokens a GitHub Actions job hands the sweep, which the hosted
+#: fix step must not pass on (cm-2qp.12).
+RUN_TOKENS = {"GITHUB_TOKEN": "ghs_run", "GH_TOKEN": "ghs_run",
+              "ACTIONS_ID_TOKEN_REQUEST_TOKEN": "oidc", "ACTIONS_RUNTIME_TOKEN": "runtime",
+              "ACTIONS_RESULTS_URL": "https://results.example"}
+
+
+@pytest.mark.parametrize("environ, hosted", [
+    ({}, False),
+    (HOSTED_ENVIRON, True),
+], ids=["no-runner-variable", "hosted"])
+def test_the_hosted_sweeps_fix_agent_is_given_no_run_token(
+        tmp_path, no_real_gh, monkeypatch, environ, hosted):
+    """cm-2qp.12 end to end: with the run's tokens in the sweep's own
+    environment, the hosted fix step's process has none of them and keeps
+    ANTHROPIC_API_KEY; the local one inherits them, as at 3f50a3f. Publish
+    runs in the sweep's process, so the PR still opens."""
+    from tests.test_fix_step import fake_claude as env_logging_claude
+
+    for name, value in {**RUN_TOKENS, "ANTHROPIC_API_KEY": "sk-ant"}.items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.setattr(green_gate, "OS_SANDBOX", Absent() if hosted else Unconfined())
+    repo = sample(tmp_path)
+    claude, log = env_logging_claude(tmp_path, edits=EDITS)
+    monkeypatch.setattr(sweep_job, "CLAUDE", str(claude))
+
+    ran = runner.run_job(repo, "sweep", now=lambda: NOW, environ=environ)
+    seen = set(json.loads(log.read_text(encoding="utf-8"))["env"])
+
+    assert ran.exit_code == runner.EXIT_SUCCESS, ran.sentence
+    assert len(creates(no_real_gh)) == 1
+    assert "ANTHROPIC_API_KEY" in seen
+    assert (not seen & set(RUN_TOKENS)) if hosted else set(RUN_TOKENS) <= seen
 
 
 def test_a_local_sweep_never_resolves_a_test_command_for_the_prompt(
