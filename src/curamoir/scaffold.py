@@ -12,7 +12,10 @@ and re-runs init by habit must not lose it, so a second run writes
 `curamoir.yaml.new` beside it and says so.
 """
 
+import os
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Optional
 
 # Never modules: build artefacts, packaging metadata, docs, and vendored code.
 # Two different questions, so two lists. NOT_SOURCE answers "is this code at
@@ -39,6 +42,17 @@ class TemplateDrift(Exception):
 
 class AlreadyInitialised(Exception):
     """`.curamoir/` exists. The new config was written alongside, not over."""
+
+
+class UnsafePath(Exception):
+    """A directory init writes into, or a file it writes, is a symlink.
+
+    Init writes beside files the developer owns (`curamoir.yaml.new`,
+    `curamoir-sweep.yml.new`), and a repository can commit any of those
+    paths as a symlink: followed, the write would land wherever the link
+    points (cm-2qp.4 security review). So the directories are checked, and
+    every file is opened with O_NOFOLLOW; nothing is written through a link.
+    """
 
 
 def detect_languages(repo):
@@ -113,9 +127,10 @@ def init_repo(repo, templates=None):
     base = repo / ".curamoir"
     config_text = _render_config(repo, templates)
 
-    if base.exists():
+    if base.exists() or base.is_symlink():
+        _refuse_symlinked(repo, base)
         pending = base / "curamoir.yaml.new"
-        pending.write_text(config_text, encoding="utf-8")
+        _write_no_follow(repo, pending, config_text)
         raise AlreadyInitialised(
             f"{base} already exists; nothing was overwritten. The config this run "
             f"would have written is at {pending.relative_to(repo)} — diff it against "
@@ -131,6 +146,81 @@ def init_repo(repo, templates=None):
     # PAUSE and state/lock are deliberately NOT created: a scaffolded PAUSE would
     # ship the repo paused, and a scaffolded lock would block the first job.
     return base
+
+
+#: Where `init --github-workflow` writes the scheduled sweep (cm-2qp.4),
+#: relative to the repository root, and its template under templates/.
+WORKFLOW_PATH = (".github", "workflows", "curamoir-sweep.yml")
+WORKFLOW_TEMPLATE = ("github", "curamoir-sweep.yml")
+
+
+@dataclass(frozen=True)
+class WorkflowWritten:
+    """Where the workflow went: `path`, and `pending` when a workflow was
+    already there and the template went beside it instead."""
+
+    path: Path
+    pending: Optional[Path] = None
+
+
+def write_github_workflow(repo, templates=None):
+    """Write the GitHub Actions sweep (templates/github/curamoir-sweep.yml)
+    to `.github/workflows/curamoir-sweep.yml`: a WorkflowWritten.
+
+    Only when the developer asked for it (`curamoir init --github-workflow`,
+    which /curamoir:init runs on a yes): the workflow spends API money on
+    a schedule, so it is never a default. Never over an existing file, for
+    the reason init never overwrites the config: a hand-tuned workflow (its
+    cron, its ref) must survive a habitual re-run. The template then goes
+    to `curamoir-sweep.yml.new` beside it, which GitHub does not run (it
+    reads only `.yml` and `.yaml` there), and `pending` says so.
+    Independent of `.curamoir/`, so a repository initialised before the
+    template existed can still ask for it.
+    """
+    repo = Path(repo)
+    templates = Path(templates) if templates else _bundled_templates()
+    text = templates.joinpath(*WORKFLOW_TEMPLATE).read_text(encoding="utf-8")
+    path = repo.joinpath(*WORKFLOW_PATH)
+    for depth in range(1, len(WORKFLOW_PATH)):
+        directory = repo.joinpath(*WORKFLOW_PATH[:depth])
+        _refuse_symlinked(repo, directory)
+        directory.mkdir(exist_ok=True)
+    if os.path.lexists(path):
+        pending = path.with_name(path.name + ".new")
+        _write_no_follow(repo, pending, text)
+        return WorkflowWritten(path, pending)
+    _write_no_follow(repo, path, text, exclusive=True)
+    return WorkflowWritten(path)
+
+
+def _refuse_symlinked(repo, directory):
+    """UnsafePath when `directory` is a symlink (UnsafePath's docstring), or
+    something other than a directory where init must make or use one."""
+    if directory.is_symlink():
+        raise UnsafePath(f"{directory.relative_to(repo)} is a symlink, so init writes "
+                         "nothing into it; replace it with a real directory first.")
+    if os.path.lexists(directory) and not directory.is_dir():
+        raise UnsafePath(f"{directory.relative_to(repo)} is not a directory, so init "
+                         "writes nothing into it; move it aside first.")
+
+
+def _write_no_follow(repo, path, text, exclusive=False):
+    """Write `text` to `path`, never through a symlink: O_NOFOLLOW refuses a
+    link at `path` itself (UnsafePath). `exclusive` also refuses any file
+    already there (O_EXCL), for a first write that must not overwrite."""
+    flags = os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW | (os.O_EXCL if exclusive else os.O_TRUNC)
+    try:
+        descriptor = os.open(path, flags, 0o644)
+    except OSError as error:
+        if os.path.islink(path):
+            raise UnsafePath(f"{path.relative_to(repo)} is a symlink, so init does not "
+                             "write through it; remove it and run init again.") from None
+        if os.path.isdir(path):
+            raise UnsafePath(f"{path.relative_to(repo)} is a directory, so init cannot "
+                             "write that file; remove it and run init again.") from None
+        raise error
+    with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+        handle.write(text)
 
 
 def _render_config(repo, templates):

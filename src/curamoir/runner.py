@@ -103,6 +103,9 @@ EXIT_FAILURE = 1
 EXIT_NOT_A_JOB = 2
 EXIT_REFUSED = 3
 EXIT_UNUSABLE_ROOT = 4
+#: 5 is taken too, outside `run`: `curamoir state push` exits
+#: state_branch.EXIT_NOTHING_TO_PUSH (and 0, 1, 3 as here), so the
+#: numbering stays one scheme. A new code here starts at 6.
 
 _EXIT_CODES = {
     SUCCESS: EXIT_SUCCESS,

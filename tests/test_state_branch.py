@@ -1,0 +1,782 @@
+"""cm-2qp.4 (E14.4): `curamoir state push`, the hosted run's ledger lines
+committed to a state branch (curamoir.state_branch).
+
+Every test runs real git, the way tests/test_publish.py does: a user
+checkout whose `origin` names a GitHub repository and is redirected, by
+the checkout's own `url.<path>.insteadOf` and `pushInsteadOf`, to a local
+bare repository, so the fetch and the push really happen and the bare
+repository shows what landed. HOME is isolated (test_publish's autouse
+`isolated_home`, imported here) so the developer's global git config can
+send nothing to github.com.
+
+The checkout's ledger is TRACKED, as it is in a real repository
+(ledger.LEDGER_PATH is committed): HEAD holds one earlier line, and a "run"
+appends to the work tree's copy, as `curamoir run sweep` does on a runner.
+"""
+
+import json
+import os
+import subprocess
+
+import pytest
+
+from curamoir import state_branch
+from curamoir.cli import main
+from curamoir.ledger import LEDGER_PATH, repo_ledger
+from tests.test_publish import checkout_state, git, isolated_home  # noqa: F401 (fixture)
+
+GITHUB_URL = "https://github.com/acme/widgets.git"
+LEDGER = "/".join(LEDGER_PATH)
+BRANCH = "curamoir/state"
+COMMITTED = '{"job": "sweep", "kind": "job", "run_id": "old", "outcome": "success"}'
+
+
+class World:
+    """A checkout with a committed ledger line, and its bare origin."""
+
+    def __init__(self, tmp_path):
+        self.origin = tmp_path / "origin.git"
+        subprocess.run(["git", "init", "--quiet", "--bare", "--initial-branch=main",
+                        str(self.origin)], check=True)
+        self.repo = tmp_path / "checkout"
+        self.ledger = self.repo.joinpath(*LEDGER_PATH)
+        self.ledger.parent.mkdir(parents=True)
+        self.ledger.write_text(COMMITTED + "\n", encoding="utf-8")
+        (self.repo / "app.py").write_text("x = 1\n", encoding="utf-8")
+        for command in (["init", "--quiet", "--initial-branch=main"],
+                        ["config", "user.name", "github-actions[bot]"],
+                        ["config", "user.email",
+                         "41898282+github-actions[bot]@users.noreply.github.com"],
+                        ["add", "-A"], ["commit", "--quiet", "-m", "base"],
+                        ["remote", "add", "origin", GITHUB_URL],
+                        ["config", f"url.{self.origin}.insteadOf", GITHUB_URL],
+                        ["config", f"url.{self.origin}.pushInsteadOf", GITHUB_URL],
+                        ["push", "--quiet", "origin", "main"]):
+            git(self.repo, *command)
+        self.main = self.origin_sha("main")
+
+    def run(self, run_id, outcome="success", reason=None):
+        """What one `curamoir run` leaves: its job line, appended to the work tree."""
+        return repo_ledger(self.repo).record("sweep", reason, f"{run_id} done", run_id=run_id,
+                                             outcome=outcome)
+
+    def fresh_run(self, run_id, **fields):
+        """A new runner's checkout: the work tree back at HEAD, then one run."""
+        git(self.repo, "checkout", "--quiet", "--", LEDGER)
+        return self.run(run_id, **fields)
+
+    def origin_sha(self, branch):
+        done = subprocess.run(["git", "rev-parse", "--verify", "--quiet",
+                               f"refs/heads/{branch}"], cwd=self.origin,
+                              capture_output=True, text=True)
+        return done.stdout.strip() or None
+
+    def state_lines(self, branch=BRANCH):
+        text = git(self.origin, "show", f"{branch}:{LEDGER}")
+        return [json.loads(line) for line in text.splitlines() if line]
+
+    def run_ids(self, branch=BRANCH):
+        return [entry.get("run_id") for entry in self.state_lines(branch)]
+
+
+@pytest.fixture
+def world(tmp_path):
+    return World(tmp_path)
+
+
+# --- what lands ------------------------------------------------------------------------
+
+def test_the_first_push_creates_the_branch_from_the_runs_lines_only(world):
+    world.run("r1")
+
+    pushed = state_branch.push_ledger(world.repo, BRANCH)
+
+    assert pushed.outcome == state_branch.PUSHED, pushed.sentence
+    assert pushed.lines == 1
+    assert world.origin_sha(BRANCH) == pushed.sha
+    # An orphan: no parent, and a tree of exactly the ledger, at its path.
+    assert git(world.origin, "rev-list", "--parents", "-n", "1", pushed.sha).split() == [
+        pushed.sha]
+    assert git(world.origin, "ls-tree", "-r", "--name-only", pushed.sha).split() == [LEDGER]
+    # The default branch's committed line is not the run's, so it is not pushed.
+    assert world.run_ids() == ["r1"]
+
+
+def test_a_second_run_appends_to_what_the_branch_holds(world):
+    world.run("r1")
+    first = state_branch.push_ledger(world.repo, BRANCH)
+    world.fresh_run("r2")
+
+    second = state_branch.push_ledger(world.repo, BRANCH)
+
+    assert second.outcome == state_branch.PUSHED, second.sentence
+    assert world.run_ids() == ["r1", "r2"]
+    assert git(world.origin, "rev-parse", f"{second.sha}^").strip() == first.sha
+
+
+def test_a_refused_runs_line_is_pushed_too(world):
+    world.run("refused-1", outcome="refused", reason="runner")
+
+    pushed = state_branch.push_ledger(world.repo, BRANCH)
+
+    assert pushed.outcome == state_branch.PUSHED, pushed.sentence
+    [entry] = world.state_lines()
+    assert (entry["run_id"], entry["outcome"], entry["reason"]) == (
+        "refused-1", "refused", "runner")
+
+
+def test_lines_already_on_the_branch_are_not_pushed_again(world):
+    world.run("r1")
+    first = state_branch.push_ledger(world.repo, BRANCH)
+
+    again = state_branch.push_ledger(world.repo, BRANCH)
+
+    assert again.outcome == state_branch.NOTHING_TO_PUSH, again.sentence
+    assert world.origin_sha(BRANCH) == first.sha
+    assert world.run_ids() == ["r1"]
+
+
+def test_a_run_that_wrote_nothing_has_nothing_to_push_and_creates_no_branch(world):
+    pushed = state_branch.push_ledger(world.repo, BRANCH)
+
+    assert pushed.outcome == state_branch.NOTHING_TO_PUSH
+    assert world.origin_sha(BRANCH) is None
+
+
+def test_a_branch_ledger_with_an_unterminated_last_line_is_closed_first(world):
+    """A truncated line on the branch must not swallow the run's line."""
+    world.run("r1")
+    state_branch.push_ledger(world.repo, BRANCH)
+    blob = git(world.origin, "show", f"{BRANCH}:{LEDGER}").rstrip("\n") + "\n" + '{"trunc'
+    _commit_on_origin(world, BRANCH, blob)
+    world.fresh_run("r2")
+
+    state_branch.push_ledger(world.repo, BRANCH)
+
+    text = git(world.origin, "show", f"{BRANCH}:{LEDGER}")
+    assert text.splitlines()[-2:] == ['{"trunc', text.splitlines()[-1]]
+    assert json.loads(text.splitlines()[-1])["run_id"] == "r2"
+
+
+def test_an_existing_branch_with_other_files_is_refused_not_appended_to(world):
+    """Only the layout this code creates (a tree of exactly the ledger) is a
+    state branch; anything else is someone's branch with the same name."""
+    world.run("r1")
+    state_branch.push_ledger(world.repo, BRANCH)
+    theirs = _commit_on_origin(world, BRANCH, git(world.origin, "show", f"{BRANCH}:{LEDGER}"),
+                               extra={"README.md": "state branch\n"})
+    world.fresh_run("r2")
+
+    pushed = state_branch.push_ledger(world.repo, BRANCH)
+
+    assert pushed.outcome == state_branch.REFUSED, pushed.sentence
+    assert BRANCH in pushed.sentence and "CURAMOIR_STATE_BRANCH" in pushed.sentence
+    # Runner-neutral: the command's own flag first, the workflow's variable second.
+    assert "with --branch (CURAMOIR_STATE_BRANCH in the Actions workflow)" in pushed.sentence
+    assert world.origin_sha(BRANCH) == theirs
+
+
+def test_an_existing_branch_that_holds_the_code_is_refused(world):
+    """A branch someone already uses under the state branch's name (here, a
+    copy of main) is never written to."""
+    git(world.repo, "push", "--quiet", "origin", f"main:refs/heads/{BRANCH}")
+    world.run("r1")
+
+    pushed = state_branch.push_ledger(world.repo, BRANCH)
+
+    assert pushed.outcome == state_branch.REFUSED, pushed.sentence
+    assert "not a state branch" in pushed.sentence
+    assert world.origin_sha(BRANCH) == world.main
+
+
+# --- concurrency -----------------------------------------------------------------------
+
+def _commit_on_origin(world, branch, ledger_text, extra=None):
+    """Someone else's commit on origin's `branch` holding `ledger_text`: its SHA."""
+    scratch = world.repo.parent / "someone-else"
+    if scratch.exists():
+        subprocess.run(["rm", "-rf", str(scratch)], check=True)
+    env = {**os.environ, "GIT_AUTHOR_NAME": "Them", "GIT_AUTHOR_EMAIL": "t@x",
+           "GIT_COMMITTER_NAME": "Them", "GIT_COMMITTER_EMAIL": "t@x"}
+    git(world.repo.parent, "clone", "--quiet", "--branch", branch, str(world.origin),
+        str(scratch))
+    path = scratch.joinpath(*LEDGER_PATH)
+    path.write_text(ledger_text, encoding="utf-8")
+    for name, text in (extra or {}).items():
+        (scratch / name).write_text(text, encoding="utf-8")
+    git(scratch, "add", "-A")
+    git(scratch, "commit", "--quiet", "-m", "theirs", env=env)
+    git(scratch, "push", "--quiet", "origin", f"HEAD:refs/heads/{branch}")
+    return git(scratch, "rev-parse", "HEAD").strip()
+
+
+def test_a_concurrent_push_fails_the_lease_and_the_retry_keeps_both_lines(world,
+                                                                          monkeypatch):
+    world.run("r1")
+    state_branch.push_ledger(world.repo, BRANCH)
+    world.fresh_run("ours")
+    fetched = state_branch._fetch_tip
+    raced = []
+
+    def then_someone_pushes(repo, push_url, branch):
+        tip = fetched(repo, push_url, branch)
+        if not raced:
+            text = git(world.origin, "show", f"{BRANCH}:{LEDGER}")
+            raced.append(_commit_on_origin(
+                world, BRANCH, text + '{"job": "sweep", "run_id": "theirs"}\n'))
+        return tip
+
+    monkeypatch.setattr(state_branch, "_fetch_tip", then_someone_pushes)
+
+    pushed = state_branch.push_ledger(world.repo, BRANCH)
+
+    assert pushed.outcome == state_branch.PUSHED, pushed.sentence
+    assert pushed.attempts == 2
+    assert world.run_ids() == ["r1", "theirs", "ours"]
+    assert git(world.origin, "rev-parse", f"{pushed.sha}^").strip() == raced[0]
+
+
+def test_a_concurrent_first_push_fails_the_empty_lease_and_retries(world, monkeypatch):
+    """Two runs both find no state branch; the second must not overwrite the first."""
+    world.run("ours")
+    fetched = state_branch._fetch_tip
+    raced = []
+
+    def then_someone_creates_it(repo, push_url, branch):
+        tip = fetched(repo, push_url, branch)
+        if not raced:
+            raced.append(_create_on_origin(world, '{"job": "sweep", "run_id": "theirs"}\n'))
+        return tip
+
+    monkeypatch.setattr(state_branch, "_fetch_tip", then_someone_creates_it)
+
+    pushed = state_branch.push_ledger(world.repo, BRANCH)
+
+    assert pushed.outcome == state_branch.PUSHED, pushed.sentence
+    assert world.run_ids() == ["theirs", "ours"]
+
+
+def _create_on_origin(world, ledger_text):
+    """Someone else's orphan state branch on origin, holding `ledger_text`."""
+    scratch = world.repo.parent / "first-elsewhere"
+    env = {**os.environ, "GIT_AUTHOR_NAME": "Them", "GIT_AUTHOR_EMAIL": "t@x",
+           "GIT_COMMITTER_NAME": "Them", "GIT_COMMITTER_EMAIL": "t@x"}
+    git(world.repo.parent, "init", "--quiet", "--initial-branch=state", str(scratch))
+    path = scratch.joinpath(*LEDGER_PATH)
+    path.parent.mkdir(parents=True)
+    path.write_text(ledger_text, encoding="utf-8")
+    git(scratch, "add", "-A")
+    git(scratch, "commit", "--quiet", "-m", "theirs", env=env)
+    git(scratch, "push", "--quiet", str(world.origin), f"HEAD:refs/heads/{BRANCH}")
+    return git(scratch, "rev-parse", "HEAD").strip()
+
+
+def test_a_branch_that_never_stops_moving_fails_after_bounded_attempts(world, monkeypatch):
+    world.run("r1")
+    state_branch.push_ledger(world.repo, BRANCH)
+    world.fresh_run("ours")
+    fetched = state_branch._fetch_tip
+    theirs = []
+
+    def always_raced(repo, push_url, branch):
+        tip = fetched(repo, push_url, branch)
+        text = git(world.origin, "show", f"{BRANCH}:{LEDGER}")
+        theirs.append(_commit_on_origin(
+            world, BRANCH, text + json.dumps({"run_id": f"t{len(theirs)}"}) + "\n"))
+        return tip
+
+    monkeypatch.setattr(state_branch, "_fetch_tip", always_raced)
+
+    pushed = state_branch.push_ledger(world.repo, BRANCH)
+
+    assert pushed.outcome == state_branch.FAILED
+    assert pushed.attempts == state_branch.PUSH_ATTEMPTS
+    assert "(on a hosted runner they are lost with the VM)" in pushed.sentence
+    assert "ours" not in world.run_ids()
+    # Nothing of theirs was lost: origin is at their last commit.
+    assert world.origin_sha(BRANCH) == theirs[-1]
+
+
+# --- what is never touched -------------------------------------------------------------
+
+def test_the_checkouts_index_head_and_work_tree_are_unchanged(world):
+    world.run("r1")
+    (world.repo / "app.py").write_text("x = 'uncommitted'\n", encoding="utf-8")
+    before = checkout_state(world.repo)
+
+    state_branch.push_ledger(world.repo, BRANCH)
+
+    assert checkout_state(world.repo) == before
+
+
+def test_the_default_branch_on_origin_is_never_moved(world):
+    world.run("r1")
+
+    state_branch.push_ledger(world.repo, BRANCH)
+    world.fresh_run("r2")
+    state_branch.push_ledger(world.repo, BRANCH)
+
+    assert world.origin_sha("main") == world.main
+
+
+@pytest.mark.parametrize("branch", ["main", "-x", "bad..name", "", "a\0b"])
+def test_the_default_branch_or_a_bad_name_is_refused_before_anything_is_pushed(world,
+                                                                              branch):
+    world.run("r1")
+
+    pushed = state_branch.push_ledger(world.repo, branch)
+
+    assert pushed.outcome == state_branch.REFUSED, pushed.sentence
+    assert world.origin_sha("main") == world.main
+    assert git(world.origin, "for-each-ref", "--format=%(refname)").split() == [
+        "refs/heads/main"]
+
+
+def test_origins_default_is_refused_even_when_the_checkout_does_not_know_it(world):
+    """The checkout has no origin/HEAD; origin's own HEAD names the default."""
+    git(world.origin, "symbolic-ref", "HEAD", "refs/heads/trunk")
+    git(world.origin, "branch", "trunk", "main")
+    world.run("r1")
+
+    pushed = state_branch.push_ledger(world.repo, "trunk")
+
+    assert pushed.outcome == state_branch.REFUSED
+    assert "default branch" in pushed.sentence
+
+
+def test_a_ledger_that_is_a_symlink_is_refused(world, tmp_path):
+    """A repository may commit the ledger path as a link to a secret on the
+    runner; following it would publish the secret on the state branch."""
+    secret = tmp_path / "secret"
+    secret.write_text("token=hunter2\n", encoding="utf-8")
+    world.ledger.unlink()
+    world.ledger.symlink_to(secret)
+
+    pushed = state_branch.push_ledger(world.repo, BRANCH)
+
+    assert pushed.outcome == state_branch.REFUSED
+    assert world.origin_sha(BRANCH) is None
+
+
+def test_a_checkout_with_no_identity_is_refused(world):
+    world.run("r1")
+    git(world.repo, "config", "--unset", "user.email")
+
+    pushed = state_branch.push_ledger(world.repo, BRANCH)
+
+    assert pushed.outcome == state_branch.REFUSED
+    assert "user.email" in pushed.sentence
+    assert world.origin_sha(BRANCH) is None
+
+
+def test_a_directory_that_is_not_a_checkout_is_refused(tmp_path):
+    pushed = state_branch.push_ledger(tmp_path, BRANCH)
+
+    assert pushed.outcome == state_branch.REFUSED
+
+
+# --- the command -----------------------------------------------------------------------
+
+def test_the_cli_exit_codes_tell_the_outcomes_apart(world, capsys):
+    world.run("r1")
+
+    assert main(["state", "push", "--repo", str(world.repo), "--branch", BRANCH]) == 0
+    assert "pushed 1 ledger line" in capsys.readouterr().out
+    assert main(["state", "push", "--repo", str(world.repo), "--branch", BRANCH]) == 5
+    assert main(["state", "push", "--repo", str(world.repo), "--branch", "main"]) == 3
+    assert "refused" in capsys.readouterr().out
+
+
+def test_the_default_branch_name_is_curamoir_state(world):
+    world.run("r1")
+
+    assert main(["state", "push", "--repo", str(world.repo)]) == 0
+    assert world.origin_sha(state_branch.DEFAULT_BRANCH) is not None
+    assert state_branch.DEFAULT_BRANCH == "curamoir/state"
+
+
+# --- reading the committed ledger (correctness review) ---------------------------------
+
+def test_a_crlf_work_tree_pushes_only_the_runs_line_in_lf(world):
+    """With `* text eol=crlf` the work tree's ledger is CRLF and HEAD's blob
+    LF; compared as written, the whole committed ledger read as the run's."""
+    (world.repo / ".gitattributes").write_text("* text eol=crlf\n", encoding="utf-8")
+    git(world.repo, "add", ".gitattributes")
+    git(world.repo, "commit", "--quiet", "-m", "crlf")
+    world.ledger.unlink()
+    git(world.repo, "checkout", "--quiet", "--", LEDGER)
+    assert world.ledger.read_bytes().endswith(b"\r\n")
+    world.run("r1")
+
+    pushed = state_branch.push_ledger(world.repo, BRANCH)
+
+    assert pushed.outcome == state_branch.PUSHED, pushed.sentence
+    assert world.run_ids() == ["r1"]
+    assert b"\r" not in subprocess.run(["git", "show", f"{BRANCH}:{LEDGER}"],
+                                       cwd=world.origin, capture_output=True).stdout
+
+
+def test_an_unborn_head_counts_every_work_tree_line_as_the_runs(tmp_path):
+    repo = tmp_path / "unborn"
+    git(tmp_path, "init", "--quiet", str(repo))
+    ledger = repo_ledger(repo)
+    ledger.record("sweep", None, "first", run_id="a")
+    ledger.record("sweep", None, "second", run_id="b")
+
+    lines, skipped = state_branch._run_lines(str(repo))
+
+    assert [json.loads(line)["run_id"] for line in lines] == ["a", "b"]
+    assert skipped == 0
+
+
+def test_a_head_whose_tree_cannot_be_read_fails_and_pushes_nothing(world):
+    """Not "no committed ledger": that would push the whole ledger as the run's."""
+    world.run("r1")
+    tree = git(world.repo, "rev-parse", "HEAD^{tree}").strip()
+    (world.repo / ".git" / "objects" / tree[:2] / tree[2:]).unlink()
+
+    pushed = state_branch.push_ledger(world.repo, BRANCH)
+
+    assert pushed.outcome == state_branch.FAILED, pushed.sentence
+    assert world.origin_sha(BRANCH) is None
+
+
+# --- edge cases review: what is pushed --------------------------------------------------
+
+TOKEN = "ghp_0123456789abcdefghijklmnopqrstuvwxyz"
+
+
+def test_a_secret_in_a_runs_line_is_redacted_before_it_is_pushed(world):
+    """The state branch may be public; a job line can carry an exception
+    message, and the message a token."""
+    repo_ledger(world.repo).record("sweep", None, f"gh failed: {TOKEN}",
+                                   run_id="r1")
+
+    pushed = state_branch.push_ledger(world.repo, BRANCH)
+    again = state_branch.push_ledger(world.repo, BRANCH)
+
+    assert pushed.outcome == state_branch.PUSHED, pushed.sentence
+    text = git(world.origin, "show", f"{BRANCH}:{LEDGER}")
+    assert TOKEN not in text and "[REDACTED]" in text
+    [entry] = world.state_lines()
+    assert entry["run_id"] == "r1"
+    # Compared in the redacted form, so the retry pushes nothing.
+    assert again.outcome == state_branch.NOTHING_TO_PUSH, again.sentence
+    assert world.origin_sha(BRANCH) == pushed.sha
+
+
+def test_a_line_that_redaction_leaves_alone_is_pushed_byte_for_byte(world):
+    world.run("r1")
+    written = world.ledger.read_bytes().splitlines()[-1]
+
+    state_branch.push_ledger(world.repo, BRANCH)
+
+    assert subprocess.run(["git", "show", f"{BRANCH}:{LEDGER}"], cwd=world.origin,
+                          capture_output=True).stdout == written + b"\n"
+
+
+@pytest.mark.parametrize("junk", [
+    b'{"run_id": "nul"}\x00',
+    b"\xff\xfe not utf-8",
+    b'{"run_id": "bad \xff"}',
+    b"[1, 2]",
+    b'"a string"',
+    b"42",
+    b"not json at all",
+    b'{"run_id": "big", "detail": "' + b"a" * (64 * 1024) + b'"}',
+], ids=["nul", "invalid-utf8", "invalid-utf8-in-object", "array", "string", "number",
+        "text", "over-64-KiB"])
+def test_a_line_that_is_not_a_json_object_of_at_most_64_kib_is_skipped(world, junk):
+    world.run("r1")
+    with world.ledger.open("ab") as handle:
+        handle.write(junk + b"\n")
+
+    pushed = state_branch.push_ledger(world.repo, BRANCH)
+
+    assert pushed.outcome == state_branch.PUSHED, pushed.sentence
+    assert (pushed.lines, pushed.skipped) == (1, 1)
+    assert "skipped 1 line" in pushed.sentence
+    assert world.run_ids() == ["r1"]
+
+
+def test_a_line_of_exactly_64_kib_is_pushed(world):
+    head = b'{"run_id": "edge", "detail": "'
+    tail = b'"}'
+    line = head + b"a" * (64 * 1024 - len(head) - len(tail)) + tail
+    assert len(line) == 64 * 1024
+    with world.ledger.open("ab") as handle:
+        handle.write(line + b"\n")
+
+    pushed = state_branch.push_ledger(world.repo, BRANCH)
+
+    assert (pushed.outcome, pushed.lines, pushed.skipped) == (state_branch.PUSHED, 1, 0)
+
+
+def test_a_run_whose_only_lines_are_junk_has_nothing_to_push_and_says_so(world):
+    with world.ledger.open("ab") as handle:
+        handle.write(b"[]\nnot json\n")
+
+    pushed = state_branch.push_ledger(world.repo, BRANCH)
+
+    assert pushed.outcome == state_branch.NOTHING_TO_PUSH, pushed.sentence
+    assert pushed.skipped == 2 and "skipped 2 lines" in pushed.sentence
+    assert world.origin_sha(BRANCH) is None
+
+
+# --- edge cases review: when the push itself fails --------------------------------------
+
+def _pre_receive(world, script):
+    hook = world.origin / "hooks" / "pre-receive"
+    hook.write_text("#!/bin/sh\n" + script, encoding="utf-8")
+    hook.chmod(0o755)
+
+
+def test_a_push_origin_rejects_with_a_hook_fails_once_and_is_not_retried(world, capsys):
+    """A pre-receive hook (a ruleset, a server policy) refusing is not "the
+    branch moved": retrying cannot help, so it fails at once."""
+    calls = world.origin.parent / "hook-calls"
+    _pre_receive(world, f'echo called >> "{calls}"\necho "state pushes are closed" >&2\n'
+                        "exit 1\n")
+    world.run("r1")
+
+    code = main(["state", "push", "--repo", str(world.repo), "--branch", BRANCH])
+
+    out = capsys.readouterr().out
+    assert code == 1, out
+    assert "could not push the ledger" in out and "state pushes are closed" in out
+    assert calls.read_text(encoding="utf-8").splitlines() == ["called"]
+    assert world.origin_sha(BRANCH) is None
+
+
+def test_a_push_that_does_not_finish_in_time_fails_with_a_sentence(world, monkeypatch):
+    _pre_receive(world, "sleep 30\n")
+    monkeypatch.setattr(state_branch, "PUSH_TIMEOUT", 1)
+    world.run("r1")
+
+    pushed = state_branch.push_ledger(world.repo, BRANCH)
+
+    assert pushed.outcome == state_branch.FAILED
+    assert "did not finish within 1 second(s)" in pushed.sentence
+    assert pushed.exit_code == 1
+
+
+# --- provenance review: what is pushed is only what redaction saw ------------------------
+
+def _append(world, *raw):
+    with world.ledger.open("ab") as handle:
+        for line in raw:
+            handle.write(line + b"\n")
+
+
+@pytest.mark.parametrize("line", [
+    b'{"run_id": "dup", "detail": "' + TOKEN.encode() + b'", "detail": "fine"}',
+    b'{"run_id": "dup", "nested": {"m": "' + TOKEN.encode() + b'", "m": "x"}}',
+], ids=["top-level", "nested"])
+def test_a_line_with_a_repeated_key_is_skipped_so_a_hidden_secret_is_never_pushed(world,
+                                                                                    line):
+    """The parser keeps the last value, so redaction would see "fine" while
+    the raw bytes still held the token."""
+    world.run("r1")
+    _append(world, line)
+
+    pushed = state_branch.push_ledger(world.repo, BRANCH)
+
+    assert (pushed.outcome, pushed.lines, pushed.skipped) == (state_branch.PUSHED, 1, 1)
+    assert TOKEN not in git(world.origin, "show", f"{BRANCH}:{LEDGER}")
+    assert world.run_ids() == ["r1"]
+
+
+def test_lines_are_pushed_in_the_ledgers_own_canonical_form(world):
+    _append(world, b'{"run_id":"r9",  "a":1}')
+
+    pushed = state_branch.push_ledger(world.repo, BRANCH)
+
+    assert pushed.outcome == state_branch.PUSHED, pushed.sentence
+    stored = git(world.origin, "show", f"{BRANCH}:{LEDGER}")
+    assert stored == json.dumps({"run_id": "r9", "a": 1}, sort_keys=True, default=str) + "\n"
+
+
+def test_a_line_the_ledger_wrote_is_pushed_as_its_own_bytes(world):
+    """ledger.record's serialisation is the canonical form."""
+    world.run("r1")
+    written = world.ledger.read_bytes().splitlines()[-1]
+
+    assert state_branch._pushable(written) == written
+
+
+def test_the_branch_is_compared_in_the_canonical_form_too(world):
+    """A branch line written in another spelling of the same object, or
+    before redaction, still counts as already there."""
+    world.run("seed")
+    state_branch.push_ledger(world.repo, BRANCH)
+    _commit_on_origin(world, BRANCH, '{"run_id":"r9","a":1}\n'
+                                     f'{{"run_id": "r10", "detail": "{TOKEN}"}}\n')
+    git(world.repo, "checkout", "--quiet", "--", LEDGER)
+    _append(world, b'{"a": 1, "run_id": "r9"}',
+            f'{{"detail": "{TOKEN}", "run_id": "r10"}}'.encode())
+    before = world.origin_sha(BRANCH)
+
+    pushed = state_branch.push_ledger(world.repo, BRANCH)
+
+    assert pushed.outcome == state_branch.NOTHING_TO_PUSH, pushed.sentence
+    assert world.origin_sha(BRANCH) == before
+
+
+def test_nesting_too_deep_to_walk_is_skipped_not_a_crash(world):
+    world.run("r1")
+    _append(world, b'{"run_id": "deep", "x": ' + b"[" * 2000 + b"]" * 2000 + b"}",
+            b'{"run_id": "deep2", "x": ' + b'{"a": ' * 2000 + b"1" + b"}" * 2000 + b"}")
+
+    pushed = state_branch.push_ledger(world.repo, BRANCH)
+
+    assert (pushed.outcome, pushed.lines, pushed.skipped) == (state_branch.PUSHED, 1, 2)
+
+
+def test_a_line_one_byte_over_the_limit_is_skipped(world):
+    head, tail = b'{"run_id": "edge", "detail": "', b'"}'
+    line = head + b"a" * (state_branch.MAX_LINE_BYTES + 1 - len(head) - len(tail)) + tail
+    assert len(line) == state_branch.MAX_LINE_BYTES + 1
+    _append(world, line)
+
+    pushed = state_branch.push_ledger(world.repo, BRANCH)
+
+    assert (pushed.outcome, pushed.skipped) == (state_branch.NOTHING_TO_PUSH, 1)
+    assert world.origin_sha(BRANCH) is None
+
+
+def test_a_line_written_twice_in_one_run_is_pushed_once(world):
+    world.run("r1")
+    _append(world, world.ledger.read_bytes().splitlines()[-1])
+
+    pushed = state_branch.push_ledger(world.repo, BRANCH)
+
+    assert pushed.lines == 1
+    assert world.run_ids() == ["r1"]
+
+
+def test_a_work_tree_with_no_ledger_has_nothing_to_push(world):
+    world.ledger.unlink()
+
+    pushed = state_branch.push_ledger(world.repo, BRANCH)
+
+    assert pushed.outcome == state_branch.NOTHING_TO_PUSH, pushed.sentence
+    assert world.origin_sha(BRANCH) is None
+
+
+# --- provenance review: the target and the layout -------------------------------------
+
+def _refs(world):
+    return git(world.origin, "for-each-ref", "--format=%(refname)").split()
+
+
+def test_origin_with_a_detached_head_is_refused_fail_closed(world):
+    """origin's default cannot be learned, so "not the default" cannot be shown."""
+    (world.origin / "HEAD").write_text(world.main + "\n", encoding="utf-8")
+    world.run("r1")
+
+    pushed = state_branch.push_ledger(world.repo, BRANCH)
+
+    assert pushed.outcome == state_branch.REFUSED, pushed.sentence
+    assert "did not say which branch is its default" in pushed.sentence
+    assert _refs(world) == ["refs/heads/main"]
+
+
+def test_origin_whose_head_points_outside_refs_heads_is_refused(world):
+    git(world.origin, "tag", "v1", "main")
+    git(world.origin, "symbolic-ref", "HEAD", "refs/tags/v1")
+    world.run("r1")
+
+    pushed = state_branch.push_ledger(world.repo, BRANCH)
+
+    assert pushed.outcome == state_branch.REFUSED, pushed.sentence
+    assert "refs/heads/curamoir/state" not in _refs(world)
+
+
+def test_the_checkouts_own_default_refuses_even_when_origins_head_differs(world):
+    """origin's live HEAD is main, but the checkout's refs/remotes/origin/HEAD
+    names the state branch: either view naming it is enough to refuse."""
+    git(world.repo, "update-ref", f"refs/remotes/origin/{BRANCH}", "HEAD")
+    git(world.repo, "symbolic-ref", "refs/remotes/origin/HEAD",
+        f"refs/remotes/origin/{BRANCH}")
+    world.run("r1")
+
+    pushed = state_branch.push_ledger(world.repo, BRANCH)
+
+    assert pushed.outcome == state_branch.REFUSED, pushed.sentence
+    assert "the checkout says so" in pushed.sentence
+    assert _refs(world) == ["refs/heads/main"]
+
+
+def _orphan_on_origin(world, files, symlinks=()):
+    """An orphan BRANCH on origin holding `files` (path: text) and
+    `symlinks` (path: target): its SHA."""
+    scratch = world.repo.parent / "orphan"
+    git(world.repo.parent, "init", "--quiet", "--initial-branch=x", str(scratch))
+    for name, text in files.items():
+        path = scratch / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+    for name, target in dict(symlinks).items():
+        path = scratch / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.symlink_to(target)
+    env = {**os.environ, "GIT_AUTHOR_NAME": "Them", "GIT_AUTHOR_EMAIL": "t@x",
+           "GIT_COMMITTER_NAME": "Them", "GIT_COMMITTER_EMAIL": "t@x"}
+    git(scratch, "add", "-A")
+    git(scratch, "commit", "--quiet", "-m", "theirs", env=env)
+    git(scratch, "push", "--quiet", str(world.origin), f"HEAD:refs/heads/{BRANCH}")
+    return git(scratch, "rev-parse", "HEAD").strip()
+
+
+def test_a_one_file_branch_at_another_path_is_not_a_state_branch(world):
+    theirs = _orphan_on_origin(world, {"notes/ledger.jsonl": COMMITTED + "\n"})
+    world.run("r1")
+
+    pushed = state_branch.push_ledger(world.repo, BRANCH)
+
+    assert pushed.outcome == state_branch.REFUSED, pushed.sentence
+    assert "not a state branch" in pushed.sentence
+    assert world.origin_sha(BRANCH) == theirs
+
+
+def test_a_branch_whose_only_ledger_is_a_symlink_is_not_a_state_branch(world):
+    theirs = _orphan_on_origin(world, {}, symlinks={LEDGER: "/etc/passwd"})
+    world.run("r1")
+
+    pushed = state_branch.push_ledger(world.repo, BRANCH)
+
+    assert pushed.outcome == state_branch.REFUSED, pushed.sentence
+    assert "not a state branch" in pushed.sentence
+    assert world.origin_sha(BRANCH) == theirs
+
+
+def test_a_push_that_exits_0_without_reporting_the_ref_fails(world, monkeypatch):
+    """Exit 0 alone is not "it landed": origin must report the ref updated
+    in the porcelain output, or the outcome is FAILED."""
+    real = state_branch._user_git
+
+    def silent_push(repo, args, timeout):
+        if args[0] == "push":
+            return subprocess.CompletedProcess(args, 0, b"Done\n", b"")
+        return real(repo, args, timeout)
+
+    monkeypatch.setattr(state_branch, "_user_git", silent_push)
+    world.run("r1")
+
+    pushed = state_branch.push_ledger(world.repo, BRANCH)
+
+    assert pushed.outcome == state_branch.FAILED, pushed.sentence
+    assert "did not report" in pushed.sentence
+
+
+def test_the_exit_codes_are_one_scheme_with_curamoir_runs():
+    """0, 1 and 3 mean what they mean for `curamoir run`; 5 is state push's
+    own, and run does not use it."""
+    from curamoir import runner
+
+    assert state_branch.EXIT_CODES == {
+        state_branch.PUSHED: runner.EXIT_SUCCESS, state_branch.FAILED: runner.EXIT_FAILURE,
+        state_branch.REFUSED: runner.EXIT_REFUSED,
+        state_branch.NOTHING_TO_PUSH: state_branch.EXIT_NOTHING_TO_PUSH}
+    run_codes = {value for name, value in vars(runner).items() if name.startswith("EXIT_")}
+    assert state_branch.EXIT_NOTHING_TO_PUSH not in run_codes

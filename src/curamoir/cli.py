@@ -17,10 +17,13 @@ from curamoir.runner import run_job
 from curamoir.scaffold import (
     AlreadyInitialised,
     TemplateDrift,
+    UnsafePath,
     detect_languages,
     detect_modules,
     init_repo,
+    write_github_workflow,
 )
+from curamoir.state_branch import DEFAULT_BRANCH, push_ledger
 from curamoir.status import collect_status, render_status
 from curamoir.sweep import LintUntrusted, work_list, work_list_document
 
@@ -33,6 +36,9 @@ def main(argv=None):
 
     init = subcommands.add_parser("init", help="scaffold .curamoir/ in a repository")
     init.add_argument("--repo", default=".", help="repository root (default: cwd)")
+    init.add_argument("--github-workflow", action="store_true",
+                      help="also write .github/workflows/curamoir-sweep.yml, the scheduled "
+                           "GitHub Actions sweep; never over an existing file")
 
     status = subcommands.add_parser("status", help="show lock, pause, spend, grades, PRs")
     status.add_argument("--repo", default=".", help="repository root (default: cwd)")
@@ -62,6 +68,16 @@ def main(argv=None):
     run.add_argument("job", help="the job to run (curamoir.runner.JOBS)")
     run.add_argument("--repo", default=".", help="repository root (default: cwd)")
 
+    state = subcommands.add_parser(
+        "state", help="the hosted runner's ledger on its state branch")
+    state_commands = state.add_subparsers(dest="state_command", required=True)
+    state_push = state_commands.add_parser(
+        "push", help="commit this run's new ledger lines to the state branch on origin")
+    state_push.add_argument("--repo", default=".", help="repository root (default: cwd)")
+    state_push.add_argument("--branch", default=DEFAULT_BRANCH,
+                            help=f"the state branch (default: {DEFAULT_BRANCH}); never the "
+                                 "default branch")
+
     arguments = parser.parse_args(argv)
     try:
         return _run(arguments)
@@ -77,7 +93,13 @@ def main(argv=None):
 
 def _run(arguments):
     if arguments.command == "init":
-        return _init(arguments.repo)
+        return _init(arguments.repo, github_workflow=arguments.github_workflow)
+    if arguments.command == "state" and arguments.state_command == "push":
+        pushed = push_ledger(arguments.repo, arguments.branch)
+        # UTF-8 bytes whatever the locale, as for `run`: the exit code is
+        # what the workflow's step reads (state_branch.EXIT_CODES).
+        _write_utf8(pushed.sentence + "\n")
+        return pushed.exit_code
     if arguments.command == "status":
         print(render_status(collect_status(arguments.repo)))
         return 0
@@ -198,7 +220,7 @@ def _uninitialised(repo):
     return 1
 
 
-def _init(repo):
+def _init(repo, github_workflow=False):
     languages = detect_languages(repo) or ["none detected"]
     modules = detect_modules(repo)
 
@@ -206,6 +228,18 @@ def _init(repo):
         base = init_repo(repo)
     except AlreadyInitialised as existing:
         print(f"cúramóir is already initialised here.\n{existing}")
+        if github_workflow:
+            # The workflow does not depend on `.curamoir/`, and a developer
+            # who initialised before it existed asks for it this way. Then
+            # the workflow is what was asked for, so its result is the exit
+            # code: 0 when it was written (or its .new was), 1 when its path
+            # was refused. The slash command reports a non-zero exit as a
+            # failure, and "already initialised" is a note here, not one.
+            # Without the flag the refusal stays 1, as before cm-2qp.4.
+            return _init_workflow(repo)
+        return 1
+    except UnsafePath as unsafe:
+        print(f"cúramóir did not initialise here.\n{unsafe}")
         return 1
     except TemplateDrift as drift:
         # A message, not a traceback: this is a packaging fault in cúramóir
@@ -229,8 +263,35 @@ def _init(repo):
             "  modules: none detected. Set modules.include explicitly in "
             ".curamoir/curamoir.yaml, or grading has nothing to grade."
         )
+    if github_workflow and _init_workflow(repo):
+        return 1
     print("\nNext: review .curamoir/curamoir.yaml, then run /curamoir:doctor.")
     return 0
+
+
+def _init_workflow(repo):
+    """Write and report the workflow: 0, or 1 when a path was unsafe."""
+    try:
+        written = write_github_workflow(repo)
+    except UnsafePath as unsafe:
+        print(f"  workflow: not written. {unsafe}")
+        return 1
+    _report_workflow(repo, written)
+    return 0
+
+
+def _report_workflow(repo, written):
+    """What `init --github-workflow` did, in the words init uses for the config."""
+    where = written.path.relative_to(Path(repo)).as_posix()
+    if written.pending is not None:
+        print(f"  workflow: {where} already exists; nothing was overwritten. The template "
+              f"is at {where}.new (GitHub does not run it): diff the two and merge by hand "
+              "if you want the changes.")
+        return
+    print(f"  workflow: wrote {where}, the scheduled GitHub Actions sweep. It runs nothing "
+          "until it is committed and pushed, and needs the CURAMOIR_REF repository "
+          "variable (a cúramóir tag or commit) and the ANTHROPIC_API_KEY repository "
+          "secret (billed per token); its header says what else.")
 
 
 if __name__ == "__main__":
