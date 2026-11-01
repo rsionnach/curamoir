@@ -87,9 +87,23 @@ too.
   guards.default_branch.detect_default_branch), when origin's default
   cannot be learned (fail closed), or when git would not take it as a
   branch name.
-- The work tree's ledger must be a regular file: a repository can commit
-  that path as a symlink to a secret on the runner, and following it
-  would publish the secret on the branch.
+- The work tree's ledger is read without following a symbolic link at
+  any component of its path from the repository root (cm-2qp.13):
+  `.curamoir` and `.curamoir/state` must be directories and
+  `ledger.jsonl` a regular file. A repository can commit any of them as
+  a link (or the VM's tests or fix agent can plant one), to a secret on
+  the runner or to another file whose JSON lines would then be redacted
+  and published on the branch. A link, or a component of another kind,
+  is REFUSED with a sentence naming it; a missing one means no ledger.
+  Each directory is opened O_NOFOLLOW relative to its parent's
+  descriptor and the file's type is checked on the descriptor that is
+  read (_work_tree_ledger), so a link swapped in between the check and
+  the read is refused, never followed. A ledger over MAX_LEDGER_BYTES
+  (64 MiB) is refused too, so a planted huge file cannot exhaust the
+  runner's memory. A hard link is not a gap: git cannot commit one, and
+  only a process that could write the ledger anyway can make one; a
+  committed symbolic link is the real vector. Like git_guard, this is
+  POSIX-only (O_NOFOLLOW, dir_fd).
 
 **Outcomes and exit codes** (StatePush.outcome, EXIT_CODES):
 - PUSHED (0).
@@ -100,15 +114,18 @@ too.
   run's lines go with the VM, so the step fails and the run shows it.
 - REFUSED (3, as runner.EXIT_REFUSED): nothing was pushed, and the
   sentence says why (the default branch, a bad name, a branch that is
-  not a state branch, a ledger that is not a regular file, no identity).
+  not a state branch, a link or a wrong kind of file on the ledger's path,
+  no identity).
 - NOTHING_TO_PUSH (5): the run wrote no line HEAD lacks, or the branch
   has them all.
 One sentence per outcome, which cli prints.
 """
 
+import errno
 import json
 import os
 import re
+import stat
 import subprocess
 import tempfile
 from dataclasses import dataclass
@@ -314,16 +331,9 @@ def _run_lines(repo):
     in order, each once (module docstring, "Which lines are the run's"),
     in their pushable form (`_pushable`), and how many were skipped as not
     ledger lines."""
-    path = Path(repo).joinpath(*LEDGER_PATH)
-    if os.path.lexists(path) and (path.is_symlink() or not path.is_file()):
-        raise _Refused(f"{_LEDGER} is not a regular file in the work tree, so it is not "
-                       "read")
-    try:
-        written = path.read_bytes()
-    except FileNotFoundError:
+    written = _work_tree_ledger(repo)
+    if written is None:
         return [], 0
-    except OSError as error:
-        raise _Failed(f"the work tree's ledger could not be read ({error})") from None
     committed = set(_lines(_head_ledger(repo)))
     run_lines, seen, skipped = [], set(), 0
     for line in _lines(written):
@@ -336,6 +346,120 @@ def _run_lines(repo):
             seen.add(pushable)
             run_lines.append(pushable)
     return run_lines, skipped
+
+
+#: The largest work-tree ledger read, in bytes (cm-2qp.13 review). A run
+#: appends a few hundred bytes per job; a ledger past this is not one, and
+#: reading a planted multi-gigabyte file would exhaust the runner's memory.
+MAX_LEDGER_BYTES = 64 * 1024 * 1024
+
+#: How a directory on the ledger's path is opened: never through a link.
+#: O_CLOEXEC as git_guard opens its own (no descriptor leaks into the git
+#: processes the push runs).
+_DIRECTORY_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+#: How the ledger itself is opened: never through a link, and without
+#: waiting (a FIFO swapped in after the check would otherwise block the
+#: open until a writer came) or taking a terminal as the controlling one.
+_FILE_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_NOCTTY | os.O_CLOEXEC
+
+_NOT_A_DIRECTORY = "a directory in the work tree, so the ledger under it is not read"
+_NOT_A_FILE = "a regular file in the work tree, so it is not read"
+
+
+def _work_tree_ledger(repo):
+    """The work tree's ledger's bytes, or None when it is missing (a
+    missing `.curamoir` or `.curamoir/state` too): nothing to push.
+
+    cm-2qp.13 (module docstring, "the work tree's ledger"): no component
+    of LEDGER_PATH is followed through a symbolic link. `.curamoir` is
+    opened with O_NOFOLLOW relative to the repository root's descriptor,
+    `state` relative to `.curamoir`'s, and `ledger.jsonl` relative to
+    `state`'s, so a link swapped in between a check and the open is
+    refused by the open itself; the file's type and size are checked on
+    the descriptor that is then read (fstat), so what was checked is what
+    is read. Each component is first lstat'ed (relative to the same
+    descriptor) only so the refusal can say what it is, and so a FIFO or
+    a device is refused before it is ever opened. A ledger larger than
+    MAX_LEDGER_BYTES is refused, and the read stops past that bound even
+    if the file grows meanwhile. _Refused names the component; _Failed
+    for any other error. Every descriptor is closed."""
+    descriptors = []
+    try:
+        try:
+            descriptors.append(os.open(repo, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC))
+        except OSError as error:
+            raise _Failed(f"the work tree could not be opened ({error})") from None
+        *directories, file = LEDGER_PATH
+        for depth, name in enumerate(directories, start=1):
+            component = "/".join(LEDGER_PATH[:depth])
+            if not _check_component(descriptors[-1], name, component, stat.S_ISDIR,
+                                    _NOT_A_DIRECTORY):
+                return None
+            descriptor = _open(descriptors[-1], name, component, _DIRECTORY_FLAGS)
+            if descriptor is None:
+                return None
+            descriptors.append(descriptor)
+        if not _check_component(descriptors[-1], file, _LEDGER, stat.S_ISREG, _NOT_A_FILE):
+            return None
+        descriptor = _open(descriptors[-1], file, _LEDGER, _FILE_FLAGS)
+        if descriptor is None:
+            return None
+        descriptors.append(descriptor)
+        status = os.fstat(descriptor)
+        if not stat.S_ISREG(status.st_mode):
+            raise _Refused(f"{_LEDGER!r} is not {_NOT_A_FILE}")
+        if status.st_size > MAX_LEDGER_BYTES:
+            raise _Refused(_too_large())
+        chunks, total = [], 0
+        while chunk := os.read(descriptor, min(1 << 16, MAX_LEDGER_BYTES + 1 - total)):
+            chunks.append(chunk)
+            total += len(chunk)
+            if total > MAX_LEDGER_BYTES:
+                raise _Refused(_too_large())
+        return b"".join(chunks)
+    except OSError as error:
+        raise _Failed(f"the work tree's ledger could not be read ({error})") from None
+    finally:
+        for descriptor in descriptors:
+            os.close(descriptor)
+
+
+def _too_large():
+    return (f"{_LEDGER!r} is larger than {MAX_LEDGER_BYTES // (1024 * 1024)} MiB, which no "
+            "run's ledger is, so it is not read")
+
+
+def _check_component(parent, name, component, is_kind, refusal_tail):
+    """False when `name` is missing under the `parent` descriptor; True
+    when it is of `is_kind` (stat.S_ISDIR or S_ISREG); _Refused, naming
+    `component`, when it is a symbolic link, or anything else ("is not "
+    and `refusal_tail`)."""
+    try:
+        mode = os.stat(name, dir_fd=parent, follow_symlinks=False).st_mode
+    except FileNotFoundError:
+        return False
+    if stat.S_ISLNK(mode):
+        raise _Refused(f"{component!r} is a symbolic link in the work tree, so it is not "
+                       "followed and the ledger is not read")
+    if not is_kind(mode):
+        raise _Refused(f"{component!r} is not {refusal_tail}")
+    return True
+
+
+def _open(parent, name, component, flags):
+    """`name` opened under the `parent` descriptor with `flags`, or None
+    when it vanished since _check_component looked; _Refused when it was
+    replaced by a link or another kind of file meanwhile (O_NOFOLLOW's
+    ELOOP, O_DIRECTORY's ENOTDIR)."""
+    try:
+        return os.open(name, flags, dir_fd=parent)
+    except FileNotFoundError:
+        return None
+    except OSError as error:
+        if error.errno in (errno.ELOOP, errno.ENOTDIR):
+            raise _Refused(f"{component!r} changed into a symbolic link or another kind "
+                           "of file after it was checked, so it is not read") from None
+        raise
 
 
 class _RepeatedKey(ValueError):

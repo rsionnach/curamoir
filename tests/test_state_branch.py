@@ -16,7 +16,9 @@ appends to the work tree's copy, as `curamoir run sweep` does on a runner.
 
 import json
 import os
+import stat
 import subprocess
+import threading
 
 import pytest
 
@@ -355,7 +357,321 @@ def test_a_ledger_that_is_a_symlink_is_refused(world, tmp_path):
     pushed = state_branch.push_ledger(world.repo, BRANCH)
 
     assert pushed.outcome == state_branch.REFUSED
+    # The lstat pre-check's own sentence, not the open's ELOOP fallback.
+    assert f"'{LEDGER}' is a symbolic link in the work tree" in pushed.sentence
     assert world.origin_sha(BRANCH) is None
+
+
+# --- cm-2qp.13: no symbolic link at any component of the ledger's path --------------------
+
+def _lured(world, tmp_path, run_id="from-the-link"):
+    """A copy of the work tree's `.curamoir` outside the checkout whose
+    ledger also holds a valid line with `run_id`: what a link would make
+    the push read and publish if it were followed. Its path."""
+    elsewhere = tmp_path / "elsewhere" / ".curamoir"
+    ledger = elsewhere.joinpath(*LEDGER_PATH[1:])
+    ledger.parent.mkdir(parents=True)
+    line = json.dumps({"job": "sweep", "kind": "job", "run_id": run_id,
+                       "outcome": "success"}, sort_keys=True)
+    ledger.write_bytes(world.ledger.read_bytes() + line.encode("utf-8") + b"\n")
+    return elsewhere
+
+
+def test_a_curamoir_directory_that_is_a_symlink_is_refused_and_not_followed(world,
+                                                                             tmp_path):
+    """A repository may commit `.curamoir` itself as a link (or the VM's
+    tests or fix agent may plant one): following it would read another
+    file's JSON lines and publish them, redacted, on the state branch."""
+    world.run("r1")
+    first = state_branch.push_ledger(world.repo, BRANCH)
+    world.fresh_run("r2")
+    target = _lured(world, tmp_path)
+    real = world.repo / ".curamoir"
+    real.rename(tmp_path / "real-curamoir")
+    real.symlink_to(target, target_is_directory=True)
+
+    pushed = state_branch.push_ledger(world.repo, BRANCH)
+
+    assert pushed.outcome == state_branch.REFUSED, pushed.sentence
+    assert "'.curamoir'" in pushed.sentence and "symbolic link" in pushed.sentence
+    # Nothing the link points at reached the branch: it did not move.
+    assert world.origin_sha(BRANCH) == first.sha
+    assert world.run_ids() == ["r1"]
+
+
+def test_a_state_directory_that_is_a_symlink_is_refused_and_not_followed(world, tmp_path):
+    world.run("r1")
+    target = _lured(world, tmp_path) / "state"
+    state = world.ledger.parent
+    state.rename(tmp_path / "real-state")
+    state.symlink_to(target, target_is_directory=True)
+
+    pushed = state_branch.push_ledger(world.repo, BRANCH)
+
+    assert pushed.outcome == state_branch.REFUSED, pushed.sentence
+    assert "'.curamoir/state'" in pushed.sentence and "symbolic link" in pushed.sentence
+    assert world.origin_sha(BRANCH) is None
+
+
+@pytest.mark.parametrize("component", [".curamoir", ".curamoir/state"])
+def test_a_directory_on_the_ledgers_path_that_is_a_regular_file_is_refused(world,
+                                                                         component):
+    world.run("r1")
+    world.ledger.unlink()
+    world.ledger.parent.rmdir()
+    if component == ".curamoir":
+        (world.repo / ".curamoir").rmdir()
+    (world.repo / component).write_text('{"run_id": "not-a-directory"}\n',
+                                        encoding="utf-8")
+
+    pushed = state_branch.push_ledger(world.repo, BRANCH)
+
+    assert pushed.outcome == state_branch.REFUSED, pushed.sentence
+    assert f"'{component}' is not a directory" in pushed.sentence
+    assert world.origin_sha(BRANCH) is None
+
+
+def test_a_ledger_that_is_a_directory_is_refused(world):
+    world.ledger.unlink()
+    world.ledger.mkdir()
+
+    pushed = state_branch.push_ledger(world.repo, BRANCH)
+
+    assert pushed.outcome == state_branch.REFUSED, pushed.sentence
+    assert f"'{LEDGER}'" in pushed.sentence and "not a regular file" in pushed.sentence
+    assert world.origin_sha(BRANCH) is None
+
+
+def test_a_ledger_that_is_a_fifo_is_refused_without_blocking(world):
+    """Opening a FIFO for reading waits for a writer; the push must refuse
+    it, not hang the workflow step."""
+    world.ledger.unlink()
+    os.mkfifo(world.ledger)
+
+    pushed = state_branch.push_ledger(world.repo, BRANCH)
+
+    assert pushed.outcome == state_branch.REFUSED, pushed.sentence
+    assert world.origin_sha(BRANCH) is None
+
+
+@pytest.mark.parametrize("missing", ["state", "curamoir"])
+def test_a_missing_directory_on_the_ledgers_path_has_nothing_to_push(world, missing):
+    world.ledger.unlink()
+    world.ledger.parent.rmdir()
+    if missing == "curamoir":
+        (world.repo / ".curamoir").rmdir()
+
+    pushed = state_branch.push_ledger(world.repo, BRANCH)
+
+    assert pushed.outcome == state_branch.NOTHING_TO_PUSH, pushed.sentence
+    assert world.origin_sha(BRANCH) is None
+
+
+@pytest.mark.parametrize("linked", ["curamoir", "state", "ledger"])
+def test_a_link_swapped_in_after_the_check_is_refused_by_the_open_itself(world, tmp_path,
+                                                                        monkeypatch,
+                                                                        linked):
+    """The lstat check only names what it finds; the guarantee is the
+    O_NOFOLLOW open. With the check blinded (a link swapped in between
+    the two), the open still refuses and reads nothing through the link."""
+    world.run("r1")
+    target = _lured(world, tmp_path)
+    path = {"curamoir": world.repo / ".curamoir", "state": world.ledger.parent,
+            "ledger": world.ledger}[linked]
+    pointed = {"curamoir": target, "state": target / "state",
+               "ledger": target.joinpath(*LEDGER_PATH[1:])}[linked]
+    path.rename(tmp_path / "moved-aside")
+    path.symlink_to(pointed, target_is_directory=linked != "ledger")
+    monkeypatch.setattr(state_branch, "_check_component", lambda *args: True)
+
+    pushed = state_branch.push_ledger(world.repo, BRANCH)
+
+    assert pushed.outcome == state_branch.REFUSED, pushed.sentence
+    assert "changed into a symbolic link" in pushed.sentence
+    assert world.origin_sha(BRANCH) is None
+
+
+@pytest.mark.parametrize("component", [".curamoir", ".curamoir/state"])
+def test_a_file_swapped_in_for_a_directory_after_the_check_is_refused_by_the_open(
+        world, monkeypatch, component):
+    """O_DIRECTORY refuses the swapped-in file at its own open (ENOTDIR),
+    naming it; without it the file would be opened and only a later
+    component's open would fail."""
+    world.run("r1")
+    world.ledger.unlink()
+    world.ledger.parent.rmdir()
+    if component == ".curamoir":
+        (world.repo / ".curamoir").rmdir()
+    (world.repo / component).write_text('{"run_id": "a-file"}\n', encoding="utf-8")
+    monkeypatch.setattr(state_branch, "_check_component", lambda *args: True)
+
+    pushed = state_branch.push_ledger(world.repo, BRANCH)
+
+    assert pushed.outcome == state_branch.REFUSED, pushed.sentence
+    assert f"'{component}' changed into a symbolic link or another kind" in pushed.sentence
+    assert world.origin_sha(BRANCH) is None
+
+
+def test_a_fifo_swapped_in_after_the_check_is_refused_by_fstat_without_blocking(
+        world, monkeypatch):
+    """The open does not wait for a writer (O_NONBLOCK), and fstat on the
+    descriptor refuses what is not a regular file. The read runs in a
+    thread: were the open to block, the test opens the FIFO for writing to
+    release it and fails, rather than hang the suite."""
+    world.ledger.unlink()
+    os.mkfifo(world.ledger)
+    monkeypatch.setattr(state_branch, "_check_component", lambda *args: True)
+    outcome = []
+
+    def read():
+        try:
+            outcome.append(state_branch._work_tree_ledger(str(world.repo)))
+        except state_branch._Refused as refused:
+            outcome.append(refused)
+
+    reader = threading.Thread(target=read, daemon=True)
+    reader.start()
+    reader.join(timeout=10)
+    blocked = reader.is_alive()
+    if blocked:
+        writer = os.open(world.ledger, os.O_WRONLY | os.O_NONBLOCK)
+        try:
+            reader.join(timeout=10)
+        finally:
+            os.close(writer)
+
+    assert not blocked, "opening the FIFO blocked waiting for a writer"
+    [refused] = outcome
+    assert isinstance(refused, state_branch._Refused)
+    assert f"'{LEDGER}' is not a regular file" in str(refused)
+
+
+def test_a_ledger_larger_than_the_bound_is_refused_not_read(world, monkeypatch):
+    """A planted huge file must not exhaust the runner's memory."""
+    world.run("r1")
+    monkeypatch.setattr(state_branch, "MAX_LEDGER_BYTES", world.ledger.stat().st_size - 1)
+
+    pushed = state_branch.push_ledger(world.repo, BRANCH)
+
+    assert pushed.outcome == state_branch.REFUSED, pushed.sentence
+    assert "is larger than" in pushed.sentence
+    assert world.origin_sha(BRANCH) is None
+
+
+def test_a_ledger_larger_than_the_bound_is_refused_before_any_byte_is_read(world,
+                                                                          monkeypatch):
+    """fstat's size refuses it up front: not one os.read on it."""
+    world.run("r1")
+    monkeypatch.setattr(state_branch, "MAX_LEDGER_BYTES", world.ledger.stat().st_size - 1)
+    reads = []
+    real_read = os.read
+    monkeypatch.setattr(os, "read", lambda fd, n: reads.append(fd) or real_read(fd, n))
+
+    with pytest.raises(state_branch._Refused, match="is larger than"):
+        state_branch._work_tree_ledger(str(world.repo))
+
+    assert reads == []
+
+
+def _understated_size(monkeypatch):
+    """os.fstat reporting a regular file's size as 0: a ledger that grows
+    after fstat, as far as the size check can tell."""
+    real_fstat = os.fstat
+
+    def fstat(fd):
+        status = real_fstat(fd)
+        if not stat.S_ISREG(status.st_mode):
+            return status
+        fields = list(status)
+        fields[stat.ST_SIZE] = 0
+        return os.stat_result(fields)
+
+    monkeypatch.setattr(os, "fstat", fstat)
+
+
+def test_a_ledger_that_grows_past_the_bound_after_fstat_stops_being_read(world,
+                                                                        monkeypatch):
+    world.run("r1")
+    monkeypatch.setattr(state_branch, "MAX_LEDGER_BYTES", 16)
+    _understated_size(monkeypatch)
+
+    with pytest.raises(state_branch._Refused, match="is larger than"):
+        state_branch._work_tree_ledger(str(world.repo))
+
+
+def test_a_ledger_of_exactly_the_bound_is_read(world, monkeypatch):
+    world.run("r1")
+    monkeypatch.setattr(state_branch, "MAX_LEDGER_BYTES", world.ledger.stat().st_size)
+
+    pushed = state_branch.push_ledger(world.repo, BRANCH)
+
+    assert pushed.outcome == state_branch.PUSHED, pushed.sentence
+    assert world.run_ids() == ["r1"]
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root reads a mode-000 file")
+def test_a_ledger_that_cannot_be_read_fails_with_exit_1(world):
+    world.run("r1")
+    world.ledger.chmod(0)
+    try:
+        pushed = state_branch.push_ledger(world.repo, BRANCH)
+    finally:
+        world.ledger.chmod(0o644)
+
+    assert pushed.outcome == state_branch.FAILED, pushed.sentence
+    assert pushed.exit_code == 1
+    assert "could not be read" in pushed.sentence
+    assert world.origin_sha(BRANCH) is None
+
+
+def test_reading_the_ledger_leaves_no_descriptor_open(world, tmp_path):
+    """Every directory and file descriptor the walk opens is closed, on
+    the read and on each refusal."""
+    def open_fds():
+        return len(os.listdir("/dev/fd"))
+
+    world.run("r1")
+    before = open_fds()
+    for _ in range(3):
+        assert state_branch._work_tree_ledger(str(world.repo)) is not None
+    target = _lured(world, tmp_path) / "state"
+    state = world.ledger.parent
+    state.rename(tmp_path / "real-state")
+    state.symlink_to(target, target_is_directory=True)
+    for _ in range(3):
+        with pytest.raises(state_branch._Refused):
+            state_branch._work_tree_ledger(str(world.repo))
+
+    assert open_fds() == before
+
+
+def test_the_fstat_and_size_refusals_leave_no_descriptor_open(world, monkeypatch):
+    def open_fds():
+        return len(os.listdir("/dev/fd"))
+
+    world.run("r1")
+    size = world.ledger.stat().st_size
+    before = open_fds()
+    with monkeypatch.context() as patched:
+        patched.setattr(state_branch, "MAX_LEDGER_BYTES", size - 1)
+        for _ in range(3):
+            with pytest.raises(state_branch._Refused, match="is larger than"):
+                state_branch._work_tree_ledger(str(world.repo))
+    with monkeypatch.context() as patched:
+        patched.setattr(state_branch, "MAX_LEDGER_BYTES", 16)
+        _understated_size(patched)
+        for _ in range(3):
+            with pytest.raises(state_branch._Refused, match="is larger than"):
+                state_branch._work_tree_ledger(str(world.repo))
+    world.ledger.unlink()
+    os.mkfifo(world.ledger)
+    with monkeypatch.context() as patched:
+        patched.setattr(state_branch, "_check_component", lambda *args: True)
+        for _ in range(3):
+            with pytest.raises(state_branch._Refused, match="not a regular file"):
+                state_branch._work_tree_ledger(str(world.repo))
+
+    assert open_fds() == before
 
 
 def test_a_checkout_with_no_identity_is_refused(world):
