@@ -101,6 +101,8 @@ cúramóir enforces *your project's own* principles. It is not a general linter.
 > still runs the sweep on your own machine, as the
 > [local adapter](#local-adapter). Why the hosted runner is the default, and
 > what each runner guards: [Platform-first runners](docs/direction-platform-first.md).
+> How a scheduler or another agent CLI plugs in, with the workflow as the
+> worked example: [Runners](docs/runners.md).
 >
 > Still to come are the r5 review, grades and the promotion commands, which
 > together are most of the reason to want this.

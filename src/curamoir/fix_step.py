@@ -20,13 +20,19 @@ model-specific call in the sweep, and what another agent CLI's fix step
 
 - In: the clone (a git_guard.Sandbox, never a checkout); the prompt,
   which carries the work list (fix_prompt); the model; the tools; the
-  timeout; max_turns; before_call; and the runner kind (config.Runner).
+  timeout; max_turns; before_call; the runner kind (config.Runner); and
+  `test_command`, the base's, which the hosted Bash rules name.
 - Must: snapshot `git_state` (git_guard.snapshot_git_state) before the
   agent starts; call `before_call` right before the process that may
   spend starts; kill the whole process group at the timeout; leave the
   edits in the clone's work tree and never commit them.
 - Out: a FixStepRun. `started`, `exit_code` and `timed_out` say whether
-  and how the agent ran; its `stdout` parses, through payload(), to
+  and how the agent ran; `stderr` starts with NOT_STARTED when the
+  process could not be started; `git_state` is the snapshot taken before
+  the agent started, returned for fix_scope.verify_fix and the tier-1
+  scan to hold the clone to; `argv` is the command line run, and carries
+  `--model <model>` (the tier-1 scan reads the model it records from
+  there); and its `stdout` parses, through payload(), to
   `claude -p --output-format json`'s result object, whose `usage` (token
   counts) and `total_cost_usd` the ledger records. That is the shape
   another CLI's fix step must emit, or translate its own output into.

@@ -83,8 +83,9 @@ Three things to tell them as they do this:
 
 <!-- cm-2qp.10 fills this section: the Routine's cloud environment recipe
 (setup script, environment variables, network access level, and the
-default branch's protection rule), the same text as docs/runners.md. Until
-then it says only what follows. -->
+default branch's protection rule), the same text as docs/runners.md's
+"Routine environment" section, which carries the same placeholder until
+then. Until then it says only what follows. -->
 
 The recipe for the Routine's cloud environment (its setup script,
 environment variables and network level) is not part of this version of
