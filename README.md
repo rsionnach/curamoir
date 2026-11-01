@@ -157,7 +157,6 @@ Every command is namespaced under the plugin, so each one reads `/curamoir:<name
 | `/curamoir:cost` | Month-to-date and trailing-90-day spend, projected month-end | planned |
 | `/curamoir:sync` | Reconcile beads against GitHub issues | planned |
 | `/curamoir:smoke` | Run the quickstart smoke test on demand | planned |
-| `/curamoir:schedule` | Write a local cron or launchd entry for the scheduled jobs | planned |
 
 The table doubles as the checklist. Rows switch to **working** as their epics land.
 

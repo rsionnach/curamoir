@@ -25,7 +25,7 @@ Then report to the developer:
 - **What happens next.** Suggest `/curamoir:doctor` to confirm prerequisites.
   The sweep runs on a schedule only once a hosted runner is set up for it:
   the GitHub Actions workflow below, or a Claude Code Routine
-  (`/curamoir:routine`, when it ships). Until then nothing runs unattended.
+  (`/curamoir:routine`). Until then nothing runs unattended.
 
 Then **ask the developer** whether to write the scheduled GitHub Actions
 sweep, `.github/workflows/curamoir-sweep.yml`. Before they answer, tell them

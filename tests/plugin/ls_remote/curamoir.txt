@@ -1,0 +1,6 @@
+# `git ls-remote https://github.com/rsionnach/curamoir`, captured 2026-11-01
+# (cm-2qp.5 provenance review), as git printed it: no tags yet, two branches
+# (one with a slash), and HEAD. Lines starting with `#` are this header.
+34511dc85124d927b8259aaa39a1bbdcabeccf44	HEAD
+34511dc85124d927b8259aaa39a1bbdcabeccf44	refs/heads/feat/e0-r0-guard-layer
+be3df5ca69211d19c1f7c7f7cbe2c2153a513534	refs/heads/feat/e14-platform-first
