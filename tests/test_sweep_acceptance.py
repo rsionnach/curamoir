@@ -52,13 +52,15 @@ from datetime import datetime, timezone
 
 import pytest
 
-from curamoir import publish, runner, sweep_job
+from curamoir import green_gate, publish, runner, sweep_job
 from curamoir.budget import UNRECORDED, month_to_date
 from curamoir.fix_counts import AGENT, REMEDY
+from curamoir.fix_step import FIX_TOOLS
 from curamoir.green_gate import GREEN, REDUCED
 from curamoir.idempotence import DUPLICATE_OPEN_PR, NO_WORK, WORK, parse_sweep_marker
 from curamoir.job_run import FAILURE, SUCCESS
 from curamoir.ledger import parse_ledger_timestamp, repo_ledger
+from tests.os_sandbox_stand_in import Absent, Unconfined
 from tests.test_lint import ALL_REGEX_RULES
 from tests.test_sweep_job import (  # noqa: F401  (isolated_home is an autouse fixture)
     GH_REPO,
@@ -70,11 +72,15 @@ from tests.test_sweep_job import (  # noqa: F401  (isolated_home is an autouse f
     isolated_home,
     job_lines,
 )
-from tests.test_tier1 import BILLING, ECC, EDITS, HANDLERS, VARIANT, fake_claude
+from tests.test_tier1 import BILLING, ECC, EDITS, HANDLERS, VARIANT, fake_claude, findings_reply
 
 #: The sample's own test suite, run by this interpreter (which has pytest),
-#: as PLANTED.json's `test_command` is with `python3`.
-TEST_COMMAND = f"PYTHONPATH=src {shlex.quote(sys.executable)} -m pytest -q -p no:cacheprovider"
+#: as PLANTED.json's `test_command` is with `python3`. `src` is put on the
+#: path by pytest's own `pythonpath` option, not a leading PYTHONPATH=
+#: assignment, so the hosted fix step's Bash rule can name the command
+#: (fix_step.bash_rules refuses a leading assignment, cm-2qp.12).
+TEST_COMMAND = (f"{shlex.quote(sys.executable)} -m pytest -q -p no:cacheprovider "
+                "-o pythonpath=src")
 #: The three principles the planted violations break.
 PRINCIPLES = {"structured-logging", ECC, "no-file-variant-proliferation"}
 #: Every file the planted violations live in.
@@ -117,7 +123,18 @@ def run_sweep(repo):
 
 
 def creates(gh):
-    return [record for record in gh.call_records() if record["argv"][:2] == ["pr", "create"]]
+    """The PR creates gh was asked for: `gh pr create`, or on the REST path
+    of a cloud session (cm-2qp.9) `gh api -X POST .../pulls`, whose record
+    gets the JSON body's `body` as its `body_file_content`, so a test reads
+    the PR's body the same way on either."""
+    found = []
+    for record in gh.call_records():
+        if record["argv"][:2] == ["pr", "create"]:
+            found.append(record)
+        elif record["argv"][:1] == ["api"] and "POST" in record["argv"]:
+            found.append({**record,
+                          "body_file_content": json.loads(record["input_content"])["body"]})
+    return found
 
 
 def section(body, heading):
@@ -342,3 +359,381 @@ def test_a_fix_that_breaks_a_test_is_left_out_of_a_reduced_pr(tmp_path, no_real_
     assert not any(BILLING in fix for fix in fix_lines(body))
     assert items(body, "### Files left for the next run") == [
         f"- `{BILLING}` (dropped by the test gate)"]
+
+
+# --- E14.1 (cm-2qp.1): the runner kind, through the real runner ----------------------------
+
+#: The green sweep's job line keys, and its PR body (the base written
+#: <BASE>), as commit 3f50a3f (and this branch before E14.1) writes them in
+#: test_one_sweep_opens_one_green_pr_fixing_all_five. Captured from that
+#: code.
+PRE_E14_SWEEP_KEYS = frozenset({
+    "at", "cost_usd", "ended", "fix_summary", "fixes", "found_delta", "held_for_open_prs",
+    "input_tokens", "job", "kind", "message", "model", "open_sweep_prs", "outcome",
+    "output_tokens", "pr", "reason", "run_id", "started", "sync", "sync_reason",
+    "test_gate", "tier1", "work"})
+PRE_E14_SWEEP_BODY = (
+    "<!-- curamoir-sweep base=<BASE> -->\n## curamoir sweep\n\n5 fixes of 3 principles at "
+    "base `<BASE>`, in 3 files. Each fix is listed with its principle id; the sweep's "
+    "ledger line records every one.\n\n### Fixes\n"
+    "- `errors-carry-context` `no-unchained-raise` `src/sample/core/billing.py` line 37\n"
+    "- `errors-carry-context` `no-unchained-raise` `src/sample/web/handlers.py` line 31\n"
+    "- `no-file-variant-proliferation` `no-variant-module` `src/sample/web/handlers_v2.py` "
+    "line 1 (deleted by the runner's remedy, not edited)\n"
+    "- `structured-logging` `no-bare-print` `src/sample/core/billing.py` line 15\n"
+    "- `structured-logging` `no-bare-print` `src/sample/web/handlers.py` line 22\n\n"
+    "### Test gate\ntests green with all 3 fixed file(s) (1 run)\nNothing was dropped.\n\n"
+    "### Files left for the next run\nNone.\n\n### Remedies skipped\nNone.\n\n"
+    "### Promotion candidates\nNone yet: promotion candidates come from the promotion "
+    "ladder (E4-R1, E4-R2), which has not landed.\n\n### Grade\nnot graded yet (Epic 7)\n")
+
+
+def test_with_no_runner_variable_the_sweep_is_the_pre_e14_sweep_plus_runner_local(
+        tmp_path, no_real_gh, monkeypatch):
+    """§8 acceptance 3, for the sweep: no runner variable is the local
+    runner, and the line and the PR are what they were before E14.1 but for
+    the line's `runner: local`."""
+    repo = sample(tmp_path)
+    base = base_of(repo)
+    stand_in(tmp_path, monkeypatch)
+
+    ran = runner.run_job(repo, "sweep", now=lambda: NOW, environ={})
+    line = job_lines(repo)[-1]
+
+    assert ran.exit_code == runner.EXIT_SUCCESS, ran.sentence
+    assert set(line) == PRE_E14_SWEEP_KEYS | {"runner"}
+    assert line["runner"] == "local"
+    [create] = creates(no_real_gh)
+    assert create["body_file_content"].replace(base, "<BASE>") == PRE_E14_SWEEP_BODY
+
+
+def test_a_session_puts_its_transcript_link_on_the_line_and_in_the_pr_body(
+        tmp_path, no_real_gh, monkeypatch):
+    """E14.1: CLAUDE_CODE_REMOTE_SESSION_ID's `cse_` id is the
+    claude.ai/code/session_ link, on the line and in the PR a reviewer
+    reads (§8 acceptance 2)."""
+    repo = sample(tmp_path)
+    base = base_of(repo)
+    stand_in(tmp_path, monkeypatch)
+    link = "https://claude.ai/code/session_01AbCdEf"
+
+    ran = runner.run_job(repo, "sweep", now=lambda: NOW, environ={
+        "CURAMOIR_RUNNER": "hosted", "CLAUDE_CODE_REMOTE": "true",
+        "CLAUDE_CODE_REMOTE_SESSION_ID": "cse_01AbCdEf"})
+    line = job_lines(repo)[-1]
+
+    assert ran.exit_code == runner.EXIT_SUCCESS, ran.sentence
+    assert (line["runner"], line["transcript"]) == ("hosted", link)
+    [create] = creates(no_real_gh)
+    body = create["body_file_content"]
+    assert f"Transcript of the run that opened this PR: {link}" in body.splitlines()
+    assert parse_sweep_marker(body) == base
+
+
+def test_an_invalid_session_id_is_unavailable_on_the_line_and_left_out_of_the_pr_body(
+        tmp_path, no_real_gh, monkeypatch):
+    repo = sample(tmp_path)
+    stand_in(tmp_path, monkeypatch)
+
+    ran = runner.run_job(repo, "sweep", now=lambda: NOW, environ={
+        "CLAUDE_CODE_REMOTE_SESSION_ID": "cse_x](https://evil.example)"})
+    line = job_lines(repo)[-1]
+
+    assert ran.exit_code == runner.EXIT_SUCCESS, ran.sentence
+    assert line["transcript"].startswith("unavailable (")
+    assert "evil" not in line["transcript"]
+    body = creates(no_real_gh)[0]["body_file_content"]
+    assert "Transcript" not in body and "evil" not in body
+
+
+# --- E14.2 (cm-2qp.2): the test gate by runner kind, through the real runner ---------------
+
+#: The `test_gate` field's keys as 3f50a3f's GateResult.ledger_fields writes
+#: them: neither runner kind adds or drops one (the job line's `runner`
+#: says which boundary the gate ran under).
+PRE_E14_TEST_GATE_KEYS = frozenset({
+    "strategy", "cause", "why", "command", "command_source", "kept", "dropped", "runs",
+    "canary"})
+
+
+@pytest.mark.parametrize("environ, hosted", [
+    ({}, False),
+    ({"CURAMOIR_RUNNER": "hosted", "CLAUDE_CODE_REMOTE": "true"}, True),
+], ids=["no-runner-variable", "hosted"])
+def test_the_gate_is_wrapped_on_the_local_runner_and_bare_on_the_hosted_one(
+        tmp_path, no_real_gh, monkeypatch, environ, hosted):
+    """§5 R3 end to end: `run.runner` reaches the gate. A hosted sweep's
+    gate never asks the OS sandbox (Absent would refuse it); a sweep with no
+    runner variable self-tests once and wraps every run, as at 3f50a3f.
+    Both open the green PR, with the pre-E14 test_gate fields."""
+    stand_in_sandbox = Absent() if hosted else Unconfined()
+    monkeypatch.setattr(green_gate, "OS_SANDBOX", stand_in_sandbox)
+    repo = sample(tmp_path)
+    stand_in(tmp_path, monkeypatch)
+
+    ran = runner.run_job(repo, "sweep", now=lambda: NOW, environ=environ)
+    line = job_lines(repo)[-1]
+
+    assert ran.exit_code == runner.EXIT_SUCCESS, ran.sentence
+    assert line["runner"] == ("hosted" if hosted else "local")
+    assert line["test_gate"]["strategy"] == GREEN
+    assert set(line["test_gate"]) == PRE_E14_TEST_GATE_KEYS
+    assert len(creates(no_real_gh)) == 1
+    runs = len(line["test_gate"]["runs"])
+    if hosted:
+        assert stand_in_sandbox.self_tests == [] and stand_in_sandbox.wrapped == []
+    else:
+        assert len(stand_in_sandbox.self_tests) == 1
+        assert len(stand_in_sandbox.wrapped) == runs + 1  # + the canary
+
+
+# --- E14.3 (cm-2qp.3): the fix step by runner kind, through the real runner ---------------
+
+HOSTED_ENVIRON = {"CURAMOIR_RUNNER": "hosted", "CLAUDE_CODE_REMOTE": "true"}
+
+
+@pytest.mark.parametrize("environ, hosted", [
+    ({}, False),
+    (HOSTED_ENVIRON, True),
+], ids=["no-runner-variable", "hosted"])
+def test_the_fix_agent_has_bash_on_the_hosted_runner_and_not_on_the_local_one(
+        tmp_path, no_real_gh, monkeypatch, environ, hosted):
+    """§5 R4 end to end: `run.runner` reaches the fix step. A hosted sweep's
+    fix agent is given Bash, approved by one allow rule for the base's test
+    command with arguments after it (cm-2qp.12; never the bare `Bash`), with
+    the denylist --settings and --restricted; a sweep with no runner
+    variable runs 3f50a3f's command line (FIX_TOOLS, --restricted, no
+    Bash). The prompt follows: only the hosted agent is told it may run
+    commands. Both open the green PR."""
+    monkeypatch.setattr(green_gate, "OS_SANDBOX", Absent() if hosted else Unconfined())
+    repo = sample(tmp_path)
+    _, log = stand_in(tmp_path, monkeypatch)
+
+    ran = runner.run_job(repo, "sweep", now=lambda: NOW, environ=environ)
+    argv = json.loads(log.read_text(encoding="utf-8"))["argv"]
+
+    assert ran.exit_code == runner.EXIT_SUCCESS, ran.sentence
+    assert len(creates(no_real_gh)) == 1
+    tools = argv[argv.index("--tools") + 1].split(",")
+    allowed = argv[argv.index("--allowedTools") + 1].split(",")
+    assert "--settings" in argv and "--restricted" in argv
+    prompt = argv[1]
+    if hosted:
+        assert tools == [*FIX_TOOLS, "Bash"] and allowed[-1] == f"Bash({TEST_COMMAND} *)"
+        assert "Bash" not in allowed
+        assert argv[argv.index("--disallowedTools") + 1].split(",")[-1] == "Bash(git *)"
+        # The job line says what the agent's Bash was (cm-2qp.12).
+        assert job_lines(repo)[-1][sweep_job.FIX_BASH_FIELD] == TEST_COMMAND
+        # The base's own test command, as the gate resolves it.
+        assert f"you may run the repository's test command, `{TEST_COMMAND}`" in prompt
+        assert "cannot run commands" not in prompt
+    else:
+        assert tools == list(FIX_TOOLS) and "Bash" not in allowed
+        assert "Bash(git *)" not in argv[argv.index("--disallowedTools") + 1]
+        assert sweep_job.FIX_BASH_FIELD not in job_lines(repo)[-1]  # the local line as was
+        assert "You cannot run commands, and you do not need to" in prompt
+
+
+@pytest.mark.parametrize("environ, hosted", [
+    ({}, False),
+    (HOSTED_ENVIRON, True),
+], ids=["no-runner-variable", "hosted"])
+def test_the_sweep_hands_its_runner_to_the_scan_and_the_fix_step_alike(
+        tmp_path, no_real_gh, monkeypatch, environ, hosted):
+    """Both of the sweep's model calls take `run.runner` on purpose
+    (tier1.run_tier1_scan passes it on to run_fix_step), so neither builds
+    its command line from a default: on hosted both keep --restricted
+    (user decision 2026-10-29), and only the fix step has Bash; with no
+    runner variable both are as at 3f50a3f. errors-carry-context is left
+    without a rule here, so the tier-1 scan runs
+    (tests/test_tier1.tier1_repo)."""
+    from curamoir import tier1
+    from tests.test_lint import NO_BARE_PRINT, NO_VARIANT_MODULE
+
+    calls = []
+    # The scan's stand-in reads only and finds nothing; the fix's makes the
+    # edits (one `claude` serves both calls, so the scan's is swapped in).
+    scan_claude, _ = fake_claude(tmp_path, "scan", findings_reply())
+
+    def recording(name, real, **override):
+        def run(*args, **kwargs):
+            result = real(*args, **{**kwargs, **override})
+            calls.append((name, kwargs["runner"].hosted, result.argv))
+            return result
+        return run
+
+    monkeypatch.setattr(tier1, "run_fix_step",
+                        recording("scan", tier1.run_fix_step, claude=scan_claude))
+    monkeypatch.setattr(sweep_job, "run_fix_step", recording("fix", sweep_job.run_fix_step))
+    monkeypatch.setattr(green_gate, "OS_SANDBOX", Absent() if hosted else Unconfined())
+    repo = checkout(tmp_path, NO_BARE_PRINT, NO_VARIANT_MODULE, config=config())
+    stand_in(tmp_path, monkeypatch)
+
+    ran = runner.run_job(repo, "sweep", now=lambda: NOW, environ=environ)
+
+    assert ran.exit_code == runner.EXIT_SUCCESS, ran.sentence
+    assert [(name, was_hosted) for name, was_hosted, _ in calls] == [
+        ("scan", hosted), ("fix", hosted)]
+    for name, _, argv in calls:
+        tools = argv[argv.index("--tools") + 1].split(",")
+        assert "--restricted" in argv
+        assert ("Bash" in tools) is (hosted and name == "fix")
+
+
+#: What a test run the hosted agent makes could leave in the clone, were
+#: HOSTED_TEST_ENVIRONMENT not honoured (a tool that ignores it, a cache of
+#: another tool): bytecode and a pytest cache.
+TEST_RUN_DEBRIS = {"src/sample/core/__pycache__/billing.cpython-312.pyc": "bytecode",
+                   ".pytest_cache/v/cache/lastfailed": "{}\n"}
+
+
+def test_test_run_debris_in_the_clone_is_dropped_and_the_pr_still_opens(
+        tmp_path, no_real_gh, monkeypatch):
+    """cm-2qp.3 edge case: on hosted the agent's own test run can leave
+    files in the clone. They are new files no violation names, so the
+    review drops them (cm-9ab's drop and re-gate) and the green PR opens
+    with the fixes alone; the dropped files are on the line's
+    `scope_dropped`."""
+    from tests.test_fix_step import fake_claude as file_writing_claude
+
+    monkeypatch.setattr(green_gate, "OS_SANDBOX", Absent())
+    repo = sample(tmp_path)
+    claude, _ = file_writing_claude(tmp_path, edits=EDITS, writes=TEST_RUN_DEBRIS)
+    monkeypatch.setattr(sweep_job, "CLAUDE", str(claude))
+
+    ran = runner.run_job(repo, "sweep", now=lambda: NOW, environ=HOSTED_ENVIRON)
+    line = job_lines(repo)[-1]
+
+    assert ran.exit_code == runner.EXIT_SUCCESS, ran.sentence
+    assert len(creates(no_real_gh)) == 1
+    assert {(d["kind"], d["path"]) for d in line["scope_dropped"]} == {
+        ("file_added", path) for path in TEST_RUN_DEBRIS}
+    assert "scope_after_drop" not in line
+    assert not set(TEST_RUN_DEBRIS) & set(line["test_gate"]["kept"])
+    assert set(line["test_gate"]["kept"]) == set(FILES)  # the deletion of handlers_v2 too
+
+
+NO_TESTS_SENTENCE = "No test command is available to you, so do not run tests"
+
+
+def _no_command(sandbox):
+    """resolve_test_command as for a base with no test command at all."""
+    from curamoir.green_gate import NO_TEST_COMMAND, GateCommand
+
+    return GateCommand(None, None, 60, 3, NO_TEST_COMMAND, "no test command at the base")
+
+
+def _git_fails(sandbox):
+    from curamoir.git_guard import GitGuardError
+
+    raise GitGuardError("git ls-tree did not finish within 60 seconds")
+
+
+def _pipeline_command(sandbox):
+    """resolve_test_command as for a base whose configured command no allow
+    rule can name (a pipeline: fix_step.bash_rules)."""
+    from curamoir.green_gate import GateCommand
+
+    return GateCommand(f"{TEST_COMMAND} | cat", "config", 60, 3)
+
+
+@pytest.mark.parametrize("resolve, fix_bash", [
+    (_no_command, sweep_job.FIX_BASH_NO_COMMAND),
+    (_git_fails, sweep_job.FIX_BASH_NO_COMMAND),
+    (_pipeline_command, sweep_job.FIX_BASH_NOT_NAMEABLE),
+], ids=["no-command", "git-fails", "no-rule-for-it"])
+def test_a_hosted_fix_agent_with_no_resolvable_test_command_gets_no_bash(
+        tmp_path, no_real_gh, monkeypatch, resolve, fix_bash):
+    """sweep_job asks green_gate.resolve_test_command for the command the
+    hosted prompt offers and its Bash rule names (sweep_job._hosted_test_command);
+    none at the base, a git failure while resolving it, or a command no
+    rule can name is no command: the agent is given no Bash at all (FIX_TOOLS,
+    no Bash rule, cm-2qp.12) and told to run no tests. The gate resolves its
+    own, unaffected (its module's function is not the one replaced here),
+    and the PR opens."""
+    monkeypatch.setattr(green_gate, "OS_SANDBOX", Absent())
+    monkeypatch.setattr(sweep_job, "resolve_test_command", resolve)
+    repo = sample(tmp_path)
+    _, log = stand_in(tmp_path, monkeypatch)
+
+    ran = runner.run_job(repo, "sweep", now=lambda: NOW, environ=HOSTED_ENVIRON)
+    argv = json.loads(log.read_text(encoding="utf-8"))["argv"]
+    prompt = argv[1]
+
+    assert ran.exit_code == runner.EXIT_SUCCESS, ran.sentence
+    assert NO_TESTS_SENTENCE in prompt and "you may run the repository's test command" not in (
+        prompt)
+    assert argv[argv.index("--tools") + 1].split(",") == list(FIX_TOOLS)
+    assert not any(rule.startswith("Bash")
+                   for rule in argv[argv.index("--allowedTools") + 1].split(","))
+    # The job line gives a fixed reason, never the command no rule can name.
+    line = job_lines(repo)[-1]
+    assert line[sweep_job.FIX_BASH_FIELD] == fix_bash
+
+
+@pytest.mark.parametrize("command, value", [
+    ("pytest  -q &&npm test", "pytest -q && npm test"),
+    (None, "none (no test command)"),
+    ("", "none (no test command)"),
+    ("pytest -q\n`echo` ghp_0123456789abcdefghijklmnopqrstuvwxyz",
+     "none (not nameable as a rule)"),
+], ids=["normalised", "none", "empty", "unnameable"])
+def test_the_fix_bash_field_names_the_command_or_a_fixed_reason(command, value):
+    """FIX_BASH_FIELD's value: the command as the rules name it, or fixed
+    text, never a command no rule can name (it may hold a secret)."""
+    assert sweep_job._fix_bash(command) == value
+
+
+#: The run tokens a GitHub Actions job hands the sweep, which the hosted
+#: fix step must not pass on (cm-2qp.12).
+RUN_TOKENS = {"GITHUB_TOKEN": "ghs_run", "GH_TOKEN": "ghs_run",
+              "ACTIONS_ID_TOKEN_REQUEST_TOKEN": "oidc", "ACTIONS_RUNTIME_TOKEN": "runtime",
+              "ACTIONS_RESULTS_URL": "https://results.example"}
+
+
+@pytest.mark.parametrize("environ, hosted", [
+    ({}, False),
+    (HOSTED_ENVIRON, True),
+], ids=["no-runner-variable", "hosted"])
+def test_the_hosted_sweeps_fix_agent_is_given_no_run_token(
+        tmp_path, no_real_gh, monkeypatch, environ, hosted):
+    """cm-2qp.12 end to end: with the run's tokens in the sweep's own
+    environment, the hosted fix step's process has none of them and keeps
+    ANTHROPIC_API_KEY; the local one inherits them, as at 3f50a3f. Publish
+    runs in the sweep's process, so the PR still opens."""
+    from tests.test_fix_step import fake_claude as env_logging_claude
+
+    for name, value in {**RUN_TOKENS, "ANTHROPIC_API_KEY": "sk-ant"}.items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.setattr(green_gate, "OS_SANDBOX", Absent() if hosted else Unconfined())
+    repo = sample(tmp_path)
+    claude, log = env_logging_claude(tmp_path, edits=EDITS)
+    monkeypatch.setattr(sweep_job, "CLAUDE", str(claude))
+
+    ran = runner.run_job(repo, "sweep", now=lambda: NOW, environ=environ)
+    seen = set(json.loads(log.read_text(encoding="utf-8"))["env"])
+
+    assert ran.exit_code == runner.EXIT_SUCCESS, ran.sentence
+    assert len(creates(no_real_gh)) == 1
+    assert "ANTHROPIC_API_KEY" in seen
+    assert (not seen & set(RUN_TOKENS)) if hosted else set(RUN_TOKENS) <= seen
+
+
+def test_a_local_sweep_never_resolves_a_test_command_for_the_prompt(
+        tmp_path, no_real_gh, monkeypatch):
+    """On the local runner the prompt names no command, so sweep_job never
+    asks for one: resolve_test_command replaced by one that fails the test
+    is never called there (the gate's own call is green_gate's)."""
+    def must_not_be_called(_sandbox):
+        raise AssertionError("the local sweep resolved a test command for the prompt")
+
+    monkeypatch.setattr(green_gate, "OS_SANDBOX", Unconfined())
+    monkeypatch.setattr(sweep_job, "resolve_test_command", must_not_be_called)
+    repo = sample(tmp_path)
+    _, log = stand_in(tmp_path, monkeypatch)
+
+    ran = runner.run_job(repo, "sweep", now=lambda: NOW, environ={})
+    prompt = json.loads(log.read_text(encoding="utf-8"))["argv"][1]
+
+    assert ran.exit_code == runner.EXIT_SUCCESS, ran.sentence
+    assert "You cannot run commands, and you do not need to" in prompt

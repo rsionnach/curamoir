@@ -15,10 +15,12 @@ is the lint's work list alone, and nothing here runs.
 **Who scans.** A separate `claude -p` call on `models.cheap`, before
 anything edits the sandbox, with a READ-ONLY toolset (SCAN_TOOLS: Read, Grep,
 Glob, and Read's allow rules alone, through fix_step.fix_step_argv, so every
-other flag of the fix step's fence applies). WHY separate from the fix
-step: the scope check (fix_scope.verify_fix) holds every edit to a violation
-known BEFORE the edit; a finding the fixing agent declared after editing
-would be a licence it drew for itself. The scan's findings are validated
+other flag of the fix step's fence applies; the scan's command line is the
+same on both runner kinds, with no Bash on the hosted runner either,
+cm-2qp.3). WHY separate from the fix step: the scope check
+(fix_scope.verify_fix) holds every edit to a violation known BEFORE the
+edit; a finding the fixing agent declared after editing would be a licence
+it drew for itself. The scan's findings are validated
 here, installed on the sandbox's work list (`WorkList.tier1`), and the one
 fix step then works through lint violations and tier-1 findings alike.
 After the scan the sandbox must still be its base, file for file
@@ -143,6 +145,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Optional
 
+from curamoir.config import LOCAL_RUNNER
 from curamoir.fix_counts import AGENT, TIER1, FixRecord
 from curamoir.fix_scope import (
     DELETED,
@@ -687,7 +690,7 @@ def scan_prompt(eligible, candidates):
 
 
 def _call_scan(sandbox, prompt, model=None, timeout=SCAN_TIMEOUT, max_turns=SCAN_MAX_TURNS,
-             claude="claude", before_call=None):
+             claude="claude", before_call=None, runner=LOCAL_RUNNER):
     """Run the scan call in `sandbox` (fix_step.run_fix_step with
     SCAN_TOOLS) and return its FixStepRun and why the sandbox is not as it
     was afterwards (its git files, its work tree, its HEAD), or None if it
@@ -701,9 +704,10 @@ def _call_scan(sandbox, prompt, model=None, timeout=SCAN_TIMEOUT, max_turns=SCAN
     base, which is refused as a change is (fail closed), and the run must
     reach run_tier1_scan so the refusal carries the call's spend and
     counts as an attempt (fix_scope, "The line's cost"; scan_attempts).
-    `before_call` is run_fix_step's."""
+    `before_call` and `runner` are run_fix_step's."""
     run = run_fix_step(sandbox, prompt, model=model, timeout=timeout, max_turns=max_turns,
-                       claude=claude, tools=SCAN_TOOLS, before_call=before_call)
+                       claude=claude, tools=SCAN_TOOLS, before_call=before_call,
+                       runner=runner)
     try:
         changed = [c.label for c in verify_git_state(run.git_state)]
         changed += list(tree_changes(run.git_state))
@@ -899,7 +903,7 @@ def _field(entry, name):
 
 def run_tier1_scan(sandbox, plan, held_paths, entries, *, cap=None, model=None,
                    timeout=SCAN_TIMEOUT, max_turns=SCAN_MAX_TURNS, claude="claude",
-                   before_call=None):
+                   before_call=None, runner=LOCAL_RUNNER):
     """Tier 1 for a READY `plan` (plan_scan) in `sandbox`, after the
     idempotence decision was applied to it (so its work list is the
     narrowed one) and before the remedies: choose the candidates, run the
@@ -917,7 +921,13 @@ def run_tier1_scan(sandbox, plan, held_paths, entries, *, cap=None, model=None,
     that the line must carry if the run ends before the call's outcome is
     known, so it counts as an attempt (scan_attempts) and retries the same
     files (rotation_origin). A failure before that point makes no call,
-    and the callback is never called."""
+    and the callback is never called.
+
+    `runner` is the run's config.Runner (`run.runner`), passed on to
+    run_fix_step (cm-2qp.3). It changes nothing for the scan today: the
+    toolset is SCAN_TOOLS on both kinds, so the argv is the same on both
+    and the scan never gets Bash. It is passed so that any future
+    runner-dependent choice comes from the run's kind, not a default."""
     if not plan.will_scan:
         raise ValueError(f"a {plan.status} plan does not scan")
     require_sandbox(sandbox, ScopeCheckError)
@@ -939,7 +949,7 @@ def run_tier1_scan(sandbox, plan, held_paths, entries, *, cap=None, model=None,
     run, changed = _call_scan(sandbox, prompt, model=model, timeout=timeout,
                               max_turns=max_turns, claude=claude,
                               before_call=None if before_call is None
-                              else (lambda: before_call(pending)))
+                              else (lambda: before_call(pending)), runner=runner)
     payload = run.payload() or {}
     cost = payload.get("total_cost_usd")
     # fix_step.usable_number: a NaN, infinite, huge or negative figure is

@@ -27,7 +27,10 @@ the PR will open on. Any PublishRefused from these calls is a refusal
 (Reason.SWEEP_BASE), before anything is cloned, linted or spent. (Why not
 guards.default_branch.detect_default_branch, which the 2026-10-23
 decision named: it falls back to local branch names, and trusts a stale
-origin/HEAD; publish's rule supersedes it.)
+origin/HEAD; publish's rule supersedes it.) Each of these gh calls, and
+publish's, takes the run's `run.github_api` (cm-2qp.9): in a Claude Code
+cloud session they go through `gh api` (curamoir.github, "The REST
+path"), with the same answers.
 
 **Refusals before step 3**, each with its Reason, and never a
 `found_delta` or a snapshot (fix_scope step 2a): an unloadable
@@ -49,8 +52,13 @@ the remedies, then the fix step on what is left for the agent, its review
 `sweep.max_files_per_pr` and the test gate, the fix records, the patch of
 exactly `gate.paths_for_pr`, the PR's text (sweep_pr: final_body, the
 branch, the title and the commit message), and ONE publish.publish. The
-fix agent runs once, in the sandbox, with fix_step.FIX_TOOLS (no shell),
-and never in the user's checkout; nothing is ever re-run there.
+fix agent runs once, in the sandbox, with fix_step.fix_tools(run.runner,
+the base's test command) (FIX_TOOLS, no shell, on the local runner;
+HOSTED_FIX_TOOLS, with Bash for that command alone, on the hosted one,
+cm-2qp.3 and cm-2qp.12, and FIX_TOOLS there too when there is no command
+a rule can name), and never in the user's checkout; nothing is
+ever re-run there. Both model calls, the scan's and the fix step's, are
+given `run.runner`, so each builds its command line for the run's kind.
 
 **What each outcome writes.** A refusal carries no `found_delta`,
 decision fields, `fixes` or snapshot (fix_scope step 2a); it keeps the
@@ -59,7 +67,10 @@ The scope fields (cm-9ab): `scope` is the FIRST review's verdict, on a
 SCOPE refusal and on the SANDBOX refusal of a file that could not be
 dropped; `scope_after_drop` is the second review's, on a SCOPE refusal
 after files were dropped; `scope_dropped` (the dropped breaches) is on
-every line of a run that dropped files, whatever its outcome. Every other
+every line of a run that dropped files, whatever its outcome. On the
+hosted runner, every line of a run whose fix agent was called carries
+`fix_bash` (FIX_BASH_FIELD, cm-2qp.12): the command its Bash was approved
+for, or why it had none; the local line has no such field. Every other
 line from step 3 on carries the decision's fields (Decision.ledger_fields),
 `found_delta`, the tier1 field and, once the gate ran, its `test_gate`;
 the snapshot follows it.
@@ -157,7 +168,7 @@ from curamoir.budget import (
     CACHE_WRITE_FIELD,
     UNRECORDED,
 )
-from curamoir.config import ConfigError
+from curamoir.config import ConfigError, GithubApi
 from curamoir.fix_counts import (
     found_delta,
     found_set,
@@ -180,11 +191,13 @@ from curamoir.fix_step import (
     DEFAULT_TIMEOUT,
     FixStepRun,
     fix_prompt,
+    fix_tools,
+    offered_test_command,
     run_fix_step,
     usable_number,
 )
 from curamoir.git_guard import GitGuardError, git, prepare_sandbox, snapshot_git_state
-from curamoir.green_gate import ABANDONED, GateError, run_test_gate
+from curamoir.green_gate import ABANDONED, GateError, resolve_test_command, run_test_gate
 from curamoir.guards.reasons import Reason
 from curamoir.guards.result import Refusal
 from curamoir.idempotence import UNKNOWN, pr_field, sweep_decision
@@ -203,6 +216,41 @@ from curamoir.tier1 import (
     trim_pr_paths,
     with_findings,
 )
+
+#: The job line's field saying what the hosted fix agent's Bash was
+#: (cm-2qp.12), and its two values when there was none. Only fixed text in
+#: that case: a command no rule can name is never echoed, since it may hold
+#: a secret or bytes a reader would misread.
+FIX_BASH_FIELD = "fix_bash"
+FIX_BASH_NO_COMMAND = "none (no test command)"
+FIX_BASH_NOT_NAMEABLE = "none (not nameable as a rule)"
+
+
+def _fix_bash(test_command):
+    """FIX_BASH_FIELD's value for the hosted fix step given `test_command`
+    (_hosted_test_command's): the command as its rules name it
+    (fix_step.offered_test_command), or a fixed reason."""
+    if not test_command:
+        return FIX_BASH_NO_COMMAND
+    return offered_test_command(test_command) or FIX_BASH_NOT_NAMEABLE
+
+
+def _hosted_test_command(sandbox, runner):
+    """The test command the hosted fix prompt names and the fix step's Bash
+    rule approves (fix_step.fix_prompt's, fix_tools' and run_fix_step's
+    `test_command`, cm-2qp.3, cm-2qp.12): the base's, as the gate itself
+    resolves it (green_gate.resolve_test_command), on the hosted runner
+    only; None on the local runner (whose prompt names none and whose run
+    is unchanged), and None when it cannot be resolved, which tells the
+    agent to run no tests and gives it no Bash. The gate resolves it again
+    for itself; nothing here decides what it runs."""
+    if not runner.hosted:
+        return None
+    try:
+        return resolve_test_command(sandbox).command
+    except (GateError, GitGuardError):
+        return None
+
 
 #: The `claude` executable a SweepTools made with no `claude` uses (module
 #: docstring, "Which `claude`"): the seam the registered body is pointed at
@@ -257,7 +305,7 @@ class SweepTools:
     """What run_sweep calls out to, so tests can stand in for each.
 
     `claude` is the `claude` executable for both model calls (fix_step's
-    seam), CLAUDE when not given. `open_sweep_prs(repo, gh_repo=...)` is the
+    seam), CLAUDE when not given. `open_sweep_prs(repo, gh_repo=..., github_api=...)` is the
     open-PR listing, github.open_sweep_prs by default; _Sweep.execute binds
     it to the repository and origin's gh_repo itself (fix_scope step 0 (iii)),
     so it is asked afresh, never cached. `now` is the clock, returning an
@@ -301,14 +349,16 @@ class SweepBase:
     sha: str
 
 
-def resolve_sweep_base(repo):
+def resolve_sweep_base(repo, *, github_api=GithubApi.CLI):
     """The SweepBase for the checkout at `repo`, resolved once, before any
     sandbox (module docstring, "Which default branch"). PublishRefused when
     origin names no GitHub repository, gh cannot say which branch is its
     default, or the checkout disagrees with it or has no remote-tracking
-    ref for it. Nothing is fetched."""
+    ref for it. Nothing is fetched. `github_api` is the run's config.GithubApi
+    (`run.github_api`), which picks how gh is asked (publish's "The REST
+    path")."""
     gh_repo = publish.origin_gh_repo(repo)
-    default = publish.origin_default_branch(repo, gh_repo)
+    default = publish.origin_default_branch(repo, gh_repo, github_api=github_api)
     ref = f"refs/remotes/origin/{default}"
     try:
         sha = git(repo, "rev-parse", "--verify", "--quiet", "--end-of-options",
@@ -375,14 +425,14 @@ class _Sweep:
             self.refuse(Reason.GUARD_ERROR, f"the sweep could not read its config: {error}")
             return
         try:
-            self.sweep_base = resolve_sweep_base(self.repo)
+            self.sweep_base = resolve_sweep_base(self.repo, github_api=self.run.github_api)
         except publish.PublishRefused as error:
             self.refuse(Reason.SWEEP_BASE, f"the sweep has no base: {error}")
             return
         # Step 0 (iii)'s binding, with origin's repository: a zero-argument
         # callable, asked afresh by sweep_decision.
         self.listing = partial(self.tools.open_sweep_prs, self.repo,
-                               gh_repo=self.sweep_base.gh_repo)
+                               gh_repo=self.sweep_base.gh_repo, github_api=self.run.github_api)
         try:
             # Step 1, pinned at the commit resolved above.
             with prepare_sandbox(self.repo, self.sweep_base.sha,
@@ -480,7 +530,8 @@ class _Sweep:
                                       run.ledger.entries(), model=model,
                                       timeout=self.tools.scan_timeout,
                                       claude=self.tools.claude,
-                                      before_call=partial(self.note_scan_pending, model))
+                                      before_call=partial(self.note_scan_pending, model),
+                                      runner=run.runner)
             except ScanRefused as error:
                 self.tier1_state = error
                 self.note_cost(model)
@@ -532,11 +583,21 @@ class _Fix:
         agent_work = remedies.for_agent(sandbox.work_list)
         # Steps 4 and 5: the fix step, then its review.
         if agent_work.items or agent_work.tier1:
-            prompt = fix_prompt(agent_work, base_principles(sandbox))
+            test_command = _hosted_test_command(sandbox, self.run.runner)
+            prompt = fix_prompt(agent_work, base_principles(sandbox), runner=self.run.runner,
+                                test_command=test_command)
             options = {} if tools.fix_timeout is None else {"timeout": tools.fix_timeout}
+            if self.run.runner.hosted:
+                owner.run.note(**{FIX_BASH_FIELD: _fix_bash(test_command)})
+            # The toolset and the argv follow the run's runner (cm-2qp.3)
+            # and the base's test command (cm-2qp.12): Bash only on the
+            # hosted runner, approved for that command alone, and none
+            # without one.
             fix_run = run_fix_step(sandbox, prompt, model=self.model, claude=tools.claude,
+                                   tools=fix_tools(self.run.runner, test_command),
                                    before_call=partial(owner.note_cost, self.model,
                                                        pending=True),
+                                   runner=self.run.runner, test_command=test_command,
                                    **options)
             owner.note_cost(self.model, fix_run=fix_run)
             unfinished = _unfinished(fix_run)
@@ -599,7 +660,7 @@ class _Fix:
         trimmed_nfc = {nfc(path) for path in trimmed}
         left_out = [path for path in verdict.paths if nfc(path) not in trimmed_nfc]
         try:
-            gate = run_test_gate(sandbox, verdict, paths=trimmed)
+            gate = run_test_gate(sandbox, verdict, paths=trimmed, runner=self.run.runner)
         except GateError as error:
             owner.refuse(Reason.TEST_GATE, f"the test gate could not answer: {error}")
             return
@@ -640,8 +701,11 @@ class _Fix:
         gate_fields = gate.ledger_fields()
         try:
             # One day (owner.day) for the branch, the title and the message.
+            # The transcript link is the run's (E14.1): resolved once by
+            # job_guard.run_guarded and handed down on the JobRun.
             body = final_body(records, sandbox.work_list, gate, sandbox.base, remedies.skipped,
-                              left_out, scope_dropped=dropped)
+                              left_out, scope_dropped=dropped,
+                              transcript_url=self.run.runner.transcript_url)
             branch = sweep_branch(owner.branch_prefix, owner.day, sandbox.base)
             title = pr_title(records, gate, owner.day)
             message = commit_message(records, gate, owner.day, sandbox.base)
@@ -660,7 +724,7 @@ class _Fix:
             published = publish.publish(
                 owner.repo, base=sandbox.base, patch=patch, paths=gate.paths_for_pr,
                 branch=branch, branch_prefix=owner.branch_prefix, gh_repo=sweep_base.gh_repo,
-                message=message, title=title, body=body)
+                message=message, title=title, body=body, github_api=self.run.github_api)
         except publish.PublishRefused as error:
             self.run.unnote(PUBLISH_PENDING)
             owner.refuse(Reason.PUBLISH, f"the sweep's PR was refused before anything was "

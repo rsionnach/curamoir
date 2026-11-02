@@ -12,6 +12,8 @@ import sys
 import uuid
 from datetime import datetime, timezone
 
+from curamoir.config import LOCAL_RUNNER, GithubApi
+
 # The job line's `outcome` values, exactly as the ledger holds them: other
 # modules compare ledger lines against these (fix_counts, tier1) and the
 # runner maps them to exit codes (job_guard.GuardedRun), so they never
@@ -32,9 +34,14 @@ UNKNOWN = "unknown"
 #: as the line is written, which `_write` reports on stderr while the run
 #: still reports its outcome: a job with no line. So they are refused when
 #: given, where the mistake is. `at` is not here: `record` lets a field
-#: replace it, and that is used.
+#: replace it, and that is used. `runner` and `transcript` (E14.1) are the
+#: runner kind's, given to JobRun as `runner_fields` and written by it, so
+#: no step of the job can make its line claim another runner kind.
+#: `github_api` (cm-2qp.9) is the run's config.GithubApi, written by JobRun
+#: from `github_api` on the REST path only (GithubApi.ledger_fields).
 RESERVED_FIELDS = frozenset(
-    {"kind", "job", "reason", "message", "run_id", "outcome", "started", "ended"})
+    {"kind", "job", "reason", "message", "run_id", "outcome", "started", "ended",
+     "runner", "transcript", "github_api"})
 
 
 def _checked(fields):
@@ -53,11 +60,27 @@ class JobRun:
     `__enter__` happens before there is anything to exit, so no line is
     written; a naive value is not checked, and would be written without an
     offset.
+
+    `runner` is the config.Runner job_guard.run_guarded resolved for the
+    run (E14.1), for the body to read and pass down (`run.runner`).
+    `runner_fields` are the line's `runner` and `transcript` fields
+    (config.Runner.ledger_fields, or a refused declaration's transcript
+    alone), written on every line this run writes; they are
+    RESERVED_FIELDS, so no outcome or note can replace them.
+
+    `github_api` is the config.GithubApi runner.run_job decided for the run
+    (cm-2qp.9), for the body to pass to its gh calls (`run.github_api`);
+    the line carries `github_api: rest` when it is GithubApi.REST, and
+    nothing otherwise (GithubApi.ledger_fields), a reserved field.
     """
 
-    def __init__(self, ledger, job, run_id=None, now=None):
+    def __init__(self, ledger, job, run_id=None, now=None, runner=None,
+                 runner_fields=None, github_api=None):
         self._ledger = ledger
         self._job = job
+        self._runner = runner
+        self._github_api = github_api
+        self._runner_fields = dict(runner_fields or {})
         self._now = now or (lambda: datetime.now(timezone.utc))
         self.run_id = run_id or uuid.uuid4().hex[:12]
         self._started = None
@@ -71,6 +94,25 @@ class JobRun:
         For a body that dates its work by the clock its line is dated by
         (sweep_job: the sweep branch's day)."""
         return self._now()
+
+    @property
+    def runner(self):
+        """The config.Runner this run resolved (E14.1): its kind, which the
+        steps that differ by runner kind branch on, and its transcript link.
+        config.LOCAL_RUNNER when none was given, because local is the
+        hardened path. run_guarded gives one to every run whose body runs (a
+        run whose declaration was refused never runs its body), so the
+        LOCAL_RUNNER default is only what a JobRun made outside run_guarded
+        sees: a test, an ad hoc caller."""
+        return LOCAL_RUNNER if self._runner is None else self._runner
+
+    @property
+    def github_api(self):
+        """The config.GithubApi this run's gh calls take (cm-2qp.9): REST in
+        a Claude Code cloud session, else CLI. GithubApi.CLI when none was
+        given, the 3f50a3f behaviour: what a JobRun made outside
+        run_guarded sees (a test, an ad hoc caller)."""
+        return GithubApi.CLI if self._github_api is None else self._github_api
 
     @property
     def ledger(self):
@@ -192,5 +234,7 @@ class JobRun:
             outcome=self._outcome,
             started=self._started.isoformat(),
             ended=ended.isoformat(),
+            **self._runner_fields,
+            **self.github_api.ledger_fields(),
             **self._extra,
         )

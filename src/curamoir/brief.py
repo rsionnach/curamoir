@@ -22,6 +22,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from curamoir import github, publish
+from curamoir.config import GithubApi
 from curamoir.grades import graded_modules
 from curamoir.idempotence import sweep_prs
 from curamoir.ledger import parse_ledger_timestamp, repo_ledger
@@ -247,13 +248,15 @@ def _read_period_spend(base):
     return None
 
 
-def gh_pr_states(repo):
+def gh_pr_states(repo, *, github_api=GithubApi.CLI):
     """The `pr_states` lookup for the repository at `repo`: gh's, of
-    origin's repository, as the sweep that opened the PRs asked it."""
+    origin's repository, as the sweep that opened the PRs asked it.
+    `github_api` is the config.GithubApi the entry point decided
+    (runner.run_job for the brief job, cli's `brief`; cm-2qp.9)."""
     repo = Path(repo)
 
     def lookup():
-        return github.pr_states(repo, gh_repo=publish.origin_gh_repo(repo))
+        return github.pr_states(repo, gh_repo=publish.origin_gh_repo(repo), github_api=github_api)
     return lookup
 
 

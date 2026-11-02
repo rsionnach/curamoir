@@ -6,9 +6,10 @@ E3-R4: "The sweep MUST run the project's test command (from config or
 detected) before opening the PR. On failure it MUST revert to the last green
 state or reduce scope, and MUST NOT open a red PR."
 
-The runner calls run_test_gate(sandbox, verdict) after fix_scope.verify_fix
-has accepted the fix and before GateResult.patch (fix_scope's module
-docstring, "What the runner does", step 7, gives the order).
+The runner calls run_test_gate(sandbox, verdict, runner=run.runner) after
+fix_scope.verify_fix has accepted the fix and before GateResult.patch
+(fix_scope's module docstring, "What the runner does", step 7, gives the
+order).
 It returns a GateResult whose `paths_for_pr` is the only thing the runner
 may patch (through GateResult.patch, which builds the patch from the bytes
 that were tested), and whose `strategy` the ledger records
@@ -43,7 +44,8 @@ sandbox, so the fixed code is what is tested, never in the user's checkout.
 The sandbox is a fresh clone with no venv or node_modules, so the SOURCE
 checkout's are reused read-only: its `.venv` (or `venv`) by VIRTUAL_ENV and
 PATH, its `node_modules/.bin` on PATH and its `node_modules` on NODE_PATH.
-Nothing is provisioned, and the OS sandbox (below) denies the network.
+Nothing is provisioned, and on the local runner the OS sandbox (below)
+denies the network.
 
 A reused venv can hold an editable install of the checkout itself (`pip
 install -e`, `uv sync`; this repository's own is hatch's
@@ -78,13 +80,15 @@ VOLTA_HOME, NVM_DIR; directories, not secrets), defaulted to their place
 under the real HOME when unset; and PYTHONUSERBASE, the user base that
 PATH's `python3` reports in the sweep's own environment (the fresh HOME
 would otherwise move it). They let a shim (pyenv's, asdf's, volta's) find
-its installs and a `pip install --user` pytest be found, but only where
-the OS sandbox grants the root or user base, which is outside the home
-(/opt/pyenv, a shared user base). Under a home neither is granted
-(os_sandbox.granted grants only a manager's installed versions, and
-~/Library is a credential tree), so there such a shim or `--user` tool
-fails: the base is red or the command not runnable, and a not-runnable
-refusal names what was not granted.
+its installs and a `pip install --user` pytest be found. On the local
+runner that works only where the OS sandbox grants the root or user base,
+which is outside the home (/opt/pyenv, a shared user base). Under a home
+neither is granted (os_sandbox.granted grants only a manager's installed
+versions, and ~/Library is a credential tree), so there such a shim or
+`--user` tool fails: the base is red or the command not runnable, and a
+not-runnable refusal names what was not granted. On the hosted runner
+nothing is withheld, so they resolve wherever they are ("On the hosted
+runner", below).
 Built: PATH (the reused venv's bin and `node_modules/.bin` first, then the
 user's PATH whole: PATH names directories, not secrets, and pruning those
 under $HOME would break a pyenv, nvm or ~/.local python3 while protecting
@@ -99,10 +103,12 @@ run write there) and removed after it (no `.npmrc`, `.netrc`, git
 credential helper or cloud config of the user's is read). TERM and SHELL are dropped:
 the output is captured, not shown, and the command is run by `/bin/sh`.
 
-**The OS sandbox** (cm-p2f; os_sandbox): every run, the canary's
-included, is wrapped by os_sandbox.wrap, so the kernel confines it: writes
-only inside the clone and the run's own scratch directory (which holds its
-HOME and TMPDIR); no reads under the user's home but the paths the run
+**The OS sandbox** (cm-p2f; os_sandbox) is the LOCAL runner's boundary
+(docs/direction-platform-first.md §3: cron, launchd or by hand on a
+developer's machine; run_test_gate's default). There every run, the
+canary's included, is wrapped by os_sandbox.wrap, so the kernel confines
+it: writes only inside the clone and the run's own scratch directory
+(which holds its HOME and TMPDIR); no reads under the user's home but the paths the run
 needs (_read_only); no network (on macOS not even loopback unless the
 base's `sweep.test_loopback` is true); no connection to a Unix socket
 outside those two; on macOS no Mach service that acts outside the sandbox
@@ -120,6 +126,31 @@ manager's installed versions), read-only. If no sandbox is available or
 its self-test fails, that is a GateError, so the sweep refuses
 (TEST_GATE, "the test command was not run: no OS sandbox ..."): there is
 no unsandboxed fallback. OS_SANDBOX is the seam tests replace.
+
+**On the hosted runner** (cm-2qp.2, the direction's §3 and §5 R3: a
+GitHub-hosted Actions job or a Claude Code Routine, which config.resolve_runner
+accepts only with a hosted marker) the boundary is the disposable VM, which
+holds no developer's home and is discarded after the run. There
+os_sandbox.wrap and os_sandbox.self_test are not called: the canary and
+every run are the bare `/bin/sh -c` argv, in the clone. Nothing else
+changes: the canary, the environment allowlist, the fresh HOME and TMPDIR,
+the timeout and the process group killed whole, the output cap and the
+scope reduction are the local runner's. Three consequences, by design:
+the run has the VM's network (`sweep.test_loopback` is moot); a
+version manager's shim or a `--user` tool under the home resolves, since
+nothing is withheld ("The environment", above); and a command that cannot
+be run is not blamed on grants (_not_granted) no sandbox made. Two more,
+not fixed here (the direction's §6: no sandbox rounds): a write outside
+the clone and the run's HOME and TMPDIR (a hard-coded /tmp path) persists
+from one of the gate's runs to the next, where local Linux gives each run
+a fresh /tmp and local macOS denies the write, so a suite that is not
+idempotent can make the base run or a reduction trial disagree with the
+run before it; and a test that signals processes (`pkill`, `kill $PPID`)
+can reach the sweep itself, which the local sandbox's signal rule and
+PID namespace prevent. The gate branches on `runner.hosted` only, never on
+"not local", so a runner kind that is not hosted, now or later, takes the
+sandboxed path. The gate's ledger fields are the same on both kinds; the
+job line's `runner` field says which boundary held.
 
 **The command** (resolve_test_command) is `sweep.test_command` from the
 BASE commit's `.curamoir/curamoir.yaml`, read from git's objects like the
@@ -187,16 +218,25 @@ front (memory without bound on a large repository) or git between runs.
 
 **Limits, stated rather than hidden.**
 
-- The tests run the fixed code, which the fix agent wrote, as the user,
-  confined by the OS sandbox (above). On macOS it can still READ outside
-  the user's home (system files, /opt, other volumes) and what it was
-  granted inside it (the reused venv), but cannot write outside the clone
-  and the run's directory nor send what it read anywhere. The allowlist
-  keeps the user's credentials out of its environment; the sandbox keeps
-  the home's files out of its reach.
+- The tests run the fixed code, which the fix agent wrote, as the user.
+  On the local runner the OS sandbox (above) confines it: on macOS it can
+  still READ outside the user's home (system files, /opt, other volumes)
+  and what it was granted inside it (the reused venv), but cannot write
+  outside the clone and the run's directory nor send what it read
+  anywhere. The allowlist keeps the user's credentials out of its
+  environment; the sandbox keeps the home's files out of its reach.
+- On the hosted runner nothing confines it but the VM (direction §3;
+  decision bead cm-2qp.11). The test command runs as the runner's own
+  user with the VM's filesystem and network, so it can read what the
+  runner's processes hold, which the allowlist does not stop: their
+  environment (on Actions, the run's GitHub token) and anything on the
+  VM's disk. A process that escapes the group (the setsid() bullet below)
+  is unconfined there too, so it can reach the run's later steps, the
+  publish included (cm-2qp.11). The boundary there is the disposable VM
+  and the scope of the run's token.
 - The OS sandbox exists on macOS and Linux only; elsewhere, or with the
   tool missing, or with Linux's unprivileged user namespaces off, the gate
-  refuses (no test command runs, no PR).
+  on the local runner refuses (no test command runs, no PR).
 - The environment is the user's checkout, not necessarily the base's
   lockfile: a venv that is ahead of or behind the base can turn a green
   base red (then nothing is opened) or the reverse. The canary checks the
@@ -246,7 +286,7 @@ from pathlib import PurePosixPath
 from typing import Optional
 
 from curamoir import os_sandbox
-from curamoir.config import DEFAULTS, load_config_text
+from curamoir.config import DEFAULTS, LOCAL_RUNNER, load_config_text
 from curamoir.git_guard import (
     GitGuardError,
     OutputCapExceeded,
@@ -301,8 +341,9 @@ _NOT_RUNNABLE = frozenset({126, 127})
 #: or a wrapper whose tool is not installed ("command not found").
 _MISSING_RUNNER = re.compile(r"No module named '?pytest'?|command not found")
 
-#: The OS sandbox every run is wrapped in (os_sandbox: its wrap() and
-#: self_test()). A module attribute so tests can put a stand-in in its place
+#: The OS sandbox every run on the local runner is wrapped in (os_sandbox:
+#: its wrap() and self_test(); never called on the hosted runner, module
+#: docstring). A module attribute so tests can put a stand-in in its place
 #: (tests/os_sandbox_stand_in.py); nothing in the package does.
 OS_SANDBOX = os_sandbox
 
@@ -611,10 +652,10 @@ def sandbox_environment(source, root=None, src=False):
     base of that PATH's `python3` (_user_base) and the version managers'
     roots are kept (_VERSION_MANAGER_ROOTS), which the fresh HOME and
     TMPDIR added per run (_run_command, each removed after it) would
-    otherwise move. A `pip install --user` pytest or a pyenv or asdf shim
-    then resolves only where the OS sandbox grants that root or user base:
-    outside the home, never under it (module docstring, "The
-    environment")."""
+    otherwise move. On the local runner a `pip install --user` pytest or a
+    pyenv or asdf shim then resolves only where the OS sandbox grants that
+    root or user base: outside the home, never under it; on the hosted
+    runner, wherever it is (module docstring, "The environment")."""
     env = {key: value for key, value in os.environ.items()
            if key in _INHERITED or key.startswith("LC_")}
     env["PYTHONDONTWRITEBYTECODE"] = "1"
@@ -652,15 +693,17 @@ def sandbox_environment(source, root=None, src=False):
     return env
 
 
-def _run_command(sandbox, argv, env, timeout, paths=(), loopback=False):
-    """One run of `argv` in the sandbox, confined by the OS sandbox
-    (OS_SANDBOX.wrap: writes only in the clone and this run's scratch
-    directory, no network): a GateRun. HOME and TMPDIR are a fresh
-    directory each inside that scratch directory, outside the clone and
-    removed afterwards, so a run neither reads the user's dotfiles (an
-    `.npmrc` token, a git credential helper) nor hands state to the next
-    run. GateError, and nothing run, if no OS sandbox is available or the
-    scratch directory cannot be made (only what was made is removed)."""
+def _run_command(sandbox, argv, env, timeout, paths=(), loopback=False, hosted=False):
+    """One run of `argv` in the sandbox, a GateRun. On the local runner it
+    is confined by the OS sandbox (OS_SANDBOX.wrap: writes only in the
+    clone and this run's scratch directory, no network); when `hosted`,
+    the VM is the boundary and `argv` runs as it is (module docstring). HOME and
+    TMPDIR are a fresh directory each inside that scratch directory,
+    outside the clone and removed afterwards, so a run neither reads the
+    user's dotfiles (an `.npmrc` token, a git credential helper) nor hands
+    state to the next run. GateError, and nothing run, if no OS sandbox
+    is available (when not `hosted`) or the scratch directory cannot be
+    made (only what was made is removed)."""
     try:
         scratch = tempfile.mkdtemp(prefix="curamoir-test-run-")
     except OSError as error:
@@ -672,7 +715,7 @@ def _run_command(sandbox, argv, env, timeout, paths=(), loopback=False):
         except OSError as error:
             raise GateError(f"the test run's HOME and TMPDIR could not be made: {error}") \
                 from error
-        wrapped = _wrapped(argv, sandbox, scratch, env, loopback)
+        wrapped = list(argv) if hosted else _wrapped(argv, sandbox, scratch, env, loopback)
         started = time.monotonic()
         try:
             # 4 bytes per character: UTF-8's widest, so the last _TAIL
@@ -711,17 +754,24 @@ def _scratch_env(sandbox, env, scratch):
 
 
 _NO_SANDBOX = "the test command was not run: no OS sandbox confines it here"
+#: What closes every no-sandbox refusal (cm-2qp.2): the local runner is the
+#: default, so a hosted runner that did not declare itself lands here.
+#: Advice only: the declaration is still checked (config.resolve_runner).
+_HOSTED_HINT = ("; if this is a hosted runner (a GitHub-hosted Actions job or a Claude "
+                "Code Routine), declare CURAMOIR_RUNNER=hosted")
 
 
 def _wrapped(argv, sandbox, scratch, env, loopback):
     """`argv` wrapped in the OS sandbox for the clone and `scratch`;
     GateError (the sweep refuses, TEST_GATE) where there is none. Never
-    the bare argv: there is no unsandboxed fallback."""
+    the bare argv: on the local runner there is no unsandboxed fallback.
+    The hosted runner's bare argv is _run_command's choice, made before
+    this is called, never a fallback from here."""
     try:
         return OS_SANDBOX.wrap(argv, clone=str(sandbox.path), run_dir=scratch,
                                read_only=_read_only(env), loopback=loopback)
     except (os_sandbox.OsSandboxUnavailable, OSError) as error:
-        raise GateError(f"{_NO_SANDBOX}: {error}") from error
+        raise GateError(f"{_NO_SANDBOX}: {error}{_HOSTED_HINT}") from error
 
 
 def _read_only(env):
@@ -820,10 +870,10 @@ def _sandbox_self_test(sandbox, env, loopback):
                                  env=_scratch_env(sandbox, env, scratch),
                                  read_only=_read_only(env), loopback=loopback)
         except os_sandbox.OsSandboxUnavailable as error:
-            raise GateError(f"{_NO_SANDBOX}: {error}") from error
+            raise GateError(f"{_NO_SANDBOX}: {error}{_HOSTED_HINT}") from error
         except OSError as error:
             raise GateError(f"{_NO_SANDBOX}: the sandbox self-test could not be set up: "
-                            f"{error}") from error
+                            f"{error}{_HOSTED_HINT}") from error
     finally:
         if scratch is not None:
             remove_tree(scratch, what="the sandbox self-test's scratch directory")
@@ -863,7 +913,7 @@ def _inside(path, root):
     return os.path.commonpath([root, path]) == root
 
 
-def _canary(sandbox, env, timeout, names, loopback=False):
+def _canary(sandbox, env, timeout, names, loopback=False, hosted=False):
     """(outside, said): what `python3`, in the tests' environment with cwd
     the sandbox, resolves from the source checkout ahead of the sandbox, as
     (what, where) pairs, and the GateResult.canary text.
@@ -874,9 +924,10 @@ def _canary(sandbox, env, timeout, names, loopback=False):
     `python3 -c` puts the cwd first itself, and a test runner's sys.path[0]
     is its own. Then the import: each of `names` whose `__file__` is
     outside the sandbox (a meta-path finder, which sys.path does not show).
-    No python3, or output that is not the canary's, checks nothing."""
+    No python3, or output that is not the canary's, checks nothing.
+    `hosted` as for _run_command."""
     run = _run_command(sandbox, ["/bin/sh", "-c", 'exec python3 -c "$0" "$@"', _CANARY, *names],
-                       env, timeout, loopback=loopback)
+                       env, timeout, loopback=loopback, hosted=hosted)
     try:
         report = json.loads(run.stdout_tail.strip().splitlines()[-1])
         path, found = report["path"], report["found"]
@@ -968,13 +1019,17 @@ def reduce_scope(candidates, trials):
 # Each grant is walked once a gate (os_sandbox.walks_cached), not once for
 # each of the self-test, the canary and every run.
 @os_sandbox.walks_cached()
-def run_test_gate(sandbox, verdict, paths=None):
+def run_test_gate(sandbox, verdict, paths=None, *, runner=LOCAL_RUNNER):
     """E3-R4 for one sweep: run the base's test command in `sandbox` with
     the fix `verdict` (fix_scope.verify_fix's, ok, with paths) accepted,
     reduce scope on red, and return a GateResult. `paths` (default
     `verdict.paths`) is the subset the runner means to open a PR with, if it
     trimmed one: every other path of the verdict is at its base content for
-    every run, so the tree tested is the PR's.
+    every run, so the tree tested is the PR's. `runner` is the run's
+    config.Runner (`run.runner`, cm-2qp.2): on `runner.hosted` the OS
+    sandbox is neither self-tested nor wrapped around any run (module
+    docstring, "On the hosted runner"); anything else, the default
+    included, is the local runner's sandboxed gate.
 
     The sandbox is left with the kept paths fixed and every other path of
     the verdict at its base. ValueError if the verdict is not ok, changed
@@ -1003,8 +1058,11 @@ def run_test_gate(sandbox, verdict, paths=None):
     env = sandbox_environment(sandbox.source, sandbox.path,
                               src=any(name.startswith("src/") for name in names))
     # Before anything of the project's runs, and before the manifest: no
-    # proven OS sandbox, no run (GateError, the sweep refuses).
-    _sandbox_self_test(sandbox, env, chosen.loopback)
+    # proven OS sandbox, no run (GateError, the sweep refuses). Not on the
+    # hosted runner, whose boundary is the VM (module docstring).
+    hosted = runner.hosted
+    if not hosted:
+        _sandbox_self_test(sandbox, env, chosen.loopback)
     git_state = snapshot_git_state(sandbox)
     held = _held(every)
     manifest = _tree(str(sandbox.path), held)
@@ -1021,7 +1079,7 @@ def run_test_gate(sandbox, verdict, paths=None):
                           tuple(runs), why, canary)
 
     outside, canary = _canary(sandbox, env, chosen.timeout, import_names(names),
-                              chosen.loopback)
+                              loopback=chosen.loopback, hosted=hosted)
     settle()
     if outside:
         result = abandoned(IMPORTS_THE_CHECKOUT, "the test environment resolves " + "; ".join(
@@ -1033,7 +1091,8 @@ def run_test_gate(sandbox, verdict, paths=None):
     def run(subset):
         _write_states(sandbox.path, {p: fixed[p] if p in subset else base[p] for p in every})
         runs.append(_run_command(sandbox, ["/bin/sh", "-c", chosen.command], env,
-                                 chosen.timeout, subset, chosen.loopback))
+                                 chosen.timeout, subset, loopback=chosen.loopback,
+                                 hosted=hosted))
         settle()
         return runs[-1].passed
 
@@ -1063,8 +1122,8 @@ def run_test_gate(sandbox, verdict, paths=None):
             result = abandoned(COMMAND_NOT_RUNNABLE, (
                 f"the test command `{chosen.command}` could not be run (exit "
                 f"{runs[-1].code}: no such command or test runner, or it could not be "
-                "executed), so nothing was tested" + _not_granted(env) + ": "
-                + runs[-1].tail.strip()[-300:]))
+                "executed), so nothing was tested"
+                + ("" if hosted else _not_granted(env)) + ": " + runs[-1].tail.strip()[-300:]))
         elif not green_base:
             result = abandoned(BASE_RED, "the tests fail at the base commit itself, with no fix "
                                          "applied, so they cannot tell a good fix from a bad one")

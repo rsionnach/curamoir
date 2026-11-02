@@ -1,0 +1,18 @@
+[
+  {
+    "sha": "8f2cfbf7077465b2c6c7065078402ef22fa9b715",
+    "filename": "docs/workflow.md",
+    "status": "added",
+    "additions": 182,
+    "deletions": 0,
+    "changes": 182
+  },
+  {
+    "sha": "421c965c596035a1d60f5cd661579ee7eb45a1b6",
+    "filename": "AGENTS.md",
+    "status": "modified",
+    "additions": 6,
+    "deletions": 0,
+    "changes": 6
+  }
+]

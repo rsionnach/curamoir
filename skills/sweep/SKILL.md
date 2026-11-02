@@ -98,8 +98,9 @@ fails if they differ.
 This skill stops after step 1: it reports the work list (its count, its
 principle ids, and each violation's location) and changes nothing. A fix
 made here, in your checkout, would reach none of those checks. The fix and
-its PR are `curamoir run sweep`'s, which the developer runs, or puts in
-their own cron entry or CI job (`/curamoir:schedule` is planned), as:
+its PR are `curamoir run sweep`'s, which the developer schedules on a
+hosted runner (the GitHub Actions workflow `/curamoir:init` offers, or a
+Routine from `/curamoir:routine`), or runs by hand:
 
 ```bash
 "${CLAUDE_PLUGIN_ROOT}"/scripts/curamoir run sweep --repo "${1:-.}"

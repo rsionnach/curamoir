@@ -131,7 +131,12 @@ curamoir.github.open_sweep_prs, runs `gh pr list --state open --limit
 `[sweep_pr_listing(item) for item in ...]`, the listing contract's
 records. `isCrossRepository` is part of that query and MUST stay in it
 (next paragraph): without it every listed record is of unknown provenance,
-and CI mode refuses until the state PR merges.
+and CI mode refuses until the state PR merges. In a Claude Code cloud
+session the same items come from `gh api repos/OWNER/REPO/pulls`
+(GitHub's REST API, cm-2qp.9: the session's proxy refuses the GraphQL `gh
+pr list` uses), mapped by curamoir.github to these same fields,
+`isCrossRepository` from the head and base repositories' ids; nothing
+here differs.
 
 **The trust boundary** (guards.pr_cap's docstring holds the rule, for
 every reader). A fork's PR has a head branch named by the fork's owner, so

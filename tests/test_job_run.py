@@ -203,3 +203,18 @@ def test_an_outcomes_field_wins_over_a_noted_field_of_the_same_name(tmp_path, re
 
     line, = job_lines(ledger)
     assert line["sync"] == "done"
+
+
+def test_a_jobrun_given_no_github_api_takes_the_cli_path_and_says_nothing(tmp_path):
+    """cm-2qp.9: a JobRun made outside run_guarded is on the 3f50a3f path,
+    and its line carries no `github_api` field."""
+    from curamoir.config import GithubApi
+
+    ledger = Ledger(tmp_path / "ledger.jsonl")
+
+    with JobRun(ledger, job="sweep") as run:
+        assert run.github_api is GithubApi.CLI
+        run.succeeded("done")
+
+    [line] = job_lines(ledger)
+    assert "github_api" not in line

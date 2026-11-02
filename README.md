@@ -88,13 +88,26 @@ cúramóir enforces *your project's own* principles. It is not a general linter.
 > [Running `curamoir-lint`](docs/curamoir-lint.md)). So
 > `/curamoir:init`, `/curamoir:status`, `/curamoir:doctor`, `/curamoir:handoff`
 > and `/curamoir:brief` all do something real, and so does the lint gate. The
-> sweep works too: `scripts/curamoir run sweep --repo <root>` runs behind the
-> guardrails, fixes the violations the lint and the tier-1 scan find in a
-> disposable clone, runs your tests, and opens at most one PR. Still to come
-> are the r5 review, grades, the promotion commands and `/curamoir:schedule`,
-> which together are most of the reason to want this. **Nothing is scheduled
-> for you yet:** `curamoir run` is the one entry point a cron entry or CI job
-> calls, but you write that entry yourself.
+> sweep works too: behind the guardrails, it fixes the violations the lint
+> and the tier-1 scan find in a disposable clone, runs your tests, and opens
+> at most one PR.
+>
+> The sweep is scheduled on a hosted runner, a disposable VM: the GitHub
+> Actions workflow `/curamoir:init` offers to write, or a Claude Code Routine
+> whose prompt and `/schedule` steps `/curamoir:routine` shows. Use one runner
+> per repository: the two share no lock and no ledger. Neither has yet been
+> exercised end to end. The Routine's cloud environment (setup script,
+> variables, network level, branch protection) is in
+> [Runners](docs/runners.md#routine-environment), and `/curamoir:routine`
+> shows it too. `scripts/curamoir run sweep --repo <root>`
+> still runs the sweep on your own machine, as the
+> [local adapter](#local-adapter). Why the hosted runner is the default, and
+> what each runner guards: [Platform-first runners](docs/direction-platform-first.md).
+> How a scheduler or another agent CLI plugs in, with the workflow as the
+> worked example: [Runners](docs/runners.md).
+>
+> Still to come are the r5 review, grades and the promotion commands, which
+> together are most of the reason to want this.
 
 cúramóir is built with cúramóir. Its own principles are in
 [`.curamoir/principles.md`](.curamoir/principles.md), and its handoffs are in
@@ -113,12 +126,12 @@ Prerequisites:
 - **`ast-grep`**, if any of your rules use `matcher: ast-grep`.
 - **`bd` (beads)**, optional: with it, findings are filed as beads too;
   without it they go to GitHub only, with a ledger note.
-- **An OS sandbox for the sweep's test run**: macOS's built-in
+- **An OS sandbox, to run the sweep on your own machine**: macOS's built-in
   `sandbox-exec`, or on Linux bubblewrap (`bwrap`) with unprivileged user
   namespaces enabled (on Ubuntu 24.04, install the `bubblewrap` package,
-  whose AppArmor profile allows them). Without one, the sweep refuses to run
-  your tests on its fixes, so it opens no PR; other platforms are not
-  supported.
+  whose AppArmor profile allows them). Without one, a local sweep refuses
+  to run your tests on its fixes, so it opens no PR; other platforms are
+  not supported. A hosted runner needs none: the VM is the boundary there.
 
 ```bash
 claude plugin marketplace add rsionnach/curamoir
@@ -132,6 +145,13 @@ Then, inside a repository:
 /curamoir:doctor    # check the install and every hook
 /curamoir:status    # see where things stand — no model calls
 ```
+
+For the scheduled sweep on GitHub Actions, accept the workflow
+`/curamoir:init` offers. Its header lists what the repository needs: the
+`ANTHROPIC_API_KEY` secret, the `CURAMOIR_REF` variable, the setting that
+lets Actions open PRs, and, if a ruleset covers the state branch
+(`curamoir/state` unless the `CURAMOIR_STATE_BRANCH` variable names
+another), a rule letting `github-actions[bot]` push to it.
 
 For development, load the plugin in place:
 
@@ -157,99 +177,139 @@ Every command is namespaced under the plugin, so each one reads `/curamoir:<name
 | `/curamoir:cost` | Month-to-date and trailing-90-day spend, projected month-end | planned |
 | `/curamoir:sync` | Reconcile beads against GitHub issues | planned |
 | `/curamoir:smoke` | Run the quickstart smoke test on demand | planned |
-| `/curamoir:schedule` | Write a local cron or launchd entry for the scheduled jobs | planned |
 
 The table doubles as the checklist. Rows switch to **working** as their epics land.
+`/curamoir:routine`, which shows the Routine prompt and its `/schedule` steps,
+is a helper and has no row.
 
 ## Guardrails
 
 An agent nobody is watching has to be predictable, so the guardrails shipped
-before any of the features:
+before any of the features. These are built for every runner; where a
+runner weakens one, the bullet and the table below say so:
 
 - **It never writes to your default branch.** Work goes to `curamoir/*` branches
   and arrives as a PR. This is enforced in code, not in a prompt.
-- **One job at a time**, via a supervisor lock. A stale lock is reported, never
-  silently overridden.
-- **A kill switch.** `touch .curamoir/PAUSE` and every scheduled job stops.
+- **One sweep at a time**, where the runner can hold it: a Routine cannot
+  (the table says how each runner does).
+- **A kill switch.** The `curamoir:paused` label, or a `.curamoir/PAUSE`
+  file, stops every scheduled job. A label that cannot be read does not
+  pause: the run goes ahead, and its ledger line says the label was not
+  checked.
 - **A spend ceiling.** Month-to-date cost is computed from the ledger before
-  each run. If a run would overspend, it refuses to start.
+  each run. If a run would overspend, it refuses to start. It does not yet
+  hold on a hosted runner (the table's Spend row).
 - **Destructive mistakes are caught.** During a job, `git reset --hard`,
   `git push --force`, `rm -rf`, a redirect that empties its own input and
   similar commands are refused, and each refusal names the safe alternative.
   This guard catches an agent's honest mistakes; it is not what keeps a
   hostile agent in (see below).
 - **An open-PR cap.** You will never come back to a wall of PRs.
-- **The sweep's test run is OS-sandboxed.** Before opening a PR the sweep runs
-  your tests on its fixes, in a throwaway clone, under `sandbox-exec` (macOS)
-  or `bwrap` (Linux). The tests can write only inside that clone and their own
-  temporary directory; cannot read your home directory beyond what the run
-  needs (the reused venv and interpreter, PATH, a version manager's installed
-  versions; never a credential directory such as `~/.ssh` or `~/.config`); have no
-  network (on macOS not even loopback unless `sweep.test_loopback: true` is
-  committed, for a suite that starts a local server); and reach no daemon's
-  socket and, on macOS, no system service that acts outside the sandbox
-  (`open`, `launchctl`, AppleEvents, DNS). The sandbox is self-tested before
-  every gate; where it is missing or fails, the sweep refuses rather than run
-  the tests unconfined. On macOS the tests can still read files outside your
-  home directory.
-- **Redaction** on everything it writes.
-
-### Where the security boundary is
-
-What contains an agent that has gone wrong, by accident or because something it
-read told it to, is not the command guard but these, each enforced in code and
-tested:
-
-- **No job's agent has a shell.** The sweep's scan gets only Read, Grep and
-  Glob, and its fix agent Edit as well. Any other tool, Bash above all, is
-  refused when the job is set up: today every shell is refused outright, and
-  one will only ever be allowed to a job that runs under a verified
-  operating-system sandbox. With no shell, a file the agent writes is never
-  run by it; the sweep's tests run it only inside the OS sandbox below.
 - **It works in a throwaway clone, never your checkout.** The git cúramóir
   runs there is hardened: no hooks, filters, diff drivers, pager or other
   configuration the clone could plant ever run, and a planted `.git` or
   `.gitattributes`, in any case, refuses the run. Only the reviewed patch
   of the files in scope leaves the clone; anything else the agent touched is
   put back or refuses the run.
-- **Your tests run OS-sandboxed** when the sweep checks its fixes (above).
+- **The repository's own Claude Code configuration never loads.** The scan
+  and the fix agent run Claude Code in restricted mode, so the clone's
+  settings, hooks and plugins are not read; the command guard above comes
+  back through cúramóir's own settings.
+- **Redaction** on everything it writes.
 
-What this does not yet cover: the fix agent's own reads, and any edit it
-attempts outside the clone, are fenced by Claude Code's permission rules
-(scoped to the clone, with every other path denied), not by an operating-system
-sandbox, and Claude Code applies those rules to Grep and Glob on a best-effort
-basis. Nothing outside the clone is reviewed by the sweep.
+### Where the security boundary is
+
+What contains an agent that has gone wrong, by accident or because something
+it read told it to, is not the command guard but the runner. Which runner a
+run is on is declared, never guessed: `CURAMOIR_RUNNER=hosted`, which the
+workflow and the Routine prompt set, is accepted only on a GitHub-hosted
+Actions runner or in a Claude Code cloud session, and refused anywhere else.
+Unset, the run is local. Each runner, as built:
+
+| | Hosted (GitHub Actions, Claude Code Routine) | Local (your machine) |
+|---|---|---|
+| Process boundary | The VM, discarded after the run | An OS sandbox (`sandbox-exec`, `bwrap`) around your tests, self-tested before every gate; missing or failing, the sweep refuses |
+| Your checkout | Not on the VM | Out of reach: the work happens in a throwaway clone |
+| Credentials at risk | What the run holds: on Actions its `GITHUB_TOKEN`, scoped by the workflow's `permissions:`; on a Routine the session's GitHub access, which acts as you; and its model credentials | Your home directory |
+| Agents' tools | Scan: Read, Grep, Glob. Fix: those, Edit, and Bash for the repository's own test command (no Bash if that command cannot be named safely) and Claude Code's built-in read-only commands; git denied | Scan: Read, Grep, Glob. Fix: those and Edit; no shell |
+| Your tests | Run unsandboxed in the clone, with the VM's network | Run in the OS sandbox, with no network (loopback only as configured) |
+| One sweep at a time | On Actions, the workflow's concurrency group queues a second run. On a Routine nothing does: each run's lock is on its own VM, so a scheduled run and **Run now** can overlap; don't start a run while one is going | The supervisor lock ([Local adapter](#local-adapter)) |
+| Kill switch | The label, or a committed `.curamoir/PAUSE` | The label, or `.curamoir/PAUSE` in your checkout |
+| Spend | The ledger records tokens; GitHub Actions bills the API key, a Routine your Claude usage. The monthly ceiling does not yet see earlier hosted runs, so it does not stop them | The ledger prices tokens against the monthly ceiling |
+| Memory between runs | Only what is committed: the ledger lines go to a state branch, never the default branch: `curamoir/state` from the workflow (its `CURAMOIR_STATE_BRANCH` variable can name another), `claude/curamoir-state` from a Routine (the prompt's own name, so the two runners' ledgers never mix) | The checkout |
+
+### Hosted runner limits
+
+The fix agent's prompt on a hosted runner forbids git, `bd`, `gh`, installs
+and the network, but the prompt is not the fence: a git command that writes
+the clone's `.git` (or moves HEAD) refuses the whole run, and a stray file
+is dropped from the patch.
+
+Past that, the boundary is the disposable VM and the scope of the run's
+token, nothing finer. Your tests run there unsandboxed, as the runner's
+user. The fix agent's process is not given the run's GitHub and Actions
+tokens, but the fix agent's Bash, and code the tests run, can still read
+what the sweep holds (on Actions, the run's `GITHUB_TOKEN` and
+`ANTHROPIC_API_KEY`), and a process either leaves behind can reach the
+run's later steps, the PR included. This is not solved yet. Keep the
+workflow's `permissions:` as written. Add no other secret to the sweep
+step's `env:`: only the GitHub and Actions tokens are kept from the agent,
+by name, so a secret under any other name reaches it.
+
+### Local adapter
+
+With `CURAMOIR_RUNNER` unset (or `local`), on your own machine, by hand
+(`scripts/curamoir run sweep --repo <root>`) or from your own cron or
+launchd entry, the sweep runs as the local adapter, behind these instead:
+
+- **Your tests run OS-sandboxed**, under `sandbox-exec` (macOS) or `bwrap`
+  (Linux). They can write only inside the clone and their own temporary
+  directory; cannot read your home directory beyond what the run needs (the
+  reused venv and interpreter, PATH, a version manager's installed versions;
+  never a credential directory such as `~/.ssh` or `~/.config`); have no
+  network (on macOS not even loopback unless `sweep.test_loopback: true` is
+  committed, for a suite that starts a local server); and reach no daemon's
+  socket and, on macOS, no system service that acts outside the sandbox
+  (`open`, `launchctl`, AppleEvents, DNS). Where the sandbox is missing or
+  fails its self-test, the sweep refuses rather than run the tests
+  unconfined. On macOS the tests can still read files outside your home
+  directory.
+- **No local job's agent has a shell.** Any tool beyond those in the table,
+  Bash above all, is refused when the job is set up; only a hosted runner's
+  fix agent gets one. With no shell, a file the agent writes is never run by
+  it; the tests run it only inside the OS sandbox.
+- **The agent's own `claude -p` is not OS-sandboxed.** It runs as you. Its
+  reads, and any edit it attempts outside the clone, are fenced by Claude
+  Code's permission rules (scoped to the clone, with every other path
+  denied), which Claude Code applies to Grep and Glob on a best-effort
+  basis. Nothing outside the clone is reviewed by the sweep.
+- **A killed job can leave its lock.** The lock is per repository, so while
+  a job runs every session in that repository is treated as inside it, yours
+  included, and the command guard is on there. A stale lock, left by a job
+  that was killed, is reported, never overridden, and keeps the guard on in
+  your own sessions until you clear it; the denial says so, and
+  `/curamoir:status` and `/curamoir:doctor` say whether the lock looks
+  stale.
+- **`CURAMOIR_JOB` is the guard's other signal.** `curamoir run` sets it
+  for the job and everything it starts; in a clone, where there is no lock,
+  it is the only one, so anything that drops it from a process's
+  environment stops the guard there. Any non-empty value counts, `0` and
+  `false` included, so do not export it in your own shell.
 
 ### Known limits
 
-The guardrails have three known limits:
+On every runner:
 
 - **The command guard catches mistakes, not a hostile agent.** It refuses
   destructive commands an agent might honestly type, along with inline code
   and other constructions it cannot read, and inside a job it refuses anything
   it cannot judge. But a shell and its tools offer more routes than a list of
   rules can close, so it is deliberately not the security boundary: that is
-  why no job's agent has a shell (above). A Claude Code hook that times out
-  fails *open*; the guard is bounded inside its 5-second budget, and tested
-  to be.
+  why no local job's agent has a shell, and why a hosted fix agent's shell
+  is contained by the VM (above). A Claude Code hook that times out fails
+  *open*; the guard is bounded inside its 5-second budget, and tested to be.
 - **Redaction is pattern-based.** It catches the shapes it knows. That reduces
   exposure but doesn't guarantee nothing leaks.
-- **The command denylist knows a job only by its signals.** It enforces only
-  inside a cúramóir job, which it detects from the `CURAMOIR_JOB` environment
-  variable that `curamoir run` sets for the job and everything it starts, with
-  the supervisor lock that `curamoir run` holds as a fallback. Because the
-  lock is per-repository, while a job runs every session in that repository
-  is treated as inside it, yours included. In a clone of the repository,
-  where there is no lock, the variable is the only signal, so anything that
-  drops it from a process's environment stops enforcement there. A stale lock,
-  left by a job that was killed, keeps the denylist on in your own sessions
-  until you clear it; the denial says so, and `/curamoir:status` and
-  `/curamoir:doctor` say whether the lock looks stale. The sweep's fix step
-  runs Claude Code in restricted mode, which loads no plugin, so it loads the
-  denylist hook through its own settings (it has no Bash tool, and cannot be
-  given one without an OS sandbox). Any
-  non-empty `CURAMOIR_JOB` counts, `0` and `false` included, so do not export
-  it in your own shell.
 
 ## What it deliberately does not do
 
@@ -266,13 +326,15 @@ The guardrails have three known limits:
 
 ## Cost
 
-Local mode is the default. It uses your existing Claude subscription, so it
-costs nothing beyond that. CI mode costs API money, because subscription auth
-isn't available there.
+The GitHub Actions workflow costs API money: its model calls are billed per
+token to the `ANTHROPIC_API_KEY` it is given. (Whether a Claude subscription
+may be used unattended there is an open question, so the workflow does not
+wire it.) A Routine runs as you and counts against your Claude usage, as
+does a sweep on your own machine. The ledger records every run's tokens.
 
 A measured cost table will replace this paragraph before release. The current
-estimate for CI mode on a small repo is roughly $4–5 a month against a default
-$15 ceiling. That figure is an estimate, not a measurement.
+estimate for the workflow on a small repo is roughly $4–5 a month against a
+default $15 ceiling. That figure is an estimate, not a measurement.
 
 ## Licence
 

@@ -1,0 +1,11 @@
+# `git ls-remote https://github.com/astral-sh/uv`, captured 2026-11-01
+# (cm-2qp.5 provenance review), trimmed to these lines and otherwise as git
+# printed them. uv's tags are lightweight (no `^{}` lines anywhere in the
+# full listing): the tag line names the commit itself. `ag/aggressive-forking`
+# is a real branch with a slash. Lines starting with `#` are this header.
+564a2074b02eb9de5aaaa9491ed74357ade0332f	HEAD
+d4fd44a573de5076bb3510817efa35d3d25c6a1e	refs/heads/ag/aggressive-forking
+564a2074b02eb9de5aaaa9491ed74357ade0332f	refs/heads/main
+39b6886536b20a239453b9abce590bbadd99a314	refs/tags/0.9.0
+9887ef5bd73c7e01fdef489cd36bc5e040c59d23	refs/tags/0.9.1
+44f5a14f401d5fc946acb82e111686cc6a9a7a1b	refs/tags/0.9.10

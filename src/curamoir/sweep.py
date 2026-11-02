@@ -49,6 +49,7 @@ from collections import OrderedDict
 from dataclasses import dataclass
 from pathlib import Path
 
+from curamoir import plugin_files
 from curamoir.lint_report import (
     SEVERITIES,
     LintReport,
@@ -57,8 +58,10 @@ from curamoir.lint_report import (
     parse_report,
 )
 
-#: The standalone runner beside this checkout's `src/`, which is the one CI runs.
-LINT = Path(__file__).resolve().parents[2] / "scripts" / "curamoir-lint"
+#: The standalone runner: the one beside this checkout's `src/`, which is
+#: the one CI runs, or an installed wheel's `curamoir-lint` console script
+#: (curamoir.plugin_files.LINT, cm-2qp.10).
+LINT = plugin_files.LINT
 
 #: The lint's own bound on the run, passed as `--timeout`: its default.
 DEFAULT_TIMEOUT = 600

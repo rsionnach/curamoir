@@ -10,6 +10,17 @@ requires-python = ">=3.12"
 # reports it as a missing prerequisite. See the risk recorded on E1-R4.
 dependencies = ["pyyaml>=6"]
 
+# The commands a hosted runner calls (cm-2qp.10): the Actions workflow and the
+# Routine prompt run `uvx --from git+https://github.com/rsionnach/curamoir@<SHA>
+# curamoir ...` in a fresh VM, where uvx builds this wheel, installs it with
+# PyYAML into a venv of its own and runs the `curamoir` script; nothing reads
+# a plugin checkout there (curamoir.plugin_files). `curamoir-lint` is the
+# process the sweep starts for its work list (curamoir.sweep.LINT), and the
+# same standalone gate as scripts/curamoir-lint for anyone who installs it.
+[project.scripts]
+curamoir = "curamoir.cli:main"
+curamoir-lint = "curamoir.lint:main"
+
 [project.optional-dependencies]
 dev = [
     "pytest>=8",
@@ -24,6 +35,18 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/curamoir"]
+
+# The plugin files an installed cúramóir reads, copied into the package at
+# build time (curamoir.plugin_files: its presence is what marks an install).
+# hooks.json for the fix step's denylist --settings; templates/ for
+# `curamoir init`. Not scripts/: their launchers need a checkout, and an
+# install reaches the same code through its console scripts and interpreter.
+# An editable install (`uv sync` here) gets the copy too, in site-packages
+# beside its .pth, but imports the package from src/, which has none, so it
+# reads the checkout (tests/test_plugin_files.py).
+[tool.hatch.build.targets.wheel.force-include]
+"hooks/hooks.json" = "curamoir/_plugin/hooks/hooks.json"
+"templates" = "curamoir/_plugin/templates"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
