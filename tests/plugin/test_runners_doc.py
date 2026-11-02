@@ -9,7 +9,9 @@ so); the run_fix_step obligations name fix_step's own constants; every
 YAML excerpt the page quotes is still in templates/github/curamoir-sweep.yml
 (the template stays the single source, and an excerpt it no longer holds is
 a stale page); the exit codes are runner's and state_branch's; and the
-Routine environment section stays the marked place cm-2qp.10 fills. The
+Routine environment section is a subsection of the Routine section (its
+text, the same as /curamoir:routine's section 3, is pinned in
+tests/plugin/test_routine_command.py, cm-2qp.10). The
 user's instruction says "No adapter code", so the page carries no Python.
 """
 
@@ -170,14 +172,16 @@ def test_it_has_the_routine_cursor_and_codex_sections():
     assert "the local adapter" in flat(section("Codex"))
 
 
-def test_the_routine_environment_section_is_the_place_cm_2qp_10_fills():
+def test_the_routine_environment_section_holds_the_recipe():
     """A subsection of the Routine section, so its anchor stays
-    #routine-environment whatever the Routine section's own text."""
+    #routine-environment (the README links it) whatever the Routine
+    section's own text; the recipe is the whole of it, between its markers."""
     environment = section("Routine environment")
 
     assert "### Routine environment\n" in section("Claude Code Routine")
-    assert "<!-- cm-2qp.10" in environment
-    assert "cm-2qp.10" in COMMAND.read_text(encoding="utf-8")
+    assert environment.strip().startswith("<!-- routine-environment:start")
+    assert environment.strip().endswith("<!-- routine-environment:end -->")
+    assert "](docs/runners.md#routine-environment)" in README.read_text(encoding="utf-8")
 
 
 def test_operator_text_names_no_bead_ids_outside_comments():

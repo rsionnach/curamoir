@@ -261,13 +261,124 @@ report for what the sweep did.
 
 ### Routine environment
 
-<!-- cm-2qp.10 fills this section: the Routine's cloud environment recipe
-(setup script, environment variables, network access level, and the
-default branch's protection rule), word for word the same text as
-commands/routine.md section 3. Until then it says only what follows. -->
+<!-- routine-environment:start. The same text in docs/runners.md ("Routine
+environment") and commands/routine.md (section 3), up to the end marker;
+tests/plugin/test_routine_command.py compares them. -->
 
-Not written yet. Until it is, a Routine made from `/curamoir:routine` is
-not expected to complete a sweep; use the GitHub Actions workflow.
+Make a cloud environment for this Routine alone (the variables below apply
+to every session that uses it), and select it in the Routine's **Cloud
+environment**. There are three parts to configure in it: the setup script,
+the environment variables and the network access level. Then one setting
+on GitHub, and two things to expect in a run.
+
+**Setup script.** Paste this as the environment's setup script. It runs as
+root before Claude Code starts. It must exit 0, or the session does not
+start, and finish in under five minutes, or the environment is not cached
+and the script runs again before every run. uv and gh come preinstalled in
+a cloud session; it installs only what is missing, including a Python of
+3.12 or later for uvx (so a run does not download one), gives each install
+at most a minute where `timeout` exists, and reports a failed install in the
+session's setup log rather than failing (without ast-grep the sweep
+refuses, saying why; bd is not needed by the sweep).
+
+```bash
+#!/bin/bash
+set -u
+AST_GREP_VERSION=0.51.0
+BD_VERSION=0.60.0
+bounded() {
+  if command -v timeout >/dev/null 2>&1; then timeout 60 "$@"; else "$@"; fi
+}
+command -v uv >/dev/null 2>&1 || bounded pip install --quiet uv || echo "setup: uv not installed"
+uv python find '>=3.12' >/dev/null 2>&1 || bounded uv python install 3.12 \
+  || echo "setup: Python 3.12 not installed"
+command -v ast-grep >/dev/null 2>&1 || bounded env UV_TOOL_BIN_DIR=/usr/local/bin \
+  uv tool install "ast-grep-cli==${AST_GREP_VERSION}" || echo "setup: ast-grep not installed"
+command -v bd >/dev/null 2>&1 || bounded npm install --global --silent "@beads/bd@${BD_VERSION}" \
+  || echo "setup: bd not installed"
+exit 0  # always 0, and the whole script in under five minutes
+```
+
+ast-grep is pinned to the GitHub Actions workflow's `AST_GREP_VERSION`; raise
+both together. It comes from PyPI, on the Trusted list. bd's npm package
+fetches its binary from bd's GitHub releases, which a cloud session has not
+yet been seen to reach; if it cannot, the log says "setup: bd not
+installed" and the sweep runs without it.
+
+**Environment variables.** One per line, as the environment's variables
+(`.env` format). Put no token or key here: anyone who uses the environment
+can read them.
+
+```text
+CURAMOIR_RUNNER=hosted
+BASH_DEFAULT_TIMEOUT_MS=1800000
+CLAUDE_CODE_RETRY_WATCHDOG=1
+```
+
+- `CURAMOIR_RUNNER=hosted` declares the hosted runner for every cúramóir
+  command in the session (the prompt also sets it on each command). It is
+  accepted because every cloud session sets `CLAUDE_CODE_REMOTE=true`.
+- `BASH_DEFAULT_TIMEOUT_MS=1800000` makes the Bash tool's default timeout
+  30 minutes (the default is 2). A command still running then is moved to
+  the background, where it can run up to 30 more minutes before Claude Code
+  stops it; only a value above 1800000 lengthens that background limit. So
+  a sweep gets about an hour in all, the prompt's own limit, and a sweep
+  longer than 30 minutes relies on that background time. If your sweeps
+  take longer than an hour, set a larger value here and raise the prompt's
+  60 minutes (its step 2) with it: the two move together, and either alone
+  still stops the sweep at the lower one.
+- `CLAUDE_CODE_RETRY_WATCHDOG=1` is Claude Code's setting for unattended
+  sessions: it retries `429` and `529` capacity errors indefinitely, backing
+  off up to 5 minutes, instead of failing after a few attempts, and retries
+  other transient errors for about three hours. A spend limit or exhausted
+  usage credits still fail at once. The sweep's own `claude -p` calls inherit it.
+
+**Network access: Trusted**, the default level. If it is set too narrow,
+the setup log shows "setup: ... not installed" lines and a run's step 1 or
+2 fails to fetch cúramóir. Trusted reaches the package
+registries the setup script installs from; GitHub goes through the session's
+GitHub proxy whatever the level, so nothing wider is needed.
+
+The prompt fetches cúramóir from GitHub, `git ls-remote` of
+`https://github.com/rsionnach/curamoir` in step 1 and
+`uvx --from git+https://github.com/rsionnach/curamoir@<SHA>` in steps 2
+and 3, through that proxy. The proxy serves API requests and source
+archives only for the repositories attached to the session (any other gets
+a 403 saying it "is not enabled for this session"), and the cloud
+environment documentation does not say whether a git fetch of a public
+repository that is not attached gets through. A Routine that sweeps
+rsionnach/curamoir itself has it attached. For any other repository this
+is not yet verified: if step 1 reports that 403, this Routine cannot fetch
+cúramóir, and that repository's sweep has to run from the GitHub Actions
+workflow instead.
+
+**Also on GitHub: branch protection on the default branch.** Set this
+before the first **Run now**. Protect the default
+branch with a ruleset (or a branch protection rule) that requires a pull
+request and blocks force pushes, with no bypass for you. The Routine pushes
+as you, and GitHub applies rules to the access you connected, so a rule you
+can bypass does not stop its push. The sweep never pushes to the default
+branch; the rule makes sure nothing else in the session can. Target the
+default branch only: the Routine must still be able to push
+`claude/curamoir-state` and the sweep's own branches (`curamoir/` unless
+`guardrails.branch_prefix` says otherwise).
+
+What to expect in a run:
+
+**GitHub through REST.** In a cloud session (`CLAUDE_CODE_REMOTE=true`,
+whatever `CURAMOIR_RUNNER` says) cúramóir asks GitHub through `gh api` REST
+calls, because the proxy refuses GraphQL (`gh pr`, `gh issue` and
+`gh label list` get a 403 there), and the run's job line carries
+`github_api: rest` besides `runner` and `transcript`. It names the
+repository from origin's push URL. What origin's URL looks like inside a
+cloud session is not documented; if it is not a GitHub repository URL, the
+sweep refuses before it clones (reason `sweep_base`), and that refusal is
+the cue to report it.
+
+**One run at a time.** Nothing keeps two runs of the Routine apart: each
+run's lock is on its own VM. Do not press **Run now** while a run is going.
+
+<!-- routine-environment:end -->
 
 ## Seam B: the agent runner
 

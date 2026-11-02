@@ -26,6 +26,7 @@ from pathlib import Path
 import pytest
 
 from curamoir import runner, state_branch
+from curamoir.config import GithubApi
 
 ROOT = Path(__file__).resolve().parents[2]
 COMMAND = ROOT / "commands" / "routine.md"
@@ -135,14 +136,184 @@ def test_the_command_suggests_a_slot_one_runner_and_how_to_read_a_run():
     assert "A run whose report lacks step 3's result kept no ledger line." in body
 
 
-def test_the_command_leaves_a_marked_place_for_the_environment_recipe():
-    """cm-2qp.10 writes the cloud environment recipe (setup script, variables,
-    network level); until then the command says it is missing, not a guess."""
-    body = COMMAND.read_text(encoding="utf-8")
+RUNNERS = ROOT / "docs" / "runners.md"
+#: What the cloud environment recipe is wrapped in, in both files.
+RECIPE = re.compile(r"<!-- routine-environment:start.*?<!-- routine-environment:end -->",
+                    flags=re.DOTALL)
 
-    assert "cm-2qp.10" in body
-    assert "<!-- cm-2qp.10" in body
-    assert "Say so plainly, and do not suggest one" in flat(body)
+
+def recipe(path):
+    (found,) = RECIPE.findall(path.read_text(encoding="utf-8"))
+    return found
+
+
+def setup_script():
+    (script,) = bash_blocks(recipe(COMMAND))
+    return script
+
+
+def test_the_command_and_the_runners_page_carry_the_same_recipe_word_for_word():
+    """cm-2qp.10: one recipe, printed by /curamoir:routine (section 3) and
+    written into docs/runners.md ("Routine environment"); the two may not
+    drift apart."""
+    assert recipe(COMMAND) == recipe(RUNNERS)
+    body = COMMAND.read_text(encoding="utf-8")
+    assert body.index("## 3. The cloud environment") < body.index("<!-- routine-environment:start")
+
+
+def test_the_command_shows_the_recipe_and_never_runs_it():
+    section_3 = flat(COMMAND.read_text(encoding="utf-8").split("## 3. The cloud environment")[1])
+
+    assert "as it is written" in section_3
+    assert "Do not run the setup script or any command in it here" in section_3
+    assert "docs/runners.md" in section_3
+
+
+def test_the_recipe_no_longer_says_it_is_missing():
+    for text in (COMMAND.read_text(encoding="utf-8"), RUNNERS.read_text(encoding="utf-8"),
+                 README.read_text(encoding="utf-8")):
+        flattened = flat(text)
+        assert "not expected to complete a sweep" not in flattened
+        assert "not written up" not in flattened
+        assert "Not written yet" not in flattened
+
+
+def test_the_setup_script_installs_only_what_is_missing_and_exits_0():
+    """The cloud environment rules: exit 0 or the session does not start;
+    under about five minutes or it is not cached. Each tool is installed
+    only when `command -v` cannot find it, and a failed install is reported,
+    not fatal, so the last command is the script's `exit 0`."""
+    script = setup_script()
+    lines = [line for line in script.splitlines() if line.strip()]
+
+    assert lines[0] == "#!/bin/bash"
+    assert lines[-1].startswith("exit 0")
+    assert "five minutes" in lines[-1]
+    assert "set -e" not in script
+    for tool in ("uv", "ast-grep", "bd"):
+        assert f"command -v {tool} >/dev/null 2>&1 ||" in script, tool
+        assert f'echo "setup: {tool} not installed"' in script, tool
+
+
+def test_the_setup_script_pins_ast_grep_to_the_workflows_version():
+    workflow = (ROOT / "templates" / "github" / "curamoir-sweep.yml").read_text(encoding="utf-8")
+    (pinned,) = re.findall(r'AST_GREP_VERSION: "([^"]+)"', workflow)
+
+    assert f"AST_GREP_VERSION={pinned}\n" in setup_script()
+    assert 'uv tool install "ast-grep-cli==${AST_GREP_VERSION}"' in setup_script()
+    assert re.search(r'npm install --global --silent "@beads/bd@\$\{BD_VERSION\}"',
+                     setup_script())
+
+
+def test_the_setup_script_runs_in_bash(tmp_path):
+    """With every tool already present it installs nothing and exits 0.
+    (What it installs against the real registries is the first Routine
+    run's to show.)"""
+    for tool in ("uv", "ast-grep", "bd"):
+        stand_in = tmp_path / tool
+        stand_in.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        stand_in.chmod(0o755)
+    ran = subprocess.run(["bash", "-c", setup_script()], capture_output=True, text=True,
+                         env={"PATH": f"{tmp_path}:/usr/bin:/bin"}, timeout=30)
+
+    assert ran.returncode == 0, ran.stderr
+    assert ran.stdout == ""
+
+
+def stand_ins(directory, **tools):
+    """Executables named after `tools`, each exiting with its given code."""
+    directory.mkdir(exist_ok=True)
+    for tool, code in tools.items():
+        path = directory / tool
+        path.write_text(f"#!/bin/sh\nexit {code}\n", encoding="utf-8")
+        path.chmod(0o755)
+    return directory
+
+
+def test_with_uv_missing_and_pip_failing_the_setup_script_still_exits_0(tmp_path):
+    """No uv and a pip that fails: uv, the Python and ast-grep (which need
+    uv) are reported not installed, bd is present, and the script exits 0,
+    so the session still starts and the sweep says what is missing. Where
+    `timeout` exists each install is run under it."""
+    bin_directory = stand_ins(tmp_path / "bin", pip=1, bd=0)
+    log = tmp_path / "timeout.log"
+    (bin_directory / "timeout").write_text(
+        f'#!/bin/sh\necho "$@" >> {log}\nshift\nexec "$@"\n', encoding="utf-8")
+    (bin_directory / "timeout").chmod(0o755)
+    ran = subprocess.run(["bash", "-c", setup_script()], capture_output=True, text=True,
+                         env={"PATH": f"{bin_directory}:/usr/bin:/bin"}, timeout=30)
+
+    assert ran.returncode == 0, ran.stderr
+    assert ran.stdout.splitlines() == ["setup: uv not installed",
+                                       "setup: Python 3.12 not installed",
+                                       "setup: ast-grep not installed"]
+    assert log.read_text(encoding="utf-8").splitlines()[0] == "60 pip install --quiet uv"
+
+
+def test_the_setup_script_runs_without_timeout_too(tmp_path):
+    bin_directory = stand_ins(tmp_path / "bin", pip=1, bd=0, **{"ast-grep": 0})
+    ran = subprocess.run(["/bin/bash", "-c", setup_script()], capture_output=True, text=True,
+                         env={"PATH": str(bin_directory)}, timeout=30)
+
+    assert ran.returncode == 0, ran.stderr
+    assert ran.stdout.splitlines() == ["setup: uv not installed",
+                                       "setup: Python 3.12 not installed"]
+
+
+def test_the_recipe_is_in_the_order_it_is_set_up():
+    """Three parts of the environment first, then GitHub's branch
+    protection (before the first Run now), then what a run looks like; and
+    /schedule's step 5 says to make the environment before selecting it."""
+    text = flat(recipe(COMMAND))
+    order = ["**Setup script.**", "**Environment variables.**", "**Network access: Trusted**",
+             "**Also on GitHub: branch protection on the default branch.**",
+             "What to expect in a run:", "**GitHub through REST.**", "**One run at a time.**"]
+
+    assert [text.index(part) for part in order] == sorted(text.index(part) for part in order)
+    assert "three parts to configure" in text
+    assert "before the first **Run now**" in text
+    assert ("Cloud environment: make it first, as section 3 describes (setup script, "
+            "variables, network level), then select it here.") in flat(
+        COMMAND.read_text(encoding="utf-8"))
+
+
+def test_the_recipe_gives_the_users_variables_exactly():
+    """The user's instruction: these three, these values. What each does is
+    stated, including that 1800000 is exactly the background limit, which
+    only a larger value lengthens."""
+    text = recipe(COMMAND)
+    (variables,) = re.findall(r"```text\n(.*?)```", text, flags=re.DOTALL)
+
+    assert variables.split() == ["CURAMOIR_RUNNER=hosted", "BASH_DEFAULT_TIMEOUT_MS=1800000",
+                                 "CLAUDE_CODE_RETRY_WATCHDOG=1"]
+    assert "only a value above 1800000 lengthens that background limit" in flat(text)
+    assert ("If your sweeps take longer than an hour, set a larger value here and raise the "
+            "prompt's 60 minutes (its step 2) with it: the two move together") in flat(text)
+    assert "running 60 minutes after it started" in flat(PROMPT.read_text(encoding="utf-8"))
+    assert "Put no token or key here" in flat(text)
+
+
+def test_the_recipe_names_the_network_level_branch_protection_and_the_fetch():
+    text = flat(recipe(COMMAND))
+
+    assert "**Network access: Trusted**" in text
+    assert "git ls-remote" in text and "uvx --from git+https://github.com/rsionnach/curamoir" in text
+    assert "is not enabled for this session" in text
+    assert "**Also on GitHub: branch protection on the default branch.**" in text
+    assert "with no bypass for you" in text
+    assert "`claude/curamoir-state`" in text
+
+
+def test_the_recipe_says_github_goes_through_rest_and_what_the_job_line_says():
+    text = flat(recipe(COMMAND))
+
+    assert "`gh api` REST" in text
+    assert f"`github_api: {GithubApi.REST.value}`" in text
+    assert "origin's push URL" in text and "`sweep_base`" in text
+
+
+def test_the_recipe_says_not_to_press_run_now_during_a_run():
+    assert "Do not press **Run now** while a run is going." in flat(recipe(COMMAND))
 
 
 def test_the_command_says_to_remove_connectors_and_allow_the_state_push():

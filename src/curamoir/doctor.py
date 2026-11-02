@@ -22,6 +22,7 @@ import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from curamoir import plugin_files
 from curamoir.config import ConfigError, load_config_text
 from curamoir.guards.lock import read_lock
 from curamoir.repo_config import CONFIG_PATH
@@ -324,7 +325,7 @@ _HOOK_PROBES = {
 
 def _registered_hook_events():
     """The events hooks.json actually registers."""
-    path = Path(__file__).resolve().parents[2] / "hooks" / "hooks.json"
+    path = plugin_files.HOOKS_JSON
     try:
         return list(json.loads(path.read_text(encoding="utf-8")).get("hooks", {}))
     except (ValueError, OSError):
@@ -344,6 +345,16 @@ def _check_hooks(repo):
     E1-R4 says "verify each hook fires (dry-run)". The file existing proves
     nothing about whether a hook actually runs under the installed layout.
     """
+    if plugin_files.INSTALLED:
+        # An installed package (`uvx --from git+...`, cm-2qp.10) is not the
+        # Claude Code plugin: nothing registers its hooks.json with Claude
+        # Code, and it carries no launcher scripts to probe. Five "missing"
+        # errors would be true of the files and false of the setup.
+        return [Finding(
+            "hooks", "ok",
+            "not probed: this cúramóir is an installed package, and the hooks are "
+            "registered by the Claude Code plugin, not by it",
+        )]
     events = _registered_hook_events()
     if not events:
         return [Finding(
@@ -395,7 +406,7 @@ def _probe_target(repo, probe, probe_target=None):
 
 
 def _probe_hook(repo, event, probe, script_path=None, probe_target=None):
-    wrapper = script_path or Path(__file__).resolve().parents[2] / "scripts" / probe["script"]
+    wrapper = script_path or plugin_files.SCRIPTS / probe["script"]
     label = f"hook ({event})"
     if not wrapper.is_file():
         return Finding(label, "error", f"{wrapper} is missing",

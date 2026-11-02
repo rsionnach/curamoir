@@ -96,8 +96,10 @@ cúramóir enforces *your project's own* principles. It is not a general linter.
 > Actions workflow `/curamoir:init` offers to write, or a Claude Code Routine
 > whose prompt and `/schedule` steps `/curamoir:routine` shows. Use one runner
 > per repository: the two share no lock and no ledger. Neither has yet been
-> exercised end to end, and the Routine's cloud environment is not written up
-> yet, so start with the workflow. `scripts/curamoir run sweep --repo <root>`
+> exercised end to end. The Routine's cloud environment (setup script,
+> variables, network level, branch protection) is in
+> [Runners](docs/runners.md#routine-environment), and `/curamoir:routine`
+> shows it too. `scripts/curamoir run sweep --repo <root>`
 > still runs the sweep on your own machine, as the
 > [local adapter](#local-adapter). Why the hosted runner is the default, and
 > what each runner guards: [Platform-first runners](docs/direction-platform-first.md).

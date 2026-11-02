@@ -17,6 +17,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
+from curamoir import plugin_files
+
 # Never modules: build artefacts, packaging metadata, docs, and vendored code.
 # Two different questions, so two lists. NOT_SOURCE answers "is this code at
 # all?"; NEVER_MODULES answers "should this code be graded?".
@@ -288,7 +290,9 @@ def _has_suffix(repo, suffix):
 
 
 def _bundled_templates():
-    return Path(__file__).resolve().parents[2] / "templates"
+    """The checkout's templates/, or an installed wheel's copy of it
+    (curamoir.plugin_files, cm-2qp.10)."""
+    return plugin_files.TEMPLATES
 
 
 def _copy_template(source, destination):
