@@ -1,38 +1,57 @@
 #!/usr/bin/env bash
 # PreToolUse hook (matcher "Agent|Task") for curamoir's R5 supervisor.
 # Ported from nthlayer-ecosystem/.claude/hooks/r5-parallel-block.sh (cm-99l),
-# with two fixes:
-#   - it is registered for the Agent tool as well as Task (the subagent tool
-#     is now called Agent; a "Task"-only matcher never fires), and
-#   - layer B blocks a dispatch of ANY subagent type while a reviewer is in
-#     flight, not only pr-review-toolkit:code-reviewer — a reviewer briefed
-#     as general-purpose must not slip past it.
+# with these changes:
+#   - registered for the Agent tool as well as Task (the tool's current
+#     name; a "Task"-only matcher never fires);
+#   - layer B applies to a dispatch of ANY subagent type, and records the
+#     reviewer's dispatch itself, atomically (r5-state.sh claim), so of two
+#     dispatches issued in one message only the first is let through;
+#   - layer A honours the lock's lease, so a crashed holder blocks other
+#     sessions for at most LEASE_SECONDS, not forever.
 #
-# Two layers, in order:
+#   A. Cross-session run lock. If <R5_ROOT>/.claude/r5-supervisor.lock is
+#      held, with a live lease, by a different Claude Code session, refuse
+#      every subagent dispatch from this one.
 #
-#   A. Cross-session run-level mutex. If <R5_ROOT>/.claude/r5-supervisor.lock
-#      is held by a different Claude Code session, refuse every subagent
-#      dispatch from this one.
+#   B. One reviewer at a time within the run (r5-state.sh claim): after the
+#      supervisor requests a reviewer (`pass` / `request`), the first
+#      dispatch is let through and recorded as reviewer_dispatched; every
+#      further dispatch is refused until that reviewer's findings (or its
+#      abandonment) are recorded.
 #
-#   B. One reviewer at a time within the run. .claude/r5-state.json is written
-#      by r5-supervise: if its status is in_progress and the last audit event
-#      is reviewer_dispatched (the supervisor has not yet recorded that
-#      reviewer's findings), refuse any further dispatch. This is what makes
-#      two lenses at the same time impossible.
-#
-# When blocked: exit 2 with a stderr message naming the holder or the pass in
-# flight. Escape hatches: the lock's lease reclaims after 15 min; a stale
-# state file is cleared with `rm .claude/r5-state.json`.
+# Blocked: exit 2 with a stderr message. If jq is missing while a run's lock
+# or state exists, refuse (the guard cannot read them; failing open would let
+# a parallel review through). Outside a curamoir checkout: allow.
 set -euo pipefail
+
+LEASE_SECONDS=900
+ABSOLUTE_TTL_SECONDS=86400
 
 _HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib/resolve-repo-root.sh
-source "$_HOOK_DIR/lib/resolve-repo-root.sh" 2>/dev/null || exit 0  # outside a curamoir checkout: nothing to guard
+source "$_HOOK_DIR/lib/resolve-repo-root.sh" 2>/dev/null || exit 0
+
+LOCK_FILE="$R5_ROOT/.claude/r5-supervisor.lock"
+STATE_FILE="$R5_ROOT/.claude/r5-state.json"
+
+if ! command -v jq >/dev/null 2>&1; then
+  if [[ -f "$LOCK_FILE" || -f "$STATE_FILE" ]]; then
+    printf 'r5-parallel-block: jq is missing, so the R5 lock and state cannot be read; refusing the dispatch\n' >&2
+    exit 2
+  fi
+  exit 0
+fi
 
 PAYLOAD=$(cat)
 
-# ---- Layer A: cross-session lock ----
-LOCK_FILE="$R5_ROOT/.claude/r5-supervisor.lock"
+_epoch() {
+  local ts="${1:-}"
+  [[ -z "$ts" ]] && { printf '0'; return; }
+  date -u -d "$ts" +%s 2>/dev/null || date -u -j -f "%Y-%m-%dT%H:%M:%SZ" "$ts" +%s 2>/dev/null || printf '0'
+}
+
+# ---- Layer A: cross-session lock, with its lease ----
 if [[ -f "$LOCK_FILE" ]]; then
   CURRENT_SESSION="${CLAUDE_CODE_SESSION_ID:-${CLAUDE_SESSION_ID:-}}"
   if [[ -z "$CURRENT_SESSION" ]]; then
@@ -40,37 +59,41 @@ if [[ -f "$LOCK_FILE" ]]; then
   fi
   HELD_SESSION=$(jq -r '.session_id // ""' "$LOCK_FILE" 2>/dev/null || true)
   if [[ -n "$HELD_SESSION" && -n "$CURRENT_SESSION" && "$HELD_SESSION" != "$CURRENT_SESSION" ]]; then
-    cat >&2 <<EOF
+    NOW=$(date -u +%s)
+    REFRESH_AGE=$(( NOW - $(_epoch "$(jq -r '.refreshed_at // ""' "$LOCK_FILE")") ))
+    ACQUIRE_AGE=$(( NOW - $(_epoch "$(jq -r '.acquired_at // ""' "$LOCK_FILE")") ))
+    if (( REFRESH_AGE <= LEASE_SECONDS && ACQUIRE_AGE <= ABSOLUTE_TTL_SECONDS )); then
+      cat >&2 <<MSG
 r5-parallel-block: the R5 supervisor lock is held by another session.
   supervisor: $(jq -r '.supervisor // "unknown"' "$LOCK_FILE")
   target:     $(jq -r '.target // "unknown"' "$LOCK_FILE")
   session:    $HELD_SESSION
-  refreshed:  $(jq -r '.refreshed_at // "?"' "$LOCK_FILE")
+  refreshed:  ${REFRESH_AGE}s ago
 
-Refusing a subagent dispatch from session $CURRENT_SESSION.
-The lease reclaims after ~15 min (.claude/hooks/r5-lock.sh status).
+Refusing a subagent dispatch from session $CURRENT_SESSION until the holder
+releases it or its lease runs out ($(( LEASE_SECONDS - REFRESH_AGE ))s).
 Manual override: rm "$LOCK_FILE"
-EOF
-    exit 2
+MSG
+      exit 2
+    fi
+    # Stale lease: the holder is gone; this session's dispatches go ahead.
   fi
 fi
 
 # ---- Layer B: one reviewer in flight at a time ----
-STATE_FILE="$R5_ROOT/.claude/r5-state.json"
 [[ -f "$STATE_FILE" ]] || exit 0
-STATUS=$(jq -r '.status // ""' "$STATE_FILE" 2>/dev/null || echo "")
-[[ "$STATUS" == "in_progress" ]] || exit 0
-LATEST_EVENT=$(jq -r '.audit_trail[-1].event // ""' "$STATE_FILE" 2>/dev/null || echo "")
-[[ "$LATEST_EVENT" == "reviewer_dispatched" ]] || exit 0
-
-cat >&2 <<EOF
+SUBAGENT=$(printf '%s' "$PAYLOAD" | jq -r '.tool_input.subagent_type // "general-purpose"' 2>/dev/null || echo "?")
+if bash "$_HOOK_DIR/r5-state.sh" claim "$SUBAGENT"; then
+  exit 0
+fi
+cat >&2 <<MSG
 r5-parallel-block: a reviewer is in flight; no other subagent may be dispatched
 until its findings are recorded (one lens at a time).
   target: $(jq -r '.target_bead // "unknown"' "$STATE_FILE")
   pass:   $(jq -r '.current_pass // "unknown"' "$STATE_FILE")
-  wanted: $(printf '%s' "$PAYLOAD" | jq -r '.tool_input.subagent_type // "general-purpose"' 2>/dev/null || echo "?")
+  wanted: $SUBAGENT
 
-Record the findings (append a findings_received event) first. If the state is
-stale, clear it with: rm "$STATE_FILE"
-EOF
+Record its findings (r5-state.sh findings ...) or, if it stalled,
+r5-state.sh abandon <pass> <reason>, then request it again.
+MSG
 exit 2

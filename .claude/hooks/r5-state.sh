@@ -4,15 +4,29 @@
 # it: while the last event is reviewer_dispatched, no other subagent may be
 # dispatched. Writing it through one helper keeps that signal reliable.
 #
+# The reviewer window: `pass` (or `request`, for a re-dispatch) asks for
+# exactly one reviewer. The parallel-block hook then calls `claim` on the
+# next subagent dispatch, which records reviewer_dispatched atomically, so
+# of two dispatches issued together only the first is let through. Until
+# `findings` (or `abandon`) is recorded, every other dispatch is refused.
+#
 # Subcommands:
 #   init <bead> <base> <head>      start a run (refuses if one is in flight)
 #   pass <name>                    set current_pass, append pass_started
-#   dispatched <pass> <iteration>  append reviewer_dispatched (blocks dispatch)
+#                                  (requests the pass's first reviewer)
+#   request <pass> <iteration>     request a re-dispatch of the same pass
+#   claim <subagent_type>          (the hook) let one dispatch through as
+#                                  the requested reviewer; exit 2 = refuse
 #   findings <pass> <crit> <imp> <minor> [verdict]
-#                                  append findings_received (unblocks)
+#                                  append findings_received (closes the window)
+#   abandon <pass> <reason>        a reviewer stalled or died: close the
+#                                  window without findings (then `request`)
 #   event <name> [json-object]     append any other event ({ts, event, ...})
 #   done <pass> <fix_iterations> [json-object]
 #                                  record the pass complete, clear current_pass
+#                                  (refused unless <pass> is the current pass
+#                                  and its last findings had no critical or
+#                                  important finding)
 #   advisory <crit> <imp> <minor> <verdict>
 #                                  record the excellence read
 #   finish <status>                completed | failed | aborted; archive the
@@ -26,6 +40,27 @@ source "$_DIR/lib/resolve-repo-root.sh" || exit 3
 command -v jq >/dev/null 2>&1 || { printf 'r5-state: jq is required\n' >&2; exit 3; }
 
 STATE="$R5_ROOT/.claude/r5-state.json"
+
+# Every write is a read-modify-write of one file, made by the orchestrator and
+# by concurrent hook invocations: serialise them with a short mkdir(2) mutex
+# (atomic), cleared after MUTEX_STALE_SECONDS if a killed process left it.
+MUTEX_DIR="$STATE.mutex"
+MUTEX_STALE_SECONDS=30
+_lock() {
+  local tries=0
+  mkdir -p "$(dirname "$STATE")" || exit 3
+  until mkdir "$MUTEX_DIR" 2>/dev/null; do
+    if [[ -d "$MUTEX_DIR" ]]; then
+      local born
+      born=$(stat -f %m "$MUTEX_DIR" 2>/dev/null || stat -c %Y "$MUTEX_DIR" 2>/dev/null || echo 0)
+      (( $(date -u +%s) - born > MUTEX_STALE_SECONDS )) && rmdir "$MUTEX_DIR" 2>/dev/null
+    fi
+    (( ++tries > 100 )) && { printf 'r5-state: could not take %s after 10s\n' "$MUTEX_DIR" >&2; exit 3; }
+    sleep 0.1
+  done
+  trap 'rmdir "$MUTEX_DIR" 2>/dev/null' EXIT
+}
+_last_event() { jq -r '.audit_trail[-1].event // ""' "$STATE"; }
 _now() { date -u +%Y-%m-%dT%H:%M:%SZ; }
 _need() { [[ -f "$STATE" ]] || { printf 'r5-state: no run in flight (%s)\n' "$STATE" >&2; exit 1; }; }
 _apply() {  # _apply <jq filter> [jq args...]
@@ -36,6 +71,8 @@ _apply() {  # _apply <jq filter> [jq args...]
 _append() {  # _append <event-json>
   _apply '.audit_trail += [$e]' --argjson e "$1"
 }
+
+_lock
 
 case "${1:-}" in
   init)
@@ -56,13 +93,42 @@ case "${1:-}" in
     ;;
   pass)
     _need; name="${2:?pass}"
+    [[ "$(_last_event)" != "reviewer_dispatched" ]] || {
+      printf 'r5-state: a reviewer is still in flight; record its findings or abandon it first\n' >&2; exit 2; }
     _apply '.current_pass = $p' --arg p "$name"
     _append "$(jq -n --arg t "$(_now)" --arg p "$name" '{ts:$t, event:"pass_started", pass:$p}')"
     ;;
-  dispatched)
+  request)
+    _need; pass="${2:?pass}"
+    [[ "$(jq -r '.current_pass // ""' "$STATE")" == "$pass" ]] || {
+      printf 'r5-state: %s is not the current pass\n' "$pass" >&2; exit 1; }
+    [[ "$(_last_event)" != "reviewer_dispatched" ]] || {
+      printf 'r5-state: a reviewer is still in flight; record its findings or abandon it first\n' >&2; exit 2; }
+    _append "$(jq -n --arg t "$(_now)" --arg p "$pass" --argjson i "${3:?iteration}" \
+      '{ts:$t, event:"reviewer_requested", pass:$p, iteration:$i}')"
+    ;;
+  claim)
+    # Called by r5-parallel-block.sh for every subagent dispatch while a run
+    # is in flight. Exit 0 = let it through; 2 = refuse.
+    [[ -f "$STATE" ]] || exit 0
+    [[ "$(jq -r '.status // ""' "$STATE")" == "in_progress" ]] || exit 0
+    case "$(_last_event)" in
+      pass_started|reviewer_requested)
+        _append "$(jq -n --arg t "$(_now)" --arg p "$(jq -r '.current_pass // ""' "$STATE")" \
+          --arg s "${2:-}" '{ts:$t, event:"reviewer_dispatched", pass:$p, subagent_type:$s}')"
+        exit 0 ;;
+      reviewer_dispatched)
+        exit 2 ;;
+      *)
+        exit 0 ;;  # between passes or during a fix round: not a reviewer
+    esac
+    ;;
+  abandon)
     _need
-    _append "$(jq -n --arg t "$(_now)" --arg p "${2:?pass}" --argjson i "${3:?iteration}" \
-      '{ts:$t, event:"reviewer_dispatched", pass:$p, iteration:$i}')"
+    [[ "$(_last_event)" == "reviewer_dispatched" ]] || {
+      printf 'r5-state: no reviewer is in flight\n' >&2; exit 1; }
+    _append "$(jq -n --arg t "$(_now)" --arg p "${2:?pass}" --arg r "${3:?reason}" \
+      '{ts:$t, event:"reviewer_abandoned", pass:$p, reason:$r}')"
     ;;
   findings)
     _need
@@ -76,6 +142,12 @@ case "${1:-}" in
     ;;
   done)
     _need; name="${2:?pass}"; iters="${3:?fix_iterations}"; extra="${4:-}"; [[ -n "$extra" ]] || extra='{}'
+    [[ "$(jq -r '.current_pass // ""' "$STATE")" == "$name" ]] || {
+      printf 'r5-state: %s is not the current pass\n' "$name" >&2; exit 1; }
+    clean="$(jq -r --arg p "$name" '[.audit_trail[] | select(.event=="findings_received" and .pass==$p)] | last
+      | if . == null then "none" elif (.counts.critical == 0 and .counts.important == 0) then "clean" else "dirty" end' "$STATE")"
+    [[ "$clean" == "clean" ]] || {
+      printf 'r5-state: %s cannot be done: its last findings are %s\n' "$name" "$clean" >&2; exit 1; }
     _apply '.completed_passes += [({name:$p, fix_iterations:$n, completed_at:$t} + $x)] | .current_pass = null' \
       --arg p "$name" --argjson n "$iters" --arg t "$(_now)" --argjson x "$extra"
     _append "$(jq -n --arg t "$(_now)" --arg p "$name" '{ts:$t, event:"pass_completed", pass:$p}')"

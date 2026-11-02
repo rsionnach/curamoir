@@ -87,10 +87,8 @@ _lock_get() {
   jq -r --arg f "$field" '.[$f] // ""' "$LOCK_FILE" 2>/dev/null
 }
 
-# Atomic write: write to temp file, fsync via mv. set -C ensures the
-# initial creation is exclusive (no clobber); subsequent updates are
-# unconditional rewrites by the same holder.
-_lock_write() {
+# The lock body for a holder, written to a temp file whose path is printed.
+_lock_body() {
   local supervisor="$1" target="$2" session="$3" acquired_at="$4" refreshed_at="$5"
   local tmp="$LOCK_FILE.tmp.$$"
   jq -n \
@@ -101,7 +99,45 @@ _lock_write() {
     --arg refreshed_at "$refreshed_at" \
     '{supervisor:$supervisor, target:$target, session_id:$session_id, acquired_at:$acquired_at, refreshed_at:$refreshed_at}' \
     > "$tmp" || { rm -f "$tmp"; return 1; }
-  mv "$tmp" "$LOCK_FILE"
+  printf '%s' "$tmp"
+}
+
+# A holder's rewrite (refresh, idempotent re-acquire): the lock is already
+# ours, so an atomic replace is enough. Returns non-zero if it failed.
+_lock_write() {
+  local tmp
+  tmp="$(_lock_body "$@")" || return 1
+  mv "$tmp" "$LOCK_FILE" || { rm -f "$tmp"; return 1; }
+}
+
+# Taking the lock when nobody holds it: link(2) fails if the lock already
+# exists, so of two sessions acquiring at the same moment exactly one wins
+# (a test runs several at once). Returns 1 if someone else got there first.
+_lock_create() {
+  local tmp
+  tmp="$(_lock_body "$@")" || return 1
+  if ln "$tmp" "$LOCK_FILE" 2>/dev/null; then
+    rm -f "$tmp"
+    return 0
+  fi
+  rm -f "$tmp"
+  return 1
+}
+
+_lost_race() {
+  printf 'r5-lock: another session took the lock at the same moment; it is held now\n' >&2
+  exit 2
+}
+
+# Reclaiming a stale lock: only if it is still the stale lock we read (no one
+# refreshed or reclaimed it meanwhile), then the same atomic create as a
+# fresh acquire, so two reclaimers cannot both win.
+_reclaim() {
+  local supervisor="$1" target="$2" session="$3" now="$4" stale_refreshed="$5"
+  [[ "$(_lock_get refreshed_at)" == "$stale_refreshed" ]] || _lost_race
+  rm -f "$LOCK_FILE"
+  _lock_create "$supervisor" "$target" "$session" "$now" "$now" || _lost_race
+  exit 0
 }
 
 # ---------------------------------------------------------------- acquire
@@ -121,7 +157,7 @@ _cmd_acquire() {
 
   # No existing lock — fresh acquire.
   if [[ ! -f "$LOCK_FILE" ]]; then
-    _lock_write "$supervisor" "$target" "$session" "$now" "$now"
+    _lock_create "$supervisor" "$target" "$session" "$now" "$now" || _lost_race
     exit 0
   fi
 
@@ -133,9 +169,16 @@ _cmd_acquire() {
   held_refreshed="$(_lock_get refreshed_at)"
   held_acquired="$(_lock_get acquired_at)"
 
-  # Same session + same supervisor => idempotent re-acquire (bumps refreshed_at).
+  # Same session + same supervisor + same target => idempotent re-acquire
+  # (bumps refreshed_at). The same supervisor on ANOTHER target is a second
+  # run while one is in flight: refused, never a silent retarget.
   if [[ "$held_session" == "$session" && "$held_supervisor" == "$supervisor" ]]; then
-    _lock_write "$supervisor" "$target" "$session" "$held_acquired" "$now"
+    if [[ "$held_target" != "$target" ]]; then
+      printf 'r5-lock: %s already holds the lock for %s in this session; finish or abort that run before %s\n' \
+        "$supervisor" "$held_target" "$target" >&2
+      exit 2
+    fi
+    _lock_write "$supervisor" "$target" "$session" "$held_acquired" "$now" || exit 3
     exit 0
   fi
 
@@ -162,15 +205,13 @@ EOF
   if (( refresh_age > LEASE_SECONDS )); then
     printf 'r5-lock: stale lease (refreshed_at %ss ago > %ss), reclaiming from %s/%s in session %s\n' \
       "$refresh_age" "$LEASE_SECONDS" "$held_supervisor" "$held_target" "$held_session" >&2
-    _lock_write "$supervisor" "$target" "$session" "$now" "$now"
-    exit 0
+    _reclaim "$supervisor" "$target" "$session" "$now" "$held_refreshed"
   fi
 
   if (( acquire_age > ABSOLUTE_TTL_SECONDS )); then
     printf 'r5-lock: absolute TTL exceeded (acquired %ss ago > %ss), reclaiming from %s/%s in session %s\n' \
       "$acquire_age" "$ABSOLUTE_TTL_SECONDS" "$held_supervisor" "$held_target" "$held_session" >&2
-    _lock_write "$supervisor" "$target" "$session" "$now" "$now"
-    exit 0
+    _reclaim "$supervisor" "$target" "$session" "$now" "$held_refreshed"
   fi
 
   # Lease fresh, held by someone else — block.
@@ -213,7 +254,7 @@ _cmd_refresh() {
     exit 1
   fi
 
-  _lock_write "$supervisor" "$held_target" "$session" "$held_acquired" "$(_now)"
+  _lock_write "$supervisor" "$held_target" "$session" "$held_acquired" "$(_now)" || exit 3
   exit 0
 }
 
@@ -253,11 +294,34 @@ _cmd_status() {
   exit 0
 }
 
+# Every acquire, refresh and release runs under a short mutex: mkdir(2) is
+# atomic, so the read-decide-write of one session cannot interleave with
+# another's (two stale reclaimers, or a reclaim racing a refresh). It is held
+# for milliseconds; one left behind by a killed process is cleared after
+# MUTEX_STALE_SECONDS.
+MUTEX_DIR="$LOCK_FILE.mutex"
+MUTEX_STALE_SECONDS=30
+_with_mutex() {
+  local tries=0
+  until mkdir "$MUTEX_DIR" 2>/dev/null; do
+    if [[ -d "$MUTEX_DIR" ]]; then
+      local born age
+      born=$(stat -f %m "$MUTEX_DIR" 2>/dev/null || stat -c %Y "$MUTEX_DIR" 2>/dev/null || echo 0)
+      age=$(( $(date -u +%s) - born ))
+      (( age > MUTEX_STALE_SECONDS )) && rmdir "$MUTEX_DIR" 2>/dev/null
+    fi
+    (( ++tries > 100 )) && { printf 'r5-lock: could not take %s after 10s\n' "$MUTEX_DIR" >&2; exit 3; }
+    sleep 0.1
+  done
+  trap 'rmdir "$MUTEX_DIR" 2>/dev/null' EXIT
+  "$@"
+}
+
 # Dispatch.
 case "${1:-}" in
-  acquire) shift; _cmd_acquire "$@" ;;
-  refresh) shift; _cmd_refresh "$@" ;;
-  release) shift; _cmd_release "$@" ;;
+  acquire) shift; _with_mutex _cmd_acquire "$@" ;;
+  refresh) shift; _with_mutex _cmd_refresh "$@" ;;
+  release) shift; _with_mutex _cmd_release "$@" ;;
   status)  shift; _cmd_status ;;
   *)
     cat >&2 <<EOF

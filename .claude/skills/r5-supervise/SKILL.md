@@ -27,15 +27,22 @@ negotiable:
   later pass before an earlier one is clean. The parallel-block hook enforces
   this by reading the state file; write the state BEFORE every dispatch.
 - **The orchestrator never runs a pass itself.** If a reviewer stalls,
-  re-dispatch (or resume) the reviewer; do not substitute your own review or
-  your own mutation harness for its verdict.
+  `r5-state.sh abandon <pass> <reason>`, then `r5-state.sh request <pass>
+  <iteration>` and dispatch a fresh reviewer (or resume the stalled one after
+  the request); do not substitute your own review or your own mutation
+  harness for its verdict.
 - **Anything changed after a pass is reviewed by that pass again**, including
   excellence touch-ups and one-line edits made while squashing.
 
 Helpers (all in `.claude/hooks/`, all resolve this repository's main worktree):
 `r5-lock.sh` (the run lock), `r5-state.sh` (the only writer of the state
 file), `r5-parallel-block.sh` (the hook, wired in `.claude/settings.local.json`
-for `Agent|Task`).
+for `Agent|Task`). The reviewer window works like this: `r5-state.sh pass`
+(or `request`, for a re-dispatch) asks for exactly one reviewer; the hook lets
+the next subagent dispatch through and records it as reviewer_dispatched,
+atomically; every later dispatch is refused until `r5-state.sh findings` (or
+`abandon`) closes the window. Never dispatch two subagents in one message
+while a reviewer has been requested: the second is refused.
 
 ## Inputs
 
@@ -61,8 +68,8 @@ bead; BASE = the parent of the oldest such commit (`git log --grep`).
    (`uv run pytest -q -p no:cacheprovider`), `uv run ruff check src tests`,
    `scripts/curamoir-lint --repo .`. A red baseline is the user's to decide on.
 
-Release the lock (`r5-lock.sh release r5-supervise`) on every exit path that
-fails pre-flight after step 1.
+On a pre-flight failure after step 3: `r5-state.sh finish aborted`. After
+step 1: release the lock (`r5-lock.sh release r5-supervise`).
 
 ## Pass loop
 
@@ -70,14 +77,12 @@ For each pass in `correctness`, `clarity`, `edge-cases`, `provenance`:
 
 1. `bash .claude/hooks/r5-lock.sh refresh r5-supervise` (exit 1 = lock lost:
    abort the run).
-2. `bash .claude/hooks/r5-state.sh pass <pass>`.
+2. `bash .claude/hooks/r5-state.sh pass <pass>` (requests the reviewer).
 3. Read `~/.claude/skills/rule-of-five-review/<pass>-reviewer.md` (edge-cases
    uses `edge-cases-reviewer.md`).
-4. Dispatch exactly one reviewer subagent, and IMMEDIATELY after it is
-   launched record it: `bash .claude/hooks/r5-state.sh dispatched <pass>
-   <iteration>` (recording first would make the hook refuse this very
-   dispatch; from the moment it is recorded the hook refuses every other
-   one). Its (subagent_type
+4. Dispatch exactly one reviewer subagent, alone in its message. The hook
+   records it (reviewer_dispatched) and refuses every other dispatch until
+   step 5. Its (subagent_type
    `pr-review-toolkit:code-reviewer` or `general-purpose`), whose brief is:
    brief:
    - `PASS <n> (<PASS>) of the sequential R5 review of bead <bead-id>.`
@@ -106,7 +111,10 @@ For each pass in `correctness`, `clarity`, `edge-cases`, `provenance`:
    (`event tests_passed` / `event tests_failed` — a failure stops the run with
    status failed); commit (`r5(<pass>): <summary> · <bead-id>` with the
    Co-Authored-By trailer); `event commit_made '{"sha":"..."}'`; then
-   re-dispatch the SAME pass (step 4, iteration + 1).
+   `r5-state.sh request <pass> <iteration + 1>` and re-dispatch the SAME pass
+   (step 4). The fix subagent is dispatched after `findings` was recorded,
+   so the hook allows it without recording it; it must finish before the
+   `request`.
 8. Three fix iterations without a clean pass: stop and ask the user.
 9. A finding that needs a design decision: `event design_question_raised`,
    ask the user, keep the lock (the run is paused, not over).
@@ -114,7 +122,7 @@ For each pass in `correctness`, `clarity`, `edge-cases`, `provenance`:
 ## Advisory stage — excellence
 
 After all four blocking passes are clean: refresh, `r5-state.sh pass
-excellence`, dispatch the excellence reviewer once, then `dispatched excellence 1`
+excellence`, dispatch the excellence reviewer once
 (`excellence-reviewer.md`, "This pass is ADVISORY"), then `r5-state.sh
 advisory <c> <i> <m> <verdict>`. No fix loop. If you choose to apply any of its
 suggestions, that change goes back through every blocking pass it touches
@@ -136,6 +144,8 @@ lock. A crash leaves the lease to expire after 15 minutes.
 
 If `.claude/r5-state.json` exists with status in_progress: read it, re-acquire
 the lock (idempotent in the same session), and continue from `current_pass`.
+If its last event is reviewer_dispatched and that reviewer is gone,
+`abandon` it and `request` the pass again.
 If that pass is provenance, check `git status --short` first and ask the user
 before restoring anything — a leftover mutant looks like real work.
 

@@ -17,9 +17,9 @@
 #   2. The main worktree of the git repository containing $PWD, if it is a
 #      curamoir checkout (.claude-plugin/plugin.json names "curamoir").
 
-if [[ -n "${R5_ROOT:-}" && -d "$R5_ROOT" ]]; then
-  return 0 2>/dev/null || exit 0
-fi
+# R5_ROOT is always resolved here, never trusted from the environment: an
+# inherited value would silently move the lock and the state elsewhere.
+unset R5_ROOT
 
 if [[ -n "${CURAMOIR_R5_ROOT:-}" ]]; then
   if [[ -d "$CURAMOIR_R5_ROOT" ]]; then
