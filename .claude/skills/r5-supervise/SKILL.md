@@ -73,9 +73,13 @@ For each pass in `correctness`, `clarity`, `edge-cases`, `provenance`:
 2. `bash .claude/hooks/r5-state.sh pass <pass>`.
 3. Read `~/.claude/skills/rule-of-five-review/<pass>-reviewer.md` (edge-cases
    uses `edge-cases-reviewer.md`).
-4. `bash .claude/hooks/r5-state.sh dispatched <pass> <iteration>` — THEN
-   dispatch exactly one reviewer subagent (subagent_type
+4. Dispatch exactly one reviewer subagent, and IMMEDIATELY after it is
+   launched record it: `bash .claude/hooks/r5-state.sh dispatched <pass>
+   <iteration>` (recording first would make the hook refuse this very
+   dispatch; from the moment it is recorded the hook refuses every other
+   one). Its (subagent_type
    `pr-review-toolkit:code-reviewer` or `general-purpose`), whose brief is:
+   brief:
    - `PASS <n> (<PASS>) of the sequential R5 review of bead <bead-id>.`
    - the template body, inlined;
    - the scope: `git diff <base>..<head>`; no findings outside the diff; the
@@ -110,7 +114,7 @@ For each pass in `correctness`, `clarity`, `edge-cases`, `provenance`:
 ## Advisory stage — excellence
 
 After all four blocking passes are clean: refresh, `r5-state.sh pass
-excellence`, `dispatched excellence 1`, dispatch the excellence reviewer once
+excellence`, dispatch the excellence reviewer once, then `dispatched excellence 1`
 (`excellence-reviewer.md`, "This pass is ADVISORY"), then `r5-state.sh
 advisory <c> <i> <m> <verdict>`. No fix loop. If you choose to apply any of its
 suggestions, that change goes back through every blocking pass it touches
