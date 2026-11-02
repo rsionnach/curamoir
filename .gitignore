@@ -13,3 +13,9 @@ __pycache__/
 # Working copy of the spec. Deliberately untracked: rsionnach/curamoir is a
 # public repo and the spec is not ready to publish. Remove this line when it is.
 docs/curamoir-spec.md
+
+# R5 supervisor runtime files (cm-99l): the lock, the in-flight state and its
+# archived audit trails, and the local hook wiring.
+.claude/r5-supervisor.lock
+.claude/r5-state*.json
+.claude/settings.local.json
