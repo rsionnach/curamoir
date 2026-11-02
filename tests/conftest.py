@@ -52,11 +52,15 @@ def no_declared_runner(monkeypatch):
     passed (job_guard.run_guarded), so a suite run inside a hosted workflow
     step or a Claude Code cloud session would otherwise run hosted, or put
     a transcript link on lines and PR bodies the tests pin. The hosted
-    markers are left as they are: on their own they resolve local, which
-    tests/test_runner_kind.py proves. A test that means another runner
-    passes `environ`, or sets the variables itself."""
+    markers are left as they are, but for CLAUDE_CODE_REMOTE: on their own
+    they resolve local, which tests/test_runner_kind.py proves, but
+    CLAUDE_CODE_REMOTE=true alone also moves every gh call to `gh api`
+    (config.resolve_github_api, cm-2qp.9), which the CLI path's tests pin
+    against. A test that means another runner passes `environ`, or sets
+    the variables itself."""
     monkeypatch.delenv("CURAMOIR_RUNNER", raising=False)
     monkeypatch.delenv("CLAUDE_CODE_REMOTE_SESSION_ID", raising=False)
+    monkeypatch.delenv("CLAUDE_CODE_REMOTE", raising=False)
 
 
 #: What the refusing stand-in `claude` prints on stderr (no_real_claude).

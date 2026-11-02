@@ -1,0 +1,103 @@
+[
+  {
+    "number": 14846,
+    "state": "open",
+    "html_url": "https://github.com/cli/cli/pull/14846",
+    "title": "A synthetic title",
+    "body": "Documents a new workflow.",
+    "merged_at": null,
+    "head": {
+      "label": "cli:same-repo-open-feature",
+      "ref": "same-repo-open-feature",
+      "sha": "aaf296326df06cbafd523c12efa0112cdc53c10c",
+      "repo": {
+        "id": 212613049,
+        "full_name": "cli/cli"
+      }
+    },
+    "base": {
+      "label": "cli:trunk",
+      "ref": "trunk",
+      "sha": "93d24ce9ffefb6cc86bde89b50271457bb0ef9cb",
+      "repo": {
+        "id": 212613049,
+        "full_name": "cli/cli"
+      }
+    }
+  },
+  {
+    "number": 14879,
+    "state": "closed",
+    "html_url": "https://github.com/cli/cli/pull/14879",
+    "title": "A synthetic title",
+    "body": "Adds an option to a command.",
+    "merged_at": "2026-10-30T18:24:32Z",
+    "head": {
+      "label": "cli:same-repo-merged-feature",
+      "ref": "same-repo-merged-feature",
+      "sha": "f59a50225f9aa8f4907c718963be3616fa48fdd5",
+      "repo": {
+        "id": 212613049,
+        "full_name": "cli/cli"
+      }
+    },
+    "base": {
+      "label": "cli:trunk",
+      "ref": "trunk",
+      "sha": "443baeba055cc78a0ff9fd9308dfc26aec860b87",
+      "repo": {
+        "id": 212613049,
+        "full_name": "cli/cli"
+      }
+    }
+  },
+  {
+    "number": 14885,
+    "state": "closed",
+    "html_url": "https://github.com/cli/cli/pull/14885",
+    "title": "A synthetic title",
+    "body": "Fixes a typo.",
+    "merged_at": null,
+    "head": {
+      "label": "example-fork-owner:fork-feature",
+      "ref": "fork-feature",
+      "sha": "33fe9ace8426b9e98c3e255a52450a4950cc5838",
+      "repo": {
+        "id": 1437467283,
+        "full_name": "example-fork-owner/cli"
+      }
+    },
+    "base": {
+      "label": "cli:trunk",
+      "ref": "trunk",
+      "sha": "9490d204a2ba95434153dedce99898ce9f281426",
+      "repo": {
+        "id": 212613049,
+        "full_name": "cli/cli"
+      }
+    }
+  },
+  {
+    "number": 14823,
+    "state": "closed",
+    "html_url": "https://github.com/cli/cli/pull/14823",
+    "title": "A synthetic title",
+    "body": "Prints the URL after a failure.",
+    "merged_at": null,
+    "head": {
+      "label": "example-fork-owner:deleted-fork-feature",
+      "ref": "deleted-fork-feature",
+      "sha": "cbf6368a9c4284271ec16c359a0ca369fec89ccc",
+      "repo": null
+    },
+    "base": {
+      "label": "cli:trunk",
+      "ref": "trunk",
+      "sha": "4f2cfe92e3499f8581bf39db77e0a1431fa7b55c",
+      "repo": {
+        "id": 212613049,
+        "full_name": "cli/cli"
+      }
+    }
+  }
+]

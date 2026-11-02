@@ -70,6 +70,16 @@ CURAMOIR_RUNNER and the hosted markers (job_guard's "The runner kind"). A
 declaration that cannot be honoured is a refusal, reason `runner`, so
 EXIT_REFUSED with the reason in the sentence.
 
+**Which gh calls** (cm-2qp.9). `run_job` decides once, from the same
+`environ`, with config.resolve_github_api: GithubApi.REST in a Claude Code
+cloud session (CLAUDE_CODE_REMOTE=true, whatever the runner kind: the
+session's GitHub proxy refuses the GraphQL that `gh pr`, `gh label` and
+`gh repo view` use), else GithubApi.CLI, the calls above. The decision is
+bound into the label check and the listing (_gh_labels, _gh_open_prs) and
+handed to the body as `run.github_api` (run_guarded's `github_api`), which
+passes it to every gh call it makes (sweep_job, brief). Nothing below
+reads the environment for it.
+
 **Exit codes**, one per GuardedRun outcome a scheduler must tell apart:
 EXIT_SUCCESS, EXIT_FAILURE (the body failed, crashed, or reported nothing,
 which job_run calls UNKNOWN: a bug, not a success), EXIT_REFUSED (a guard or
@@ -84,6 +94,7 @@ stdout (and cli.py is where cúramóir prints).
 and nothing is written.
 """
 
+import os
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -91,6 +102,7 @@ from typing import Any, Optional
 
 from curamoir import github, publish
 from curamoir.brief import gh_pr_states, write_brief
+from curamoir.config import resolve_github_api
 from curamoir.job_guard import UNUSABLE_ROOT, run_guarded
 from curamoir.job_run import FAILURE, REFUSED, SUCCESS, UNKNOWN
 from curamoir.sweep_job import run_sweep
@@ -122,10 +134,11 @@ class Job:
 
     `body(repo, run)` does the work and reports its outcome on `run` (the
     JobRun writing the job's line). `opens_prs` subjects the job to the
-    open-PR cap; `open_pr_listing_for(root)` then returns the listing
-    callable the cap counts with (guards.pr_cap's contract: no arguments),
-    for the repository at `root`. A factory, because the registry is built
-    before any run knows its repository.
+    open-PR cap; `open_pr_listing_for(root, github_api=)` then returns the
+    listing callable the cap counts with (guards.pr_cap's contract: no
+    arguments), for the repository at `root`, asking gh the run's way
+    (config.GithubApi; module docstring, "Which gh calls"). A factory,
+    because the registry is built before any run knows its repository.
     """
 
     body: Callable[[Path, Any], Any]
@@ -145,36 +158,37 @@ class RunReport:
 
 def _brief(repo, run):
     """What `curamoir brief` does: write `.curamoir/briefs/latest.md`."""
-    path = write_brief(repo, pr_states=gh_pr_states(repo))
+    path = write_brief(repo, pr_states=gh_pr_states(repo, github_api=run.github_api))
     # Relative to the root, so the line is the same from a cron checkout
     # and a CI one (E10-R4).
     run.succeeded(f"wrote {Path(path).relative_to(repo).as_posix()}")
     return path
 
 
-def _gh_open_prs(root):
+def _gh_open_prs(root, *, github_api):
     """The open-PR listing for the repository at `root`: gh's, of origin's
     repository, both asked afresh on every call (module docstring, "Which
-    repository gh is asked about")."""
+    repository gh is asked about"), through `github_api`'s calls."""
 
     def listing():
-        return github.open_sweep_prs(root, gh_repo=publish.origin_gh_repo(root))
+        return github.open_sweep_prs(root, gh_repo=publish.origin_gh_repo(root),
+                                     github_api=github_api)
 
     return listing
 
 
-def _gh_labels(root):
+def _gh_labels(root, *, github_api):
     """The label check's callable for the repository at `root`: gh's labels
     of origin's repository, or of the repository gh resolves itself when
     origin names none (module docstring, "Which repository gh is asked
-    about")."""
+    about"), through `github_api`'s calls."""
 
     def labels():
         try:
             gh_repo = publish.origin_gh_repo(root)
         except publish.PublishRefused:
             gh_repo = None
-        return github.repo_labels(root, gh_repo=gh_repo)
+        return github.repo_labels(root, gh_repo=gh_repo, github_api=github_api)
 
     return labels
 
@@ -208,7 +222,9 @@ def run_job(repo, name, *, open_pr_listing=None, repo_labels=None, now=None,
     `environ` is the environment the runner kind is declared in
     (CURAMOIR_RUNNER and the hosted markers; job_guard's "The runner
     kind"): os.environ when None. This is the entry point, so it is the
-    one place a test or an embedding caller hands a different one in.
+    one place a test or an embedding caller hands a different one in. The
+    same mapping decides the run's gh calls (module docstring, "Which gh
+    calls").
     """
     job = JOBS.get(name)
     if job is None:
@@ -223,17 +239,20 @@ def run_job(repo, name, *, open_pr_listing=None, repo_labels=None, now=None,
                          f"directory at {root}, so there is no ledger to record the run "
                          "in. Point --repo at the repository root, or run /curamoir:init.")
 
+    # cm-2qp.9: decided once, here, from the mapping the runner kind is
+    # declared in, and handed to everything below that runs gh.
+    github_api = resolve_github_api(os.environ if environ is None else environ)
     if open_pr_listing is None and job.open_pr_listing_for is not None:
-        open_pr_listing = job.open_pr_listing_for(root)
+        open_pr_listing = job.open_pr_listing_for(root, github_api=github_api)
     if repo_labels is None:
-        repo_labels = _gh_labels(root)
+        repo_labels = _gh_labels(root, github_api=github_api)
 
     try:
         result = run_guarded(
             root, name, open_pr_listing,
             lambda run: job.body(root, run),
             now=now, repo_labels=repo_labels, opens_prs=job.opens_prs,
-            environ=environ,
+            environ=environ, github_api=github_api,
         )
     except (Exception, SystemExit, Terminated) as crash:
         # SystemExit too: a body calling sys.exit(0) has a `failure` line

@@ -478,7 +478,7 @@ def _resolve_runner(environ):
 
 
 def run_guarded(repo, job, open_pr_listing, body, *, now=None, repo_labels=None,
-                opens_prs=True, environ=None):
+                opens_prs=True, environ=None, github_api=None):
     """Run `body(run)` for `job` behind `job_gateway(repo, ...)`, inside one
     `JobRun` writing to the repo's own ledger, and return a GuardedRun.
 
@@ -500,6 +500,11 @@ def run_guarded(repo, job, open_pr_listing, body, *, now=None, repo_labels=None,
     `environ` is the environment the runner kind is declared in (module
     docstring, "The runner kind"): os.environ when None. It is read once,
     before anything runs; the body gets the result as `run.runner`.
+    `github_api` is the config.GithubApi the caller decided (runner.run_job,
+    cm-2qp.9), handed to the body as `run.github_api`; None is
+    GithubApi.CLI (JobRun.github_api). It is the caller's, not resolved
+    here, because the caller's label and listing callables, made before
+    this runs, take the same decision.
 
     It sets os.environ['CURAMOIR_JOB'] to `job` for the run and restores
     the value before it on every exit (module docstring, Ordering 5), so it
@@ -570,7 +575,7 @@ def run_guarded(repo, job, open_pr_listing, body, *, now=None, repo_labels=None,
             # runner_fields: on the line whatever ends the run, and reserved
             # (job_run.RESERVED_FIELDS), so the body cannot replace them.
             with JobRun(repo_ledger(context.repo), job, now=now, runner=runner,
-                        runner_fields=runner_fields) as run, \
+                        runner_fields=runner_fields, github_api=github_api) as run, \
                     HoldOnExit(signals):
                 gateway = job_gateway(context.repo, open_pr_listing, now=now,
                                       repo_labels=repo_labels, lock=lock,

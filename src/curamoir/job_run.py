@@ -12,7 +12,7 @@ import sys
 import uuid
 from datetime import datetime, timezone
 
-from curamoir.config import LOCAL_RUNNER
+from curamoir.config import LOCAL_RUNNER, GithubApi
 
 # The job line's `outcome` values, exactly as the ledger holds them: other
 # modules compare ledger lines against these (fix_counts, tier1) and the
@@ -37,9 +37,11 @@ UNKNOWN = "unknown"
 #: replace it, and that is used. `runner` and `transcript` (E14.1) are the
 #: runner kind's, given to JobRun as `runner_fields` and written by it, so
 #: no step of the job can make its line claim another runner kind.
+#: `github_api` (cm-2qp.9) is the run's config.GithubApi, written by JobRun
+#: from `github_api` on the REST path only (GithubApi.ledger_fields).
 RESERVED_FIELDS = frozenset(
     {"kind", "job", "reason", "message", "run_id", "outcome", "started", "ended",
-     "runner", "transcript"})
+     "runner", "transcript", "github_api"})
 
 
 def _checked(fields):
@@ -65,13 +67,19 @@ class JobRun:
     (config.Runner.ledger_fields, or a refused declaration's transcript
     alone), written on every line this run writes; they are
     RESERVED_FIELDS, so no outcome or note can replace them.
+
+    `github_api` is the config.GithubApi runner.run_job decided for the run
+    (cm-2qp.9), for the body to pass to its gh calls (`run.github_api`);
+    the line carries `github_api: rest` when it is GithubApi.REST, and
+    nothing otherwise (GithubApi.ledger_fields), a reserved field.
     """
 
     def __init__(self, ledger, job, run_id=None, now=None, runner=None,
-                 runner_fields=None):
+                 runner_fields=None, github_api=None):
         self._ledger = ledger
         self._job = job
         self._runner = runner
+        self._github_api = github_api
         self._runner_fields = dict(runner_fields or {})
         self._now = now or (lambda: datetime.now(timezone.utc))
         self.run_id = run_id or uuid.uuid4().hex[:12]
@@ -97,6 +105,14 @@ class JobRun:
         LOCAL_RUNNER default is only what a JobRun made outside run_guarded
         sees: a test, an ad hoc caller."""
         return LOCAL_RUNNER if self._runner is None else self._runner
+
+    @property
+    def github_api(self):
+        """The config.GithubApi this run's gh calls take (cm-2qp.9): REST in
+        a Claude Code cloud session, else CLI. GithubApi.CLI when none was
+        given, the 3f50a3f behaviour: what a JobRun made outside
+        run_guarded sees (a test, an ad hoc caller)."""
+        return GithubApi.CLI if self._github_api is None else self._github_api
 
     @property
     def ledger(self):
@@ -219,5 +235,6 @@ class JobRun:
             started=self._started.isoformat(),
             ended=ended.isoformat(),
             **self._runner_fields,
+            **self.github_api.ledger_fields(),
             **self._extra,
         )

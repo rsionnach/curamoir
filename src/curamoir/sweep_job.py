@@ -27,7 +27,10 @@ the PR will open on. Any PublishRefused from these calls is a refusal
 (Reason.SWEEP_BASE), before anything is cloned, linted or spent. (Why not
 guards.default_branch.detect_default_branch, which the 2026-10-23
 decision named: it falls back to local branch names, and trusts a stale
-origin/HEAD; publish's rule supersedes it.)
+origin/HEAD; publish's rule supersedes it.) Each of these gh calls, and
+publish's, takes the run's `run.github_api` (cm-2qp.9): in a Claude Code
+cloud session they go through `gh api` (curamoir.github, "The REST
+path"), with the same answers.
 
 **Refusals before step 3**, each with its Reason, and never a
 `found_delta` or a snapshot (fix_scope step 2a): an unloadable
@@ -165,7 +168,7 @@ from curamoir.budget import (
     CACHE_WRITE_FIELD,
     UNRECORDED,
 )
-from curamoir.config import ConfigError
+from curamoir.config import ConfigError, GithubApi
 from curamoir.fix_counts import (
     found_delta,
     found_set,
@@ -302,7 +305,7 @@ class SweepTools:
     """What run_sweep calls out to, so tests can stand in for each.
 
     `claude` is the `claude` executable for both model calls (fix_step's
-    seam), CLAUDE when not given. `open_sweep_prs(repo, gh_repo=...)` is the
+    seam), CLAUDE when not given. `open_sweep_prs(repo, gh_repo=..., github_api=...)` is the
     open-PR listing, github.open_sweep_prs by default; _Sweep.execute binds
     it to the repository and origin's gh_repo itself (fix_scope step 0 (iii)),
     so it is asked afresh, never cached. `now` is the clock, returning an
@@ -346,14 +349,16 @@ class SweepBase:
     sha: str
 
 
-def resolve_sweep_base(repo):
+def resolve_sweep_base(repo, *, github_api=GithubApi.CLI):
     """The SweepBase for the checkout at `repo`, resolved once, before any
     sandbox (module docstring, "Which default branch"). PublishRefused when
     origin names no GitHub repository, gh cannot say which branch is its
     default, or the checkout disagrees with it or has no remote-tracking
-    ref for it. Nothing is fetched."""
+    ref for it. Nothing is fetched. `github_api` is the run's config.GithubApi
+    (`run.github_api`), which picks how gh is asked (publish's "The REST
+    path")."""
     gh_repo = publish.origin_gh_repo(repo)
-    default = publish.origin_default_branch(repo, gh_repo)
+    default = publish.origin_default_branch(repo, gh_repo, github_api=github_api)
     ref = f"refs/remotes/origin/{default}"
     try:
         sha = git(repo, "rev-parse", "--verify", "--quiet", "--end-of-options",
@@ -420,14 +425,14 @@ class _Sweep:
             self.refuse(Reason.GUARD_ERROR, f"the sweep could not read its config: {error}")
             return
         try:
-            self.sweep_base = resolve_sweep_base(self.repo)
+            self.sweep_base = resolve_sweep_base(self.repo, github_api=self.run.github_api)
         except publish.PublishRefused as error:
             self.refuse(Reason.SWEEP_BASE, f"the sweep has no base: {error}")
             return
         # Step 0 (iii)'s binding, with origin's repository: a zero-argument
         # callable, asked afresh by sweep_decision.
         self.listing = partial(self.tools.open_sweep_prs, self.repo,
-                               gh_repo=self.sweep_base.gh_repo)
+                               gh_repo=self.sweep_base.gh_repo, github_api=self.run.github_api)
         try:
             # Step 1, pinned at the commit resolved above.
             with prepare_sandbox(self.repo, self.sweep_base.sha,
@@ -719,7 +724,7 @@ class _Fix:
             published = publish.publish(
                 owner.repo, base=sandbox.base, patch=patch, paths=gate.paths_for_pr,
                 branch=branch, branch_prefix=owner.branch_prefix, gh_repo=sweep_base.gh_repo,
-                message=message, title=title, body=body)
+                message=message, title=title, body=body, github_api=self.run.github_api)
         except publish.PublishRefused as error:
             self.run.unnote(PUBLISH_PENDING)
             owner.refuse(Reason.PUBLISH, f"the sweep's PR was refused before anything was "

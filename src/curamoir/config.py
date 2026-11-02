@@ -677,6 +677,51 @@ class RunnerKind(str, Enum):
         return self.value
 
 
+class GithubApi(str, Enum):
+    """How cúramóir's gh calls reach GitHub (cm-2qp.9), decided once at
+    the entry point by resolve_github_api and handed down explicitly.
+
+    CLI: `gh pr list`, `gh pr create`, `gh label list`, `gh repo view`, as
+    at 3f50a3f: the path for a laptop and for GitHub Actions. Those
+    subcommands use GitHub's GraphQL API.
+    REST: `gh api repos/OWNER/REPO/...` (GitHub's REST API) for the same
+    questions: the path inside a Claude Code cloud session, whose GitHub
+    proxy refuses GraphQL with a 403 ("GitHub GraphQL is not available
+    from Claude Code sessions"), so every CLI call above fails there
+    (https://code.claude.com/docs/en/cloud-environments, "GitHub proxy").
+    A str, as RunnerKind is."""
+
+    CLI = "cli"
+    REST = "rest"
+
+    def __str__(self):
+        return self.value
+
+    def ledger_fields(self):
+        """The job line's field for this path: `github_api: rest` on the
+        REST path, so a cloud run's line says how GitHub was asked;
+        nothing on the CLI path, so a laptop's or an Actions run's line is
+        byte for byte what it was before cm-2qp.9."""
+        return {"github_api": self.value} if self is GithubApi.REST else {}
+
+
+def resolve_github_api(environ):
+    """GithubApi.REST when `environ` (a mapping, os.environ or a test's
+    dict) has CLAUDE_CODE_REMOTE exactly `true`, else GithubApi.CLI.
+
+    WHY that marker and not the runner kind: the proxy sits in front of
+    every Claude Code cloud session, whatever CURAMOIR_RUNNER says, so a
+    cloud session running local (no declaration) is still behind it, and
+    a GitHub Actions run (hosted, no proxy) keeps the CLI. Exact, as the
+    hosted markers are: a laptop never has it `true`
+    (cloud-environments: "it's never `true` locally"). Unlike the runner
+    kind this is never refused: either answer is a way to ask GitHub, and
+    a wrong one fails as a gh error (degraded checks, a refused sweep),
+    never silently. Read by the entry points only (runner.run_job,
+    cli's brief); nothing below them reads the environment for it."""
+    return GithubApi.REST if environ.get(CLAUDE_MARKER) == "true" else GithubApi.CLI
+
+
 @dataclass(frozen=True)
 class Runner:
     """A run's resolved runner kind: its `kind`, the link to its transcript
@@ -811,3 +856,4 @@ def transcript_fields(link, unavailable):
     if unavailable is not None:
         return {"transcript": f"{TRANSCRIPT_UNAVAILABLE} ({unavailable})"}
     return {}
+

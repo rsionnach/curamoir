@@ -7,10 +7,12 @@ is a thin wrapper that invokes this and reports what it said.
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 
 from curamoir.brief import due_for_brief_from_config, gh_pr_states, write_brief
+from curamoir.config import resolve_github_api
 from curamoir.doctor import diagnose, render_report
 from curamoir.handoff import write_handoff
 from curamoir.runner import run_job
@@ -110,7 +112,10 @@ def _run(arguments):
         if arguments.if_due and not due_for_brief_from_config(arguments.repo):
             print("No brief needed: the last handoff is recent.")
             return 0
-        path = write_brief(arguments.repo, pr_states=gh_pr_states(arguments.repo))
+        # cm-2qp.9: this command's own entry point decides how gh is asked,
+        # as runner.run_job does for a scheduled brief.
+        path = write_brief(arguments.repo, pr_states=gh_pr_states(
+            arguments.repo, github_api=resolve_github_api(os.environ)))
         print(f"Wrote {path}\n")
         print(path.read_text(encoding="utf-8"))
         return 0

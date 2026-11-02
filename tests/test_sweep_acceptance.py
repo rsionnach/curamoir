@@ -123,7 +123,18 @@ def run_sweep(repo):
 
 
 def creates(gh):
-    return [record for record in gh.call_records() if record["argv"][:2] == ["pr", "create"]]
+    """The PR creates gh was asked for: `gh pr create`, or on the REST path
+    of a cloud session (cm-2qp.9) `gh api -X POST .../pulls`, whose record
+    gets the JSON body's `body` as its `body_file_content`, so a test reads
+    the PR's body the same way on either."""
+    found = []
+    for record in gh.call_records():
+        if record["argv"][:2] == ["pr", "create"]:
+            found.append(record)
+        elif record["argv"][:1] == ["api"] and "POST" in record["argv"]:
+            found.append({**record,
+                          "body_file_content": json.loads(record["input_content"])["body"]})
+    return found
 
 
 def section(body, heading):
