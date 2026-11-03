@@ -267,7 +267,7 @@ def test_another_session_is_refused_unless_the_owner_s_lease_has_lapsed(r5root):
     start(r5root)  # S1 owns the run, with no lock at all
     run(STATE, "pass", "correctness", root=r5root)
     refused = hook(r5root, session="S2")
-    assert refused.returncode == 2 and "belongs to session" in refused.stderr
+    assert refused.returncode == 2 and "belongs to session" in refused.stderr and "another session's run" in refused.stderr
     run(LOCK, "acquire", "r5-supervise", "b1", root=r5root, session="S3")
     age_lock(r5root, PAST_LEASE)  # a third session's lapsed lock is not the owner's
     assert hook(r5root, session="S2").returncode == 2
@@ -411,6 +411,17 @@ def test_an_event_cannot_rename_itself_or_take_a_non_object(r5root):
     assert last["event"] == "note" and last["ts"] != "x"
     assert hook(r5root).returncode == 2
     assert run(STATE, "event", "note", "[1]", root=r5root).returncode == 1
+
+
+def test_a_bad_or_missing_argument_exits_1_not_as_a_refusal(r5root):
+    start(r5root)
+    run(STATE, "pass", "correctness", root=r5root)
+    hook(r5root)
+    for args in (("findings", "correctness", "x", "0", "0"), ("findings", "correctness"),
+                 ("request", "correctness", "two"), ("init",)):
+        bad = run(STATE, *args, root=r5root)
+        assert bad.returncode == 1 and bad.stderr.startswith("r5-state: "), (args, bad.stderr)
+    assert events(r5root)[-1] == "reviewer_dispatched"
 
 
 def test_bad_json_leaves_the_state_untouched_and_no_temp_file(r5root):

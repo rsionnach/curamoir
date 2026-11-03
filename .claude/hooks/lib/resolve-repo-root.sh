@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # resolve-repo-root.sh — single source of truth for where curamoir's R5
-# supervisor keeps its lock and state. Sourced by r5-lock.sh and
-# r5-parallel-block.sh so the helper and the hook can never resolve to two
-# different places (two lockfiles would make the mutex a no-op).
+# supervisor keeps its lock and state. Sourced by r5-lock.sh, r5-state.sh
+# and r5-parallel-block.sh, so the helpers and the hook can never resolve to
+# two different places (two lockfiles would make the lock a no-op).
 #
 # Ported from nthlayer-ecosystem/.claude/hooks/lib/resolve-ecosystem-root.sh
 # (cm-99l). curamoir is one repository, so the root is the MAIN worktree of

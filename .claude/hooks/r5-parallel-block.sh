@@ -69,9 +69,15 @@ fi
 # ---- Layer B: the run's window ----
 [[ -f "$R5_STATE_FILE" ]] || exit 0
 SUBAGENT=$(printf '%s' "$PAYLOAD" | jq -r '.tool_input.subagent_type // "general-purpose"' 2>/dev/null || echo "?")
-if bash "$_HOOK_DIR/r5-state.sh" claim "$SUBAGENT" "$CURRENT_SESSION"; then
-  exit 0
-fi
-printf 'r5-parallel-block: refused %s for the R5 run on %s (one lens, one agent at a time)\n' \
-  "$SUBAGENT" "$(jq -r '.target_bead // "unknown"' "$R5_STATE_FILE")" >&2
+# claim prints its reason; the hook adds which refusal it was.
+rc=0
+bash "$_HOOK_DIR/r5-state.sh" claim "$SUBAGENT" "$CURRENT_SESSION" || rc=$?
+case "$rc" in
+  0) exit 0 ;;
+  2) why="one lens, one agent at a time" ;;
+  4) why="another session's run" ;;
+  *) why="the state helper failed (exit $rc)" ;;
+esac
+printf 'r5-parallel-block: refused %s for the R5 run on %s (%s)\n' \
+  "$SUBAGENT" "$(jq -r '.target_bead // "unknown"' "$R5_STATE_FILE")" "$why" >&2
 exit 2

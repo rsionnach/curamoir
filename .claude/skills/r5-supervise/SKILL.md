@@ -40,8 +40,7 @@ worktree): `r5-lock.sh` (the run lock), `r5-state.sh` (the only writer of the
 state file), and `r5-parallel-block.sh` (the hook). The window protocol (one
 reviewer, or one fix agent, at a time) and run ownership across sessions are
 documented once, in the header of `r5-state.sh`; read it before a first run.
-In short: record the state BEFORE every dispatch (`pass` / `request`), never
-dispatch two subagents in one message while a reviewer has been requested
+In short: never dispatch two subagents in one message while a reviewer has been requested
 (the second is refused), and never remove the lock by hand (with no lock,
 every other session is refused until the run is adopted or finished).
 

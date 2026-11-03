@@ -63,7 +63,8 @@
 #
 # Exit codes:
 #   0   - success (claim: the dispatch may go ahead)
-#   1   - usage error or a bad argument (including bad JSON)
+#   1   - usage error or a bad argument (a missing one, a count that is not
+#         a non-negative integer, a JSON argument that is not an object)
 #   2   - refused by the run's state or order (claim: refuse the dispatch)
 #   3   - internal error (cannot resolve the root, jq or perl missing, the
 #         mutex not taken within 10s)
@@ -93,6 +94,16 @@ _usage() {  # the header above, from line 2 to the first non-comment line
 _refuse() { printf 'r5-state: %s\n' "$*" >&2; exit 2; }
 _bad_arg() { printf 'r5-state: %s\n' "$*" >&2; exit 1; }
 _now() { date -u +%Y-%m-%dT%H:%M:%SZ; }
+# _arg <var> <name> <value>: set <var> to a required argument, or exit 1.
+_arg() {
+  [[ -n "$3" ]] || _bad_arg "${CMD:-?}: missing <$2>"
+  printf -v "$1" '%s' "$3"
+}
+# _int <var> <name> <value>: as _arg, for a non-negative integer.
+_int() {
+  [[ "$3" =~ ^[0-9]+$ ]] || _bad_arg "${CMD:-?}: <$2> must be a non-negative integer, got '$3'"
+  printf -v "$1" '%s' "$3"
+}
 
 # Every write is a read-modify-write of one file, made by the orchestrator and
 # by concurrent hook invocations: serialise them (lib/flock.sh).
@@ -120,7 +131,7 @@ _current_pass() { jq -r '.current_pass // ""' "$STATE"; }
 _last_window_event() {  # as JSON, {} if none
   jq -c --argjson w "$WINDOW_EVENTS" '[.audit_trail[] | select(.event as $e | $w | index($e))] | last // {}' "$STATE"
 }
-_last_event() { _last_window_event | jq -r '.event // ""'; }
+_last_window_event_name() { _last_window_event | jq -r '.event // ""'; }
 _open_fix() {  # a fix agent dispatched and not yet closed by fixes_applied
   jq -e '(.audit_trail | map(.event)) as $e
     | ($e | indices("fix_dispatched") | max // -1) > ($e | indices("fixes_applied") | max // -1)' \
@@ -144,10 +155,10 @@ _need_current() {  # _need_current <pass>
   [[ "$(_current_pass)" == "$1" ]] || _refuse "$1 is not the current pass"
 }
 _need_in_flight() {
-  [[ "$(_last_event)" == "reviewer_dispatched" ]] || _refuse "no reviewer is in flight"
+  [[ "$(_last_window_event_name)" == "reviewer_dispatched" ]] || _refuse "no reviewer is in flight"
 }
 _need_not_in_flight() {
-  [[ "$(_last_event)" != "reviewer_dispatched" ]] \
+  [[ "$(_last_window_event_name)" != "reviewer_dispatched" ]] \
     || _refuse "a reviewer is still in flight; record its findings or abandon it first"
 }
 _need_no_open_fix() {
@@ -155,7 +166,7 @@ _need_no_open_fix() {
 }
 _need_last_in() {  # _need_last_in <what> <event>...: the last window event is one of these
   local what="$1" last; shift
-  last="$(_last_event)"
+  last="$(_last_window_event_name)"
   local e
   for e in "$@"; do [[ "$last" == "$e" ]] && return 0; done
   _refuse "$what cannot follow ${last:-nothing}"
@@ -170,9 +181,10 @@ _blocking_pass() {  # _blocking_pass <name>: one of the four blocking passes
 
 _mutex
 
-case "${1:-}" in
+CMD="${1:-}"
+case "$CMD" in
   init)
-    bead="${2:?bead}"; base="${3:?base}"; head="${4:?head}"
+    _arg bead bead "${2:-}"; _arg base base "${3:-}"; _arg head head "${4:-}"
     if [[ -f "$STATE" ]] && [[ "$(jq -r '.status' "$STATE")" == "in_progress" ]]; then
       _refuse "a run is in flight on $(jq -r '.target_bead' "$STATE"); finish or abort it first"
     fi
@@ -195,7 +207,7 @@ case "${1:-}" in
     _event run_adopted --arg f "$from" --arg s "$me" '{from:$f, session_id:$s}'
     ;;
   pass)
-    _need_run; name="${2:?pass}"
+    _need_run; _arg name pass "${2:-}"
     _need_not_in_flight
     cur="$(_current_pass)"
     [[ -z "$cur" ]] || _refuse "$cur is still the current pass; record it done first"
@@ -206,7 +218,7 @@ case "${1:-}" in
     _event pass_started --arg p "$name" '{pass:$p}'
     ;;
   request)
-    _need_run; pass="${2:?pass}"; iteration="${3:?iteration}"
+    _need_run; _arg pass pass "${2:-}"; _int iteration iteration "${3:-}"
     _need_current "$pass"
     _need_not_in_flight
     _need_no_open_fix
@@ -229,7 +241,7 @@ case "${1:-}" in
       exit 4
     fi
     pass="$(_current_pass)"
-    case "$(_last_event)" in
+    case "$(_last_window_event_name)" in
       pass_started|reviewer_requested)
         _event reviewer_dispatched --arg p "$pass" --arg s "$subagent" '{pass:$p, subagent_type:$s}'
         exit 0 ;;
@@ -245,35 +257,36 @@ case "${1:-}" in
     esac
     ;;
   findings)
-    _need_run; pass="${2:?pass}"
+    _need_run; _arg pass pass "${2:-}"
+    _int crit critical "${3:-}"; _int imp important "${4:-}"; _int minor minor "${5:-}"
     _blocking_pass "$pass"
     _need_current "$pass"
     _need_in_flight
-    _event findings_received --arg p "$pass" --argjson c "${3:?}" --argjson i "${4:?}" \
-      --argjson m "${5:?}" --arg v "${6:-}" \
+    _event findings_received --arg p "$pass" --argjson c "$crit" --argjson i "$imp" \
+      --argjson m "$minor" --arg v "${6:-}" \
       '{pass:$p, counts:{critical:$c, important:$i, minor:$m}, verdict:$v}'
     ;;
   abandon)
-    _need_run; pass="${2:?pass}"; reason="${3:?reason}"
+    _need_run; _arg pass pass "${2:-}"; _arg reason reason "${3:-}"
     _need_current "$pass"
     _need_in_flight
     _event reviewer_abandoned --arg p "$pass" --arg r "$reason" '{pass:$p, reason:$r}'
     ;;
   fixed)
-    _need_run; pass="${2:?pass}"; extra="${3:-}"; [[ -n "$extra" ]] || extra='{}'
+    _need_run; _arg pass pass "${2:-}"; extra="${3:-}"; [[ -n "$extra" ]] || extra='{}'
     _object "$extra"
     _need_current "$pass"
     _need_last_in "fixed" findings_received fix_dispatched fixes_applied reviewer_left_tree_dirty
     _event fixes_applied --argjson x "$extra" --arg p "$pass" '$x + {pass:$p}'
     ;;
   tree-dirty)
-    _need_run; pass="${2:?pass}"
+    _need_run; _arg pass pass "${2:-}"
     _need_current "$pass"
     _need_last_in "tree-dirty" findings_received
     _event reviewer_left_tree_dirty --arg p "$pass" '{pass:$p}'
     ;;
   event)
-    _need_run; name="${2:?event}"; extra="${3:-}"; [[ -n "$extra" ]] || extra='{}'
+    _need_run; _arg name event "${2:-}"; extra="${3:-}"; [[ -n "$extra" ]] || extra='{}'
     _object "$extra"
     if jq -en --argjson w "$WINDOW_EVENTS" --arg e "$name" '$w | index($e)' >/dev/null; then
       _bad_arg "$name is a window event, written by its own subcommand"
@@ -281,7 +294,7 @@ case "${1:-}" in
     _event "$name" --argjson x "$extra" '$x'
     ;;
   done)
-    _need_run; name="${2:?pass}"; iters="${3:?fix_iterations}"; extra="${4:-}"; [[ -n "$extra" ]] || extra='{}'
+    _need_run; _arg name pass "${2:-}"; _int iters fix_iterations "${3:-}"; extra="${4:-}"; [[ -n "$extra" ]] || extra='{}'
     _object "$extra"
     _blocking_pass "$name"
     _need_current "$name"
@@ -298,15 +311,17 @@ case "${1:-}" in
     ;;
   advisory)
     _need_run
+    _int crit critical "${2:-}"; _int imp important "${3:-}"; _int minor minor "${4:-}"
+    _arg verdict verdict "${5:-}"
     _need_current excellence
     _need_in_flight
-    rec="$(jq -cn --arg t "$(_now)" --argjson c "${2:?}" --argjson i "${3:?}" --argjson m "${4:?}" --arg v "${5:?verdict}" \
+    rec="$(jq -cn --arg t "$(_now)" --argjson c "$crit" --argjson i "$imp" --argjson m "$minor" --arg v "$verdict" \
       '{ts:$t, event:"advisory_pass_completed", pass:"excellence", counts:{critical:$c, important:$i, minor:$m}, verdict:$v}')"
     _apply '.advisory_results += [$r] | .current_pass = null' --argjson r "$rec"
     _append "$rec"
     ;;
   finish)
-    _need_run; status="${2:?status}"
+    _need_run; _arg status status "${2:-}"
     case "$status" in completed|failed|aborted) ;; *) _bad_arg "bad status $status";; esac
     if [[ "$status" == completed ]]; then
       missing="$(jq -r '[.passes[] as $p | select([.completed_passes[].name] | index($p) | not) | $p]

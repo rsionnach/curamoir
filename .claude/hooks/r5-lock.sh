@@ -289,16 +289,8 @@ case "${1:-}" in
   release) shift; _with_mutex _cmd_release "$@" ;;
   status)  shift; _cmd_status ;;
   *)
-    cat >&2 <<EOF
-usage: r5-lock.sh <subcommand> [args]
-  acquire <supervisor> <target> [session_id]
-  refresh <supervisor> [session_id]
-  release <supervisor> [session_id]
-  status
-
-session_id defaults to \$CLAUDE_CODE_SESSION_ID.
-Lock file: $LOCK_FILE
-EOF
+    # The usage is the header, from line 2 to the first non-comment line.
+    awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' "${BASH_SOURCE[0]}" >&2
     exit 1
     ;;
 esac
