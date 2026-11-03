@@ -79,6 +79,8 @@ command -v jq >/dev/null 2>&1 || { printf 'r5-state: jq is required\n' >&2; exit
 source "$_DIR/lib/flock.sh"
 # shellcheck source=lib/lease.sh
 source "$_DIR/lib/lease.sh"
+# shellcheck source=lib/usage.sh
+source "$_DIR/lib/usage.sh"
 
 STATE="$R5_STATE_FILE"
 
@@ -87,22 +89,18 @@ WINDOW_EVENTS='["supervisor_started","pass_started","reviewer_requested",
   "fix_dispatched","fixes_applied","reviewer_left_tree_dirty",
   "pass_completed","advisory_pass_completed"]'
 
-_usage() {  # the header above, from line 2 to the first non-comment line
-  awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' "${BASH_SOURCE[0]}" >&2
-  exit 1
-}
 _refuse() { printf 'r5-state: %s\n' "$*" >&2; exit 2; }
 _bad_arg() { printf 'r5-state: %s\n' "$*" >&2; exit 1; }
 _now() { date -u +%Y-%m-%dT%H:%M:%SZ; }
 # _arg <var> <name> <value>: set <var> to a required argument, or exit 1.
 _arg() {
-  [[ -n "$3" ]] || _bad_arg "${CMD:-?}: missing <$2>"
+  [[ -n "$3" ]] || _bad_arg "$CMD: missing <$2>"
   printf -v "$1" '%s' "$3"
 }
 # _int <var> <name> <value>: as _arg, for a non-negative integer.
 _int() {
-  [[ "$3" =~ ^[0-9]+$ ]] || _bad_arg "${CMD:-?}: <$2> must be a non-negative integer, got '$3'"
-  printf -v "$1" '%s' "$3"
+  _arg "$1" "$2" "$3"
+  [[ "$3" =~ ^[0-9]+$ ]] || _bad_arg "$CMD: <$2> must be a non-negative integer, got '$3'"
 }
 
 # Every write is a read-modify-write of one file, made by the orchestrator and
@@ -336,5 +334,5 @@ case "$CMD" in
     mv "$STATE" "$R5_ROOT/.claude/r5-state-${bead}-${status}-$(date -u +%Y%m%dT%H%M%SZ).json"
     ;;
   show) _need_run; cat "$STATE" ;;
-  *) _usage ;;
+  *) _r5_usage "${BASH_SOURCE[0]}" ;;
 esac

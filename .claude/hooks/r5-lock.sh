@@ -52,6 +52,8 @@ source "$_SCRIPT_DIR/lib/resolve-repo-root.sh" || {
 source "$_SCRIPT_DIR/lib/flock.sh"
 # shellcheck source=lib/lease.sh
 source "$_SCRIPT_DIR/lib/lease.sh"
+# shellcheck source=lib/usage.sh
+source "$_SCRIPT_DIR/lib/usage.sh"
 
 LOCK_FILE="$R5_LOCK_FILE"
 LOCK_DIR="$(dirname "$LOCK_FILE")"
@@ -289,8 +291,6 @@ case "${1:-}" in
   release) shift; _with_mutex _cmd_release "$@" ;;
   status)  shift; _cmd_status ;;
   *)
-    # The usage is the header, from line 2 to the first non-comment line.
-    awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' "${BASH_SOURCE[0]}" >&2
-    exit 1
+    _r5_usage "${BASH_SOURCE[0]}"
     ;;
 esac
