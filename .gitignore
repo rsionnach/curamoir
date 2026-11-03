@@ -18,4 +18,5 @@ docs/curamoir-spec.md
 # archived audit trails, and the local hook wiring.
 .claude/r5-supervisor.lock
 .claude/r5-state*.json
+.claude/r5-*.flock
 .claude/settings.local.json

@@ -14,11 +14,12 @@
 #      held, with a live lease, by a different Claude Code session, refuse
 #      every subagent dispatch from this one.
 #
-#   B. One reviewer at a time within the run (r5-state.sh claim): after the
-#      supervisor requests a reviewer (`pass` / `request`), the first
-#      dispatch is let through and recorded as reviewer_dispatched; every
-#      further dispatch is refused until that reviewer's findings (or its
-#      abandonment) are recorded.
+#   B. One agent at a time within the run (r5-state.sh claim), for the
+#      session that owns the run: after the supervisor requests a reviewer
+#      (`pass` / `request`), the first dispatch is let through and recorded
+#      as reviewer_dispatched; every further dispatch is refused until that
+#      reviewer's findings are recorded (or it is abandoned and requested
+#      again). In a fix round, one fix agent at a time.
 #
 # Blocked: exit 2 with a stderr message. If jq is missing while a run's lock
 # or state exists, refuse (the guard cannot read them; failing open would let
@@ -51,12 +52,13 @@ _epoch() {
   date -u -d "$ts" +%s 2>/dev/null || date -u -j -f "%Y-%m-%dT%H:%M:%SZ" "$ts" +%s 2>/dev/null || printf '0'
 }
 
+CURRENT_SESSION="${CLAUDE_CODE_SESSION_ID:-${CLAUDE_SESSION_ID:-}}"
+if [[ -z "$CURRENT_SESSION" ]]; then
+  CURRENT_SESSION=$(printf '%s' "$PAYLOAD" | jq -r '.session_id // ""' 2>/dev/null || true)
+fi
+
 # ---- Layer A: cross-session lock, with its lease ----
 if [[ -f "$LOCK_FILE" ]]; then
-  CURRENT_SESSION="${CLAUDE_CODE_SESSION_ID:-${CLAUDE_SESSION_ID:-}}"
-  if [[ -z "$CURRENT_SESSION" ]]; then
-    CURRENT_SESSION=$(printf '%s' "$PAYLOAD" | jq -r '.session_id // ""' 2>/dev/null || true)
-  fi
   HELD_SESSION=$(jq -r '.session_id // ""' "$LOCK_FILE" 2>/dev/null || true)
   if [[ -n "$HELD_SESSION" && -n "$CURRENT_SESSION" && "$HELD_SESSION" != "$CURRENT_SESSION" ]]; then
     NOW=$(date -u +%s)
@@ -80,20 +82,23 @@ MSG
   fi
 fi
 
-# ---- Layer B: one reviewer in flight at a time ----
+# ---- Layer B: one reviewer (or one fix agent) at a time, in the run's own
+# session; another session's dispatches are layer A's business ----
 [[ -f "$STATE_FILE" ]] || exit 0
 SUBAGENT=$(printf '%s' "$PAYLOAD" | jq -r '.tool_input.subagent_type // "general-purpose"' 2>/dev/null || echo "?")
-if bash "$_HOOK_DIR/r5-state.sh" claim "$SUBAGENT"; then
+if bash "$_HOOK_DIR/r5-state.sh" claim "$SUBAGENT" "$CURRENT_SESSION"; then
   exit 0
 fi
 cat >&2 <<MSG
-r5-parallel-block: a reviewer is in flight; no other subagent may be dispatched
-until its findings are recorded (one lens at a time).
+r5-parallel-block: a reviewer or fix agent of the R5 run is in flight (or an
+abandoned reviewer has not been requested again); no other subagent may be
+dispatched (one lens, one agent at a time).
   target: $(jq -r '.target_bead // "unknown"' "$STATE_FILE")
   pass:   $(jq -r '.current_pass // "unknown"' "$STATE_FILE")
   wanted: $SUBAGENT
 
-Record its findings (r5-state.sh findings ...) or, if it stalled,
-r5-state.sh abandon <pass> <reason>, then request it again.
+Reviewer: record its findings (r5-state.sh findings ...) or, if it stalled
+or never started, r5-state.sh abandon <pass> <reason>, then request it again.
+Fix agent: r5-state.sh event fixes_applied '{"files":[...]}' when it is done.
 MSG
 exit 2

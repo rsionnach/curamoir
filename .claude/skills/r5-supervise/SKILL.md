@@ -24,8 +24,9 @@ negotiable:
 - **One lens per reviewer.** Each pass is its own reviewer subagent with its own
   template. Never two lenses in one reviewer.
 - **One reviewer at a time, in order.** Never two reviewers in flight, never a
-  later pass before an earlier one is clean. The parallel-block hook enforces
-  this by reading the state file; write the state BEFORE every dispatch.
+  later pass before an earlier one is clean. The state helper refuses a pass
+  out of order, and the parallel-block hook refuses a second agent; record
+  the state BEFORE every dispatch (`pass` / `request`).
 - **The orchestrator never runs a pass itself.** If a reviewer stalls,
   `r5-state.sh abandon <pass> <reason>`, then `r5-state.sh request <pass>
   <iteration>` and dispatch a fresh reviewer (or resume the stalled one after
@@ -40,9 +41,13 @@ file), `r5-parallel-block.sh` (the hook, wired in `.claude/settings.local.json`
 for `Agent|Task`). The reviewer window works like this: `r5-state.sh pass`
 (or `request`, for a re-dispatch) asks for exactly one reviewer; the hook lets
 the next subagent dispatch through and records it as reviewer_dispatched,
-atomically; every later dispatch is refused until `r5-state.sh findings` (or
-`abandon`) closes the window. Never dispatch two subagents in one message
-while a reviewer has been requested: the second is refused.
+atomically; every later dispatch is refused until `r5-state.sh findings`
+closes the window (or `abandon`, and then `request` again). In a fix round
+the hook records each dispatch as fix_dispatched and lets one fix agent run
+at a time, until `event fixes_applied`. Never dispatch two subagents in one
+message while a reviewer has been requested: the second is refused. The run
+belongs to the session that started it (or `adopt`ed it); other sessions'
+dispatches are refused only while the lock's lease is live.
 
 ## Inputs
 
@@ -80,11 +85,12 @@ For each pass in `correctness`, `clarity`, `edge-cases`, `provenance`:
 2. `bash .claude/hooks/r5-state.sh pass <pass>` (requests the reviewer).
 3. Read `~/.claude/skills/rule-of-five-review/<pass>-reviewer.md` (edge-cases
    uses `edge-cases-reviewer.md`).
-4. Dispatch exactly one reviewer subagent, alone in its message. The hook
-   records it (reviewer_dispatched) and refuses every other dispatch until
-   step 5. Its (subagent_type
-   `pr-review-toolkit:code-reviewer` or `general-purpose`), whose brief is:
-   brief:
+4. Dispatch exactly one reviewer subagent, alone in its message
+   (subagent_type `pr-review-toolkit:code-reviewer` or `general-purpose`).
+   The hook records it (reviewer_dispatched) and refuses every other
+   dispatch until step 5. If the dispatch did not launch (a denied
+   permission prompt, another hook), it is still recorded:
+   `abandon <pass> "never started"`, `request`, dispatch again. Its brief:
    - `PASS <n> (<PASS>) of the sequential R5 review of bead <bead-id>.`
    - the template body, inlined;
    - the scope: `git diff <base>..<head>`; no findings outside the diff; the
@@ -106,15 +112,17 @@ For each pass in `correctness`, `clarity`, `edge-cases`, `provenance`:
    and go to the next pass. (Minors: fix them in the same fix round if cheap,
    then that fix round is re-reviewed like any other.)
 7. Otherwise: refresh the lock, dispatch ONE fix subagent (or fix it yourself
-   if the change is a few lines), `r5-state.sh event fixes_applied
-   '{"files":[...]}'`; run the full suite, ruff and curamoir-lint
+   if the change is a few lines; the hook records a fix agent as
+   fix_dispatched and refuses a second); when the fix is in place,
+   `r5-state.sh event fixes_applied '{"files":[...]}'` (this closes the fix
+   agent's window; record it only after the agent has finished); run the full suite, ruff and curamoir-lint
    (`event tests_passed` / `event tests_failed` — a failure stops the run with
    status failed); commit (`r5(<pass>): <summary> · <bead-id>` with the
    Co-Authored-By trailer); `event commit_made '{"sha":"..."}'`; then
-   `r5-state.sh request <pass> <iteration + 1>` and re-dispatch the SAME pass
-   (step 4). The fix subagent is dispatched after `findings` was recorded,
-   so the hook allows it without recording it; it must finish before the
-   `request`.
+   `r5-state.sh request <pass> <iteration + 1>` (refused while a fix agent
+   is open) and re-dispatch the SAME pass (step 4). `done` is refused unless
+   that pass's clean findings are the run's last window event, so a fix or a
+   re-request after them always goes back through the reviewer.
 8. Three fix iterations without a clean pass: stop and ask the user.
 9. A finding that needs a design decision: `event design_question_raised`,
    ask the user, keep the lock (the run is paused, not over).
@@ -138,14 +146,21 @@ A NEEDS WORK verdict or a CRITICAL: do not close; ask the user.
 3. `bash .claude/hooks/r5-lock.sh release r5-supervise`.
 
 On failure or abort: `r5-state.sh finish failed|aborted`, then release the
-lock. A crash leaves the lease to expire after 15 minutes.
+lock. A crash leaves the lease to expire after 15 minutes; after that, other
+sessions' dispatches go through, and a new session resumes the run (below).
+The helpers' short mutex is a kernel flock(2), dropped when its holder dies,
+so a killed helper never wedges the run.
 
 ## Resume
 
 If `.claude/r5-state.json` exists with status in_progress: read it, re-acquire
-the lock (idempotent in the same session), and continue from `current_pass`.
-If its last event is reviewer_dispatched and that reviewer is gone,
-`abandon` it and `request` the pass again.
+the lock (idempotent in the same session; a new session reclaims it once
+the old lease has run out), then `r5-state.sh adopt` if the run's
+session_id is not this session, and log `event session_restarted`. Continue
+from `current_pass`. If its last window event is reviewer_dispatched and
+that reviewer is gone (or never started), `abandon` it and `request` the
+pass again; if it is fix_dispatched, check the fix agent's work, then
+`event fixes_applied`.
 If that pass is provenance, check `git status --short` first and ask the user
 before restoring anything — a leftover mutant looks like real work.
 

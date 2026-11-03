@@ -5,8 +5,10 @@ strictly in order, under a lock. These tests drive the shell helpers in
 .claude/hooks against a scratch root (CURAMOIR_R5_ROOT), never the live
 repository's lock or state, and pin the failure modes the correctness review
 reproduced: two sessions both acquiring the lock, a crashed holder blocking
-every session forever, two dispatches in one message both getting through,
-and a stalled reviewer deadlocking the run.
+every session forever (through the lock or through the state), two
+dispatches in one message both getting through, a stalled reviewer
+deadlocking the run, a pass closed while its re-review was still running,
+and a killed process leaving a mutex behind.
 """
 
 import datetime
@@ -164,13 +166,17 @@ def test_two_dispatches_issued_together_let_exactly_one_through(r5root):
     assert events(r5root).count("reviewer_dispatched") == 1
 
 
-def test_findings_close_the_window_and_a_fix_subagent_is_not_recorded(r5root):
+def test_in_a_fix_round_one_fix_agent_runs_at_a_time(r5root):
     start(r5root)
     run(STATE, "pass", "correctness", root=r5root)
     hook(r5root)
     assert run(STATE, "findings", "correctness", "0", "2", "0", "FIX", root=r5root).returncode == 0
-    assert hook(r5root).returncode == 0  # the fix subagent
-    assert hook(r5root).returncode == 0  # and another: no reviewer was requested
+    assert hook(r5root).returncode == 0  # the fix agent, recorded
+    assert events(r5root)[-1] == "fix_dispatched"
+    assert hook(r5root).returncode == 2  # a second, while the first is open
+    assert run(STATE, "request", "correctness", "2", root=r5root).returncode == 2
+    run(STATE, "event", "fixes_applied", root=r5root)
+    assert run(STATE, "request", "correctness", "2", root=r5root).returncode == 0
     assert events(r5root).count("reviewer_dispatched") == 1
 
 
@@ -190,7 +196,9 @@ def test_a_stalled_reviewer_is_abandoned_then_requested_again(r5root):
     run(STATE, "pass", "correctness", root=r5root)
     hook(r5root)
     assert run(STATE, "request", "correctness", "2", root=r5root).returncode == 2
+    assert run(STATE, "abandon", "clarity", "stalled", root=r5root).returncode == 1  # not current
     assert run(STATE, "abandon", "correctness", "stalled", root=r5root).returncode == 0
+    assert hook(r5root).returncode == 2  # nothing until the reviewer is requested again
     assert run(STATE, "request", "correctness", "2", root=r5root).returncode == 0
     assert hook(r5root).returncode == 0
     assert events(r5root)[-3:] == ["reviewer_abandoned", "reviewer_requested", "reviewer_dispatched"]
@@ -201,6 +209,81 @@ def test_the_next_pass_cannot_start_while_a_reviewer_is_in_flight(r5root):
     run(STATE, "pass", "correctness", root=r5root)
     hook(r5root)
     assert run(STATE, "pass", "clarity", root=r5root).returncode == 2
+
+
+def test_passes_run_in_order_and_one_at_a_time(r5root):
+    start(r5root)
+    assert run(STATE, "pass", "clarity", root=r5root).returncode == 2
+    assert run(STATE, "pass", "excellence", root=r5root).returncode == 2
+    assert run(STATE, "pass", "correctness", root=r5root).returncode == 0
+    hook(r5root)
+    run(STATE, "findings", "correctness", "0", "0", "0", "PASS", root=r5root)
+    assert run(STATE, "pass", "clarity", root=r5root).returncode == 2  # correctness not done
+    run(STATE, "done", "correctness", "0", root=r5root)
+    assert run(STATE, "pass", "edge-cases", root=r5root).returncode == 2
+    assert run(STATE, "pass", "clarity", root=r5root).returncode == 0
+
+
+def test_another_sessions_crashed_run_stops_blocking_once_its_lease_runs_out(r5root):
+    run(LOCK, "acquire", "r5-supervise", "b1", root=r5root, session="S1")
+    start(r5root)
+    run(STATE, "pass", "correctness", root=r5root)
+    assert hook(r5root, session="S2").returncode == 2  # S1's lease is live
+    hook(r5root)  # S1 dispatches its reviewer, then crashes
+    age_lock(r5root, 1000)
+    before = events(r5root)
+    assert hook(r5root, session="S2").returncode == 0
+    assert hook(r5root, session="S2").returncode == 0
+    assert events(r5root) == before  # S2's dispatches are not the run's
+
+
+def test_a_crash_before_the_dispatch_does_not_record_another_sessions_agent(r5root):
+    run(LOCK, "acquire", "r5-supervise", "b1", root=r5root, session="S1")
+    start(r5root)
+    run(STATE, "pass", "correctness", root=r5root)  # S1 crashes here
+    age_lock(r5root, 1000)
+    assert hook(r5root, session="S2").returncode == 0
+    assert events(r5root)[-1] == "pass_started"
+
+
+def test_a_new_session_adopts_a_run_only_while_holding_the_lock(r5root):
+    run(LOCK, "acquire", "r5-supervise", "b1", root=r5root, session="S1")
+    start(r5root)
+    run(STATE, "pass", "correctness", root=r5root)
+    hook(r5root)
+    age_lock(r5root, 1000)
+    assert run(STATE, "adopt", root=r5root, session="S2").returncode == 2  # no lock yet
+    assert run(LOCK, "acquire", "r5-supervise", "b1", root=r5root, session="S2").returncode == 0
+    assert run(STATE, "adopt", root=r5root, session="S2").returncode == 0
+    assert state(r5root)["session_id"] == "S2"
+    assert hook(r5root, session="S2").returncode == 2  # S1's reviewer is still recorded in flight
+    run(STATE, "abandon", "correctness", "its session crashed", root=r5root, session="S2")
+    run(STATE, "request", "correctness", "2", root=r5root, session="S2")
+    assert hook(r5root, session="S2").returncode == 0
+
+
+def test_a_killed_process_holding_the_mutex_does_not_block_the_next_call(r5root):
+    start(r5root)
+    holder = subprocess.Popen(
+        ["bash", "-c", f'source "{HOOKS}/lib/flock.sh"; _r5_flock "$1" t; echo held; exec sleep 60',
+         "_", str(r5root / ".claude" / "r5-state.json.flock")],
+        stdout=subprocess.PIPE, text=True)
+    blocked = None
+    try:
+        assert holder.stdout.readline().strip() == "held"
+        blocked = subprocess.Popen(["bash", str(STATE), "show"], env={
+            **os.environ, "CURAMOIR_R5_ROOT": str(r5root)}, stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL)
+        with pytest.raises(subprocess.TimeoutExpired):
+            blocked.wait(timeout=1)  # waits on the held mutex
+        holder.kill()
+        assert blocked.wait(timeout=5) == 0
+    finally:
+        for proc in (holder, blocked):
+            if proc is not None:
+                proc.kill()
+                proc.wait()
+        holder.stdout.close()
 
 
 def test_without_jq_a_run_in_flight_refuses_every_dispatch(r5root, tmp_path_factory):
@@ -230,6 +313,40 @@ def test_a_pass_is_done_only_when_it_is_current_and_its_last_findings_are_clean(
     assert run(STATE, "done", "correctness", "1", root=r5root).returncode == 0
     assert state(r5root)["current_pass"] is None
     assert [p["name"] for p in state(r5root)["completed_passes"]] == ["correctness"]
+
+
+def test_a_pass_cannot_be_done_while_its_re_review_is_requested_or_running(r5root):
+    start(r5root)
+    run(STATE, "pass", "correctness", root=r5root)
+    hook(r5root)
+    run(STATE, "findings", "correctness", "0", "0", "1", "PASS", root=r5root)
+    run(STATE, "event", "fixes_applied", root=r5root)
+    run(STATE, "request", "correctness", "2", root=r5root)
+    assert run(STATE, "done", "correctness", "1", root=r5root).returncode == 1  # requested
+    hook(r5root)
+    assert run(STATE, "done", "correctness", "1", root=r5root).returncode == 1  # running
+    assert run(STATE, "pass", "clarity", root=r5root).returncode == 2
+
+
+def test_findings_need_the_current_pass_and_a_dispatched_reviewer(r5root):
+    start(r5root)
+    run(STATE, "pass", "correctness", root=r5root)
+    assert run(STATE, "findings", "correctness", "0", "0", "0", root=r5root).returncode == 1
+    hook(r5root)
+    assert run(STATE, "findings", "clarity", "0", "0", "0", root=r5root).returncode == 1
+    assert run(STATE, "advisory", "0", "0", "0", "PASS", root=r5root).returncode == 1
+    assert run(STATE, "findings", "correctness", "0", "0", "0", root=r5root).returncode == 0
+
+
+def test_a_bookkeeping_event_never_reopens_a_window(r5root):
+    start(r5root)
+    run(STATE, "pass", "correctness", root=r5root)
+    hook(r5root)
+    run(STATE, "event", "session_restarted", root=r5root)
+    assert hook(r5root).returncode == 2
+    assert run(STATE, "event", "reviewer_abandoned", root=r5root).returncode == 1
+    assert run(STATE, "event", "findings_received", root=r5root).returncode == 1
+    assert events(r5root)[-1] == "session_restarted"
 
 
 def test_a_second_run_cannot_start_while_one_is_in_flight(r5root):

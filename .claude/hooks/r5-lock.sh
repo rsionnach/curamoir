@@ -48,6 +48,8 @@ source "$_SCRIPT_DIR/lib/resolve-repo-root.sh" || {
   printf 'r5-lock: cannot resolve the repository root\n' >&2
   exit 3
 }
+# shellcheck source=lib/flock.sh
+source "$_SCRIPT_DIR/lib/flock.sh"
 
 LOCK_FILE="$R5_ROOT/.claude/r5-supervisor.lock"
 LOCK_DIR="$(dirname "$LOCK_FILE")"
@@ -294,26 +296,12 @@ _cmd_status() {
   exit 0
 }
 
-# Every acquire, refresh and release runs under a short mutex: mkdir(2) is
-# atomic, so the read-decide-write of one session cannot interleave with
-# another's (two stale reclaimers, or a reclaim racing a refresh). It is held
-# for milliseconds; one left behind by a killed process is cleared after
-# MUTEX_STALE_SECONDS.
-MUTEX_DIR="$LOCK_FILE.mutex"
-MUTEX_STALE_SECONDS=30
+# Every acquire, refresh and release runs under a short mutex (lib/flock.sh),
+# so the read-decide-write of one session cannot interleave with another's
+# (two stale reclaimers, or a reclaim racing a refresh). It is held for
+# milliseconds, and the kernel drops it if its holder is killed.
 _with_mutex() {
-  local tries=0
-  until mkdir "$MUTEX_DIR" 2>/dev/null; do
-    if [[ -d "$MUTEX_DIR" ]]; then
-      local born age
-      born=$(stat -f %m "$MUTEX_DIR" 2>/dev/null || stat -c %Y "$MUTEX_DIR" 2>/dev/null || echo 0)
-      age=$(( $(date -u +%s) - born ))
-      (( age > MUTEX_STALE_SECONDS )) && rmdir "$MUTEX_DIR" 2>/dev/null
-    fi
-    (( ++tries > 100 )) && { printf 'r5-lock: could not take %s after 10s\n' "$MUTEX_DIR" >&2; exit 3; }
-    sleep 0.1
-  done
-  trap 'rmdir "$MUTEX_DIR" 2>/dev/null' EXIT
+  _r5_flock "$LOCK_FILE.flock" r5-lock
   "$@"
 }
 
