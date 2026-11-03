@@ -80,7 +80,16 @@
 #         subcommand that changes the run: adopt it first)
 set -euo pipefail
 
-_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# This script's real directory: through any symlink to the file, and with
+# CDPATH cleared (an exported CDPATH makes `cd` print a second path). The
+# same bootstrap opens each helper, before lib/ can be sourced.
+_self="${BASH_SOURCE[0]}"
+while [[ -L "$_self" ]]; do
+  _link="$(readlink "$_self")"
+  [[ "$_link" == /* ]] || _link="$(dirname -- "$_self")/$_link"
+  _self="$_link"
+done
+_DIR="$(CDPATH= cd -- "$(dirname -- "$_self")" && pwd)"
 # shellcheck source=lib/resolve-repo-root.sh
 source "$_DIR/lib/resolve-repo-root.sh" || exit 3
 command -v jq >/dev/null 2>&1 || { printf 'r5-state: jq is required\n' >&2; exit 3; }
@@ -217,6 +226,12 @@ _blocking_pass() {  # _blocking_pass <name>: one of the four blocking passes
   jq -e --arg p "$1" '.passes | index($p)' "$STATE" >/dev/null || _bad_arg "$1 is not a blocking pass"
 }
 
+# Move a finished run's file to r5-state-<bead>-<status>-<ts>.json.
+_archive() {
+  mv "$STATE" "$R5_ROOT/.claude/r5-state-$(jq -r '.target_bead' "$STATE")-$(jq -r '.status' "$STATE")-$(date -u +%Y%m%dT%H%M%SZ).json" \
+    || { printf 'r5-state: could not archive %s\n' "$STATE" >&2; exit 3; }
+}
+
 _mutex
 
 CMD="${1:-}"
@@ -229,6 +244,7 @@ case "$CMD" in
       _need_valid_state
       [[ "$(jq -r '.status' "$STATE")" != "in_progress" ]] \
         || _refuse "a run is in flight on $(jq -r '.target_bead' "$STATE"); finish or abort it first"
+      _archive  # a finished run whose archive move failed: keep its trail
     fi
     tmp="$STATE.tmp.$$"
     jq -n --arg b "$bead" --arg base "$base" --arg head "$head" --arg t "$(_now)" --arg s "$(_r5_session)" '{
@@ -394,10 +410,12 @@ case "$CMD" in
         | join(", ")' "$STATE")"
       [[ -z "$missing" ]] || _refuse "the run is not complete: $missing"
     fi
-    _apply '.status = $s | .current_pass = null' --arg s "$status"
-    _event "supervisor_$status"
-    bead="$(jq -r '.target_bead' "$STATE")"
-    mv "$STATE" "$R5_ROOT/.claude/r5-state-${bead}-${status}-$(date -u +%Y%m%dT%H%M%SZ).json"
+    # Repeating a finish whose archive move failed only retries the move.
+    if [[ "$(jq -r '.status' "$STATE")" == in_progress ]]; then
+      _apply '.status = $s | .current_pass = null' --arg s "$status"
+      _event "supervisor_$status"
+    fi
+    _archive
     ;;
   open-window)
     # (r5-lock.sh) "<owner> <bead> <event>" if the run has a reviewer or a
@@ -408,7 +426,8 @@ case "$CMD" in
     if [[ "$last" == reviewer_dispatched ]]; then event=reviewer
     elif _open_fix; then event=fix-agent
     else exit 0; fi
-    printf '%s %s %s\n' "$(jq -r '.session_id // "-"' "$STATE")" "$(jq -r '.target_bead' "$STATE")" "$event"
+    printf '%s %s %s\n' "$(jq -r 'if (.session_id // "") == "" then "-" else .session_id end' "$STATE")" \
+      "$(jq -r '.target_bead' "$STATE")" "$event"
     ;;
   show) _need_run; cat "$STATE" ;;
   *) _r5_usage "${BASH_SOURCE[0]}" ;;

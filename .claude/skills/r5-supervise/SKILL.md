@@ -203,8 +203,13 @@ before restoring anything — a leftover mutant looks like real work.
 A long reviewer does not lose the lock: while the run has a reviewer or a
 fix agent in flight, `r5-lock.sh acquire` from another session refuses to
 reclaim the lapsed lease (until the 24h TTL), except `acquire r5-supervise
-<that bead>`, which is resuming the run. Refresh as soon as the reviewer
-reports.
+<that bead>`, which is resuming the run; resume that way only once you are
+sure the original session is gone (ask the user), or it loses its lock
+mid-review. Refresh as soon as the reviewer reports.
+
+The 24h TTL counts from the run's start: the pre-flight acquire restamps the
+lock when no run is in flight. A run that lasts longer than that fails its
+next refresh (exit 1): stop and ask the user.
 
 If a step failed partway (a full disk, a killed helper): `show` the state.
 A `pass` that set current_pass but wrote no pass_started is repaired with

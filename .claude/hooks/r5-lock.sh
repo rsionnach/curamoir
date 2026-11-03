@@ -44,7 +44,16 @@
 set -uo pipefail
 
 # Resolve R5_ROOT via the shared resolver.
-_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# This script's real directory: through any symlink to the file, and with
+# CDPATH cleared (an exported CDPATH makes `cd` print a second path). The
+# same bootstrap opens each helper, before lib/ can be sourced.
+_self="${BASH_SOURCE[0]}"
+while [[ -L "$_self" ]]; do
+  _link="$(readlink "$_self")"
+  [[ "$_link" == /* ]] || _link="$(dirname -- "$_self")/$_link"
+  _self="$_link"
+done
+_SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$_self")" && pwd)"
 # shellcheck source=lib/resolve-repo-root.sh
 source "$_SCRIPT_DIR/lib/resolve-repo-root.sh" || {
   printf 'r5-lock: cannot resolve the repository root\n' >&2
@@ -164,7 +173,11 @@ _cmd_acquire() {
         "$supervisor" "$held_target" "$target" >&2
       exit 2
     fi
-    _lock_write "$supervisor" "$target" "$session" "$held_acquired" "$now" || exit 3
+    # The absolute TTL counts from the start of a run: with no run in flight,
+    # a re-acquire (the start of the next run) restamps acquired_at.
+    local acquired="$held_acquired"
+    [[ "$(jq -r '.status // ""' "$R5_STATE_FILE" 2>/dev/null)" == in_progress ]] || acquired="$now"
+    _lock_write "$supervisor" "$target" "$session" "$acquired" "$now" || exit 3
     exit 0
   fi
 
@@ -189,16 +202,25 @@ EOF
   # (r5-supervise on its bead) may reclaim before the absolute TTL.
   if (( refresh_age > R5_LEASE_SECONDS || refresh_age < 0 )) && (( acquire_age <= R5_ABSOLUTE_TTL_SECONDS )); then
     local window
-    window="$(bash "$_SCRIPT_DIR/r5-state.sh" open-window 2>/dev/null || true)"
+    local window_rc=0
+    window="$(bash "$_SCRIPT_DIR/r5-state.sh" open-window 2>/dev/null)" || window_rc=$?
+    if (( window_rc != 0 )); then
+      printf 'r5-lock: the lease of %s/%s has lapsed, but the R5 run state cannot be read (exit %s); not reclaiming\n' \
+        "$held_supervisor" "$held_target" "$window_rc" >&2
+      exit 2
+    fi
     if [[ -n "$window" ]]; then
       local w_owner w_bead w_event
       read -r w_owner w_bead w_event <<< "$window"
-      if [[ "$w_owner" == "$held_session" && ! ( "$supervisor" == r5-supervise && "$target" == "$w_bead" ) ]]; then
+      # An unknown owner ("-") is taken to be the holder, as claim does.
+      if [[ ( "$w_owner" == "$held_session" || "$w_owner" == "-" ) \
+            && ! ( "$supervisor" == r5-supervise && "$target" == "$w_bead" ) ]]; then
         cat >&2 <<EOF
 r5-lock: the lease of $held_supervisor/$held_target (session $held_session)
 has lapsed, but its R5 run on $w_bead still has a $w_event open: a long
-review, not a crash. Not reclaiming. Wait for it, or, to resume that run in
-this session, acquire r5-supervise $w_bead.
+review, not a crash. Not reclaiming. Wait for it; or, once you are sure that
+session is gone, resume the run here (acquire r5-supervise $w_bead, then
+r5-state.sh adopt), and end it with r5-state.sh finish aborted if needed.
 EOF
         exit 2
       fi
@@ -259,6 +281,13 @@ _cmd_refresh() {
     exit 1
   fi
 
+  local acquire_age
+  read -r _ acquire_age <<< "$(_r5_lock_ages "$LOCK_FILE")"
+  if (( acquire_age > R5_ABSOLUTE_TTL_SECONDS )); then
+    printf 'r5-lock: refresh: the lock is past its %ss limit (acquired %ss ago), so it no longer protects this run; stop and ask the user\n' \
+      "$R5_ABSOLUTE_TTL_SECONDS" "$acquire_age" >&2
+    exit 1
+  fi
   _lock_write "$supervisor" "$held_target" "$session" "$held_acquired" "$(_now)" || exit 3
   exit 0
 }

@@ -24,7 +24,22 @@
 # curamoir checkout: allow.
 set -euo pipefail
 
-_HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# This script's real directory: through any symlink to the file, and with
+# CDPATH cleared (an exported CDPATH makes `cd` print a second path). The
+# same bootstrap opens each helper, before lib/ can be sourced.
+_self="${BASH_SOURCE[0]}"
+while [[ -L "$_self" ]]; do
+  _link="$(readlink "$_self")"
+  [[ "$_link" == /* ]] || _link="$(dirname -- "$_self")/$_link"
+  _self="$_link"
+done
+_HOOK_DIR="$(CDPATH= cd -- "$(dirname -- "$_self")" && pwd)"
+# A hook that cannot find its own libraries cannot tell whether a run is in
+# flight: refuse (a broken install is loud, never a silent hole).
+if [[ ! -f "$_HOOK_DIR/lib/resolve-repo-root.sh" || ! -f "$_HOOK_DIR/lib/lease.sh" ]]; then
+  printf 'r5-parallel-block: cannot find lib/ next to %s; the hook is installed wrongly, refusing the dispatch\n' "$_HOOK_DIR" >&2
+  exit 2
+fi
 # shellcheck source=lib/resolve-repo-root.sh
 source "$_HOOK_DIR/lib/resolve-repo-root.sh" 2>/dev/null || exit 0
 
@@ -75,7 +90,7 @@ rc=0
 bash "$_HOOK_DIR/r5-state.sh" claim "$SUBAGENT" "$CURRENT_SESSION" || rc=$?
 case "$rc" in
   0) exit 0 ;;
-  2) why="one lens, one agent at a time" ;;
+  2) why="refused by the run's state" ;;
   4) why="another session's run" ;;
   *) why="the state helper failed (exit $rc)" ;;
 esac

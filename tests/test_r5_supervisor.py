@@ -81,12 +81,15 @@ def clear_pass(root, name):
     assert run(STATE, "done", name, "0", root=root).returncode == 0
 
 
-def age_lock(root, seconds):
-    """Rewrite the lock as if it were last refreshed `seconds` ago."""
+def age_lock(root, seconds, field="refreshed_at"):
+    """Rewrite the lock as if `field` were set `seconds` ago."""
     data = json.loads(lock_file(root).read_text())
     old = datetime.datetime.now(datetime.UTC) - datetime.timedelta(seconds=seconds)
-    data["refreshed_at"] = old.strftime("%Y-%m-%dT%H:%M:%SZ")
+    data[field] = old.strftime("%Y-%m-%dT%H:%M:%SZ")
     lock_file(root).write_text(json.dumps(data))
+
+
+PAST_TTL = 86400 + 100  # older than the lock's absolute TTL
 
 
 # ---------------------------------------------------------------- the lock
@@ -288,6 +291,55 @@ def test_a_long_review_keeps_the_lock_from_another_supervisor(r5root):
     assert run(LOCK, "acquire", "r5-supervise", "b1", root=r5root, session="S2").returncode == 0
 
 
+def test_the_ttl_counts_from_the_run_s_start_and_refresh_fails_past_it(r5root):
+    run(LOCK, "acquire", "r5-supervise", "b1", root=r5root)
+    age_lock(r5root, PAST_TTL, field="acquired_at")
+    run(LOCK, "acquire", "r5-supervise", "b1", root=r5root)  # no run in flight: restamped
+    assert run(LOCK, "refresh", "r5-supervise", root=r5root).returncode == 0
+    start(r5root)
+    age_lock(r5root, PAST_TTL, field="acquired_at")
+    run(LOCK, "acquire", "r5-supervise", "b1", root=r5root)  # a run in flight: not restamped
+    late = run(LOCK, "refresh", "r5-supervise", root=r5root)
+    assert late.returncode == 1 and "limit" in late.stderr
+
+
+def test_the_long_review_guard_covers_a_fix_agent_and_an_unknown_owner(r5root):
+    run(LOCK, "acquire", "r5-supervise", "b1", root=r5root, session="S1")
+    run(STATE, "init", "b1", "x", "y", root=r5root, session="")  # an owner never recorded
+    run(STATE, "pass", "correctness", root=r5root, session="")
+    hook(r5root, session="")
+    run(STATE, "findings", "correctness", "0", "1", "0", root=r5root, session="")
+    hook(r5root, session="")  # a fix agent
+    assert events(r5root)[-1] == "fix_dispatched"
+    age_lock(r5root, PAST_LEASE)
+    assert run(LOCK, "acquire", "epic-executor", "e1", root=r5root, session="S2").returncode == 2
+
+
+def test_an_unreadable_run_state_stops_a_reclaim(r5root):
+    run(LOCK, "acquire", "r5-supervise", "b1", root=r5root, session="S1")
+    start(r5root)
+    path = r5root / ".claude" / "r5-state.json"
+    data = json.loads(path.read_text())
+    data["audit_trail"] = [1, 2]  # shape-valid, but not events
+    path.write_text(json.dumps(data))
+    age_lock(r5root, PAST_LEASE)
+    refused = run(LOCK, "acquire", "epic-executor", "e1", root=r5root, session="S2")
+    assert refused.returncode == 2 and "cannot be read" in refused.stderr
+
+
+def test_resuming_a_crashed_long_review_then_ending_it(r5root):
+    run(LOCK, "acquire", "r5-supervise", "b1", root=r5root, session="S1")
+    start(r5root)
+    run(STATE, "pass", "correctness", root=r5root)
+    hook(r5root)
+    age_lock(r5root, PAST_LEASE)
+    assert run(LOCK, "acquire", "r5-supervise", "b1", root=r5root, session="S2").returncode == 0
+    assert run(STATE, "adopt", root=r5root, session="S2").returncode == 0
+    assert run(STATE, "finish", "aborted", root=r5root, session="S2").returncode == 0
+    assert run(LOCK, "release", "r5-supervise", root=r5root, session="S2").returncode == 0
+    assert run(LOCK, "acquire", "epic-executor", "e1", root=r5root, session="S3").returncode == 0
+
+
 def test_a_lock_from_the_future_counts_as_expired(r5root):
     run(LOCK, "acquire", "r5-supervise", "b1", root=r5root, session="HOLDER")
     age_lock(r5root, -3600)
@@ -466,6 +518,36 @@ def test_a_bead_id_that_cannot_name_the_archive_is_refused(r5root):
     assert not (r5root / ".claude" / "r5-state.json").exists()
 
 
+def finished_but_not_archived(root):
+    """The state a finish leaves when its archive move fails."""
+    path = root / ".claude" / "r5-state.json"
+    data = json.loads(path.read_text())
+    data["status"] = "aborted"
+    data["audit_trail"].append({"ts": "2026-11-03T00:00:00Z", "event": "supervisor_aborted"})
+    path.write_text(json.dumps(data))
+
+
+def archived_aborted_events(root, bead):
+    archived = list((root / ".claude").glob(f"r5-state-{bead}-aborted-*.json"))
+    assert len(archived) == 1
+    return [e["event"] for e in json.loads(archived[0].read_text())["audit_trail"]]
+
+
+def test_repeating_a_finish_whose_archive_failed_only_retries_the_move(r5root):
+    start(r5root)
+    finished_but_not_archived(r5root)
+    assert run(STATE, "finish", "aborted", root=r5root).returncode == 0
+    assert archived_aborted_events(r5root, "b1").count("supervisor_aborted") == 1
+
+
+def test_init_archives_a_finished_but_unarchived_run_before_starting(r5root):
+    start(r5root)
+    finished_but_not_archived(r5root)
+    assert run(STATE, "init", "b2", "x", "y", root=r5root).returncode == 0
+    assert "supervisor_aborted" in archived_aborted_events(r5root, "b1")
+    assert state(r5root)["target_bead"] == "b2"
+
+
 def test_a_second_run_cannot_start_while_one_is_in_flight(r5root):
     start(r5root, "b1")
     assert run(STATE, "init", "b2", "x", "y", root=r5root).returncode == 2
@@ -599,3 +681,28 @@ def test_the_hook_checks_its_own_repository_whatever_the_session_s_cwd(tmp_path)
                               timeout=60).returncode
                for cwd in (repo, tmp_path, elsewhere)]
     assert results == [0, 2, 2]  # the reviewer, then two refusals from outside the repo
+
+
+def test_the_hook_works_through_a_symlink_and_with_cdpath_set(tmp_path):
+    repo = tmp_path / "repo"
+    hooks = hooks_in(repo)
+    for args in (("init", "b1", "x", "y"), ("pass", "correctness")):
+        subprocess.run(["bash", str(hooks / "r5-state.sh"), *args], env=bare_env(), cwd=repo,
+                       capture_output=True, timeout=60, check=True)
+    link = tmp_path / "linked-hook.sh"
+    link.symlink_to(hooks / "r5-parallel-block.sh")
+    payload = json.dumps({"tool_input": {"subagent_type": "general-purpose"}})
+    env = {**bare_env(), "CDPATH": f".:{tmp_path}"}
+    first = subprocess.run(["bash", str(link)], input=payload, capture_output=True, text=True,
+                           env=env, cwd=tmp_path, timeout=60)
+    second = subprocess.run(["bash", ".claude/hooks/r5-parallel-block.sh"], input=payload,
+                            capture_output=True, text=True, env=env, cwd=repo, timeout=60)
+    assert (first.returncode, second.returncode) == (0, 2), (first.stderr, second.stderr)
+
+
+def test_a_hook_without_its_libraries_refuses(tmp_path):
+    lone = tmp_path / "lone.sh"
+    shutil.copy(HOOK, lone)
+    refused = subprocess.run(["bash", str(lone)], input="{}", capture_output=True, text=True,
+                             env=bare_env(), cwd=tmp_path, timeout=60)
+    assert refused.returncode == 2 and "installed wrongly" in refused.stderr
