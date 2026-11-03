@@ -47,6 +47,9 @@
 #   tree-dirty <pass>              provenance left the tree dirty: the pass
 #                                  failed whatever its counts; `done` is
 #                                  refused until it is reviewed again
+#   reopen <pass>                  a change after <pass> was done: it and
+#                                  every later pass (and the advisory read)
+#                                  are to run again, starting with <pass>
 #   event <name> [json-object]     append a bookkeeping event
 #   done <pass> <fix_iterations> [json-object]
 #                                  the pass is complete (only if the run's
@@ -68,7 +71,8 @@
 #   2   - refused by the run's state or order (claim: refuse the dispatch)
 #   3   - internal error (cannot resolve the root, jq or perl missing, the
 #         mutex not taken within 10s)
-#   4   - claim only: another session's run
+#   4   - another session's run (claim: refuse the dispatch; any other
+#         subcommand that changes the run: adopt it first)
 set -euo pipefail
 
 _DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -87,7 +91,7 @@ STATE="$R5_STATE_FILE"
 WINDOW_EVENTS='["supervisor_started","pass_started","reviewer_requested",
   "reviewer_dispatched","reviewer_abandoned","findings_received",
   "fix_dispatched","fixes_applied","reviewer_left_tree_dirty",
-  "pass_completed","advisory_pass_completed"]'
+  "pass_completed","advisory_pass_completed","pass_reopened"]'
 
 _refuse() { printf 'r5-state: %s\n' "$*" >&2; exit 2; }
 _bad_arg() { printf 'r5-state: %s\n' "$*" >&2; exit 1; }
@@ -149,6 +153,20 @@ _owner_lease_lapsed() {  # _owner_lease_lapsed <owner>
 
 # ---- preconditions ----
 _need_run() { [[ -f "$STATE" ]] || _refuse "no run in flight ($STATE)"; }
+# Every subcommand that changes the run (all but init, adopt, claim, show)
+# is the owner's alone: a session whose run was adopted by another must not
+# write to it, finish it included. An unknown session on either side is
+# treated as the owner, as in claim.
+_need_owned_run() {
+  _need_run
+  local owner caller
+  owner="$(jq -r '.session_id // ""' "$STATE")"; caller="$(_r5_session)"
+  if [[ -n "$owner" && -n "$caller" && "$owner" != "$caller" ]]; then
+    printf 'r5-state: the run belongs to session %s, not this one (%s); adopt it first (r5-lock.sh acquire, then r5-state.sh adopt)\n' \
+      "$owner" "$caller" >&2
+    exit 4
+  fi
+}
 _need_current() {  # _need_current <pass>
   [[ "$(_current_pass)" == "$1" ]] || _refuse "$1 is not the current pass"
 }
@@ -205,7 +223,7 @@ case "$CMD" in
     _event run_adopted --arg f "$from" --arg s "$me" '{from:$f, session_id:$s}'
     ;;
   pass)
-    _need_run; _arg name pass "${2:-}"
+    _need_owned_run; _arg name pass "${2:-}"
     _need_not_in_flight
     cur="$(_current_pass)"
     [[ -z "$cur" ]] || _refuse "$cur is still the current pass; record it done first"
@@ -216,7 +234,7 @@ case "$CMD" in
     _event pass_started --arg p "$name" '{pass:$p}'
     ;;
   request)
-    _need_run; _arg pass pass "${2:-}"; _int iteration iteration "${3:-}"
+    _need_owned_run; _arg pass pass "${2:-}"; _int iteration iteration "${3:-}"
     _need_current "$pass"
     _need_not_in_flight
     _need_no_open_fix
@@ -244,7 +262,8 @@ case "$CMD" in
         _event reviewer_dispatched --arg p "$pass" --arg s "$subagent" '{pass:$p, subagent_type:$s}'
         exit 0 ;;
       reviewer_dispatched)
-        _refuse "the $pass reviewer is in flight; record its findings, or abandon it if it stalled or never started" ;;
+        if [[ "$pass" == excellence ]]; then report="advisory"; else report="findings $pass"; fi
+        _refuse "the $pass reviewer is in flight; record its report (\`$report ...\`), or abandon it if it stalled or never started" ;;
       reviewer_abandoned)
         _refuse "the $pass reviewer was abandoned; request it again before dispatching" ;;
       *)
@@ -254,8 +273,25 @@ case "$CMD" in
         exit 0 ;;
     esac
     ;;
+  reopen)
+    # A change after a pass was done goes back through that pass and every
+    # later one: drop them (and any advisory read) from completed_passes, so
+    # `pass` starts again at <pass>. The trail keeps the dropped results.
+    _need_owned_run; _arg pass pass "${2:-}"
+    _blocking_pass "$pass"
+    _need_not_in_flight
+    _need_no_open_fix
+    jq -e --arg p "$pass" '[.completed_passes[].name] | index($p)' "$STATE" >/dev/null \
+      || _refuse "$pass is not done, so there is nothing to reopen"
+    dropped="$(jq -c --arg p "$pass" '(.passes | index($p)) as $i | .passes[$i:] as $later
+      | [.completed_passes[].name | select(. as $n | $later | index($n))]' "$STATE")"
+    _apply '(.passes | index($p)) as $i | .passes[$i:] as $later
+      | .completed_passes |= map(select(.name as $n | $later | index($n) | not))
+      | .advisory_results = [] | .current_pass = null' --arg p "$pass"
+    _event pass_reopened --arg p "$pass" --argjson d "$dropped" '{pass:$p, dropped:$d}'
+    ;;
   findings)
-    _need_run; _arg pass pass "${2:-}"
+    _need_owned_run; _arg pass pass "${2:-}"
     _int crit critical "${3:-}"; _int imp important "${4:-}"; _int minor minor "${5:-}"
     _blocking_pass "$pass"
     _need_current "$pass"
@@ -265,26 +301,26 @@ case "$CMD" in
       '{pass:$p, counts:{critical:$c, important:$i, minor:$m}, verdict:$v}'
     ;;
   abandon)
-    _need_run; _arg pass pass "${2:-}"; _arg reason reason "${3:-}"
+    _need_owned_run; _arg pass pass "${2:-}"; _arg reason reason "${3:-}"
     _need_current "$pass"
     _need_in_flight
     _event reviewer_abandoned --arg p "$pass" --arg r "$reason" '{pass:$p, reason:$r}'
     ;;
   fixed)
-    _need_run; _arg pass pass "${2:-}"; extra="${3:-}"; [[ -n "$extra" ]] || extra='{}'
+    _need_owned_run; _arg pass pass "${2:-}"; extra="${3:-}"; [[ -n "$extra" ]] || extra='{}'
     _object "$extra"
     _need_current "$pass"
     _need_last_in "fixed" findings_received fix_dispatched fixes_applied reviewer_left_tree_dirty
     _event fixes_applied --argjson x "$extra" --arg p "$pass" '$x + {pass:$p}'
     ;;
   tree-dirty)
-    _need_run; _arg pass pass "${2:-}"
+    _need_owned_run; _arg pass pass "${2:-}"
     _need_current "$pass"
     _need_last_in "tree-dirty" findings_received
     _event reviewer_left_tree_dirty --arg p "$pass" '{pass:$p}'
     ;;
   event)
-    _need_run; _arg name event "${2:-}"; extra="${3:-}"; [[ -n "$extra" ]] || extra='{}'
+    _need_owned_run; _arg name event "${2:-}"; extra="${3:-}"; [[ -n "$extra" ]] || extra='{}'
     _object "$extra"
     if jq -en --argjson w "$WINDOW_EVENTS" --arg e "$name" '$w | index($e)' >/dev/null; then
       _bad_arg "$name is a window event, written by its own subcommand"
@@ -292,7 +328,7 @@ case "$CMD" in
     _event "$name" --argjson x "$extra" '$x'
     ;;
   done)
-    _need_run; _arg name pass "${2:-}"; _int iters fix_iterations "${3:-}"; extra="${4:-}"; [[ -n "$extra" ]] || extra='{}'
+    _need_owned_run; _arg name pass "${2:-}"; _int iters fix_iterations "${3:-}"; extra="${4:-}"; [[ -n "$extra" ]] || extra='{}'
     _object "$extra"
     _blocking_pass "$name"
     _need_current "$name"
@@ -308,7 +344,7 @@ case "$CMD" in
     _event pass_completed --arg p "$name" '{pass:$p}'
     ;;
   advisory)
-    _need_run
+    _need_owned_run
     _int crit critical "${2:-}"; _int imp important "${3:-}"; _int minor minor "${4:-}"
     _arg verdict verdict "${5:-}"
     _need_current excellence
@@ -319,7 +355,7 @@ case "$CMD" in
     _append "$rec"
     ;;
   finish)
-    _need_run; _arg status status "${2:-}"
+    _need_owned_run; _arg status status "${2:-}"
     case "$status" in completed|failed|aborted) ;; *) _bad_arg "bad status $status";; esac
     if [[ "$status" == completed ]]; then
       missing="$(jq -r '[.passes[] as $p | select([.completed_passes[].name] | index($p) | not) | $p]

@@ -290,6 +290,22 @@ def test_a_new_session_adopts_a_run_only_while_holding_the_lock(r5root):
     assert hook(r5root, session="S2").returncode == 0
 
 
+def test_a_session_whose_run_was_adopted_can_no_longer_change_it(r5root):
+    run(LOCK, "acquire", "r5-supervise", "b1", root=r5root, session="S1")
+    start(r5root)
+    run(STATE, "pass", "correctness", root=r5root)
+    hook(r5root)
+    age_lock(r5root, PAST_LEASE)
+    run(LOCK, "acquire", "r5-supervise", "b1", root=r5root, session="S2")
+    assert run(STATE, "adopt", root=r5root, session="S2").returncode == 0
+    for args in (("finish", "aborted"), ("findings", "correctness", "0", "0", "0"),
+                 ("abandon", "correctness", "x"), ("event", "note")):
+        stale = run(STATE, *args, root=r5root, session="S1")
+        assert stale.returncode == 4 and "adopt it first" in stale.stderr, args
+    assert (r5root / ".claude" / "r5-state.json").exists()
+    assert run(STATE, "abandon", "correctness", "S1 is gone", root=r5root, session="S2").returncode == 0
+
+
 # ---------------------------------------------------------------- passes and the run
 
 def test_the_next_pass_cannot_start_while_a_reviewer_is_in_flight(r5root):
@@ -382,6 +398,31 @@ def test_finish_completed_needs_every_pass_and_the_advisory_read(r5root):
     assert run(STATE, "done", "excellence", "0", root=r5root).returncode == 1
     assert run(STATE, "advisory", "0", "0", "1", "PASS", root=r5root).returncode == 0
     assert run(STATE, "finish", "completed", root=r5root).returncode == 0
+
+
+def test_reopen_runs_a_done_pass_and_every_later_one_again(r5root):
+    start(r5root)
+    clear_pass(r5root, "correctness")
+    clear_pass(r5root, "clarity")
+    assert run(STATE, "reopen", "edge-cases", root=r5root).returncode == 2  # not done
+    assert run(STATE, "reopen", "correctness", root=r5root).returncode == 0
+    assert state(r5root)["completed_passes"] == []
+    assert state(r5root)["audit_trail"][-1]["dropped"] == ["correctness", "clarity"]
+    assert run(STATE, "pass", "clarity", root=r5root).returncode == 2
+    clear_pass(r5root, "correctness")
+    run(STATE, "pass", "clarity", root=r5root)
+    hook(r5root)
+    assert run(STATE, "reopen", "correctness", root=r5root).returncode == 2  # a reviewer in flight
+
+
+def test_the_excellence_in_flight_refusal_names_advisory(r5root):
+    start(r5root)
+    for name in ("correctness", "clarity", "edge-cases", "provenance"):
+        clear_pass(r5root, name)
+    run(STATE, "pass", "excellence", root=r5root)
+    hook(r5root)
+    refused = hook(r5root)
+    assert refused.returncode == 2 and "`advisory ...`" in refused.stderr
 
 
 def test_a_second_run_cannot_start_while_one_is_in_flight(r5root):

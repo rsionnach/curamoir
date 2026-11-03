@@ -33,7 +33,10 @@ negotiable:
   the request); do not substitute your own review or your own mutation
   harness for its verdict.
 - **Anything changed after a pass is reviewed by that pass again**, including
-  excellence touch-ups and one-line edits made while squashing.
+  excellence touch-ups and one-line edits made while squashing. If the change
+  comes after that pass was done (a clarity fix that changes behaviour, an
+  applied excellence suggestion), `r5-state.sh reopen <earliest pass the
+  change touches>`: that pass and every later one run again, in order.
 
 Helpers (all in `.claude/hooks/`, all resolve this repository's main
 worktree): `r5-lock.sh` (the run lock), `r5-state.sh` (the only writer of the
@@ -95,8 +98,11 @@ step 1: release the lock (`r5-lock.sh release r5-supervise`).
 
 For each pass in `correctness`, `clarity`, `edge-cases`, `provenance`:
 
-1. `bash .claude/hooks/r5-lock.sh refresh r5-supervise` (exit 1 = lock lost:
-   abort the run).
+1. `bash .claude/hooks/r5-lock.sh refresh r5-supervise`. Exit 1 = the lock
+   is lost: another session reclaimed it after this one's lease lapsed (a
+   step that ran longer than 15 minutes). Stop, touch neither the lock nor
+   the state file (the helper refuses this session anyway, exit 4), and tell
+   the user; the other session may have adopted the run.
 2. `bash .claude/hooks/r5-state.sh pass <pass>` (requests the reviewer).
 3. Read `~/.claude/skills/rule-of-five-review/<pass>-reviewer.md` (edge-cases
    uses `edge-cases-reviewer.md`).
@@ -154,7 +160,7 @@ excellence`, dispatch the excellence reviewer once
 (`excellence-reviewer.md`, "This pass is ADVISORY"), then `r5-state.sh
 advisory <c> <i> <m> <verdict>`. No fix loop. If you choose to apply any of its
 suggestions, that change goes back through every blocking pass it touches
-(the rule above); otherwise record the suggestions as follow-up beads.
+(`reopen`, the rule above); otherwise record the suggestions as follow-up beads.
 A NEEDS WORK verdict or a CRITICAL: do not close; ask the user.
 
 ## Close
