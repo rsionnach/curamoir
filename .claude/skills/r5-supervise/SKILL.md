@@ -107,7 +107,9 @@ For each pass in `correctness`, `clarity`, `edge-cases`, `provenance`:
    While that reviewer runs, dispatch nothing else (the hook refuses).
 5. When it reports: `bash .claude/hooks/r5-state.sh findings <pass> <c> <i> <m> <verdict>`.
    After provenance, check `git status --short` yourself; a dirty tree is a
-   failed pass: restore, record `event reviewer_left_tree_dirty`, re-dispatch.
+   failed pass whatever the counts: restore, `event reviewer_left_tree_dirty`
+   (from then on `done` is refused), `request provenance <iteration + 1>`,
+   re-dispatch.
 6. If `critical + important == 0`: `r5-state.sh done <pass> <fix_iterations>`
    and go to the next pass. (Minors: fix them in the same fix round if cheap,
    then that fix round is re-reviewed like any other.)
@@ -142,7 +144,8 @@ A NEEDS WORK verdict or a CRITICAL: do not close; ask the user.
 1. `bd close <bead-id> --reason "<per-pass findings counts, fix iterations,
    commits, provenance mutants run/survived, advisory notes>"`.
 2. `bash .claude/hooks/r5-state.sh finish completed` (archives the trail as
-   `.claude/r5-state-<bead>-completed-<ts>.json`).
+   `.claude/r5-state-<bead>-completed-<ts>.json`; refused unless all four
+   passes are done and the advisory read is recorded).
 3. `bash .claude/hooks/r5-lock.sh release r5-supervise`.
 
 On failure or abort: `r5-state.sh finish failed|aborted`, then release the

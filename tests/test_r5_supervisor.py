@@ -349,6 +349,78 @@ def test_a_bookkeeping_event_never_reopens_a_window(r5root):
     assert events(r5root)[-1] == "session_restarted"
 
 
+def test_fixes_applied_only_follows_the_current_pass_s_findings(r5root):
+    start(r5root)
+    run(STATE, "pass", "correctness", root=r5root)
+    assert run(STATE, "event", "fixes_applied", root=r5root).returncode == 2  # requested
+    hook(r5root)
+    assert run(STATE, "event", "fixes_applied", root=r5root).returncode == 2  # running
+    assert hook(r5root).returncode == 2
+    assert events(r5root)[-1] == "reviewer_dispatched"
+    run(STATE, "findings", "correctness", "0", "1", "0", "FIX", root=r5root)
+    assert run(STATE, "event", "fixes_applied", root=r5root).returncode == 0
+    assert state(r5root)["audit_trail"][-1]["pass"] == "correctness"
+
+
+def test_a_dirty_tree_after_provenance_fails_the_pass_until_it_is_re_reviewed(r5root):
+    start(r5root)
+    for name in ("correctness", "clarity", "edge-cases"):
+        run(STATE, "pass", name, root=r5root)
+        hook(r5root)
+        run(STATE, "findings", name, "0", "0", "0", root=r5root)
+        assert run(STATE, "done", name, "0", root=r5root).returncode == 0
+    run(STATE, "pass", "provenance", root=r5root)
+    hook(r5root)
+    run(STATE, "findings", "provenance", "0", "0", "0", root=r5root)
+    assert run(STATE, "event", "reviewer_left_tree_dirty", root=r5root).returncode == 0
+    assert run(STATE, "done", "provenance", "0", root=r5root).returncode == 1
+    assert run(STATE, "request", "provenance", "2", root=r5root).returncode == 0
+    assert hook(r5root).returncode == 0
+    assert events(r5root)[-1] == "reviewer_dispatched"
+
+
+def test_finish_completed_needs_every_pass_and_the_advisory_read(r5root):
+    start(r5root)
+    run(STATE, "pass", "correctness", root=r5root)
+    refused = run(STATE, "finish", "completed", root=r5root)
+    assert refused.returncode == 2 and "clarity" in refused.stderr
+    for name in ("correctness", "clarity", "edge-cases", "provenance"):
+        if name != "correctness":
+            run(STATE, "pass", name, root=r5root)
+        hook(r5root)
+        run(STATE, "findings", name, "0", "0", "0", root=r5root)
+        run(STATE, "done", name, "0", root=r5root)
+    assert run(STATE, "finish", "completed", root=r5root).returncode == 2  # no advisory read
+    run(STATE, "pass", "excellence", root=r5root)
+    hook(r5root)
+    assert run(STATE, "findings", "excellence", "0", "0", "0", root=r5root).returncode == 1
+    assert run(STATE, "done", "excellence", "0", root=r5root).returncode == 1
+    assert run(STATE, "advisory", "0", "0", "1", "PASS", root=r5root).returncode == 0
+    assert run(STATE, "finish", "completed", root=r5root).returncode == 0
+
+
+def test_an_event_cannot_rename_itself_or_take_a_non_object(r5root):
+    start(r5root)
+    run(STATE, "pass", "correctness", root=r5root)
+    hook(r5root)
+    assert run(STATE, "event", "note", '{"event": "findings_received", "ts": "x"}',
+               root=r5root).returncode == 0
+    last = state(r5root)["audit_trail"][-1]
+    assert last["event"] == "note" and last["ts"] != "x"
+    assert hook(r5root).returncode == 2
+    assert run(STATE, "event", "note", "[1]", root=r5root).returncode == 1
+
+
+def test_another_session_is_refused_unless_the_owner_s_lease_has_lapsed(r5root):
+    start(r5root)  # S1 owns the run, with no lock at all
+    run(STATE, "pass", "correctness", root=r5root)
+    assert hook(r5root, session="S2").returncode == 2
+    run(LOCK, "acquire", "r5-supervise", "b1", root=r5root, session="S3")
+    age_lock(r5root, 1000)  # a third session's lapsed lock is not the owner's
+    assert hook(r5root, session="S2").returncode == 2
+    assert events(r5root)[-1] == "pass_started"
+
+
 def test_a_second_run_cannot_start_while_one_is_in_flight(r5root):
     start(r5root, "b1")
     assert run(STATE, "init", "b2", "x", "y", root=r5root).returncode == 2
