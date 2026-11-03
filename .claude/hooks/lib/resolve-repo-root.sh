@@ -9,7 +9,9 @@
 # the repository containing $PWD: resolved through `git --git-common-dir`,
 # so a sibling worktree shares its parent's lock and state.
 #
-# Exports: R5_ROOT (absolute path; no trailing slash).
+# Exports: R5_ROOT (absolute path; no trailing slash), and the two files
+# every helper shares under it: R5_LOCK_FILE (the run lock, r5-lock.sh) and
+# R5_STATE_FILE (the run's audit trail, r5-state.sh).
 # Returns non-zero if the root cannot be located — callers must handle.
 #
 # Resolution order:
@@ -19,12 +21,18 @@
 
 # R5_ROOT is always resolved here, never trusted from the environment: an
 # inherited value would silently move the lock and the state elsewhere.
-unset R5_ROOT
+unset R5_ROOT R5_LOCK_FILE R5_STATE_FILE
+
+_r5_export_root() {
+  R5_ROOT="$1"
+  R5_LOCK_FILE="$R5_ROOT/.claude/r5-supervisor.lock"
+  R5_STATE_FILE="$R5_ROOT/.claude/r5-state.json"
+  export R5_ROOT R5_LOCK_FILE R5_STATE_FILE
+}
 
 if [[ -n "${CURAMOIR_R5_ROOT:-}" ]]; then
   if [[ -d "$CURAMOIR_R5_ROOT" ]]; then
-    R5_ROOT="$(cd "$CURAMOIR_R5_ROOT" && pwd)"
-    export R5_ROOT
+    _r5_export_root "$(cd "$CURAMOIR_R5_ROOT" && pwd)"
     return 0 2>/dev/null || exit 0
   fi
   printf 'resolve-repo-root: CURAMOIR_R5_ROOT is not a directory: %s\n' "$CURAMOIR_R5_ROOT" >&2
@@ -36,8 +44,7 @@ if [[ -n "$_common_dir" ]]; then
   _root="$(cd "$(dirname "$_common_dir")" 2>/dev/null && pwd)" || _root=""
   if [[ -n "$_root" && -f "$_root/.claude-plugin/plugin.json" ]] \
       && grep -q '"name": *"curamoir"' "$_root/.claude-plugin/plugin.json" 2>/dev/null; then
-    R5_ROOT="$_root"
-    export R5_ROOT
+    _r5_export_root "$_root"
     return 0 2>/dev/null || exit 0
   fi
 fi

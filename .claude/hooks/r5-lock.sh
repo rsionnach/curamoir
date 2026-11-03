@@ -8,9 +8,16 @@
 # this repository. Acquire on start, refresh before every subagent dispatch,
 # release on every exit path.
 #
-# Storage: <R5_ROOT>/.claude/r5-supervisor.lock, where R5_ROOT is the main
-# worktree of this repository (lib/resolve-repo-root.sh), so a sibling
-# worktree contends for the same lock.
+# Storage: $R5_LOCK_FILE, <R5_ROOT>/.claude/r5-supervisor.lock, where
+# R5_ROOT is the main worktree of this repository (lib/resolve-repo-root.sh),
+# so a sibling worktree contends for the same lock. The lease rule is in
+# lib/lease.sh.
+#
+# Concurrency: acquire, refresh and release each run under a short kernel
+# mutex (lib/flock.sh), which is what makes every read-decide-write atomic:
+# of two sessions acquiring (or reclaiming) at once, exactly one wins. The
+# link(2) create and the reclaim re-check below are defence in depth: they
+# keep that guarantee if a caller ever bypasses the mutex.
 #
 # Lock shape (JSON):
 #   {"supervisor", "target", "session_id", "acquired_at", "refreshed_at"}
@@ -21,25 +28,18 @@
 #   release <supervisor> [session_id]            - drop the lock
 #   status                                       - print holder or "no lock"
 #
-# session_id defaults to $CLAUDE_CODE_SESSION_ID when omitted.
+# session_id defaults to $CLAUDE_CODE_SESSION_ID (or $CLAUDE_SESSION_ID)
+# when omitted.
 #
 # Exit codes:
 #   0   - success
 #   1   - usage error, or refresh/release called by a non-holder
 #   2   - cross-session block, or same-session nesting refusal
-#   3   - internal error (cannot resolve the root, jq missing)
+#   3   - internal error (cannot resolve the root, jq or perl missing, the
+#         .claude directory cannot be created, the mutex not taken within
+#         10s, a lock write failed)
 
 set -uo pipefail
-
-# Lease window: refreshed_at older than this is reclaimable by another
-# supervisor (with a warning). Tune up if a real dispatch ever exceeds
-# this; do not weaken the per-dispatch refresh cadence.
-LEASE_SECONDS=900
-
-# Absolute backstop: acquired_at older than this is reclaimable even if
-# refreshed_at looks fresh (defends against a runaway refresh loop on a
-# wedged session).
-ABSOLUTE_TTL_SECONDS=86400  # 24h
 
 # Resolve R5_ROOT via the shared resolver.
 _SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -50,37 +50,17 @@ source "$_SCRIPT_DIR/lib/resolve-repo-root.sh" || {
 }
 # shellcheck source=lib/flock.sh
 source "$_SCRIPT_DIR/lib/flock.sh"
+# shellcheck source=lib/lease.sh
+source "$_SCRIPT_DIR/lib/lease.sh"
 
-LOCK_FILE="$R5_ROOT/.claude/r5-supervisor.lock"
+LOCK_FILE="$R5_LOCK_FILE"
 LOCK_DIR="$(dirname "$LOCK_FILE")"
 mkdir -p "$LOCK_DIR" || { printf 'r5-lock: cannot create %s\n' "$LOCK_DIR" >&2; exit 3; }
 
 # jq is required for safe JSON read/write.
 command -v jq >/dev/null 2>&1 || { printf 'r5-lock: jq is required\n' >&2; exit 3; }
 
-# Default session id from env when caller omits it.
-_default_session() {
-  if [[ -n "${CLAUDE_CODE_SESSION_ID:-}" ]]; then
-    printf '%s' "$CLAUDE_CODE_SESSION_ID"
-  elif [[ -n "${CLAUDE_SESSION_ID:-}" ]]; then
-    printf '%s' "$CLAUDE_SESSION_ID"
-  else
-    printf ''
-  fi
-}
-
 _now() { date -u +%Y-%m-%dT%H:%M:%SZ; }
-
-# Parse an ISO-8601 Z timestamp to epoch seconds. Returns 0 on bad input.
-_epoch() {
-  local ts="${1:-}"
-  [[ -z "$ts" ]] && { printf '0'; return; }
-  # macOS BSD date wants -j -f; GNU date wants -d. Try GNU first, fall
-  # back to BSD; if neither parses, return 0 so callers treat as stale.
-  date -u -d "$ts" +%s 2>/dev/null || \
-    date -u -j -f "%Y-%m-%dT%H:%M:%SZ" "$ts" +%s 2>/dev/null || \
-    printf '0'
-}
 
 # Read a field from the lockfile (printing empty on any failure).
 _lock_get() {
@@ -113,8 +93,8 @@ _lock_write() {
 }
 
 # Taking the lock when nobody holds it: link(2) fails if the lock already
-# exists, so of two sessions acquiring at the same moment exactly one wins
-# (a test runs several at once). Returns 1 if someone else got there first.
+# exists (defence in depth under the mutex; see the header). Returns 1 if
+# someone else got there first.
 _lock_create() {
   local tmp
   tmp="$(_lock_body "$@")" || return 1
@@ -131,10 +111,10 @@ _lost_race() {
   exit 2
 }
 
-# Reclaiming a stale lock: only if it is still the stale lock we read (no one
-# refreshed or reclaimed it meanwhile), then the same atomic create as a
-# fresh acquire, so two reclaimers cannot both win.
-_reclaim() {
+# Reclaiming a stale lock, then exiting: only if it is still the stale lock
+# we read (defence in depth under the mutex), with the same atomic create as
+# a fresh acquire.
+_reclaim_and_exit() {
   local supervisor="$1" target="$2" session="$3" now="$4" stale_refreshed="$5"
   [[ "$(_lock_get refreshed_at)" == "$stale_refreshed" ]] || _lost_race
   rm -f "$LOCK_FILE"
@@ -149,7 +129,7 @@ _cmd_acquire() {
     printf 'usage: r5-lock.sh acquire <supervisor> <target> [session_id]\n' >&2
     exit 1
   }
-  [[ -z "$session" ]] && session="$(_default_session)"
+  [[ -z "$session" ]] && session="$(_r5_session)"
   [[ -z "$session" ]] && {
     printf 'r5-lock: no session id (CLAUDE_CODE_SESSION_ID not set, none passed)\n' >&2
     exit 1
@@ -197,23 +177,19 @@ EOF
   fi
 
   # Different session — check lease + absolute TTL for stale reclaim.
-  local now_epoch refreshed_epoch acquired_epoch refresh_age acquire_age
-  now_epoch=$(date -u +%s)
-  refreshed_epoch=$(_epoch "$held_refreshed")
-  acquired_epoch=$(_epoch "$held_acquired")
-  refresh_age=$(( now_epoch - refreshed_epoch ))
-  acquire_age=$(( now_epoch - acquired_epoch ))
+  local refresh_age acquire_age
+  read -r refresh_age acquire_age <<< "$(_r5_lock_ages "$LOCK_FILE")"
 
-  if (( refresh_age > LEASE_SECONDS )); then
+  if (( refresh_age > R5_LEASE_SECONDS )); then
     printf 'r5-lock: stale lease (refreshed_at %ss ago > %ss), reclaiming from %s/%s in session %s\n' \
-      "$refresh_age" "$LEASE_SECONDS" "$held_supervisor" "$held_target" "$held_session" >&2
-    _reclaim "$supervisor" "$target" "$session" "$now" "$held_refreshed"
+      "$refresh_age" "$R5_LEASE_SECONDS" "$held_supervisor" "$held_target" "$held_session" >&2
+    _reclaim_and_exit "$supervisor" "$target" "$session" "$now" "$held_refreshed"
   fi
 
-  if (( acquire_age > ABSOLUTE_TTL_SECONDS )); then
+  if (( acquire_age > R5_ABSOLUTE_TTL_SECONDS )); then
     printf 'r5-lock: absolute TTL exceeded (acquired %ss ago > %ss), reclaiming from %s/%s in session %s\n' \
-      "$acquire_age" "$ABSOLUTE_TTL_SECONDS" "$held_supervisor" "$held_target" "$held_session" >&2
-    _reclaim "$supervisor" "$target" "$session" "$now" "$held_refreshed"
+      "$acquire_age" "$R5_ABSOLUTE_TTL_SECONDS" "$held_supervisor" "$held_target" "$held_session" >&2
+    _reclaim_and_exit "$supervisor" "$target" "$session" "$now" "$held_refreshed"
   fi
 
   # Lease fresh, held by someone else — block.
@@ -225,7 +201,7 @@ r5-lock: held by another supervisor.
   refreshed:  $held_refreshed (${refresh_age}s ago)
 
 If this state is stale (the prior supervisor crashed or the session was
-abandoned), the lease will auto-reclaim in $(( LEASE_SECONDS - refresh_age ))s.
+abandoned), the lease will auto-reclaim in $(( R5_LEASE_SECONDS - refresh_age ))s.
 Do not remove the lock by hand: an R5 run in .claude/r5-state.json would then
 refuse every other session's subagents. Once the lease has lapsed, acquire
 the lock and take the run over (r5-state.sh adopt), or end it
@@ -241,7 +217,7 @@ _cmd_refresh() {
     printf 'usage: r5-lock.sh refresh <supervisor> [session_id]\n' >&2
     exit 1
   }
-  [[ -z "$session" ]] && session="$(_default_session)"
+  [[ -z "$session" ]] && session="$(_r5_session)"
 
   [[ -f "$LOCK_FILE" ]] || {
     printf 'r5-lock: refresh: no lockfile (you do not hold the lock)\n' >&2
@@ -270,7 +246,7 @@ _cmd_release() {
     printf 'usage: r5-lock.sh release <supervisor> [session_id]\n' >&2
     exit 1
   }
-  [[ -z "$session" ]] && session="$(_default_session)"
+  [[ -z "$session" ]] && session="$(_r5_session)"
 
   [[ -f "$LOCK_FILE" ]] || exit 0  # no lock, nothing to release
 
@@ -299,10 +275,8 @@ _cmd_status() {
   exit 0
 }
 
-# Every acquire, refresh and release runs under a short mutex (lib/flock.sh),
-# so the read-decide-write of one session cannot interleave with another's
-# (two stale reclaimers, or a reclaim racing a refresh). It is held for
-# milliseconds, and the kernel drops it if its holder is killed.
+# The mutex (see the header): held for milliseconds, dropped by the kernel if
+# its holder is killed.
 _with_mutex() {
   _r5_flock "$LOCK_FILE.flock" r5-lock
   "$@"

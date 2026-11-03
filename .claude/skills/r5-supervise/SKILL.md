@@ -35,21 +35,35 @@ negotiable:
 - **Anything changed after a pass is reviewed by that pass again**, including
   excellence touch-ups and one-line edits made while squashing.
 
-Helpers (all in `.claude/hooks/`, all resolve this repository's main worktree):
-`r5-lock.sh` (the run lock), `r5-state.sh` (the only writer of the state
-file), `r5-parallel-block.sh` (the hook, wired in `.claude/settings.local.json`
-for `Agent|Task`). The reviewer window works like this: `r5-state.sh pass`
-(or `request`, for a re-dispatch) asks for exactly one reviewer; the hook lets
-the next subagent dispatch through and records it as reviewer_dispatched,
-atomically; every later dispatch is refused until `r5-state.sh findings`
-closes the window (or `abandon`, and then `request` again). In a fix round
-the hook records each dispatch as fix_dispatched and lets one fix agent run
-at a time, until `event fixes_applied`. Never dispatch two subagents in one
-message while a reviewer has been requested: the second is refused. The run
-belongs to the session that started it (or `adopt`ed it); other sessions'
-dispatches are refused while its lock's lease is live and go through once it
-has lapsed. Never remove the lock by hand: with no lock, every other
-session is refused until the run is adopted or finished.
+Helpers (all in `.claude/hooks/`, all resolve this repository's main
+worktree): `r5-lock.sh` (the run lock), `r5-state.sh` (the only writer of the
+state file), and `r5-parallel-block.sh` (the hook). The window protocol (one
+reviewer, or one fix agent, at a time) and run ownership across sessions are
+documented once, in the header of `r5-state.sh`; read it before a first run.
+In short: record the state BEFORE every dispatch (`pass` / `request`), never
+dispatch two subagents in one message while a reviewer has been requested
+(the second is refused), and never remove the lock by hand (with no lock,
+every other session is refused until the run is adopted or finished).
+
+The hook is wired per checkout, in the untracked `.claude/settings.local.json`
+(this repository is a plugin, so a project `settings.json` would ship to its
+users). Without it nothing enforces the windows. The entry:
+
+```json
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Agent|Task",
+        "hooks": [
+          { "type": "command",
+            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/r5-parallel-block.sh\"" }
+        ]
+      }
+    ]
+  }
+}
+```
 
 ## Inputs
 
@@ -109,24 +123,27 @@ For each pass in `correctness`, `clarity`, `edge-cases`, `provenance`:
    While that reviewer runs, dispatch nothing else (the hook refuses).
 5. When it reports: `bash .claude/hooks/r5-state.sh findings <pass> <c> <i> <m> <verdict>`.
    After provenance, check `git status --short` yourself; a dirty tree is a
-   failed pass whatever the counts: restore, `event reviewer_left_tree_dirty`
-   (from then on `done` is refused), `request provenance <iteration + 1>`,
-   re-dispatch.
+   failed pass whatever the counts: restore, `r5-state.sh tree-dirty
+   provenance` (from then on `done` is refused), then step 7f.
 6. If `critical + important == 0`: `r5-state.sh done <pass> <fix_iterations>`
    and go to the next pass. (Minors: fix them in the same fix round if cheap,
    then that fix round is re-reviewed like any other.)
-7. Otherwise: refresh the lock, dispatch ONE fix subagent (or fix it yourself
-   if the change is a few lines; the hook records a fix agent as
-   fix_dispatched and refuses a second); when the fix is in place,
-   `r5-state.sh event fixes_applied '{"files":[...]}'` (this closes the fix
-   agent's window; record it only after the agent has finished); run the full suite, ruff and curamoir-lint
-   (`event tests_passed` / `event tests_failed` — a failure stops the run with
-   status failed); commit (`r5(<pass>): <summary> · <bead-id>` with the
-   Co-Authored-By trailer); `event commit_made '{"sha":"..."}'`; then
-   `r5-state.sh request <pass> <iteration + 1>` (refused while a fix agent
-   is open) and re-dispatch the SAME pass (step 4). `done` is refused unless
-   that pass's clean findings are the run's last window event, so a fix or a
-   re-request after them always goes back through the reviewer.
+7. Otherwise, a fix round:
+   a. `bash .claude/hooks/r5-lock.sh refresh r5-supervise`.
+   b. Fix: dispatch ONE fix subagent (the hook records it as fix_dispatched
+      and refuses a second), or fix it yourself if the change is a few lines.
+   c. Once the fix is in place (and any fix agent has finished):
+      `r5-state.sh fixed <pass> '{"files":[...]}'`.
+   d. Run the full suite, ruff and curamoir-lint; `event tests_passed`, or
+      `event tests_failed` and stop the run with `finish failed`.
+   e. Commit (`r5(<pass>): <summary> · <bead-id>`, with the Co-Authored-By
+      trailer); `event commit_made '{"sha":"..."}'`.
+   f. `r5-state.sh request <pass> <iteration + 1>`, then go back to step 1
+      with that `request` in place of step 2: refresh, and re-dispatch the
+      SAME pass.
+   `done` is refused unless that pass's clean findings are the run's last
+   window event, so a fix or a re-request after them always goes back
+   through the reviewer.
 8. Three fix iterations without a clean pass: stop and ask the user.
 9. A finding that needs a design decision: `event design_question_raised`,
    ask the user, keep the lock (the run is paused, not over).
@@ -165,7 +182,7 @@ session_id is not this session, and log `event session_restarted`. Continue
 from `current_pass`. If its last window event is reviewer_dispatched and
 that reviewer is gone (or never started), `abandon` it and `request` the
 pass again; if it is fix_dispatched, check the fix agent's work, then
-`event fixes_applied`.
+`fixed <pass>`.
 If that pass is provenance, check `git status --short` first and ask the user
 before restoring anything — a leftover mutant looks like real work.
 

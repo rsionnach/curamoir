@@ -1,94 +1,127 @@
 #!/usr/bin/env bash
-# r5-state.sh — the only writer of <R5_ROOT>/.claude/r5-state.json, the R5
-# supervisor's append-only audit trail (cm-99l). r5-parallel-block.sh reads
-# it: while the last window event is reviewer_dispatched, no other subagent may be
-# dispatched. Writing it through one helper keeps that signal reliable.
+# r5-state.sh — the only writer of $R5_STATE_FILE (<R5_ROOT>/.claude/
+# r5-state.json), the R5 supervisor's append-only audit trail (cm-99l).
+# r5-parallel-block.sh asks it (`claim`) whether a subagent dispatch may go
+# ahead. This header is the authoritative description of the window
+# protocol; SKILL.md and the hook point here.
 #
-# The reviewer window: `pass` (or `request`, for a re-dispatch) asks for
-# exactly one reviewer. The parallel-block hook then calls `claim` on the
-# next subagent dispatch, which records reviewer_dispatched atomically, so
-# of two dispatches issued together only the first is let through. Until
-# `findings` (or `abandon`, then `request`) is recorded, every other dispatch
-# is refused. In a fix round (a pass is current, its reviewer has reported)
-# `claim` records each dispatch as fix_dispatched and lets one fix agent run
-# at a time; `event fixes_applied` closes it, and `request` is refused while
-# one is open. Between passes, dispatches are not the run's business.
+# Windows. Every decision reads the last *window event* (WINDOW_EVENTS
+# below); bookkeeping events (tests_passed, commit_made, run_adopted, ...)
+# never open or close one.
+#   - Reviewer window: `pass` (or `request`, for a re-dispatch) asks for
+#     exactly one reviewer. The hook's `claim` on the next dispatch records
+#     reviewer_dispatched atomically, so of two dispatches issued together
+#     only the first is let through. Every other dispatch is refused until
+#     `findings` closes the window (or `abandon`, and then `request` again).
+#   - Fix window: once the current pass's reviewer has reported, `claim`
+#     records a dispatch as fix_dispatched and lets one fix agent run at a
+#     time; `fixed` closes it. `request` is refused while one is open.
+#   - Between passes (no current pass), dispatches are not the run's
+#     business.
 #
-# The run belongs to the session that started (or adopted) it: `claim`
-# applies the window only to that session's dispatches. Another session's
-# dispatch goes through once the owner's lock has lapsed (a crashed run), and
-# is refused in every other case: while the lease is live (the hook's layer
-# A), and with no lock or someone else's lock (exit 4) until the run is
+# Ownership. The run belongs to the session that started (or adopted) it,
+# and the windows apply to that session's dispatches. Another session's
+# dispatch goes through only once the owner's lock has lapsed (a crashed
+# run); while the lease is live the hook's layer A refuses it, and with no
+# lock or someone else's lock `claim` refuses it (exit 4) until the run is
 # adopted or finished.
 #
 # Subcommands:
-#   init <bead> <base> <head>      start a run (refuses if one is in flight)
-#   adopt                          take over an in-flight run from a session
-#                                  that is gone (this session must hold the
-#                                  lock: r5-lock.sh acquire first)
-#   pass <name>                    set current_pass, append pass_started
-#                                  (requests the pass's first reviewer);
-#                                  passes run in order, excellence last
+#   init <bead> <base> <head>      start a run, owned by this session
+#   adopt                          take over the run from a session that is
+#                                  gone (this session must hold the lock:
+#                                  r5-lock.sh acquire first)
+#   pass <name>                    start the next pass (in order, excellence
+#                                  last) and request its first reviewer
 #   request <pass> <iteration>     request a re-dispatch of the current pass
 #   claim <subagent_type> [session]
 #                                  (the hook) let one dispatch through as
-#                                  the requested reviewer or a fix agent;
-#                                  exit 2 = refuse; 4 = another session's run
+#                                  the requested reviewer or a fix agent
 #   findings <pass> <crit> <imp> <minor> [verdict]
-#                                  the dispatched reviewer's report; closes
-#                                  the window
+#                                  the dispatched reviewer's report
 #   abandon <pass> <reason>        the dispatched reviewer stalled, died or
-#                                  never started: close the window without
+#                                  never started: close its window without
 #                                  findings (then `request`)
-#   event <name> [json-object]     append any other event ({ts, event, ...});
-#                                  of the window events it writes only
-#                                  fixes_applied and reviewer_left_tree_dirty,
-#                                  and only after the current pass's findings
+#   fixed <pass> [json-object]     the fix round's changes are in place:
+#                                  closes the fix window (fixes_applied)
+#   tree-dirty <pass>              provenance left the tree dirty: the pass
+#                                  failed whatever its counts; `done` is
+#                                  refused until it is reviewed again
+#   event <name> [json-object]     append a bookkeeping event
 #   done <pass> <fix_iterations> [json-object]
-#                                  record the pass complete, clear current_pass
-#                                  (refused unless the run's last window event
-#                                  is that pass's findings, with no critical or
-#                                  important finding)
+#                                  the pass is complete (only if the run's
+#                                  last window event is that pass's findings,
+#                                  with no critical or important finding)
 #   advisory <crit> <imp> <minor> <verdict>
 #                                  the excellence reviewer's report
-#   finish <status>                completed (refused unless every pass is
-#                                  done and the advisory read recorded) |
-#                                  failed | aborted; archive the
-#                                  file as r5-state-<bead>-<status>-<ts>.json
+#   finish <completed|failed|aborted>
+#                                  end the run (completed only when every
+#                                  pass is done and the advisory read
+#                                  recorded); archive the file as
+#                                  r5-state-<bead>-<status>-<ts>.json
 #   show                           print the state file
+#
+# Exit codes:
+#   0   - success (claim: the dispatch may go ahead)
+#   1   - usage error or a bad argument (including bad JSON)
+#   2   - refused by the run's state or order (claim: refuse the dispatch)
+#   3   - internal error (cannot resolve the root, jq or perl missing, the
+#         mutex not taken within 10s)
+#   4   - claim only: another session's run
 set -euo pipefail
 
 _DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib/resolve-repo-root.sh
 source "$_DIR/lib/resolve-repo-root.sh" || exit 3
 command -v jq >/dev/null 2>&1 || { printf 'r5-state: jq is required\n' >&2; exit 3; }
+# shellcheck source=lib/flock.sh
+source "$_DIR/lib/flock.sh"
+# shellcheck source=lib/lease.sh
+source "$_DIR/lib/lease.sh"
 
-STATE="$R5_ROOT/.claude/r5-state.json"
+STATE="$R5_STATE_FILE"
+
+WINDOW_EVENTS='["supervisor_started","pass_started","reviewer_requested",
+  "reviewer_dispatched","reviewer_abandoned","findings_received",
+  "fix_dispatched","fixes_applied","reviewer_left_tree_dirty",
+  "pass_completed","advisory_pass_completed"]'
+
+_usage() {  # the header above, from line 2 to the first non-comment line
+  awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' "${BASH_SOURCE[0]}" >&2
+  exit 1
+}
+_refuse() { printf 'r5-state: %s\n' "$*" >&2; exit 2; }
+_bad_arg() { printf 'r5-state: %s\n' "$*" >&2; exit 1; }
+_now() { date -u +%Y-%m-%dT%H:%M:%SZ; }
 
 # Every write is a read-modify-write of one file, made by the orchestrator and
 # by concurrent hook invocations: serialise them (lib/flock.sh).
-# shellcheck source=lib/flock.sh
-source "$_DIR/lib/flock.sh"
-_lock() {
+_mutex() {
   mkdir -p "$(dirname "$STATE")" || exit 3
   _r5_flock "$STATE.flock" r5-state
 }
-_session() { printf '%s' "${CLAUDE_CODE_SESSION_ID:-${CLAUDE_SESSION_ID:-}}"; }
+_apply() {  # _apply <jq filter> [jq args...]; exit 1 on a bad JSON argument
+  local filter="$1"; shift
+  local tmp="$STATE.tmp.$$"
+  if jq "$@" "$filter" "$STATE" > "$tmp"; then mv "$tmp" "$STATE"; else rm -f "$tmp"; exit 1; fi
+}
+_append() {  # _append <event-json>
+  _apply '.audit_trail += [$e]' --argjson e "$1"
+}
+_event() {  # _event <name> [jq-args... <filter for the extra fields>]
+  local name="$1"; shift
+  local extra='{}'
+  (( $# )) && extra="$(jq -cn "$@")"
+  _append "$(jq -cn --arg t "$(_now)" --arg e "$name" --argjson x "$extra" '$x + {ts:$t, event:$e}')"
+}
+
+# ---- reading the state ----
 _current_pass() { jq -r '.current_pass // ""' "$STATE"; }
-_need_current() {  # _need_current <pass>
-  [[ "$(_current_pass)" == "$1" ]] || {
-    printf 'r5-state: %s is not the current pass\n' "$1" >&2; exit 1; }
+_last_window_event() {  # as JSON, {} if none
+  jq -c --argjson w "$WINDOW_EVENTS" '[.audit_trail[] | select(.event as $e | $w | index($e))] | last // {}' "$STATE"
 }
-_need_in_flight() {
-  [[ "$(_last_event)" == "reviewer_dispatched" ]] || {
-    printf 'r5-state: no reviewer is in flight\n' >&2; exit 1; }
-}
-_need_not_in_flight() {
-  [[ "$(_last_event)" != "reviewer_dispatched" ]] || {
-    printf 'r5-state: a reviewer is still in flight; record its findings or abandon it first\n' >&2; exit 2; }
-}
-# A fix agent dispatched in this run and not yet closed by fixes_applied.
-_open_fix() {
+_last_event() { _last_window_event | jq -r '.event // ""'; }
+_open_fix() {  # a fix agent dispatched and not yet closed by fixes_applied
   jq -e '(.audit_trail | map(.event)) as $e
     | ($e | indices("fix_dispatched") | max // -1) > ($e | indices("fixes_applied") | max // -1)' \
     "$STATE" >/dev/null
@@ -97,67 +130,54 @@ _next_pass() {
   jq -r '([.completed_passes[].name]) as $done
     | ([.passes[] | select(. as $p | $done | index($p) | not)] | first) // "excellence"' "$STATE"
 }
-# The window events: the ones that open or close a reviewer's or a fix
-# agent's window. Every decision reads the last of these, so a bookkeeping
-# event (tests_passed, run_adopted, ...) can never reopen a window, and
-# `event` may not write one.
-WINDOW_EVENTS='["supervisor_started","pass_started","reviewer_requested","reviewer_dispatched",
-  "reviewer_abandoned","findings_received","fix_dispatched","fixes_applied",
-  "reviewer_left_tree_dirty","pass_completed","advisory_pass_completed"]'
-# The two window events the orchestrator writes through `event`, and the last
-# window event each may follow.
-FIXES_APPLIED_AFTER='["findings_received","fix_dispatched","fixes_applied","reviewer_left_tree_dirty"]'
-LEFT_DIRTY_AFTER='["findings_received"]'
-_last() {  # the last window event, as JSON
-  jq -c --argjson w "$WINDOW_EVENTS" '[.audit_trail[] | select(.event as $e | $w | index($e))] | last // {}' "$STATE"
-}
-_last_event() { _last | jq -r '.event // ""'; }
-_now() { date -u +%Y-%m-%dT%H:%M:%SZ; }
-_need() { [[ -f "$STATE" ]] || { printf 'r5-state: no run in flight (%s)\n' "$STATE" >&2; exit 1; }; }
-_apply() {  # _apply <jq filter> [jq args...]
-  local filter="$1"; shift
-  local tmp="$STATE.tmp.$$"
-  if jq "$@" "$filter" "$STATE" > "$tmp"; then mv "$tmp" "$STATE"; else rm -f "$tmp"; exit 1; fi
-}
-_append() {  # _append <event-json>
-  _apply '.audit_trail += [$e]' --argjson e "$1"
-}
-_object() {  # _object <json>: refuse anything but a JSON object
-  jq -en --argjson x "$1" '$x | type == "object"' >/dev/null 2>&1 || {
-    printf 'r5-state: expected a JSON object, got %s\n' "$1" >&2; exit 1; }
-}
-_blocking_pass() {  # _blocking_pass <name>: one of the four blocking passes
-  jq -e --arg p "$1" '.passes | index($p)' "$STATE" >/dev/null || {
-    printf 'r5-state: %s is not a blocking pass\n' "$1" >&2; exit 1; }
-}
-_epoch() {
-  date -u -d "$1" +%s 2>/dev/null || date -u -j -f "%Y-%m-%dT%H:%M:%SZ" "$1" +%s 2>/dev/null || printf '0'
-}
-# True if the run owner's lock has lapsed: the lock exists, is held by
-# <owner>, and its lease (or its absolute TTL) has run out. These numbers
-# match r5-lock.sh and r5-parallel-block.sh.
+# The run owner's lock has lapsed: it exists, is the owner's, and its lease
+# has run out (a crashed run).
 _owner_lease_lapsed() {  # _owner_lease_lapsed <owner>
-  local lock="$R5_ROOT/.claude/r5-supervisor.lock" now refreshed acquired
-  [[ -f "$lock" ]] || return 1
-  [[ "$(jq -r '.session_id // ""' "$lock" 2>/dev/null)" == "$1" ]] || return 1
-  now=$(date -u +%s)
-  refreshed=$(_epoch "$(jq -r '.refreshed_at // ""' "$lock")")
-  acquired=$(_epoch "$(jq -r '.acquired_at // ""' "$lock")")
-  (( now - refreshed > 900 || now - acquired > 86400 ))
+  [[ -f "$R5_LOCK_FILE" ]] || return 1
+  [[ "$(jq -r '.session_id // ""' "$R5_LOCK_FILE" 2>/dev/null)" == "$1" ]] || return 1
+  ! _r5_lease_live "$R5_LOCK_FILE"
 }
 
-_lock
+# ---- preconditions ----
+_need_run() { [[ -f "$STATE" ]] || _refuse "no run in flight ($STATE)"; }
+_need_current() {  # _need_current <pass>
+  [[ "$(_current_pass)" == "$1" ]] || _refuse "$1 is not the current pass"
+}
+_need_in_flight() {
+  [[ "$(_last_event)" == "reviewer_dispatched" ]] || _refuse "no reviewer is in flight"
+}
+_need_not_in_flight() {
+  [[ "$(_last_event)" != "reviewer_dispatched" ]] \
+    || _refuse "a reviewer is still in flight; record its findings or abandon it first"
+}
+_need_no_open_fix() {
+  ! _open_fix || _refuse "a fix agent is still open; record \`fixed <pass>\` first"
+}
+_need_last_in() {  # _need_last_in <what> <event>...: the last window event is one of these
+  local what="$1" last; shift
+  last="$(_last_event)"
+  local e
+  for e in "$@"; do [[ "$last" == "$e" ]] && return 0; done
+  _refuse "$what cannot follow ${last:-nothing}"
+}
+_object() {  # _object <json>: a JSON object, or exit 1
+  jq -en --argjson x "$1" '$x | type == "object"' >/dev/null 2>&1 \
+    || _bad_arg "expected a JSON object, got $1"
+}
+_blocking_pass() {  # _blocking_pass <name>: one of the four blocking passes
+  jq -e --arg p "$1" '.passes | index($p)' "$STATE" >/dev/null || _bad_arg "$1 is not a blocking pass"
+}
+
+_mutex
 
 case "${1:-}" in
   init)
     bead="${2:?bead}"; base="${3:?base}"; head="${4:?head}"
     if [[ -f "$STATE" ]] && [[ "$(jq -r '.status' "$STATE")" == "in_progress" ]]; then
-      printf 'r5-state: a run is in flight on %s; finish or abort it first\n' \
-        "$(jq -r '.target_bead' "$STATE")" >&2
-      exit 2
+      _refuse "a run is in flight on $(jq -r '.target_bead' "$STATE"); finish or abort it first"
     fi
-    jq -n --arg b "$bead" --arg base "$base" --arg head "$head" --arg t "$(_now)" --arg s "$(_session)" '{
-      supervisor: "r5-supervise", version: 3, target_bead: $b, session_id: $s, started_at: $t,
+    jq -n --arg b "$bead" --arg base "$base" --arg head "$head" --arg t "$(_now)" --arg s "$(_r5_session)" '{
+      supervisor: "r5-supervise", target_bead: $b, session_id: $s, started_at: $t,
       passes: ["correctness", "clarity", "edge-cases", "provenance"],
       advisory_passes: ["excellence"], current_pass: null, completed_passes: [],
       advisory_results: [], status: "in_progress",
@@ -165,150 +185,141 @@ case "${1:-}" in
       audit_trail: [{ts: $t, event: "supervisor_started", session_id: $s}]}' > "$STATE"
     ;;
   adopt)
-    _need; me="$(_session)"
-    [[ -n "$me" ]] || { printf 'r5-state: no session id in the environment\n' >&2; exit 1; }
-    holder="$(jq -r '.session_id // ""' "$R5_ROOT/.claude/r5-supervisor.lock" 2>/dev/null || true)"
-    [[ "$holder" == "$me" ]] || {
-      printf 'r5-state: this session does not hold the R5 lock; acquire it first\n' >&2; exit 2; }
+    _need_run
+    me="$(_r5_session)"
+    [[ -n "$me" ]] || _bad_arg "no session id in the environment"
+    holder="$(jq -r '.session_id // ""' "$R5_LOCK_FILE" 2>/dev/null || true)"
+    [[ "$holder" == "$me" ]] || _refuse "this session does not hold the R5 lock; acquire it first"
     from="$(jq -r '.session_id // ""' "$STATE")"
     _apply '.session_id = $s' --arg s "$me"
-    _append "$(jq -n --arg t "$(_now)" --arg f "$from" --arg s "$me" '{ts:$t, event:"run_adopted", from:$f, session_id:$s}')"
+    _event run_adopted --arg f "$from" --arg s "$me" '{from:$f, session_id:$s}'
     ;;
   pass)
-    _need; name="${2:?pass}"
+    _need_run; name="${2:?pass}"
     _need_not_in_flight
     cur="$(_current_pass)"
-    [[ -z "$cur" ]] || {
-      printf 'r5-state: %s is still the current pass; record it done first\n' "$cur" >&2; exit 2; }
+    [[ -z "$cur" ]] || _refuse "$cur is still the current pass; record it done first"
     next="$(_next_pass)"
-    [[ "$name" == "$next" ]] || {
-      printf 'r5-state: the next pass is %s, not %s\n' "$next" "$name" >&2; exit 2; }
-    _open_fix && { printf 'r5-state: a fix agent is still open; record fixes_applied first\n' >&2; exit 2; }
+    [[ "$name" == "$next" ]] || _refuse "the next pass is $next, not $name"
+    _need_no_open_fix
     _apply '.current_pass = $p' --arg p "$name"
-    _append "$(jq -n --arg t "$(_now)" --arg p "$name" '{ts:$t, event:"pass_started", pass:$p}')"
+    _event pass_started --arg p "$name" '{pass:$p}'
     ;;
   request)
-    _need; pass="${2:?pass}"
+    _need_run; pass="${2:?pass}"; iteration="${3:?iteration}"
     _need_current "$pass"
     _need_not_in_flight
-    _open_fix && { printf 'r5-state: a fix agent is still open; record fixes_applied first\n' >&2; exit 2; }
-    _append "$(jq -n --arg t "$(_now)" --arg p "$pass" --argjson i "${3:?iteration}" \
-      '{ts:$t, event:"reviewer_requested", pass:$p, iteration:$i}')"
+    _need_no_open_fix
+    _event reviewer_requested --arg p "$pass" --argjson i "$iteration" '{pass:$p, iteration:$i}'
     ;;
   claim)
-    # Called by r5-parallel-block.sh for every subagent dispatch while a run
-    # is in flight. Exit 0 = let it through; 2 = refuse.
+    # Exit 0 = let the dispatch through; 2 = refuse; 4 = another session's run.
+    subagent="${2:-}"; caller="${3:-$(_r5_session)}"
     [[ -f "$STATE" ]] || exit 0
     [[ "$(jq -r '.status // ""' "$STATE")" == "in_progress" ]] || exit 0
-    owner="$(jq -r '.session_id // ""' "$STATE")"; caller="${3:-$(_session)}"
-    # Another session's dispatch. It goes ahead only when the run's owner
-    # has crashed: its lock is still there and its lease has lapsed. Any
-    # other case (no lock, a lock someone else took and has not adopted the
-    # run with) is refused. An unknown session on either side is treated
-    # as the run's own, so that check fails closed too.
+    owner="$(jq -r '.session_id // ""' "$STATE")"
+    # An unknown session on either side is treated as the run's own, so the
+    # ownership check fails closed.
     if [[ -n "$owner" && -n "$caller" && "$owner" != "$caller" ]]; then
       _owner_lease_lapsed "$owner" && exit 0
+      printf 'r5-state: the R5 run on %s belongs to session %s, whose lock is not a lapsed one;\n' \
+        "$(jq -r '.target_bead' "$STATE")" "$owner" >&2
+      printf '  take it over (r5-lock.sh acquire r5-supervise <bead>, then r5-state.sh adopt)\n' >&2
+      printf '  or end it (r5-state.sh finish aborted)\n' >&2
       exit 4
     fi
     pass="$(_current_pass)"
     case "$(_last_event)" in
       pass_started|reviewer_requested)
-        _append "$(jq -n --arg t "$(_now)" --arg p "$pass" \
-          --arg s "${2:-}" '{ts:$t, event:"reviewer_dispatched", pass:$p, subagent_type:$s}')"
+        _event reviewer_dispatched --arg p "$pass" --arg s "$subagent" '{pass:$p, subagent_type:$s}'
         exit 0 ;;
-      reviewer_dispatched|reviewer_abandoned)
-        exit 2 ;;  # a reviewer is in flight, or one must be requested again
+      reviewer_dispatched)
+        _refuse "the $pass reviewer is in flight; record its findings, or abandon it if it stalled or never started" ;;
+      reviewer_abandoned)
+        _refuse "the $pass reviewer was abandoned; request it again before dispatching" ;;
       *)
-        [[ -n "$pass" ]] || exit 0  # between passes: not a reviewer
-        _open_fix && exit 2         # one fix agent at a time
-        _append "$(jq -n --arg t "$(_now)" --arg p "$pass" \
-          --arg s "${2:-}" '{ts:$t, event:"fix_dispatched", pass:$p, subagent_type:$s}')"
+        [[ -n "$pass" ]] || exit 0  # between passes: not the run's business
+        ! _open_fix || _refuse "a fix agent is open; record \`fixed $pass\` when it is done"
+        _event fix_dispatched --arg p "$pass" --arg s "$subagent" '{pass:$p, subagent_type:$s}'
         exit 0 ;;
     esac
     ;;
-  abandon)
-    _need; pass="${2:?pass}"
-    _need_current "$pass"
-    _need_in_flight
-    _append "$(jq -n --arg t "$(_now)" --arg p "$pass" --arg r "${3:?reason}" \
-      '{ts:$t, event:"reviewer_abandoned", pass:$p, reason:$r}')"
-    ;;
   findings)
-    _need; pass="${2:?pass}"
+    _need_run; pass="${2:?pass}"
     _blocking_pass "$pass"
     _need_current "$pass"
     _need_in_flight
-    _append "$(jq -n --arg t "$(_now)" --arg p "$pass" --argjson c "${3:?}" --argjson i "${4:?}" \
+    _event findings_received --arg p "$pass" --argjson c "${3:?}" --argjson i "${4:?}" \
       --argjson m "${5:?}" --arg v "${6:-}" \
-      '{ts:$t, event:"findings_received", pass:$p, counts:{critical:$c, important:$i, minor:$m}, verdict:$v}')"
+      '{pass:$p, counts:{critical:$c, important:$i, minor:$m}, verdict:$v}'
+    ;;
+  abandon)
+    _need_run; pass="${2:?pass}"; reason="${3:?reason}"
+    _need_current "$pass"
+    _need_in_flight
+    _event reviewer_abandoned --arg p "$pass" --arg r "$reason" '{pass:$p, reason:$r}'
+    ;;
+  fixed)
+    _need_run; pass="${2:?pass}"; extra="${3:-}"; [[ -n "$extra" ]] || extra='{}'
+    _object "$extra"
+    _need_current "$pass"
+    _need_last_in "fixed" findings_received fix_dispatched fixes_applied reviewer_left_tree_dirty
+    _event fixes_applied --argjson x "$extra" --arg p "$pass" '$x + {pass:$p}'
+    ;;
+  tree-dirty)
+    _need_run; pass="${2:?pass}"
+    _need_current "$pass"
+    _need_last_in "tree-dirty" findings_received
+    _event reviewer_left_tree_dirty --arg p "$pass" '{pass:$p}'
     ;;
   event)
-    _need; name="${2:?event}"; extra="${3:-}"; [[ -n "$extra" ]] || extra='{}'
+    _need_run; name="${2:?event}"; extra="${3:-}"; [[ -n "$extra" ]] || extra='{}'
     _object "$extra"
-    case "$name" in
-      fixes_applied) after="$FIXES_APPLIED_AFTER" ;;
-      reviewer_left_tree_dirty) after="$LEFT_DIRTY_AFTER" ;;
-      *)
-        if jq -en --argjson w "$WINDOW_EVENTS" --arg e "$name" '$w | index($e)' >/dev/null; then
-          printf 'r5-state: %s is written by its own subcommand, not by event\n' "$name" >&2; exit 1
-        fi
-        after="" ;;
-    esac
-    if [[ -n "$after" ]]; then
-      # A fix (or a dirty tree) belongs to the current pass, after its
-      # reviewer has reported; never while a reviewer is requested or running.
-      last="$(_last_event)"
-      [[ -n "$(_current_pass)" ]] && jq -en --argjson a "$after" --arg e "$last" '$a | index($e)' >/dev/null || {
-        printf 'r5-state: %s cannot follow %s\n' "$name" "${last:-nothing}" >&2; exit 2; }
-      extra="$(jq -cn --argjson x "$extra" --arg p "$(_current_pass)" '$x + {pass:$p}')"
+    if jq -en --argjson w "$WINDOW_EVENTS" --arg e "$name" '$w | index($e)' >/dev/null; then
+      _bad_arg "$name is a window event, written by its own subcommand"
     fi
-    # The fixed fields are applied last, so the caller's object cannot
-    # rename the event or rewrite its timestamp.
-    _append "$(jq -n --arg t "$(_now)" --arg e "$name" --argjson x "$extra" '$x + {ts:$t, event:$e}')"
+    _event "$name" --argjson x "$extra" '$x'
     ;;
   done)
-    _need; name="${2:?pass}"; iters="${3:?fix_iterations}"; extra="${4:-}"; [[ -n "$extra" ]] || extra='{}'
+    _need_run; name="${2:?pass}"; iters="${3:?fix_iterations}"; extra="${4:-}"; [[ -n "$extra" ]] || extra='{}'
     _object "$extra"
     _blocking_pass "$name"
     _need_current "$name"
     # The last window event must be this pass's findings: anything after
-    # them (a re-request, a dispatch, a fix) has not been reviewed yet.
-    clean="$(_last | jq -r --arg p "$name" '
+    # them (a re-request, a dispatch, a fix, a dirty tree) is unreviewed.
+    verdict="$(_last_window_event | jq -r --arg p "$name" '
       if (.event != "findings_received" or .pass != $p) then "followed by later activity"
-        elif (.counts.critical == 0 and .counts.important == 0) then "clean" else "dirty" end')"
-    [[ "$clean" == "clean" ]] || {
-      printf 'r5-state: %s cannot be done: its findings are %s\n' "$name" "$clean" >&2; exit 1; }
+      elif (.counts.critical == 0 and .counts.important == 0) then "clean"
+      else "not clean" end')"
+    [[ "$verdict" == "clean" ]] || _refuse "$name cannot be done: its findings are $verdict"
     _apply '.completed_passes += [($x + {name:$p, fix_iterations:$n, completed_at:$t})] | .current_pass = null' \
       --arg p "$name" --argjson n "$iters" --arg t "$(_now)" --argjson x "$extra"
-    _append "$(jq -n --arg t "$(_now)" --arg p "$name" '{ts:$t, event:"pass_completed", pass:$p}')"
+    _event pass_completed --arg p "$name" '{pass:$p}'
     ;;
   advisory)
-    _need
+    _need_run
     _need_current excellence
     _need_in_flight
-    rec="$(jq -n --arg t "$(_now)" --argjson c "${2:?}" --argjson i "${3:?}" --argjson m "${4:?}" --arg v "${5:?verdict}" \
+    rec="$(jq -cn --arg t "$(_now)" --argjson c "${2:?}" --argjson i "${3:?}" --argjson m "${4:?}" --arg v "${5:?verdict}" \
       '{ts:$t, event:"advisory_pass_completed", pass:"excellence", counts:{critical:$c, important:$i, minor:$m}, verdict:$v}')"
     _apply '.advisory_results += [$r] | .current_pass = null' --argjson r "$rec"
     _append "$rec"
     ;;
   finish)
-    _need; status="${2:?status}"
-    case "$status" in completed|failed|aborted) ;; *) printf 'r5-state: bad status %s\n' "$status" >&2; exit 1;; esac
+    _need_run; status="${2:?status}"
+    case "$status" in completed|failed|aborted) ;; *) _bad_arg "bad status $status";; esac
     if [[ "$status" == completed ]]; then
-      # Completed means every blocking pass done, in order, the advisory read
-      # recorded, and nothing left open.
       missing="$(jq -r '[.passes[] as $p | select([.completed_passes[].name] | index($p) | not) | $p]
         + (if (.advisory_results | length) == 0 then ["excellence"] else [] end)
         + (if .current_pass != null then ["(" + .current_pass + " is still current)"] else [] end)
         | join(", ")' "$STATE")"
-      [[ -z "$missing" ]] || {
-        printf 'r5-state: the run is not complete: %s\n' "$missing" >&2; exit 2; }
+      [[ -z "$missing" ]] || _refuse "the run is not complete: $missing"
     fi
     _apply '.status = $s | .current_pass = null' --arg s "$status"
-    _append "$(jq -n --arg t "$(_now)" --arg s "$status" '{ts:$t, event:("supervisor_" + $s)}')"
+    _event "supervisor_$status"
     bead="$(jq -r '.target_bead' "$STATE")"
     mv "$STATE" "$R5_ROOT/.claude/r5-state-${bead}-${status}-$(date -u +%Y%m%dT%H%M%SZ).json"
     ;;
-  show) _need; cat "$STATE" ;;
-  *) sed -n '2,58p' "${BASH_SOURCE[0]}" >&2; exit 1 ;;
+  show) _need_run; cat "$STATE" ;;
+  *) _usage ;;
 esac
