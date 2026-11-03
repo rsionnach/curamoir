@@ -43,8 +43,8 @@ worktree): `r5-lock.sh` (the run lock), `r5-state.sh` (the only writer of the
 state file), and `r5-parallel-block.sh` (the hook). The window protocol (one
 reviewer, or one fix agent, at a time) and run ownership across sessions are
 documented once, in the header of `r5-state.sh`; read it before a first run.
-In short: never dispatch two subagents in one message while a reviewer has been requested
-(the second is refused), and never remove the lock by hand (with no lock,
+In short: never dispatch two subagents in one message while a reviewer has
+been requested (the second is refused), and never remove the lock by hand (with no lock,
 every other session is refused until the run is adopted or finished).
 
 The hook is wired per checkout, in the untracked `.claude/settings.local.json`
@@ -130,9 +130,12 @@ For each pass in `correctness`, `clarity`, `edge-cases`, `provenance`:
    After provenance, check `git status --short` yourself; a dirty tree is a
    failed pass whatever the counts: restore, `r5-state.sh tree-dirty
    provenance` (from then on `done` is refused), then step 7f.
-6. If `critical + important == 0`: `r5-state.sh done <pass> <fix_iterations>`
-   and go to the next pass. (Minors: fix them in the same fix round if cheap,
-   then that fix round is re-reviewed like any other.)
+6. If `critical + important == 0`, either:
+   - leave the minors (record them as follow-up beads if they matter):
+     `r5-state.sh done <pass> <fix_iterations>` and go to the next pass; or
+   - fix the minors: do NOT run `done`; go to step 7, a fix round like any
+     other, and the pass re-reviews it. (`done` first and a fix after it
+     would need `reopen`.)
 7. Otherwise, a fix round:
    a. `bash .claude/hooks/r5-lock.sh refresh r5-supervise`.
    b. Fix: dispatch ONE fix subagent (the hook records it as fix_dispatched

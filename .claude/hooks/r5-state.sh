@@ -24,7 +24,9 @@
 # dispatch goes through only once the owner's lock has lapsed (a crashed
 # run); while the lease is live the hook's layer A refuses it, and with no
 # lock or someone else's lock `claim` refuses it (exit 4) until the run is
-# adopted or finished.
+# adopted or finished. Every subcommand that changes the run (all but init,
+# adopt, claim and show) is likewise the owner's alone: another session gets
+# exit 4 until it adopts the run.
 #
 # Subcommands:
 #   init <bead> <base> <head>      start a run, owned by this session
@@ -155,15 +157,17 @@ _owner_lease_lapsed() {  # _owner_lease_lapsed <owner>
 _need_run() { [[ -f "$STATE" ]] || _refuse "no run in flight ($STATE)"; }
 # Every subcommand that changes the run (all but init, adopt, claim, show)
 # is the owner's alone: a session whose run was adopted by another must not
-# write to it, finish it included. An unknown session on either side is
-# treated as the owner, as in claim.
+# write to it, finish it included. An unknown session on either side (a run
+# from before ownership was recorded, or no session id in the environment)
+# is let through: it cannot be told apart from the owner, and refusing it
+# would wedge a run that has no other owner.
 _need_owned_run() {
   _need_run
   local owner caller
   owner="$(jq -r '.session_id // ""' "$STATE")"; caller="$(_r5_session)"
   if [[ -n "$owner" && -n "$caller" && "$owner" != "$caller" ]]; then
-    printf 'r5-state: the run belongs to session %s, not this one (%s); adopt it first (r5-lock.sh acquire, then r5-state.sh adopt)\n' \
-      "$owner" "$caller" >&2
+    printf 'r5-state: the run belongs to session %s, not this one (%s);\n  %s\n' \
+      "$owner" "$caller" "$R5_ADOPT_HINT" >&2
     exit 4
   fi
 }
@@ -223,15 +227,15 @@ case "$CMD" in
     _event run_adopted --arg f "$from" --arg s "$me" '{from:$f, session_id:$s}'
     ;;
   pass)
-    _need_owned_run; _arg name pass "${2:-}"
+    _need_owned_run; _arg pass pass "${2:-}"
     _need_not_in_flight
     cur="$(_current_pass)"
     [[ -z "$cur" ]] || _refuse "$cur is still the current pass; record it done first"
     next="$(_next_pass)"
-    [[ "$name" == "$next" ]] || _refuse "the next pass is $next, not $name"
+    [[ "$pass" == "$next" ]] || _refuse "the next pass is $next, not $pass"
     _need_no_open_fix
-    _apply '.current_pass = $p' --arg p "$name"
-    _event pass_started --arg p "$name" '{pass:$p}'
+    _apply '.current_pass = $p' --arg p "$pass"
+    _event pass_started --arg p "$pass" '{pass:$p}'
     ;;
   request)
     _need_owned_run; _arg pass pass "${2:-}"; _int iteration iteration "${3:-}"
@@ -250,10 +254,8 @@ case "$CMD" in
     # ownership check fails closed.
     if [[ -n "$owner" && -n "$caller" && "$owner" != "$caller" ]]; then
       _owner_lease_lapsed "$owner" && exit 0
-      printf 'r5-state: the R5 run on %s belongs to session %s, whose lock is not a lapsed one;\n' \
-        "$(jq -r '.target_bead' "$STATE")" "$owner" >&2
-      printf '  take it over (r5-lock.sh acquire r5-supervise <bead>, then r5-state.sh adopt)\n' >&2
-      printf '  to end it, adopt it first, then r5-state.sh finish aborted\n' >&2
+      printf 'r5-state: the R5 run on %s belongs to session %s, whose lock is still live, or absent;\n  %s\n' \
+        "$(jq -r '.target_bead' "$STATE")" "$owner" "$R5_ADOPT_HINT" >&2
       exit 4
     fi
     pass="$(_current_pass)"
@@ -272,23 +274,6 @@ case "$CMD" in
         _event fix_dispatched --arg p "$pass" --arg s "$subagent" '{pass:$p, subagent_type:$s}'
         exit 0 ;;
     esac
-    ;;
-  reopen)
-    # A change after a pass was done goes back through that pass and every
-    # later one: drop them (and any advisory read) from completed_passes, so
-    # `pass` starts again at <pass>. The trail keeps the dropped results.
-    _need_owned_run; _arg pass pass "${2:-}"
-    _blocking_pass "$pass"
-    _need_not_in_flight
-    _need_no_open_fix
-    jq -e --arg p "$pass" '[.completed_passes[].name] | index($p)' "$STATE" >/dev/null \
-      || _refuse "$pass is not done, so there is nothing to reopen"
-    dropped="$(jq -c --arg p "$pass" '(.passes | index($p)) as $i | .passes[$i:] as $later
-      | [.completed_passes[].name | select(. as $n | $later | index($n))]' "$STATE")"
-    _apply '(.passes | index($p)) as $i | .passes[$i:] as $later
-      | .completed_passes |= map(select(.name as $n | $later | index($n) | not))
-      | .advisory_results = [] | .current_pass = null' --arg p "$pass"
-    _event pass_reopened --arg p "$pass" --argjson d "$dropped" '{pass:$p, dropped:$d}'
     ;;
   findings)
     _need_owned_run; _arg pass pass "${2:-}"
@@ -310,6 +295,8 @@ case "$CMD" in
     _need_owned_run; _arg pass pass "${2:-}"; extra="${3:-}"; [[ -n "$extra" ]] || extra='{}'
     _object "$extra"
     _need_current "$pass"
+    # A fix may follow the findings, a fix agent, an earlier fix (a round
+    # in several steps), or a dirty tree (provenance's restore).
     _need_last_in "fixed" findings_received fix_dispatched fixes_applied reviewer_left_tree_dirty
     _event fixes_applied --argjson x "$extra" --arg p "$pass" '$x + {pass:$p}'
     ;;
@@ -318,6 +305,23 @@ case "$CMD" in
     _need_current "$pass"
     _need_last_in "tree-dirty" findings_received
     _event reviewer_left_tree_dirty --arg p "$pass" '{pass:$p}'
+    ;;
+  reopen)
+    # A change after a pass was done goes back through that pass and every
+    # later one: drop them (and any advisory read) from completed_passes, so
+    # `pass` starts again at <pass>. The trail keeps the dropped results.
+    _need_owned_run; _arg pass pass "${2:-}"
+    _blocking_pass "$pass"
+    _need_not_in_flight
+    _need_no_open_fix
+    jq -e --arg p "$pass" '[.completed_passes[].name] | index($p)' "$STATE" >/dev/null \
+      || _refuse "$pass is not done, so there is nothing to reopen"
+    dropped="$(jq -c --arg p "$pass" '(.passes | index($p)) as $i | .passes[$i:] as $later
+      | [.completed_passes[].name | select(. as $n | $later | index($n))]' "$STATE")"
+    _apply '(.passes | index($p)) as $i | .passes[$i:] as $later
+      | .completed_passes |= map(select(.name as $n | $later | index($n) | not))
+      | .advisory_results = [] | .current_pass = null' --arg p "$pass"
+    _event pass_reopened --arg p "$pass" --argjson d "$dropped" '{pass:$p, dropped:$d}'
     ;;
   event)
     _need_owned_run; _arg name event "${2:-}"; extra="${3:-}"; [[ -n "$extra" ]] || extra='{}'
@@ -328,20 +332,20 @@ case "$CMD" in
     _event "$name" --argjson x "$extra" '$x'
     ;;
   done)
-    _need_owned_run; _arg name pass "${2:-}"; _int iters fix_iterations "${3:-}"; extra="${4:-}"; [[ -n "$extra" ]] || extra='{}'
+    _need_owned_run; _arg pass pass "${2:-}"; _int iters fix_iterations "${3:-}"; extra="${4:-}"; [[ -n "$extra" ]] || extra='{}'
     _object "$extra"
-    _blocking_pass "$name"
-    _need_current "$name"
+    _blocking_pass "$pass"
+    _need_current "$pass"
     # The last window event must be this pass's findings: anything after
     # them (a re-request, a dispatch, a fix, a dirty tree) is unreviewed.
-    verdict="$(_last_window_event | jq -r --arg p "$name" '
+    verdict="$(_last_window_event | jq -r --arg p "$pass" '
       if (.event != "findings_received" or .pass != $p) then "followed by later activity"
       elif (.counts.critical == 0 and .counts.important == 0) then "clean"
       else "not clean" end')"
-    [[ "$verdict" == "clean" ]] || _refuse "$name cannot be done: its findings are $verdict"
+    [[ "$verdict" == "clean" ]] || _refuse "$pass cannot be done: its findings are $verdict"
     _apply '.completed_passes += [($x + {name:$p, fix_iterations:$n, completed_at:$t})] | .current_pass = null' \
-      --arg p "$name" --argjson n "$iters" --arg t "$(_now)" --argjson x "$extra"
-    _event pass_completed --arg p "$name" '{pass:$p}'
+      --arg p "$pass" --argjson n "$iters" --arg t "$(_now)" --argjson x "$extra"
+    _event pass_completed --arg p "$pass" '{pass:$p}'
     ;;
   advisory)
     _need_owned_run

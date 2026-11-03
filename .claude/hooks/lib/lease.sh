@@ -14,6 +14,10 @@ R5_LEASE_SECONDS=900
 # A backstop against a wedged session that keeps refreshing.
 R5_ABSOLUTE_TTL_SECONDS=86400
 
+# How another session recovers a run it does not own: one wording for every
+# message that refuses it (r5-lock.sh, r5-state.sh, the hook).
+R5_ADOPT_HINT='take the run over with r5-lock.sh acquire r5-supervise <bead>, then r5-state.sh adopt; to end it instead, adopt it first, then r5-state.sh finish aborted'
+
 # _r5_session: this session's id, from the environment ("" if unknown).
 _r5_session() { printf '%s' "${CLAUDE_CODE_SESSION_ID:-${CLAUDE_SESSION_ID:-}}"; }
 

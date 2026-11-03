@@ -33,7 +33,9 @@
 #
 # Exit codes:
 #   0   - success
-#   1   - usage error, or refresh/release called by a non-holder
+#   1   - usage error, or refresh/release called by a non-holder (the lock
+#         has no exit 4: a non-holder of the lock is a caller error here,
+#         while r5-state.sh's 4 means another session owns the run)
 #   2   - cross-session block, or same-session nesting refusal
 #   3   - internal error (cannot resolve the root, jq or perl missing, the
 #         .claude directory cannot be created, the mutex not taken within
@@ -205,9 +207,8 @@ r5-lock: held by another supervisor.
 If this state is stale (the prior supervisor crashed or the session was
 abandoned), the lease will auto-reclaim in $(( R5_LEASE_SECONDS - refresh_age ))s.
 Do not remove the lock by hand: an R5 run in .claude/r5-state.json would then
-refuse every other session's subagents. Once the lease has lapsed, acquire
-the lock and take the run over (r5-state.sh adopt); to end it instead,
-adopt it first, then r5-state.sh finish aborted.
+refuse every other session's subagents. Once the lease has lapsed,
+$R5_ADOPT_HINT.
 EOF
   exit 2
 }
