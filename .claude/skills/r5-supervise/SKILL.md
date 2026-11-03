@@ -103,8 +103,11 @@ step 1: release the lock (`r5-lock.sh release r5-supervise`).
 
 For each pass in `correctness`, `clarity`, `edge-cases`, `provenance`:
 
-1. `bash .claude/hooks/r5-lock.sh refresh r5-supervise`. Exit 1 = the lock
-   is lost: another session reclaimed it after this one's lease lapsed (a
+1. `bash .claude/hooks/r5-lock.sh refresh r5-supervise`. Exit 4 = the lock
+   is still this session's but past its 24h limit (a run paused overnight on
+   a design question, say): ask the user; with their OK, `r5-lock.sh renew
+   r5-supervise` and `event lock_renewed`, then carry on, or end the run.
+   Exit 1 = the lock is lost: another session reclaimed it after this one's lease lapsed (a
    step that ran longer than 15 minutes). Stop, touch neither the lock nor
    the state file (the helper refuses this session anyway, exit 4), and tell
    the user; the other session may have adopted the run.
@@ -209,7 +212,7 @@ mid-review. Refresh as soon as the reviewer reports.
 
 The 24h TTL counts from the run's start: the pre-flight acquire restamps the
 lock when no run is in flight. A run that lasts longer than that fails its
-next refresh (exit 1): stop and ask the user.
+next refresh with exit 4 (step 1).
 
 If a step failed partway (a full disk, a killed helper): `show` the state.
 A `pass` that set current_pass but wrote no pass_started is repaired with

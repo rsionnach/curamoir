@@ -26,6 +26,9 @@
 #   acquire <supervisor> <target> [session_id]   - claim the lock
 #   refresh <supervisor> [session_id]            - bump refreshed_at
 #   release <supervisor> [session_id]            - drop the lock
+#   renew <supervisor> [session_id]              - restamp acquired_at (the
+#                                                  holder, with the user's OK,
+#                                                  when a run outlives the TTL)
 #   status                                       - print holder or "no lock"
 #
 # session_id defaults to $CLAUDE_CODE_SESSION_ID (or $CLAUDE_SESSION_ID)
@@ -33,9 +36,11 @@
 #
 # Exit codes:
 #   0   - success
-#   1   - usage error, or refresh/release called by a non-holder (the lock
-#         has no exit 4: a non-holder of the lock is a caller error here,
-#         while r5-state.sh's 4 means another session owns the run)
+#   1   - usage error, or refresh/release/renew called by a non-holder (the
+#         lock is lost)
+#   4   - refresh only: the lock is still this session's, but past its
+#         absolute TTL (or stamped in the future), so it no longer protects
+#         the run; ask the user, then `renew` or end the run
 #   2   - cross-session block, or same-session nesting refusal
 #   3   - internal error (cannot resolve the root, jq or perl missing, the
 #         .claude directory cannot be created, the mutex not taken within
@@ -45,7 +50,8 @@ set -uo pipefail
 
 # Resolve R5_ROOT via the shared resolver.
 # This script's real directory: through any symlink to the file, and with
-# CDPATH cleared (an exported CDPATH makes `cd` print a second path). The
+# CDPATH cleared (an exported CDPATH makes `cd` print a second path), and
+# physically (-P), so a `..` in a link target is the kernel's `..`. The
 # same bootstrap opens each helper, before lib/ can be sourced.
 _self="${BASH_SOURCE[0]}"
 while [[ -L "$_self" ]]; do
@@ -53,7 +59,7 @@ while [[ -L "$_self" ]]; do
   [[ "$_link" == /* ]] || _link="$(dirname -- "$_self")/$_link"
   _self="$_link"
 done
-_SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$_self")" && pwd)"
+_SCRIPT_DIR="$(CDPATH= cd -P -- "$(dirname -- "$_self")" && pwd)"
 # shellcheck source=lib/resolve-repo-root.sh
 source "$_SCRIPT_DIR/lib/resolve-repo-root.sh" || {
   printf 'r5-lock: cannot resolve the repository root\n' >&2
@@ -74,6 +80,14 @@ mkdir -p "$LOCK_DIR" || { printf 'r5-lock: cannot create %s\n' "$LOCK_DIR" >&2; 
 command -v jq >/dev/null 2>&1 || { printf 'r5-lock: jq is required\n' >&2; exit 3; }
 
 _now() { date -u +%Y-%m-%dT%H:%M:%SZ; }
+
+# No R5 run in flight: no state file, or a well-formed one whose status is
+# final. A malformed file counts as a run in flight (fail closed).
+_no_run_in_flight() {
+  [[ ! -f "$R5_STATE_FILE" ]] && return 0
+  jq -e 'type == "object" and (.status | type) == "string" and .status != "in_progress"' \
+    "$R5_STATE_FILE" >/dev/null 2>&1
+}
 
 # Read a field from the lockfile (printing empty on any failure).
 _lock_get() {
@@ -168,16 +182,19 @@ _cmd_acquire() {
   # (bumps refreshed_at). The same supervisor on ANOTHER target is a second
   # run while one is in flight: refused, never a silent retarget.
   if [[ "$held_session" == "$session" && "$held_supervisor" == "$supervisor" ]]; then
+    # With no run in flight, a re-acquire is the start of the next run: it
+    # may take a new target, and it restamps acquired_at (the absolute TTL
+    # counts from a run's start). With a run in flight, neither.
+    if _no_run_in_flight; then
+      _lock_write "$supervisor" "$target" "$session" "$now" "$now" || exit 3
+      exit 0
+    fi
     if [[ "$held_target" != "$target" ]]; then
-      printf 'r5-lock: %s already holds the lock for %s in this session; finish or abort that run before %s\n' \
-        "$supervisor" "$held_target" "$target" >&2
+      printf 'r5-lock: %s already holds the lock for %s in this session, with its run in flight; finish or abort that run (then r5-lock.sh release %s) before %s\n' \
+        "$supervisor" "$held_target" "$supervisor" "$target" >&2
       exit 2
     fi
-    # The absolute TTL counts from the start of a run: with no run in flight,
-    # a re-acquire (the start of the next run) restamps acquired_at.
-    local acquired="$held_acquired"
-    [[ "$(jq -r '.status // ""' "$R5_STATE_FILE" 2>/dev/null)" == in_progress ]] || acquired="$now"
-    _lock_write "$supervisor" "$target" "$session" "$acquired" "$now" || exit 3
+    _lock_write "$supervisor" "$target" "$session" "$held_acquired" "$now" || exit 3
     exit 0
   fi
 
@@ -233,7 +250,7 @@ EOF
     _reclaim_and_exit "$supervisor" "$target" "$session" "$now" "$held_refreshed"
   fi
 
-  if (( acquire_age > R5_ABSOLUTE_TTL_SECONDS )); then
+  if (( acquire_age > R5_ABSOLUTE_TTL_SECONDS || acquire_age < 0 )); then
     printf 'r5-lock: absolute TTL exceeded (acquired %ss ago > %ss), reclaiming from %s/%s in session %s\n' \
       "$acquire_age" "$R5_ABSOLUTE_TTL_SECONDS" "$held_supervisor" "$held_target" "$held_session" >&2
     _reclaim_and_exit "$supervisor" "$target" "$session" "$now" "$held_refreshed"
@@ -283,12 +300,29 @@ _cmd_refresh() {
 
   local acquire_age
   read -r _ acquire_age <<< "$(_r5_lock_ages "$LOCK_FILE")"
-  if (( acquire_age > R5_ABSOLUTE_TTL_SECONDS )); then
-    printf 'r5-lock: refresh: the lock is past its %ss limit (acquired %ss ago), so it no longer protects this run; stop and ask the user\n' \
-      "$R5_ABSOLUTE_TTL_SECONDS" "$acquire_age" >&2
-    exit 1
+  if (( acquire_age > R5_ABSOLUTE_TTL_SECONDS || acquire_age < 0 )); then
+    printf 'r5-lock: refresh: the lock is still yours but past its %ss limit (acquired %ss ago), so it no longer protects this run; ask the user, then r5-lock.sh renew %s, or end the run\n' \
+      "$R5_ABSOLUTE_TTL_SECONDS" "$acquire_age" "$supervisor" >&2
+    exit 4
   fi
   _lock_write "$supervisor" "$held_target" "$session" "$held_acquired" "$(_now)" || exit 3
+  exit 0
+}
+
+# ---------------------------------------------------------------- renew
+_cmd_renew() {
+  local supervisor="${1:-}" session="${2:-}"
+  [[ -z "$supervisor" ]] && {
+    printf 'usage: r5-lock.sh renew <supervisor> [session_id]\n' >&2
+    exit 1
+  }
+  [[ -z "$session" ]] && session="$(_r5_session)"
+  [[ -f "$LOCK_FILE" && "$(_lock_get supervisor)" == "$supervisor" && "$(_lock_get session_id)" == "$session" ]] || {
+    printf 'r5-lock: renew: this session does not hold the lock for %s\n' "$supervisor" >&2
+    exit 1
+  }
+  local now; now="$(_now)"
+  _lock_write "$supervisor" "$(_lock_get target)" "$session" "$now" "$now" || exit 3
   exit 0
 }
 
@@ -340,6 +374,7 @@ case "${1:-}" in
   acquire) shift; _with_mutex _cmd_acquire "$@" ;;
   refresh) shift; _with_mutex _cmd_refresh "$@" ;;
   release) shift; _with_mutex _cmd_release "$@" ;;
+  renew)   shift; _with_mutex _cmd_renew "$@" ;;
   status)  shift; _cmd_status ;;
   *)
     _r5_usage "${BASH_SOURCE[0]}"

@@ -42,7 +42,7 @@ if [[ -n "${CURAMOIR_R5_ROOT:-}" ]]; then
   return 1 2>/dev/null || exit 1
 fi
 
-_here="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+_here="$(CDPATH= cd -P -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 _common_dir="$(git -C "$_here" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" || _common_dir=""
 if [[ -n "$_common_dir" ]]; then
   _root="$(cd "$(dirname "$_common_dir")" 2>/dev/null && pwd)" || _root=""

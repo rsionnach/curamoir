@@ -81,7 +81,8 @@
 set -euo pipefail
 
 # This script's real directory: through any symlink to the file, and with
-# CDPATH cleared (an exported CDPATH makes `cd` print a second path). The
+# CDPATH cleared (an exported CDPATH makes `cd` print a second path), and
+# physically (-P), so a `..` in a link target is the kernel's `..`. The
 # same bootstrap opens each helper, before lib/ can be sourced.
 _self="${BASH_SOURCE[0]}"
 while [[ -L "$_self" ]]; do
@@ -89,7 +90,7 @@ while [[ -L "$_self" ]]; do
   [[ "$_link" == /* ]] || _link="$(dirname -- "$_self")/$_link"
   _self="$_link"
 done
-_DIR="$(CDPATH= cd -- "$(dirname -- "$_self")" && pwd)"
+_DIR="$(CDPATH= cd -P -- "$(dirname -- "$_self")" && pwd)"
 # shellcheck source=lib/resolve-repo-root.sh
 source "$_DIR/lib/resolve-repo-root.sh" || exit 3
 command -v jq >/dev/null 2>&1 || { printf 'r5-state: jq is required\n' >&2; exit 3; }
@@ -228,7 +229,11 @@ _blocking_pass() {  # _blocking_pass <name>: one of the four blocking passes
 
 # Move a finished run's file to r5-state-<bead>-<status>-<ts>.json.
 _archive() {
-  mv "$STATE" "$R5_ROOT/.claude/r5-state-$(jq -r '.target_bead' "$STATE")-$(jq -r '.status' "$STATE")-$(date -u +%Y%m%dT%H%M%SZ).json" \
+  # Both fields are sanitised: a hand-edited file must not name a path.
+  local bead status
+  bead="$(jq -r '.target_bead' "$STATE" | tr -c 'A-Za-z0-9._\n-' _)"
+  status="$(jq -r '.status' "$STATE" | tr -c 'A-Za-z0-9._\n-' _)"
+  mv "$STATE" "$R5_ROOT/.claude/r5-state-${bead}-${status}-$(date -u +%Y%m%dT%H%M%SZ).json" \
     || { printf 'r5-state: could not archive %s\n' "$STATE" >&2; exit 3; }
 }
 

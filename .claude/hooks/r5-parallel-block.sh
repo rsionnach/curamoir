@@ -25,7 +25,8 @@
 set -euo pipefail
 
 # This script's real directory: through any symlink to the file, and with
-# CDPATH cleared (an exported CDPATH makes `cd` print a second path). The
+# CDPATH cleared (an exported CDPATH makes `cd` print a second path), and
+# physically (-P), so a `..` in a link target is the kernel's `..`. The
 # same bootstrap opens each helper, before lib/ can be sourced.
 _self="${BASH_SOURCE[0]}"
 while [[ -L "$_self" ]]; do
@@ -33,7 +34,7 @@ while [[ -L "$_self" ]]; do
   [[ "$_link" == /* ]] || _link="$(dirname -- "$_self")/$_link"
   _self="$_link"
 done
-_HOOK_DIR="$(CDPATH= cd -- "$(dirname -- "$_self")" && pwd)"
+_HOOK_DIR="$(CDPATH= cd -P -- "$(dirname -- "$_self")" && pwd)"
 # A hook that cannot find its own libraries cannot tell whether a run is in
 # flight: refuse (a broken install is loud, never a silent hole).
 if [[ ! -f "$_HOOK_DIR/lib/resolve-repo-root.sh" || ! -f "$_HOOK_DIR/lib/lease.sh" ]]; then

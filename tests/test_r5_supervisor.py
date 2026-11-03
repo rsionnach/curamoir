@@ -122,12 +122,32 @@ def test_a_live_lock_refuses_another_session_and_nesting(r5root):
     assert run(LOCK, "acquire", "epic-executor", "e1", root=r5root).returncode == 2
 
 
-def test_the_same_session_cannot_retarget_its_own_run(r5root):
+def test_the_same_session_cannot_retarget_a_run_in_flight(r5root):
     assert run(LOCK, "acquire", "r5-supervise", "b1", root=r5root).returncode == 0
+    start(r5root)
     assert run(LOCK, "acquire", "r5-supervise", "b1", root=r5root).returncode == 0  # idempotent
     other = run(LOCK, "acquire", "r5-supervise", "b2", root=r5root)
-    assert other.returncode == 2 and "b1" in other.stderr
+    assert other.returncode == 2 and "b1" in other.stderr and "release" in other.stderr
     assert json.loads(lock_file(r5root).read_text())["target"] == "b1"
+
+
+def test_a_lock_left_from_a_finished_run_takes_the_next_bead(r5root):
+    run(LOCK, "acquire", "r5-supervise", "b1", root=r5root)
+    start(r5root)
+    run(STATE, "finish", "aborted", root=r5root)  # finished, but not released
+    assert run(LOCK, "acquire", "r5-supervise", "b2", root=r5root).returncode == 0
+    assert json.loads(lock_file(r5root).read_text())["target"] == "b2"
+
+
+def test_a_malformed_state_is_a_run_in_flight_for_the_lock(r5root):
+    run(LOCK, "acquire", "r5-supervise", "b1", root=r5root)
+    start(r5root)
+    age_lock(r5root, 3600, field="acquired_at")
+    before = json.loads(lock_file(r5root).read_text())["acquired_at"]
+    (r5root / ".claude" / "r5-state.json").write_text("{trunc")
+    run(LOCK, "acquire", "r5-supervise", "b1", root=r5root)
+    assert json.loads(lock_file(r5root).read_text())["acquired_at"] == before  # not restamped
+    assert run(LOCK, "acquire", "r5-supervise", "b2", root=r5root).returncode == 2
 
 
 def test_only_the_holder_refreshes_or_releases(r5root):
@@ -300,7 +320,18 @@ def test_the_ttl_counts_from_the_run_s_start_and_refresh_fails_past_it(r5root):
     age_lock(r5root, PAST_TTL, field="acquired_at")
     run(LOCK, "acquire", "r5-supervise", "b1", root=r5root)  # a run in flight: not restamped
     late = run(LOCK, "refresh", "r5-supervise", root=r5root)
-    assert late.returncode == 1 and "limit" in late.stderr
+    assert late.returncode == 4 and "renew" in late.stderr
+    assert run(LOCK, "renew", "r5-supervise", root=r5root, session="S2").returncode == 1
+    assert run(LOCK, "renew", "r5-supervise", root=r5root).returncode == 0  # with the user's OK
+    assert run(LOCK, "refresh", "r5-supervise", root=r5root).returncode == 0
+    assert state(r5root)["status"] == "in_progress"
+
+
+def test_a_lock_acquired_in_the_future_fails_refresh_and_can_be_reclaimed(r5root):
+    run(LOCK, "acquire", "r5-supervise", "b1", root=r5root, session="S1")
+    age_lock(r5root, -600, field="acquired_at")
+    assert run(LOCK, "refresh", "r5-supervise", root=r5root, session="S1").returncode == 4
+    assert run(LOCK, "acquire", "r5-supervise", "b2", root=r5root, session="S2").returncode == 0
 
 
 def test_the_long_review_guard_covers_a_fix_agent_and_an_unknown_owner(r5root):
@@ -546,6 +577,19 @@ def test_init_archives_a_finished_but_unarchived_run_before_starting(r5root):
     assert run(STATE, "init", "b2", "x", "y", root=r5root).returncode == 0
     assert "supervisor_aborted" in archived_aborted_events(r5root, "b1")
     assert state(r5root)["target_bead"] == "b2"
+
+
+def test_a_hand_edited_bead_or_status_cannot_name_a_path_outside_the_archive(r5root):
+    start(r5root)
+    finished_but_not_archived(r5root)
+    path = r5root / ".claude" / "r5-state.json"
+    data = json.loads(path.read_text())
+    data["target_bead"], data["status"] = "../../escaped", "done/x"
+    path.write_text(json.dumps(data))
+    assert run(STATE, "finish", "aborted", root=r5root).returncode == 0
+    archived = [p.name for p in (r5root / ".claude").glob("r5-state-*.json")]
+    assert len(archived) == 1 and archived[0].startswith("r5-state-.._.._escaped-done_x-")
+    assert not list(r5root.parent.glob("escaped*"))
 
 
 def test_a_second_run_cannot_start_while_one_is_in_flight(r5root):
