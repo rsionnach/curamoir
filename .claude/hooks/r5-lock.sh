@@ -184,7 +184,28 @@ EOF
   local refresh_age acquire_age
   read -r refresh_age acquire_age <<< "$(_r5_lock_ages "$LOCK_FILE")"
 
-  if (( refresh_age > R5_LEASE_SECONDS )); then
+  # A lapsed lease while the holder's R5 run has a reviewer or fix agent in
+  # flight is a long review, not a crash: only resuming that very run
+  # (r5-supervise on its bead) may reclaim before the absolute TTL.
+  if (( refresh_age > R5_LEASE_SECONDS || refresh_age < 0 )) && (( acquire_age <= R5_ABSOLUTE_TTL_SECONDS )); then
+    local window
+    window="$(bash "$_SCRIPT_DIR/r5-state.sh" open-window 2>/dev/null || true)"
+    if [[ -n "$window" ]]; then
+      local w_owner w_bead w_event
+      read -r w_owner w_bead w_event <<< "$window"
+      if [[ "$w_owner" == "$held_session" && ! ( "$supervisor" == r5-supervise && "$target" == "$w_bead" ) ]]; then
+        cat >&2 <<EOF
+r5-lock: the lease of $held_supervisor/$held_target (session $held_session)
+has lapsed, but its R5 run on $w_bead still has a $w_event open: a long
+review, not a crash. Not reclaiming. Wait for it, or, to resume that run in
+this session, acquire r5-supervise $w_bead.
+EOF
+        exit 2
+      fi
+    fi
+  fi
+
+  if (( refresh_age > R5_LEASE_SECONDS || refresh_age < 0 )); then
     printf 'r5-lock: stale lease (refreshed_at %ss ago > %ss), reclaiming from %s/%s in session %s\n' \
       "$refresh_age" "$R5_LEASE_SECONDS" "$held_supervisor" "$held_target" "$held_session" >&2
     _reclaim_and_exit "$supervisor" "$target" "$session" "$now" "$held_refreshed"

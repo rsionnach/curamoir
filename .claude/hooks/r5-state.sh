@@ -29,7 +29,8 @@
 # exit 4 until it adopts the run.
 #
 # Subcommands:
-#   init <bead> <base> <head>      start a run, owned by this session
+#   init <bead> <base> <head>      start a run, owned by this session (bead:
+#                                  letters, digits, '.', '_', '-')
 #   adopt                          take over the run from a session that is
 #                                  gone (this session must hold the lock:
 #                                  r5-lock.sh acquire first)
@@ -64,6 +65,8 @@
 #                                  pass is done and the advisory read
 #                                  recorded); archive the file as
 #                                  r5-state-<bead>-<status>-<ts>.json
+#   open-window                    (r5-lock.sh) "<owner> <bead> <reviewer|
+#                                  fix-agent>" while one is in flight
 #   show                           print the state file
 #
 # Exit codes:
@@ -154,7 +157,22 @@ _owner_lease_lapsed() {  # _owner_lease_lapsed <owner>
 }
 
 # ---- preconditions ----
-_need_run() { [[ -f "$STATE" ]] || _refuse "no run in flight ($STATE)"; }
+# The state file must have the shape init writes; a truncated, emptied or
+# hand-edited file cannot say whether a reviewer is in flight, so nothing
+# proceeds on it (claim refuses every dispatch) until it is moved aside.
+_valid_state() {
+  jq -e 'type == "object" and (.status | type) == "string"
+    and (.audit_trail | type) == "array" and (.passes | type) == "array"
+    and (.completed_passes | type) == "array"
+    and (.advisory_results | type) == "array"' "$STATE" >/dev/null 2>&1
+}
+_need_valid_state() {
+  _valid_state || _refuse "$STATE is unreadable or malformed, so nothing can proceed on it; move it aside (keep it: it is the run's audit trail) and start the run again"
+}
+_need_run() {
+  [[ -f "$STATE" ]] || _refuse "no run in flight ($STATE)"
+  _need_valid_state
+}
 # Every subcommand that changes the run (all but init, adopt, claim, show)
 # is the owner's alone: a session whose run was adopted by another must not
 # write to it, finish it included. An unknown session on either side (a run
@@ -205,16 +223,23 @@ CMD="${1:-}"
 case "$CMD" in
   init)
     _arg bead bead "${2:-}"; _arg base base "${3:-}"; _arg head head "${4:-}"
-    if [[ -f "$STATE" ]] && [[ "$(jq -r '.status' "$STATE")" == "in_progress" ]]; then
-      _refuse "a run is in flight on $(jq -r '.target_bead' "$STATE"); finish or abort it first"
+    # The bead id names the archive file at `finish`.
+    [[ "$bead" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || _bad_arg "init: <bead> must be letters, digits, '.', '_' or '-', got '$bead'"
+    if [[ -f "$STATE" ]]; then
+      _need_valid_state
+      [[ "$(jq -r '.status' "$STATE")" != "in_progress" ]] \
+        || _refuse "a run is in flight on $(jq -r '.target_bead' "$STATE"); finish or abort it first"
     fi
+    tmp="$STATE.tmp.$$"
     jq -n --arg b "$bead" --arg base "$base" --arg head "$head" --arg t "$(_now)" --arg s "$(_r5_session)" '{
       supervisor: "r5-supervise", target_bead: $b, session_id: $s, started_at: $t,
       passes: ["correctness", "clarity", "edge-cases", "provenance"],
       advisory_passes: ["excellence"], current_pass: null, completed_passes: [],
       advisory_results: [], status: "in_progress",
       diff_range: {base: $base, head: $head},
-      audit_trail: [{ts: $t, event: "supervisor_started", session_id: $s}]}' > "$STATE"
+      audit_trail: [{ts: $t, event: "supervisor_started", session_id: $s}]}' > "$tmp" \
+      || { rm -f "$tmp"; exit 3; }
+    mv "$tmp" "$STATE" || { rm -f "$tmp"; exit 3; }
     ;;
   adopt)
     _need_run
@@ -248,7 +273,8 @@ case "$CMD" in
     # Exit 0 = let the dispatch through; 2 = refuse; 4 = another session's run.
     subagent="${2:-}"; caller="${3:-$(_r5_session)}"
     [[ -f "$STATE" ]] || exit 0
-    [[ "$(jq -r '.status // ""' "$STATE")" == "in_progress" ]] || exit 0
+    _need_valid_state
+    [[ "$(jq -r '.status' "$STATE")" == "in_progress" ]] || exit 0
     owner="$(jq -r '.session_id // ""' "$STATE")"
     # An unknown session on either side is treated as the run's own, so the
     # ownership check fails closed.
@@ -372,6 +398,17 @@ case "$CMD" in
     _event "supervisor_$status"
     bead="$(jq -r '.target_bead' "$STATE")"
     mv "$STATE" "$R5_ROOT/.claude/r5-state-${bead}-${status}-$(date -u +%Y%m%dT%H%M%SZ).json"
+    ;;
+  open-window)
+    # (r5-lock.sh) "<owner> <bead> <event>" if the run has a reviewer or a
+    # fix agent in flight; nothing otherwise. Read-only.
+    [[ -f "$STATE" ]] && _valid_state || exit 0
+    [[ "$(jq -r '.status' "$STATE")" == "in_progress" ]] || exit 0
+    last="$(_last_window_event_name)"
+    if [[ "$last" == reviewer_dispatched ]]; then event=reviewer
+    elif _open_fix; then event=fix-agent
+    else exit 0; fi
+    printf '%s %s %s\n' "$(jq -r '.session_id // "-"' "$STATE")" "$(jq -r '.target_bead' "$STATE")" "$event"
     ;;
   show) _need_run; cat "$STATE" ;;
   *) _r5_usage "${BASH_SOURCE[0]}" ;;

@@ -50,7 +50,11 @@ finished).
 
 The hook is wired per checkout, in the untracked `.claude/settings.local.json`
 (this repository is a plugin, so a project `settings.json` would ship to its
-users). Without it nothing enforces the windows. The entry:
+users). Without it nothing enforces the windows. A session started in a
+sibling worktree (for example under `.claude/worktrees/`) reads that
+worktree's settings, not the main checkout's, so it has no hook unless the
+entry is added there too; run supervised R5 from the main checkout. The
+entry:
 
 ```json
 {
@@ -195,6 +199,23 @@ pass again; if it is fix_dispatched, check the fix agent's work, then
 `fixed <pass>`.
 If that pass is provenance, check `git status --short` first and ask the user
 before restoring anything — a leftover mutant looks like real work.
+
+A long reviewer does not lose the lock: while the run has a reviewer or a
+fix agent in flight, `r5-lock.sh acquire` from another session refuses to
+reclaim the lapsed lease (until the 24h TTL), except `acquire r5-supervise
+<that bead>`, which is resuming the run. Refresh as soon as the reviewer
+reports.
+
+If a step failed partway (a full disk, a killed helper): `show` the state.
+A `pass` that set current_pass but wrote no pass_started is repaired with
+`request <pass> 1`; a `finish` whose archive move failed is repeated once
+the cause is fixed.
+
+When the helpers themselves cannot run (perl or flock unavailable, so every
+call exits 3; or the state file is malformed, so every call and every
+dispatch is refused), the escape is manual and the user's call: move
+`.claude/r5-state.json` aside (keep it; it is the audit trail), which ends
+the run and lets dispatches through, then start the run again.
 
 ## Several beads
 

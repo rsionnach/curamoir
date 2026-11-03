@@ -19,7 +19,9 @@
 #
 # Blocked: exit 2 with a stderr message. If jq is missing while a run's lock
 # or state exists, refuse (the guard cannot read them; failing open would let
-# a parallel review through). Outside a curamoir checkout: allow.
+# a parallel review through). The repository is the one that contains this
+# hook, whatever the session's cwd (lib/resolve-repo-root.sh); outside a
+# curamoir checkout: allow.
 set -euo pipefail
 
 _HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

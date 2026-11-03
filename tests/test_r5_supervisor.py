@@ -275,6 +275,26 @@ def test_another_session_is_refused_unless_the_owner_s_lease_has_lapsed(r5root):
     assert events(r5root)[-1] == "pass_started"
 
 
+def test_a_long_review_keeps_the_lock_from_another_supervisor(r5root):
+    run(LOCK, "acquire", "r5-supervise", "b1", root=r5root, session="S1")
+    start(r5root)
+    run(STATE, "pass", "correctness", root=r5root)
+    hook(r5root)  # S1's reviewer runs past the lease
+    age_lock(r5root, PAST_LEASE)
+    other = run(LOCK, "acquire", "epic-executor", "e1", root=r5root, session="S2")
+    assert other.returncode == 2 and "Not reclaiming" in other.stderr
+    assert run(LOCK, "acquire", "r5-supervise", "b2", root=r5root, session="S2").returncode == 2
+    assert json.loads(lock_file(r5root).read_text())["session_id"] == "S1"
+    assert run(LOCK, "acquire", "r5-supervise", "b1", root=r5root, session="S2").returncode == 0
+
+
+def test_a_lock_from_the_future_counts_as_expired(r5root):
+    run(LOCK, "acquire", "r5-supervise", "b1", root=r5root, session="HOLDER")
+    age_lock(r5root, -3600)
+    assert hook(r5root, session="S2").returncode == 0
+    assert run(LOCK, "acquire", "r5-supervise", "b2", root=r5root, session="S2").returncode == 0
+
+
 def test_a_new_session_adopts_a_run_only_while_holding_the_lock(r5root):
     run(LOCK, "acquire", "r5-supervise", "b1", root=r5root, session="S1")
     start(r5root)
@@ -426,6 +446,26 @@ def test_the_excellence_in_flight_refusal_names_advisory(r5root):
     assert refused.returncode == 2 and "`advisory ...`" in refused.stderr
 
 
+@pytest.mark.parametrize("content", ["", "[]", '{"status": "in_progress", "audit_trail": "x"}',
+                                     "TRUNCATE"])
+def test_a_malformed_state_file_refuses_every_dispatch_and_every_change(r5root, content):
+    start(r5root)
+    run(STATE, "pass", "correctness", root=r5root)
+    hook(r5root)
+    path = r5root / ".claude" / "r5-state.json"
+    path.write_text(path.read_text()[:200] if content == "TRUNCATE" else content)
+    refused = hook(r5root)
+    assert refused.returncode == 2 and "malformed" in refused.stderr
+    assert run(STATE, "finish", "aborted", root=r5root).returncode == 2
+    assert run(STATE, "init", "b2", "x", "y", root=r5root).returncode == 2
+
+
+def test_a_bead_id_that_cannot_name_the_archive_is_refused(r5root):
+    for bead in ("cm/1", "a b", "../x", ".hidden"):
+        assert run(STATE, "init", bead, "x", "y", root=r5root).returncode == 1, bead
+    assert not (r5root / ".claude" / "r5-state.json").exists()
+
+
 def test_a_second_run_cannot_start_while_one_is_in_flight(r5root):
     start(r5root, "b1")
     assert run(STATE, "init", "b2", "x", "y", root=r5root).returncode == 2
@@ -517,11 +557,45 @@ def test_an_inherited_r5_root_is_ignored(r5root, tmp_path_factory):
     assert not (elsewhere / ".claude").exists()
 
 
-def test_outside_a_curamoir_checkout_the_helpers_refuse_and_the_hook_allows(tmp_path):
+def hooks_in(repo, curamoir=True):
+    """A copy of the helpers inside a scratch git repository, so a test can run
+    them with no override and a stray cwd without resolving to this checkout."""
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    if curamoir:
+        (repo / ".claude-plugin").mkdir()
+        (repo / ".claude-plugin" / "plugin.json").write_text('{"name": "curamoir"}')
+    shutil.copytree(HOOKS, repo / ".claude" / "hooks")
+    return repo / ".claude" / "hooks"
+
+
+def bare_env(session="S1"):
     env = {k: v for k, v in os.environ.items() if not k.startswith(("CURAMOIR_", "R5_"))}
-    lock = subprocess.run(["bash", str(LOCK), "status"], capture_output=True, text=True,
-                          env=env, cwd=tmp_path, timeout=60)
+    env["CLAUDE_CODE_SESSION_ID"] = session
+    return env
+
+
+def test_outside_a_curamoir_checkout_the_helpers_refuse_and_the_hook_allows(tmp_path):
+    hooks = hooks_in(tmp_path / "other", curamoir=False)
+    lock = subprocess.run(["bash", str(hooks / "r5-lock.sh"), "status"], capture_output=True,
+                          text=True, env=bare_env(), cwd=tmp_path, timeout=60)
     assert lock.returncode == 3
-    allowed = subprocess.run(["bash", str(HOOK)], input="{}", capture_output=True, text=True,
-                             env=env, cwd=tmp_path, timeout=60)
+    allowed = subprocess.run(["bash", str(hooks / "r5-parallel-block.sh")], input="{}",
+                             capture_output=True, text=True, env=bare_env(), cwd=tmp_path,
+                             timeout=60)
     assert allowed.returncode == 0
+
+
+def test_the_hook_checks_its_own_repository_whatever_the_session_s_cwd(tmp_path):
+    repo = tmp_path / "repo"
+    hooks = hooks_in(repo)
+    for args in (("init", "b1", "x", "y"), ("pass", "correctness")):
+        assert subprocess.run(["bash", str(hooks / "r5-state.sh"), *args], env=bare_env(),
+                              cwd=repo, capture_output=True, timeout=60).returncode == 0
+    payload = json.dumps({"tool_input": {"subagent_type": "general-purpose"}})
+    elsewhere = tmp_path / "elsewhere"
+    subprocess.run(["git", "init", "-q", str(elsewhere)], check=True)
+    results = [subprocess.run(["bash", str(hooks / "r5-parallel-block.sh")], input=payload,
+                              capture_output=True, text=True, env=bare_env(), cwd=cwd,
+                              timeout=60).returncode
+               for cwd in (repo, tmp_path, elsewhere)]
+    assert results == [0, 2, 2]  # the reviewer, then two refusals from outside the repo
