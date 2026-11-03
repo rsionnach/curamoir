@@ -74,7 +74,9 @@ r5-parallel-block: the R5 supervisor lock is held by another session.
 
 Refusing a subagent dispatch from session $CURRENT_SESSION until the holder
 releases it or its lease runs out ($(( LEASE_SECONDS - REFRESH_AGE ))s).
-Manual override: rm "$LOCK_FILE"
+Do not remove the lock by hand: the run would then refuse this session
+until it is adopted (r5-lock.sh acquire, r5-state.sh adopt) or ended
+(r5-state.sh finish aborted).
 MSG
       exit 2
     fi
@@ -83,11 +85,24 @@ MSG
 fi
 
 # ---- Layer B: one reviewer (or one fix agent) at a time, in the run's own
-# session; another session's dispatches are layer A's business ----
+# session. Another session's dispatches: layer A refuses them while the
+# owner's lease is live; claim lets them through once it has lapsed, and
+# refuses them (exit 4) in any other case, e.g. with no lock at all ----
 [[ -f "$STATE_FILE" ]] || exit 0
 SUBAGENT=$(printf '%s' "$PAYLOAD" | jq -r '.tool_input.subagent_type // "general-purpose"' 2>/dev/null || echo "?")
-if bash "$_HOOK_DIR/r5-state.sh" claim "$SUBAGENT" "$CURRENT_SESSION"; then
-  exit 0
+rc=0
+bash "$_HOOK_DIR/r5-state.sh" claim "$SUBAGENT" "$CURRENT_SESSION" || rc=$?
+(( rc == 0 )) && exit 0
+if (( rc == 4 )); then
+  cat >&2 <<MSG
+r5-parallel-block: the R5 run on $(jq -r '.target_bead // "unknown"' "$STATE_FILE") belongs to session
+$(jq -r '.session_id // "unknown"' "$STATE_FILE"), and its lock is not that session's
+lapsed lock, so this session ($CURRENT_SESSION) may not dispatch subagents.
+
+Take the run over (r5-lock.sh acquire r5-supervise <bead>, then
+r5-state.sh adopt) or end it (r5-state.sh finish aborted).
+MSG
+  exit 2
 fi
 cat >&2 <<MSG
 r5-parallel-block: a reviewer or fix agent of the R5 run is in flight (or an

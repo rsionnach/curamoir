@@ -15,9 +15,11 @@
 # one is open. Between passes, dispatches are not the run's business.
 #
 # The run belongs to the session that started (or adopted) it: `claim`
-# applies only to that session's dispatches, so a crashed run cannot block
-# another session once the lock's lease has run out (the hook's layer A
-# refuses other sessions while it is live).
+# applies the window only to that session's dispatches. Another session's
+# dispatch goes through once the owner's lock has lapsed (a crashed run), and
+# is refused in every other case: while the lease is live (the hook's layer
+# A), and with no lock or someone else's lock (exit 4) until the run is
+# adopted or finished.
 #
 # Subcommands:
 #   init <bead> <base> <head>      start a run (refuses if one is in flight)
@@ -31,7 +33,7 @@
 #   claim <subagent_type> [session]
 #                                  (the hook) let one dispatch through as
 #                                  the requested reviewer or a fix agent;
-#                                  exit 2 = refuse
+#                                  exit 2 = refuse; 4 = another session's run
 #   findings <pass> <crit> <imp> <minor> [verdict]
 #                                  the dispatched reviewer's report; closes
 #                                  the window
@@ -206,7 +208,7 @@ case "${1:-}" in
     # as the run's own, so that check fails closed too.
     if [[ -n "$owner" && -n "$caller" && "$owner" != "$caller" ]]; then
       _owner_lease_lapsed "$owner" && exit 0
-      exit 2
+      exit 4
     fi
     pass="$(_current_pass)"
     case "$(_last_event)" in
@@ -308,5 +310,5 @@ case "${1:-}" in
     mv "$STATE" "$R5_ROOT/.claude/r5-state-${bead}-${status}-$(date -u +%Y%m%dT%H%M%SZ).json"
     ;;
   show) _need; cat "$STATE" ;;
-  *) sed -n '2,56p' "${BASH_SOURCE[0]}" >&2; exit 1 ;;
+  *) sed -n '2,58p' "${BASH_SOURCE[0]}" >&2; exit 1 ;;
 esac

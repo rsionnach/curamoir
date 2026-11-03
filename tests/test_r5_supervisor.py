@@ -414,7 +414,8 @@ def test_an_event_cannot_rename_itself_or_take_a_non_object(r5root):
 def test_another_session_is_refused_unless_the_owner_s_lease_has_lapsed(r5root):
     start(r5root)  # S1 owns the run, with no lock at all
     run(STATE, "pass", "correctness", root=r5root)
-    assert hook(r5root, session="S2").returncode == 2
+    refused = hook(r5root, session="S2")
+    assert refused.returncode == 2 and "belongs to session" in refused.stderr
     run(LOCK, "acquire", "r5-supervise", "b1", root=r5root, session="S3")
     age_lock(r5root, 1000)  # a third session's lapsed lock is not the owner's
     assert hook(r5root, session="S2").returncode == 2

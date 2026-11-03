@@ -47,7 +47,9 @@ the hook records each dispatch as fix_dispatched and lets one fix agent run
 at a time, until `event fixes_applied`. Never dispatch two subagents in one
 message while a reviewer has been requested: the second is refused. The run
 belongs to the session that started it (or `adopt`ed it); other sessions'
-dispatches are refused only while the lock's lease is live.
+dispatches are refused while its lock's lease is live and go through once it
+has lapsed. Never remove the lock by hand: with no lock, every other
+session is refused until the run is adopted or finished.
 
 ## Inputs
 
