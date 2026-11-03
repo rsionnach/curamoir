@@ -33,7 +33,7 @@
 #   adopt                          take over the run from a session that is
 #                                  gone (this session must hold the lock:
 #                                  r5-lock.sh acquire first)
-#   pass <name>                    start the next pass (in order, excellence
+#   pass <pass>                    start the next pass (in order, excellence
 #                                  last) and request its first reviewer
 #   request <pass> <iteration>     request a re-dispatch of the current pass
 #   claim <subagent_type> [session]
