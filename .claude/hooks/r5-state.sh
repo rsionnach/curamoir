@@ -66,7 +66,8 @@
 #                                  recorded); archive the file as
 #                                  r5-state-<bead>-<status>-<ts>.json
 #   open-window                    (r5-lock.sh) "<owner> <bead> <reviewer|
-#                                  fix-agent>" while one is in flight
+#                                  fix-agent>" while one is in flight;
+#                                  exit 2 on a malformed file
 #   show                           print the state file
 #
 # Exit codes:
@@ -150,9 +151,13 @@ _last_window_event() {  # as JSON, {} if none
 }
 _last_window_event_name() { _last_window_event | jq -r '.event // ""'; }
 _open_fix() {  # a fix agent dispatched and not yet closed by fixes_applied
-  jq -e '(.audit_trail | map(.event)) as $e
+  # A jq failure must not read as "no fix open": exit 3, which the hook
+  # turns into a refusal.
+  local open
+  open="$(jq '(.audit_trail | map(.event)) as $e
     | ($e | indices("fix_dispatched") | max // -1) > ($e | indices("fixes_applied") | max // -1)' \
-    "$STATE" >/dev/null
+    "$STATE")" || exit 3
+  [[ "$open" == true ]]
 }
 _next_pass() {
   jq -r '([.completed_passes[].name]) as $done
@@ -174,7 +179,8 @@ _valid_state() {
   jq -e 'type == "object" and (.status | type) == "string"
     and (.audit_trail | type) == "array" and (.passes | type) == "array"
     and (.completed_passes | type) == "array"
-    and (.advisory_results | type) == "array"' "$STATE" >/dev/null 2>&1
+    and (.advisory_results | type) == "array"
+    and all(.audit_trail[]; type == "object" and (.event | type) == "string")' "$STATE" >/dev/null 2>&1
 }
 _need_valid_state() {
   _valid_state || _refuse "$STATE is unreadable or malformed, so nothing can proceed on it; move it aside (keep it: it is the run's audit trail) and start the run again"
@@ -305,8 +311,11 @@ case "$CMD" in
         "$(jq -r '.target_bead' "$STATE")" "$owner" "$R5_ADOPT_HINT" >&2
       exit 4
     fi
+    # Assigned first, so a jq failure stops the helper (non-zero: the hook
+    # refuses) instead of falling through to the `*` branch.
     pass="$(_current_pass)"
-    case "$(_last_window_event_name)" in
+    last="$(_last_window_event_name)"
+    case "$last" in
       pass_started|reviewer_requested)
         _event reviewer_dispatched --arg p "$pass" --arg s "$subagent" '{pass:$p, subagent_type:$s}'
         exit 0 ;;
@@ -425,7 +434,10 @@ case "$CMD" in
   open-window)
     # (r5-lock.sh) "<owner> <bead> <event>" if the run has a reviewer or a
     # fix agent in flight; nothing otherwise. Read-only.
-    [[ -f "$STATE" ]] && _valid_state || exit 0
+    # A malformed file is an unknown run, so this fails (the lock then
+    # refuses to reclaim), as everything else does on it.
+    [[ -f "$STATE" ]] || exit 0
+    _need_valid_state
     [[ "$(jq -r '.status' "$STATE")" == "in_progress" ]] || exit 0
     last="$(_last_window_event_name)"
     if [[ "$last" == reviewer_dispatched ]]; then event=reviewer
