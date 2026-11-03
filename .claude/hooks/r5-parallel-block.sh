@@ -58,8 +58,8 @@ r5-parallel-block: the R5 supervisor lock is held by another session.
 Refusing a subagent dispatch from session $CURRENT_SESSION until the holder
 releases it or its lease runs out ($(( R5_LEASE_SECONDS - REFRESH_AGE ))s).
 Do not remove the lock by hand: the run would then refuse this session
-until it is adopted (r5-lock.sh acquire, r5-state.sh adopt) or ended
-(r5-state.sh finish aborted).
+until it is adopted (r5-lock.sh acquire, then r5-state.sh adopt; to end
+it, adopt it first, then r5-state.sh finish aborted).
 MSG
     exit 2
   fi

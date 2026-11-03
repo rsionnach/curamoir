@@ -253,7 +253,7 @@ case "$CMD" in
       printf 'r5-state: the R5 run on %s belongs to session %s, whose lock is not a lapsed one;\n' \
         "$(jq -r '.target_bead' "$STATE")" "$owner" >&2
       printf '  take it over (r5-lock.sh acquire r5-supervise <bead>, then r5-state.sh adopt)\n' >&2
-      printf '  or end it (r5-state.sh finish aborted)\n' >&2
+      printf '  to end it, adopt it first, then r5-state.sh finish aborted\n' >&2
       exit 4
     fi
     pass="$(_current_pass)"

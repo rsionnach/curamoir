@@ -268,6 +268,7 @@ def test_another_session_is_refused_unless_the_owner_s_lease_has_lapsed(r5root):
     run(STATE, "pass", "correctness", root=r5root)
     refused = hook(r5root, session="S2")
     assert refused.returncode == 2 and "belongs to session" in refused.stderr and "another session's run" in refused.stderr
+    assert "adopt it first, then r5-state.sh finish aborted" in refused.stderr
     run(LOCK, "acquire", "r5-supervise", "b1", root=r5root, session="S3")
     age_lock(r5root, PAST_LEASE)  # a third session's lapsed lock is not the owner's
     assert hook(r5root, session="S2").returncode == 2

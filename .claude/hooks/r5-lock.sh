@@ -206,8 +206,8 @@ If this state is stale (the prior supervisor crashed or the session was
 abandoned), the lease will auto-reclaim in $(( R5_LEASE_SECONDS - refresh_age ))s.
 Do not remove the lock by hand: an R5 run in .claude/r5-state.json would then
 refuse every other session's subagents. Once the lease has lapsed, acquire
-the lock and take the run over (r5-state.sh adopt), or end it
-(r5-state.sh finish aborted).
+the lock and take the run over (r5-state.sh adopt); to end it instead,
+adopt it first, then r5-state.sh finish aborted.
 EOF
   exit 2
 }
