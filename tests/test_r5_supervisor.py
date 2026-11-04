@@ -323,6 +323,13 @@ def test_another_sessions_live_lock_blocks_a_dispatch(r5root):
     assert hook(r5root, session="HOLDER").returncode == 0
 
 
+def test_claude_session_id_is_the_fallback_session_variable(r5root):
+    env = {"CLAUDE_SESSION_ID": "FALLBACK"}
+    assert run(LOCK, "acquire", "r5-supervise", "b1", root=r5root, session=None,
+               env_extra=env).returncode == 0
+    assert json.loads(lock_file(r5root).read_text())["session_id"] == "FALLBACK"
+
+
 def test_with_no_session_in_the_environment_the_payload_s_session_id_is_honoured(r5root):
     run(LOCK, "acquire", "r5-supervise", "b1", root=r5root, session="HOLDER")
     refused = run(HOOK, root=r5root, session=None, stdin=payload("S2"))
@@ -592,16 +599,23 @@ def test_the_long_review_guard_covers_a_fix_agent_and_an_unknown_owner(r5root):
     hook(r5root, session="")  # a fix agent
     assert events(r5root)[-1] == "fix_dispatched"
     age_lock(r5root, PAST_LEASE)
-    assert run(LOCK, "acquire", "epic-executor", "e1", root=r5root, session="S2").returncode == 2
+    other = run(LOCK, "acquire", "epic-executor", "e1", root=r5root, session="S2")
+    assert other.returncode == 2 and "Not reclaiming" in other.stderr and "fix-agent" in other.stderr
 
 
-def test_an_unreadable_run_state_stops_a_reclaim(r5root):
+@pytest.mark.parametrize("content", [
+    "{trunc", "", "[]", '{"status": "in_progress"}', "TRAIL"])
+def test_an_unreadable_run_state_stops_a_reclaim(r5root, content):
     run(LOCK, "acquire", "r5-supervise", "b1", root=r5root, session="S1")
     start(r5root)
     path = r5root / ".claude" / "r5-state.json"
-    data = json.loads(path.read_text())
-    data["audit_trail"] = [1, 2]  # shape-valid, but not events
-    path.write_text(json.dumps(data))
+    if content == "TRAIL":  # the right type, but its entries are not events
+        data = json.loads(path.read_text())
+        data["audit_trail"] = [1, 2]
+        content = json.dumps(data)
+    path.write_text(content)
+    window = run(STATE, "open-window", root=r5root, session="S2")
+    assert window.returncode == 2 and "malformed" in window.stderr and window.stdout == ""
     age_lock(r5root, PAST_LEASE)
     refused = run(LOCK, "acquire", "epic-executor", "e1", root=r5root, session="S2")
     assert refused.returncode == 2 and "cannot be read" in refused.stderr
@@ -785,6 +799,19 @@ def test_finish_completed_needs_every_pass_and_the_advisory_read(r5root):
     assert run(STATE, "finish", "completed", root=r5root).returncode == 0
 
 
+def test_finish_completed_is_refused_while_a_second_excellence_read_is_in_flight(r5root):
+    start(r5root)
+    for name in ("correctness", "clarity", "edge-cases", "provenance"):
+        clear_pass(r5root, name)
+    advisory_read(r5root)
+    run(STATE, "pass", "excellence", root=r5root)  # a second read, after a touch-up
+    hook(r5root)
+    refused = run(STATE, "finish", "completed", root=r5root)
+    assert refused.returncode == 2 and "excellence is still current" in refused.stderr
+    assert state(r5root)["status"] == "in_progress"
+    assert not list((r5root / ".claude").glob("r5-state-b1-completed-*.json"))
+
+
 def test_reopen_runs_a_done_pass_and_every_later_one_again(r5root):
     start(r5root)
     clear_pass(r5root, "correctness")
@@ -800,6 +827,11 @@ def test_reopen_runs_a_done_pass_and_every_later_one_again(r5root):
     hook(r5root)
     busy = run(STATE, "reopen", "correctness", root=r5root)  # a reviewer in flight
     assert busy.returncode == 2 and "still in flight" in busy.stderr
+    run(STATE, "findings", "clarity", "0", "1", "0", root=r5root)
+    hook(r5root)  # a fix agent
+    assert events(r5root)[-1] == "fix_dispatched"
+    fixing = run(STATE, "reopen", "correctness", root=r5root)
+    assert fixing.returncode == 2 and "a fix agent is still open" in fixing.stderr
 
 
 def advisory_read(root):
@@ -855,8 +887,9 @@ def test_a_malformed_state_file_refuses_every_dispatch_and_every_change(r5root, 
     path.write_text(path.read_text()[:200] if content == "TRUNCATE" else content)
     refused = hook(r5root)
     assert refused.returncode == 2 and "malformed" in refused.stderr
-    assert run(STATE, "finish", "aborted", root=r5root).returncode == 2
-    assert run(STATE, "init", "b2", "x", "y", root=r5root).returncode == 2
+    for args in (("finish", "aborted"), ("init", "b2", "x", "y")):
+        change = run(STATE, *args, root=r5root)
+        assert change.returncode == 2 and "malformed" in change.stderr, args
 
 
 @pytest.mark.parametrize("change", [
@@ -1063,10 +1096,10 @@ def test_the_hook_checks_its_own_repository_whatever_the_session_s_cwd(tmp_path)
     elsewhere = tmp_path / "elsewhere"
     subprocess.run(["git", "init", "-q", str(elsewhere)], check=True)
     results = [subprocess.run(["bash", str(hooks / "r5-parallel-block.sh")], input=payload(cwd=cwd),
-                              capture_output=True, text=True, env=bare_env(), cwd=cwd,
-                              timeout=60).returncode
+                              capture_output=True, text=True, env=bare_env(), cwd=cwd, timeout=60)
                for cwd in (repo, tmp_path, elsewhere)]
-    assert results == [0, 2, 2]  # the reviewer, then two refusals from outside the repo
+    assert [r.returncode for r in results] == [0, 2, 2]  # the reviewer, then two refusals
+    assert all("reviewer is in flight" in r.stderr for r in results[1:])
 
 
 def test_the_hook_works_through_a_symlink_and_with_cdpath_set(tmp_path):
