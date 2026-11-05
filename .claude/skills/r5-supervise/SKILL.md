@@ -177,11 +177,17 @@ A NEEDS WORK verdict or a CRITICAL: do not close; ask the user.
 
 ## Close
 
-1. `bd close <bead-id> --reason "<per-pass findings counts, fix iterations,
-   commits, provenance mutants run/survived, advisory notes>"`.
-2. `bash .claude/hooks/r5-state.sh finish completed` (archives the trail as
+In this order: the run's completeness check comes before the bead closes,
+because a refused finish can be acted on and a closed bead cannot be
+un-closed by it.
+
+1. `bash .claude/hooks/r5-state.sh finish completed` (archives the trail as
    `.claude/r5-state-<bead>-completed-<ts>.json`; refused unless all four
-   passes are done and the advisory read is recorded).
+   passes are done and the advisory read is recorded). Refused: stop, do not
+   close the bead.
+2. `bd close <bead-id> --reason "<per-pass findings counts, fix iterations,
+   commits, provenance mutants run/survived, advisory notes>"` (if it fails,
+   run it again).
 3. `bash .claude/hooks/r5-lock.sh release r5-supervise`.
 
 On failure or abort: `r5-state.sh finish failed|aborted`, then release the
