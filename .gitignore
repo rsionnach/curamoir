@@ -18,3 +18,6 @@ docs/curamoir-spec.md
 # internals. Remove these lines when they are.
 docs/r5-gate-v2-spec.md
 docs/r5-gate-v2-curamoir-spec.md
+# The v0.5 spec delta (review gate, verdicts, filing, runner and docs
+# additions), likewise untracked until the spec is published.
+docs/curamoir-spec-v0.5-delta.md
