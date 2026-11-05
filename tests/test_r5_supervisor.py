@@ -163,6 +163,11 @@ def age_lock(root, seconds, field="refreshed_at"):
 TTL = 86400  # the lock's absolute TTL (lib/lease.sh)
 PAST_TTL = TTL + 100  # older than the lock's absolute TTL
 
+# r5-state.sh's refusal on a malformed state file. Matched in full, not as
+# "malformed": the message carries the state file's path, and a test's
+# tmp_path holds its test name, which may contain that word.
+MALFORMED = "is unreadable or malformed, so nothing can proceed on it"
+
 
 # ---------------------------------------------------------------- the lock
 
@@ -328,6 +333,13 @@ def test_claude_session_id_is_the_fallback_session_variable(r5root):
     assert run(LOCK, "acquire", "r5-supervise", "b1", root=r5root, session=None,
                env_extra=env).returncode == 0
     assert json.loads(lock_file(r5root).read_text())["session_id"] == "FALLBACK"
+
+
+def test_claude_code_session_id_wins_over_the_fallback(r5root):
+    env = {"CLAUDE_SESSION_ID": "FALLBACK"}
+    assert run(LOCK, "acquire", "r5-supervise", "b1", root=r5root, session="PRIMARY",
+               env_extra=env).returncode == 0
+    assert json.loads(lock_file(r5root).read_text())["session_id"] == "PRIMARY"
 
 
 def test_with_no_session_in_the_environment_the_payload_s_session_id_is_honoured(r5root):
@@ -615,7 +627,7 @@ def test_an_unreadable_run_state_stops_a_reclaim(r5root, content):
         content = json.dumps(data)
     path.write_text(content)
     window = run(STATE, "open-window", root=r5root, session="S2")
-    assert window.returncode == 2 and "malformed" in window.stderr and window.stdout == ""
+    assert window.returncode == 2 and MALFORMED in window.stderr and window.stdout == ""
     age_lock(r5root, PAST_LEASE)
     refused = run(LOCK, "acquire", "epic-executor", "e1", root=r5root, session="S2")
     assert refused.returncode == 2 and "cannot be read" in refused.stderr
@@ -886,10 +898,10 @@ def test_a_malformed_state_file_refuses_every_dispatch_and_every_change(r5root, 
     path = r5root / ".claude" / "r5-state.json"
     path.write_text(path.read_text()[:200] if content == "TRUNCATE" else content)
     refused = hook(r5root)
-    assert refused.returncode == 2 and "malformed" in refused.stderr
+    assert refused.returncode == 2 and MALFORMED in refused.stderr
     for args in (("finish", "aborted"), ("init", "b2", "x", "y")):
         change = run(STATE, *args, root=r5root)
-        assert change.returncode == 2 and "malformed" in change.stderr, args
+        assert change.returncode == 2 and MALFORMED in change.stderr, args
 
 
 @pytest.mark.parametrize("change", [
@@ -908,7 +920,7 @@ def test_a_state_of_the_right_type_but_a_broken_clause_refuses_and_records_nothi
     run(STATE, "pass", "correctness", root=r5root)  # a valid file would let one reviewer through
     before = edit_state(r5root, change)
     refused = hook(r5root)
-    assert refused.returncode == 2 and "malformed" in refused.stderr
+    assert refused.returncode == 2 and MALFORMED in refused.stderr
     assert state_file(r5root).read_text() == before
 
 
