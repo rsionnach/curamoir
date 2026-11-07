@@ -269,8 +269,10 @@ _git() {
   if out="$(git -C "$R5_ROOT" "$@" 2>/dev/null)"; then printf '%s' "$out"; fi
 }
 # The open set this pass's previous report left (section 10): the open_set
-# of its last findings event, or, for an event written before open sets were
-# recorded, that event's non-closure findings. [] on a first review.
+# of its last findings event; [] on a first review. The fallback to an
+# event's non-closure findings serves events written before open sets were
+# recorded (341c94f): only cm-70j's own R5 run has them, so it can go once
+# that run is archived.
 _prior_open() {  # _prior_open <pass>
   jq -c --arg p "$1" '[.audit_trail[]
       | select((.event == "findings_received" or .event == "advisory_pass_completed") and .pass == $p)]
@@ -313,7 +315,8 @@ _close_round() {
           | .lenses[$l] = ((.lenses[$l] // {}) + ($m | with_entries(select(.key
               | IN("model", "tier", "tokens_in", "tokens_out", "duration_s"))))
               + {status: $s, findings: $p.findings, unproven: $p.unproven,
-                 closures: ($p.closures // []), unaccounted: (($p.unaccounted // []) | length)}))
+                 closures: ($p.closures // []),
+                 unaccounted_count: (($p.unaccounted // []) | length)}))
       end' --arg l "$1" --arg s "$2" --argjson p "$parsed" --argjson m "$meta" --arg t "$(_now)"
 }
 # _unavailable <pass>: the reviewer's report did not meet the contract (R5-R9).
@@ -546,8 +549,9 @@ case "$CMD" in
     (( rc == 0 )) || _unavailable excellence
     _close_round excellence ok "$PARSED" "$meta"
     rec="$(jq -cn --arg t "$(_now)" --argjson r "$PARSED" --arg v "$verdict" \
-      '{ts:$t, event:"advisory_pass_completed", pass:"excellence", counts:$r.counts, findings:$r.findings,
-        open_set:$r.open_set, closures:$r.closures, unaccounted:$r.unaccounted, verdict:$v}')"
+      '{ts:$t, event:"advisory_pass_completed", pass:"excellence", counts:$r.counts, unproven:$r.unproven,
+        findings:$r.findings, open_set:$r.open_set, closures:$r.closures, unaccounted:$r.unaccounted,
+        downgrades_refused:$r.downgrades_refused, verdict:$v}')"
     _apply '.advisory_results += [$r] | .current_pass = null' --argjson r "$rec"
     _append "$rec"
     _log_rejected excellence

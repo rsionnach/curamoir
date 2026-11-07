@@ -9,6 +9,12 @@ every session forever (through the lock or through the state), two
 dispatches in one message both getting through, a stalled reviewer
 deadlocking the run, a pass closed while its re-review was still running,
 and a killed process leaving a mutex behind.
+
+They also cover cm-70j, the record in the shape of section 10 of
+docs/r5-gate-v2-curamoir-spec.md: the R5-FINDINGS parser
+(lib/r5_findings.py: schema, fingerprints, verification floor), UNAVAILABLE
+reports, rounds[], the open set and its closures, and the verdict keyed to
+HEAD^{tree}.
 """
 
 import datetime
@@ -30,9 +36,8 @@ STATE = HOOKS / "r5-state.sh"
 HOOK = HOOKS / "r5-parallel-block.sh"
 
 # The helpers need bash, jq and python3 (lib/flock.sh, lib/r5_findings.py).
-# Locally a missing tool
-# skips the module; in CI it is a failure, so the guard's tests can never
-# be skipped silently there.
+# Locally a missing tool skips the module; in CI it is a failure, so the
+# guard's tests can never be skipped silently there.
 _MISSING_TOOLS = [t for t in ("bash", "jq", "python3") if shutil.which(t) is None]
 if _MISSING_TOOLS and os.environ.get("CI"):
     pytest.fail(f"the R5 helpers need {', '.join(_MISSING_TOOLS)}; CI must install them",
@@ -1258,7 +1263,7 @@ def test_a_re_review_closes_what_the_last_round_left_open_and_carries_the_rest(r
     assert sorted(second["unaccounted"]) == sorted(f["fingerprint"] for f in first[1:])
     assert second["counts"] == {"critical": 0, "important": 1, "minor": 1}
     entry = state(r5root)["rounds"][-1]["lenses"]["correctness"]
-    assert entry["closures"] == [first[0]["fingerprint"]] and entry["unaccounted"] == 2
+    assert entry["closures"] == [first[0]["fingerprint"]] and entry["unaccounted_count"] == 2
     refused = run(STATE, "done", "correctness", "1", root=r5root)
     assert refused.returncode == 2 and "its findings are not clean" in refused.stderr
 

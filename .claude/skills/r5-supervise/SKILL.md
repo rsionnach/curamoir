@@ -227,7 +227,7 @@ the previous round's open findings with their fingerprints; include them.
 After all four blocking passes are clean: refresh, `r5-state.sh pass
 excellence`, dispatch the excellence reviewer once
 (`excellence-reviewer.md`, "This pass is ADVISORY", and the findings
-contract below), write its report to `.claude/r5-reports/` as in step 5,
+contract above), write its report to `.claude/r5-reports/` as in step 5,
 then `r5-state.sh advisory <that file> <verdict>`. No fix loop. If you choose to apply any of its
 suggestions, that change goes back through every blocking pass it touches
 (`reopen`, the rule above); otherwise record the suggestions as follow-up beads.

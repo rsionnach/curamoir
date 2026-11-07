@@ -18,8 +18,9 @@ orchestrator.
 - ``counts`` (critical, important, minor) and ``unproven`` (blocking findings
   whose verification_level is below the floor), both over the open set;
 - ``closures`` (the prior fingerprints validly closed), ``closure_rejected``
-  (each rejected closure with its reason) and ``unaccounted`` (prior open
-  findings the report neither closed nor re-raised).
+  (each rejected closure with its reason), ``unaccounted`` (prior open
+  findings the report neither closed nor re-raised) and
+  ``downgrades_refused`` (re-raises held at the prior, higher severity).
 
 Closures, per section 10 (settled 2026-11-07). A record with ``resolves`` set
 is a closure, not a finding: it is never counted, whatever its severity, and
@@ -177,27 +178,27 @@ def parse_report(text: str, lens: str, floor: str = DEFAULT_FLOOR,
     records = [_finding(item, lens, n) for n, item in enumerate(raw, 1)]
 
     prior = {f["fingerprint"]: f for f in prior_open}
-    closed, rejected = [], []
+    claimed, rejected = [], []
     for record in (r for r in records if r["resolves"] is not None):
         target = record["resolves"]
         if target not in prior:
             reason = "resolves names no fingerprint in the previous round's open set"
         elif not record["evidence"].strip():
             reason = "a closure needs evidence (the resolving lines)"
-        elif target in closed:
+        elif target in claimed:
             reason = "a second closure of the same fingerprint is dropped"
         else:
-            closed.append(target)
+            claimed.append(target)
             continue
         rejected.append({"resolves": target, "fingerprint": record["fingerprint"],
                          "reason": reason})
     # R5-R25: closing everything without citing the resolving lines.
-    if prior and not closed and all(
+    if prior and not claimed and all(
             any(r["resolves"] == fp and not r["evidence"].strip() for r in records)
             for fp in prior):
         raise ReportError("every prior finding is closed with empty evidence")
 
-    current, seen, held = [], set(), []
+    current, seen, downgrades_refused = [], set(), []
     for record in (r for r in records if r["resolves"] is None):
         fp = record["fingerprint"]
         if fp in seen:  # one entry per fingerprint
@@ -208,12 +209,13 @@ def parse_report(text: str, lens: str, floor: str = DEFAULT_FLOOR,
             # A re-raise may not lower a finding's severity: only a valid
             # closure, with evidence, takes a finding down.
             record = {**record, "severity": before["severity"]}
-            held.append(fp)
+            downgrades_refused.append(fp)
         current.append(record)
-    # A re-raise of a closed fingerprint keeps it open.
-    closed = [fp for fp in closed if fp not in seen]
+    # A closure is valid unless the same report also re-raises the finding,
+    # which keeps it open (it is then neither a closure nor a rejection).
+    valid_closures = [fp for fp in claimed if fp not in seen]
     carried = [{**f, "unaccounted": True} for fp, f in prior.items()
-               if fp not in seen and fp not in closed]
+               if fp not in seen and fp not in valid_closures]
     open_set = current + carried
 
     counts = {s.lower(): sum(f["severity"] == s for f in open_set) for s in SEVERITIES}
@@ -225,9 +227,9 @@ def parse_report(text: str, lens: str, floor: str = DEFAULT_FLOOR,
         and LEVELS.index(f.get("verification_level", "asserted")) < floor_rank
     ]
     return {"findings": records, "open_set": open_set, "counts": counts,
-            "unproven": unproven, "closures": closed, "closure_rejected": rejected,
+            "unproven": unproven, "closures": valid_closures, "closure_rejected": rejected,
             "unaccounted": [f["fingerprint"] for f in carried],
-            "downgrades_refused": held}
+            "downgrades_refused": downgrades_refused}
 
 
 def main(argv: list) -> int:
