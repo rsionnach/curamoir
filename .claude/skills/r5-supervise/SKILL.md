@@ -209,8 +209,9 @@ ESCALATED). Append this paragraph to every reviewer's brief, verbatim, with
 first 16 hex of sha256 of lens, path and the normalised claim) and sets its
 status to `open`; a reviewer's own fingerprint or status is ignored. Of
 two findings with one fingerprint in a report, the most severe is kept. A
-`resolves` that is not a 16-hex fingerprint, a report that is not UTF-8,
-and a claim that is not valid Unicode make the report UNAVAILABLE.
+`resolves` that is not a 16-hex fingerprint (surrounding space and upper
+case are forgiven), a report that is not UTF-8, and any field that is not
+valid Unicode make the report UNAVAILABLE.
 Closures follow section 10 as settled on 2026-11-07: a record with
 `resolves` is a closure, never counted whatever its severity; it is valid
 only if `resolves` names a fingerprint in the previous round's open set and

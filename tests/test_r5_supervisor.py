@@ -1293,7 +1293,7 @@ def test_of_same_fingerprint_findings_in_one_report_the_most_severe_is_kept():
     assert len(out["open_set"]) == 1 and out["open_set"][0]["severity"] == "CRITICAL"
 
 
-@pytest.mark.parametrize("resolves", ["", "anything", "0123456789ABCDEF", "0123456789abcde"])
+@pytest.mark.parametrize("resolves", ["", "   ", "anything", "0123456789abcde", "0123456789abcdeg"])
 def test_a_resolves_that_cannot_be_a_fingerprint_is_a_contract_failure(resolves):
     with pytest.raises(r5f.ReportError, match="16-hex fingerprint"):
         parse([{**finding("correctness", "CRITICAL"), "resolves": resolves}])
@@ -1353,6 +1353,37 @@ def test_findings_after_a_lost_round_append_reconstruct_a_round_not_the_fix_roun
     rounds = state(r5root)["rounds"]
     assert rounds[-2]["kind"] == "fix" and "correctness" not in rounds[-2]["lenses"]
     assert rounds[-1]["reconstructed"] is True and rounds[-1]["lenses"]["correctness"]["status"] == "ok"
+
+
+@pytest.mark.parametrize("copied", [" {fp}", "{fp}\n", "{fp_upper}"])
+def test_a_copied_fingerprint_is_forgiven_space_and_case(copied):
+    earlier = prior(finding("correctness", "IMPORTANT", 1))
+    fp = earlier[0]["fingerprint"]
+    closure = {**finding("correctness", "IMPORTANT", 40),
+               "resolves": copied.format(fp=fp, fp_upper=fp.upper())}
+    assert reparse([closure], earlier)["closures"] == [fp]
+
+
+@pytest.mark.parametrize("key", ["evidence", "fix", "path"])
+def test_any_field_that_is_not_valid_unicode_is_a_contract_failure(key):
+    record = json.dumps(finding("correctness", "MINOR"))[:-1] + f', "{key}": "bad \\ud800"}}'
+    with pytest.raises(r5f.ReportError, match="not valid Unicode"):
+        r5f.parse_report("R5-FINDINGS: [" + record + "]", "correctness")
+
+
+def test_a_retried_findings_after_a_crash_reuses_its_round(r5root):
+    start(r5root)
+    run(STATE, "pass", "correctness", root=r5root)
+    hook(r5root)
+    path = report("correctness", 0, 1, 0)
+    run(STATE, "findings", "correctness", path, root=r5root)
+    # As if findings died after closing the round but before its event.
+    edit_state(r5root, lambda d: d.update(audit_trail=d["audit_trail"][:-1]))
+    assert events(r5root)[-1] == "reviewer_dispatched"
+    assert run(STATE, "findings", "correctness", path, root=r5root).returncode == 0
+    rounds = state(r5root)["rounds"]
+    assert len(rounds) == 1 and "reconstructed" not in rounds[0]
+    assert rounds[0]["lenses"]["correctness"]["status"] == "ok"
 
 
 def test_a_bad_prior_open_set_file_is_a_usage_error(tmp_path):

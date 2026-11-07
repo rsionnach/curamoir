@@ -309,10 +309,13 @@ _log_rejected() {
   jq -r '.closure_rejected[] | "  resolves \(.resolves): \(.reason)"' "$PARSED_FILE" >&2
 }
 # _close_round <lens> <status> [parsed-file] [meta-json]: complete the round
-# entry this lens's dispatch opened (the last one still in_flight for it).
-# If that entry is missing (a crash in claim between reviewer_dispatched and
-# the round's append) a round is reconstructed for it, rather than writing
-# into an unrelated (fix) round.
+# the last reviewer_dispatched opened, which that event names (`round`), so a
+# retried `findings` (one that closed the round, then died before its event)
+# writes the same round again. If the dispatch's round is missing (a crash in
+# claim between reviewer_dispatched and the round's append) it is
+# reconstructed under that number, rather than written into an unrelated
+# (fix) round. A dispatch recorded before rounds were numbered has no
+# `round`: the last round still in_flight for the lens is used.
 _close_round() {
   local parsed="${3:-}" meta="${4:-}" empty=""
   if [[ -z "$parsed" ]]; then
@@ -322,9 +325,13 @@ _close_round() {
   fi
   [[ -n "$meta" ]] || meta='{}'
   _apply '$pf[0] as $p | (.rounds // []) as $r
-    | ([range(0; $r | length) as $k | select($r[$k].lenses[$l].status == "in_flight") | $k] | last) as $found
+    | ([.audit_trail[] | select(.event == "reviewer_dispatched")] | last | .round) as $want
+    | (if $want != null
+       then ([range(0; $r | length) as $k | select($r[$k].n == $want) | $k] | last)
+       else ([range(0; $r | length) as $k | select($r[$k].lenses[$l].status == "in_flight") | $k] | last)
+       end) as $found
     | (if $found == null then
-         .rounds = $r + [{n: ($r | length) + 1, kind: "review", head: null, started: null,
+         .rounds = $r + [{n: ($want // (($r | length) + 1)), kind: "review", head: null, started: null,
                           ended: null, reconstructed: true, lenses: {($l): {status: "in_flight"}}}]
        else . end)
     | ($found // ((.rounds | length) - 1)) as $i
@@ -431,19 +438,24 @@ case "$CMD" in
     last="$(_last_window_event_name)"
     case "$last" in
       pass_started|reviewer_requested)
-        _event reviewer_dispatched --arg p "$pass" --arg s "$subagent" '{pass:$p, subagent_type:$s}'
+        # The dispatch names the round it opens, so its findings close that
+        # round and no other (lib: _close_round).
+        round_n="$(jq -r '((.rounds // []) | length) + 1' "$STATE")"
+        _event reviewer_dispatched --arg p "$pass" --arg s "$subagent" --argjson n "$round_n" \
+          '{pass:$p, subagent_type:$s, round:$n}'
         # A later reviewer of the same pass re-reads the tree after a fix: a
         # verify round.
         _apply '([.audit_trail[] | select(.event == "findings_received" and .pass == $p)]
                  | length > 0) as $again
-          | .rounds = ((.rounds // []) + [{n: ((.rounds // []) | length) + 1,
+          | .rounds = ((.rounds // []) + [{n: $n,
               kind: (if $again then "verify" else "review" end),
               head: (if $h == "" then null else $h end), started: $t, ended: null,
               lenses: {($l): {model: null, tier: null,
                 mode: (if $again then "verify" else "review" end),
                 tokens_in: null, tokens_out: null, duration_s: null,
                 status: "in_flight", skip_rule: null, findings: []}}}])' \
-          --arg p "$pass" --arg l "$(_lens_of "$pass")" --arg h "$(_git rev-parse --verify -q HEAD)" --arg t "$(_now)"
+          --arg p "$pass" --arg l "$(_lens_of "$pass")" --arg h "$(_git rev-parse --verify -q HEAD)" \
+          --arg t "$(_now)" --argjson n "$round_n"
         exit 0 ;;
       reviewer_dispatched)
         if [[ "$pass" == excellence ]]; then report="advisory"; else report="findings $pass"; fi

@@ -108,11 +108,20 @@ def _is_int(value: Any) -> bool:
     return isinstance(value, int) and not isinstance(value, bool)
 
 
+def _unicode(value: str, key: str, n: int) -> str:
+    """The value, if it can be written as UTF-8 (a JSON \\ud800 escape cannot)."""
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError:
+        raise ReportError(f"finding {n}: {key} is not valid Unicode") from None
+    return value
+
+
 def _text(finding: dict, key: str, n: int) -> str:
     value = finding.get(key)
     if not isinstance(value, str) or not value.strip():
         raise ReportError(f"finding {n}: {key} must be a non-empty string")
-    return value
+    return _unicode(value, key, n)
 
 
 def _finding(raw: Any, lens: str, n: int) -> dict:
@@ -129,8 +138,11 @@ def _finding(raw: Any, lens: str, n: int) -> dict:
         raise ReportError(f"finding {n}: start_line and end_line must be integers with 1 <= start <= end")
     claim = _text(raw, "claim", n)
     resolves = raw.get("resolves")
-    # A value that cannot be a fingerprint at all is a malformed record, not a
+    # A copied fingerprint is forgiven surrounding space and upper case; a
+    # value that cannot be a fingerprint at all is a malformed record, not a
     # closure to reject: it would otherwise turn a finding into an ignored one.
+    if isinstance(resolves, str):
+        resolves = resolves.strip().lower()
     if resolves is not None and not (isinstance(resolves, str) and _FINGERPRINT.fullmatch(resolves)):
         raise ReportError(f"finding {n}: resolves must be a 16-hex fingerprint or null")
     evidence = raw.get("evidence")
@@ -142,9 +154,13 @@ def _finding(raw: Any, lens: str, n: int) -> dict:
         evidence = ""
     elif not isinstance(evidence, str):
         raise ReportError(f"finding {n}: evidence must be a string")
+    else:
+        _unicode(evidence, "evidence", n)
     fix = raw.get("fix")
     if fix is not None and not isinstance(fix, str):
         raise ReportError(f"finding {n}: fix must be a string or null")
+    if fix is not None:
+        _unicode(fix, "fix", n)
     regression = raw.get("regression", False)
     if not isinstance(regression, bool):
         raise ReportError(f"finding {n}: regression must be true or false")
