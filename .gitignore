@@ -17,6 +17,7 @@ docs/curamoir-spec.md
 # R5 supervisor runtime files (cm-99l): the lock, the in-flight state and its
 # archived audit trails, and the local hook wiring.
 .claude/r5-supervisor.lock
+.claude/r5-reports/
 .claude/r5-state*.json
 .claude/r5-*.flock
 .claude/settings.local.json

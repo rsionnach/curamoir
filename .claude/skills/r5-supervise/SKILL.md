@@ -126,7 +126,8 @@ For each pass in `correctness`, `clarity`, `edge-cases`, `provenance`:
      pre-change view via `git show <base>:<file>`;
    - the bead (`bd show` output) and any user decisions in its notes;
    - `Focus: <pass> only — do not comment on other dimensions.`;
-   - report: CRITICAL / IMPORTANT / MINOR with file:line, a verdict.
+   - report: CRITICAL / IMPORTANT / MINOR with file:line, a verdict, and the
+     **findings contract** below as the brief's last paragraph, verbatim.
    - **provenance only:** it may mutate files for the kill check and must
      restore every one (`git checkout -- <file>`, never `git stash` or
      `checkout .`); macOS has no `timeout` binary, so run each mutant through
@@ -134,7 +135,17 @@ For each pass in `correctness`, `clarity`, `edge-cases`, `provenance`:
      `git status --short` verbatim. A pass whose kill check could not run is
      NOT clean.
    While that reviewer runs, dispatch nothing else (the hook refuses).
-5. When it reports: `bash .claude/hooks/r5-state.sh findings <pass> <c> <i> <m> <verdict>`.
+5. When it reports, write its report verbatim to
+   `.claude/r5-reports/<bead-id>-<pass>-<iteration>.md` (gitignored) and run
+   `bash .claude/hooks/r5-state.sh findings <pass> <that file> <verdict>
+   ['{"model":"…","tokens_in":…,"tokens_out":…,"duration_s":…}']` with
+   whatever of the optional metadata the dispatch result gives you. The
+   counts come from the report's `R5-FINDINGS:` line, never from you. If
+   that line is missing or malformed the reviewer is recorded UNAVAILABLE
+   (exit 2): `request <pass> <iteration + 1>` and dispatch it again. A
+   blocking finding whose `verification_level` is below the floor (default
+   `script`) is listed in its round's `unproven`; it still blocks, and the
+   fix round's first job on it is to verify or dispute it.
    After provenance, check `git status --short` yourself; a dirty tree is a
    failed pass whatever the counts: restore, `r5-state.sh tree-dirty
    provenance` (from then on `done` is refused), then step 7f.
@@ -165,12 +176,41 @@ For each pass in `correctness`, `clarity`, `edge-cases`, `provenance`:
 9. A finding that needs a design decision: `event design_question_raised`,
    ask the user, keep the lock (the run is paused, not over).
 
+## The findings contract (every reviewer, every pass)
+
+The record is in the shape of section 10 of
+`docs/r5-gate-v2-curamoir-spec.md`, the contract shared with NthLayer's
+gate: `rounds[]` (one review or verify round per reviewer, one fix round per
+fix, with the commit from `event commit_made`) and, at `finish`, a verdict
+keyed to `git rev-parse HEAD^{tree}` (completed is CLEAN, failed is
+ESCALATED). Append this paragraph to every reviewer's brief, verbatim, with
+`<lens>` filled in (`correctness`, `clarity`, `edge_cases`, `provenance` or
+`excellence`):
+
+> End your report with exactly one line, the last non-empty line of your
+> output: `R5-FINDINGS:` followed by a JSON array, on that one line, with one
+> object per finding: `{"lens": "<lens>", "severity": "CRITICAL" |
+> "IMPORTANT" | "MINOR", "path": "<repo-relative path>", "start_line": <int>,
+> "end_line": <int>, "claim": "<one sentence: what is wrong>", "evidence":
+> "<the lines or test output that show it>", "fix": "<one sentence: what
+> would resolve it>" or null, "verification_level": "asserted" | "cited" |
+> "walked" | "script" | "reproduced"}` (the ladder: how far you proved it,
+> from asserted, unsupported, to reproduced). On a re-review, add
+> `"resolves": "<fingerprint>"` to a finding that confirms a prior one
+> closed, or `"regression": true` to one a fix introduced. No findings:
+> `R5-FINDINGS: []`. Nothing may follow that line.
+
+`lib/r5_findings.py` validates each finding, computes its fingerprint (the
+first 16 hex of sha256 of lens, path and the normalised claim) and sets its
+status to `open`; a reviewer's own fingerprint or status is ignored.
+
 ## Advisory stage — excellence
 
 After all four blocking passes are clean: refresh, `r5-state.sh pass
 excellence`, dispatch the excellence reviewer once
-(`excellence-reviewer.md`, "This pass is ADVISORY"), then `r5-state.sh
-advisory <c> <i> <m> <verdict>`. No fix loop. If you choose to apply any of its
+(`excellence-reviewer.md`, "This pass is ADVISORY", and the findings
+contract below), write its report to `.claude/r5-reports/` as in step 5,
+then `r5-state.sh advisory <that file> <verdict>`. No fix loop. If you choose to apply any of its
 suggestions, that change goes back through every blocking pass it touches
 (`reopen`, the rule above); otherwise record the suggestions as follow-up beads.
 A NEEDS WORK verdict or a CRITICAL: do not close; ask the user.
@@ -225,7 +265,7 @@ A `pass` that set current_pass but wrote no pass_started is repaired with
 `request <pass> 1`; a `finish` whose archive move failed is repeated once
 the cause is fixed.
 
-When the helpers themselves cannot run (perl or flock unavailable, so every
+When the helpers themselves cannot run (python3 or flock unavailable, so every
 call exits 3; or the state file is malformed, so every call and every
 dispatch is refused), the escape is manual and the user's call: move
 `.claude/r5-state.json` aside (keep it; it is the audit trail), which ends

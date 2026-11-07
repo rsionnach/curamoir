@@ -12,6 +12,7 @@ and a killed process leaving a mutex behind.
 """
 
 import datetime
+import importlib.util
 import json
 import os
 import shutil
@@ -28,15 +29,16 @@ LOCK = HOOKS / "r5-lock.sh"
 STATE = HOOKS / "r5-state.sh"
 HOOK = HOOKS / "r5-parallel-block.sh"
 
-# The helpers need bash, jq and perl (lib/flock.sh). Locally a missing tool
+# The helpers need bash, jq and python3 (lib/flock.sh, lib/r5_findings.py).
+# Locally a missing tool
 # skips the module; in CI it is a failure, so the guard's tests can never
 # be skipped silently there.
-_MISSING_TOOLS = [t for t in ("bash", "jq", "perl") if shutil.which(t) is None]
+_MISSING_TOOLS = [t for t in ("bash", "jq", "python3") if shutil.which(t) is None]
 if _MISSING_TOOLS and os.environ.get("CI"):
     pytest.fail(f"the R5 helpers need {', '.join(_MISSING_TOOLS)}; CI must install them",
                 pytrace=False)
 pytestmark = pytest.mark.skipif(bool(_MISSING_TOOLS),
-                                reason="the R5 helpers need bash, jq and perl")
+                                reason="the R5 helpers need bash, jq and python3")
 
 
 @pytest.fixture
@@ -45,6 +47,35 @@ def r5root(tmp_path):
     (tmp_path / ".claude-plugin").mkdir()
     (tmp_path / ".claude-plugin" / "plugin.json").write_text('{"name": "curamoir"}')
     return tmp_path
+
+
+_REPORTS = {}
+
+
+@pytest.fixture(autouse=True)
+def _report_dir(tmp_path_factory):
+    _REPORTS["dir"] = tmp_path_factory.mktemp("reports")
+
+
+def finding(lens, severity, n=1, level="script", **extra):
+    """One finding in the shared schema (docs/r5-gate-v2-curamoir-spec.md §10)."""
+    return {"lens": lens, "severity": severity, "path": f"src/m{n}.py",
+            "start_line": n, "end_line": n + 2, "claim": f"{severity.lower()} defect {n}",
+            "evidence": "the lines", "fix": "change it", "verification_level": level,
+            **extra}
+
+
+def report(pass_name, critical=0, important=0, minor=0, findings=None, prose="Review.\n"):
+    """A reviewer's report whose last line is R5-FINDINGS: with these counts
+    (or these findings); returns its path."""
+    lens = pass_name.replace("-", "_")
+    if findings is None:
+        findings = ([finding(lens, "CRITICAL", 1 + n) for n in range(critical)]
+                    + [finding(lens, "IMPORTANT", 10 + n) for n in range(important)]
+                    + [finding(lens, "MINOR", 20 + n) for n in range(minor)])
+    path = _REPORTS["dir"] / f"report-{len(list(_REPORTS['dir'].iterdir()))}.md"
+    path.write_text(prose + "R5-FINDINGS: " + json.dumps(findings) + "\n")
+    return str(path)
 
 
 _SESSION_VARS = ("CLAUDE_CODE_SESSION_ID", "CLAUDE_SESSION_ID")
@@ -148,7 +179,7 @@ def clear_pass(root, name):
     """Run one pass with a clean review, as the supervisor would."""
     run(STATE, "pass", name, root=root)
     hook(root)
-    run(STATE, "findings", name, "0", "0", "0", root=root)
+    run(STATE, "findings", name, report(name, 0, 0, 0), root=root)
     assert run(STATE, "done", name, "0", root=root).returncode == 0
 
 
@@ -405,7 +436,7 @@ def test_in_a_fix_round_one_fix_agent_runs_at_a_time(r5root):
     start(r5root)
     run(STATE, "pass", "correctness", root=r5root)
     hook(r5root)
-    assert run(STATE, "findings", "correctness", "0", "2", "0", "FIX", root=r5root).returncode == 0
+    assert run(STATE, "findings", "correctness", report("correctness", 0, 2, 0), "FIX", root=r5root).returncode == 0
     assert hook(r5root, subagent="feature-dev:code-architect").returncode == 0  # the fix agent
     assert events(r5root)[-1] == "fix_dispatched"
     assert state(r5root)["audit_trail"][-1]["subagent_type"] == "feature-dev:code-architect"
@@ -422,7 +453,7 @@ def test_a_re_dispatch_is_requested_then_claimed(r5root):
     start(r5root)
     run(STATE, "pass", "correctness", root=r5root)
     hook(r5root)
-    run(STATE, "findings", "correctness", "0", "1", "0", "FIX", root=r5root)
+    run(STATE, "findings", "correctness", report("correctness", 0, 1, 0), "FIX", root=r5root)
     assert run(STATE, "request", "correctness", "2", root=r5root).returncode == 0
     assert hook(r5root).returncode == 0
     second = hook(r5root)
@@ -469,7 +500,7 @@ def test_fixed_only_follows_the_current_pass_s_findings(r5root):
     assert running.returncode == 2 and "fixed cannot follow reviewer_dispatched" in running.stderr
     assert hook(r5root).returncode == 2
     assert events(r5root)[-1] == "reviewer_dispatched"
-    run(STATE, "findings", "correctness", "0", "1", "0", "FIX", root=r5root)
+    run(STATE, "findings", "correctness", report("correctness", 0, 1, 0), "FIX", root=r5root)
     assert run(STATE, "fixed", "correctness", '{"pass": "clarity"}', root=r5root).returncode == 0
     assert state(r5root)["audit_trail"][-1]["pass"] == "correctness"  # not the extra's
 
@@ -478,7 +509,7 @@ def test_a_fix_may_follow_a_dirty_tree_but_a_dirty_tree_only_follows_findings(r5
     start(r5root)
     run(STATE, "pass", "correctness", root=r5root)
     hook(r5root)
-    run(STATE, "findings", "correctness", "0", "0", "0", root=r5root)
+    run(STATE, "findings", "correctness", report("correctness", 0, 0, 0), root=r5root)
     assert run(STATE, "tree-dirty", "correctness", root=r5root).returncode == 0
     assert run(STATE, "fixed", "correctness", root=r5root).returncode == 0
     assert events(r5root)[-2:] == ["reviewer_left_tree_dirty", "fixes_applied"]
@@ -607,7 +638,7 @@ def test_the_long_review_guard_covers_a_fix_agent_and_an_unknown_owner(r5root):
     run(STATE, "init", "b1", "x", "y", root=r5root, session="")  # an owner never recorded
     run(STATE, "pass", "correctness", root=r5root, session="")
     hook(r5root, session="")
-    run(STATE, "findings", "correctness", "0", "1", "0", root=r5root, session="")
+    run(STATE, "findings", "correctness", report("correctness", 0, 1, 0), root=r5root, session="")
     hook(r5root, session="")  # a fix agent
     assert events(r5root)[-1] == "fix_dispatched"
     age_lock(r5root, PAST_LEASE)
@@ -679,7 +710,7 @@ def test_a_session_whose_run_was_adopted_can_no_longer_change_it(r5root):
     age_lock(r5root, PAST_LEASE)
     run(LOCK, "acquire", "r5-supervise", "b1", root=r5root, session="S2")
     assert run(STATE, "adopt", root=r5root, session="S2").returncode == 0
-    for args in (("finish", "aborted"), ("findings", "correctness", "0", "0", "0"),
+    for args in (("finish", "aborted"), ("findings", "correctness", report("correctness")),
                  ("abandon", "correctness", "x"), ("event", "note")):
         stale = run(STATE, *args, root=r5root, session="S1")
         assert stale.returncode == 4 and "adopt it first" in stale.stderr, args
@@ -706,7 +737,7 @@ def test_passes_run_in_order_and_one_at_a_time(r5root):
     again = run(STATE, "pass", "correctness", root=r5root)
     assert again.returncode == 2 and "correctness is still the current pass" in again.stderr
     hook(r5root)
-    run(STATE, "findings", "correctness", "0", "0", "0", "PASS", root=r5root)
+    run(STATE, "findings", "correctness", report("correctness", 0, 0, 0), "PASS", root=r5root)
     undone = run(STATE, "pass", "clarity", root=r5root)  # correctness not done
     assert undone.returncode == 2 and "correctness is still the current pass" in undone.stderr
     run(STATE, "done", "correctness", "0", root=r5root)
@@ -721,14 +752,14 @@ def test_a_pass_is_done_only_when_it_is_current_and_its_last_findings_are_clean(
     hook(r5root)
     unreported = run(STATE, "done", "correctness", "0", root=r5root)  # no findings
     assert unreported.returncode == 2 and "followed by later activity" in unreported.stderr
-    run(STATE, "findings", "correctness", "0", "1", "0", "FIX", root=r5root)
+    run(STATE, "findings", "correctness", report("correctness", 0, 1, 0), "FIX", root=r5root)
     dirty = run(STATE, "done", "correctness", "1", root=r5root)
     assert dirty.returncode == 2 and "its findings are not clean" in dirty.stderr
     other = run(STATE, "done", "clarity", "1", root=r5root)
     assert other.returncode == 2 and "clarity is not the current pass" in other.stderr
     run(STATE, "request", "correctness", "2", root=r5root)
     hook(r5root)
-    run(STATE, "findings", "correctness", "0", "0", "3", "PASS", root=r5root)
+    run(STATE, "findings", "correctness", report("correctness", 0, 0, 3), "PASS", root=r5root)
     assert run(STATE, "done", "correctness", "1", '{"name": "clarity", "fix_iterations": 9}',
                root=r5root).returncode == 0
     assert state(r5root)["current_pass"] is None
@@ -740,7 +771,7 @@ def test_a_critical_finding_alone_keeps_a_pass_from_being_done(r5root):
     start(r5root)
     run(STATE, "pass", "correctness", root=r5root)
     hook(r5root)
-    run(STATE, "findings", "correctness", "1", "0", "0", "FIX", root=r5root)
+    run(STATE, "findings", "correctness", report("correctness", 1, 0, 0), "FIX", root=r5root)
     refused = run(STATE, "done", "correctness", "0", root=r5root)
     assert refused.returncode == 2 and "its findings are not clean" in refused.stderr
     assert state(r5root)["completed_passes"] == []
@@ -750,7 +781,7 @@ def test_a_pass_cannot_be_done_while_its_re_review_is_requested_or_running(r5roo
     start(r5root)
     run(STATE, "pass", "correctness", root=r5root)
     hook(r5root)
-    run(STATE, "findings", "correctness", "0", "0", "1", "PASS", root=r5root)
+    run(STATE, "findings", "correctness", report("correctness", 0, 0, 1), "PASS", root=r5root)
     run(STATE, "fixed", "correctness", root=r5root)
     run(STATE, "request", "correctness", "2", root=r5root)
     for when in ("requested", "running"):
@@ -765,14 +796,14 @@ def test_a_pass_cannot_be_done_while_its_re_review_is_requested_or_running(r5roo
 def test_findings_need_the_current_pass_and_a_dispatched_reviewer(r5root):
     start(r5root)
     run(STATE, "pass", "correctness", root=r5root)
-    early = run(STATE, "findings", "correctness", "0", "0", "0", root=r5root)
+    early = run(STATE, "findings", "correctness", report("correctness", 0, 0, 0), root=r5root)
     assert early.returncode == 2 and "no reviewer is in flight" in early.stderr
     hook(r5root)
-    other = run(STATE, "findings", "clarity", "0", "0", "0", root=r5root)
+    other = run(STATE, "findings", "clarity", report("clarity", 0, 0, 0), root=r5root)
     assert other.returncode == 2 and "clarity is not the current pass" in other.stderr
-    advisory = run(STATE, "advisory", "0", "0", "0", "PASS", root=r5root)
+    advisory = run(STATE, "advisory", report("excellence", 0, 0, 0), "PASS", root=r5root)
     assert advisory.returncode == 2 and "excellence is not the current pass" in advisory.stderr
-    assert run(STATE, "findings", "correctness", "0", "0", "0", root=r5root).returncode == 0
+    assert run(STATE, "findings", "correctness", report("correctness", 0, 0, 0), root=r5root).returncode == 0
 
 
 def test_a_dirty_tree_after_provenance_fails_the_pass_until_it_is_re_reviewed(r5root):
@@ -781,7 +812,7 @@ def test_a_dirty_tree_after_provenance_fails_the_pass_until_it_is_re_reviewed(r5
         clear_pass(r5root, name)
     run(STATE, "pass", "provenance", root=r5root)
     hook(r5root)
-    run(STATE, "findings", "provenance", "0", "0", "0", root=r5root)
+    run(STATE, "findings", "provenance", report("provenance", 0, 0, 0), root=r5root)
     assert run(STATE, "tree-dirty", "provenance", root=r5root).returncode == 0
     refused = run(STATE, "done", "provenance", "0", root=r5root)
     assert refused.returncode == 2 and "followed by later activity" in refused.stderr
@@ -796,7 +827,7 @@ def test_finish_completed_needs_every_pass_and_the_advisory_read(r5root):
     refused = run(STATE, "finish", "completed", root=r5root)
     assert refused.returncode == 2 and "clarity" in refused.stderr
     hook(r5root)
-    run(STATE, "findings", "correctness", "0", "0", "0", root=r5root)
+    run(STATE, "findings", "correctness", report("correctness", 0, 0, 0), root=r5root)
     run(STATE, "done", "correctness", "0", root=r5root)
     for name in ("clarity", "edge-cases", "provenance"):
         clear_pass(r5root, name)
@@ -804,10 +835,10 @@ def test_finish_completed_needs_every_pass_and_the_advisory_read(r5root):
     assert unread.returncode == 2 and "the run is not complete: excellence" in unread.stderr
     run(STATE, "pass", "excellence", root=r5root)
     hook(r5root)
-    for args in (("findings", "excellence", "0", "0", "0"), ("done", "excellence", "0")):
+    for args in (("findings", "excellence", report("excellence")), ("done", "excellence", "0")):
         bad = run(STATE, *args, root=r5root)
         assert bad.returncode == 1 and "excellence is not a blocking pass" in bad.stderr, args
-    assert run(STATE, "advisory", "0", "0", "1", "PASS", root=r5root).returncode == 0
+    assert run(STATE, "advisory", report("excellence", 0, 0, 1), "PASS", root=r5root).returncode == 0
     assert run(STATE, "finish", "completed", root=r5root).returncode == 0
 
 
@@ -839,7 +870,7 @@ def test_reopen_runs_a_done_pass_and_every_later_one_again(r5root):
     hook(r5root)
     busy = run(STATE, "reopen", "correctness", root=r5root)  # a reviewer in flight
     assert busy.returncode == 2 and "still in flight" in busy.stderr
-    run(STATE, "findings", "clarity", "0", "1", "0", root=r5root)
+    run(STATE, "findings", "clarity", report("clarity", 0, 1, 0), root=r5root)
     hook(r5root)  # a fix agent
     assert events(r5root)[-1] == "fix_dispatched"
     fixing = run(STATE, "reopen", "correctness", root=r5root)
@@ -849,7 +880,7 @@ def test_reopen_runs_a_done_pass_and_every_later_one_again(r5root):
 def advisory_read(root):
     run(STATE, "pass", "excellence", root=root)
     hook(root)
-    assert run(STATE, "advisory", "0", "0", "0", "PASS", root=root).returncode == 0
+    assert run(STATE, "advisory", report("excellence", 0, 0, 0), "PASS", root=root).returncode == 0
 
 
 def test_reopen_drops_the_advisory_read_so_the_run_needs_a_new_one(r5root):
@@ -873,7 +904,7 @@ def test_reopen_while_a_later_pass_is_current_clears_the_current_pass(r5root):
     clear_pass(r5root, "correctness")
     run(STATE, "pass", "clarity", root=r5root)
     hook(r5root)
-    run(STATE, "findings", "clarity", "0", "0", "0", root=r5root)  # no reviewer in flight
+    run(STATE, "findings", "clarity", report("clarity", 0, 0, 0), root=r5root)  # no reviewer in flight
     assert run(STATE, "reopen", "correctness", root=r5root).returncode == 0
     assert state(r5root)["current_pass"] is None
     assert run(STATE, "pass", "correctness", root=r5root).returncode == 0
@@ -989,6 +1020,234 @@ def test_finish_archives_the_trail_under_a_timestamp(r5root):
     assert not (r5root / ".claude" / "r5-state.json").exists()
 
 
+# ---------------------------------------------------------------- findings, rounds and the verdict (cm-70j)
+
+def _load_findings():
+    spec = importlib.util.spec_from_file_location("r5_findings", HOOKS / "lib" / "r5_findings.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+r5f = _load_findings()
+
+
+def parse(findings, lens="correctness", floor="script", prose="Review.\n"):
+    return r5f.parse_report(prose + "R5-FINDINGS: " + json.dumps(findings) + "\n", lens, floor)
+
+
+def test_the_fingerprint_ignores_case_whitespace_line_numbers_and_shas():
+    a = r5f.fingerprint("correctness", "src/a.py", "Off by one at line 41 in abc1234def")
+    b = r5f.fingerprint("correctness", "src/a.py", "off  by one at line 7 in 9f8e7d6c5b")
+    assert a == b and len(a) == 16 and int(a, 16) >= 0
+    assert a != r5f.fingerprint("clarity", "src/a.py", "off by one at line in")
+    assert a != r5f.fingerprint("correctness", "src/b.py", "off by one at line in")
+    assert a != r5f.fingerprint("correctness", "src/a.py", "off by two at line in")
+
+
+def test_the_parser_sets_fingerprint_and_status_itself_and_counts_by_severity():
+    raw = [finding("correctness", "CRITICAL", 1, fingerprint="forged", status="fixed"),
+           finding("correctness", "IMPORTANT", 2), finding("correctness", "MINOR", 3)]
+    out = parse(raw)
+    assert out["counts"] == {"critical": 1, "important": 1, "minor": 1}
+    first = out["findings"][0]
+    assert first["status"] == "open"
+    assert first["fingerprint"] == r5f.fingerprint("correctness", "src/m1.py", "critical defect 1")
+    assert first["regression"] is False and first["resolves"] is None
+
+
+def test_a_finding_may_omit_lens_but_not_claim_another_reviewer_s():
+    raw = finding("edge_cases", "MINOR")
+    del raw["lens"]
+    assert parse([raw], lens="edge_cases")["findings"][0]["lens"] == "edge_cases"
+    with pytest.raises(r5f.ReportError, match="not this reviewer"):
+        parse([finding("clarity", "MINOR")], lens="edge_cases")
+
+
+@pytest.mark.parametrize("text, reason", [
+    ("", "empty"),
+    ("The review found nothing.\n", "does not start with R5-FINDINGS:"),
+    ("R5-FINDINGS: [oops]\n", "not JSON"),
+    ('R5-FINDINGS: {"a": 1}\n', "not a JSON array"),
+    ('R5-FINDINGS: []\ntrailing prose\n', "does not start with R5-FINDINGS:"),
+])
+def test_a_report_off_the_contract_is_refused_with_its_reason(text, reason):
+    with pytest.raises(r5f.ReportError, match=reason):
+        r5f.parse_report(text, "correctness")
+
+
+@pytest.mark.parametrize("change, reason", [
+    ({"severity": "P1"}, "severity"),
+    ({"start_line": 0}, "start_line"),
+    ({"start_line": 9, "end_line": 3}, "start_line"),
+    ({"end_line": True}, "start_line"),
+    ({"path": ""}, "path"),
+    ({"claim": "  "}, "claim"),
+    ({"evidence": None}, "evidence"),
+    ({"fix": 3}, "fix"),
+    ({"regression": "yes"}, "regression"),
+    ({"verification_level": "proven"}, "verification_level"),
+])
+def test_each_field_of_the_schema_is_checked(change, reason):
+    with pytest.raises(r5f.ReportError, match=reason):
+        parse([{**finding("correctness", "IMPORTANT"), **change}])
+
+
+def test_a_blocking_finding_below_the_floor_is_unproven_and_a_minor_never_is():
+    raw = [finding("correctness", "IMPORTANT", 1, level="cited"),
+           finding("correctness", "CRITICAL", 2, level="script"),
+           finding("correctness", "IMPORTANT", 3, level="reproduced"),
+           finding("correctness", "MINOR", 4, level="asserted")]
+    no_level = finding("correctness", "IMPORTANT", 5)
+    del no_level["verification_level"]
+    out = parse([*raw, no_level])
+    fps = {f["start_line"]: f["fingerprint"] for f in out["findings"]}
+    assert out["unproven"] == [fps[1], fps[5]]  # a missing level is "asserted"
+    assert parse(raw, floor="reproduced")["unproven"] == [fps[1], fps[2]]
+    assert parse([finding("excellence", "IMPORTANT", level="asserted")], lens="excellence")["unproven"] == []
+
+
+def test_findings_are_counted_from_the_report_and_block_done(r5root):
+    start(r5root)
+    run(STATE, "pass", "correctness", root=r5root)
+    hook(r5root)
+    assert run(STATE, "findings", "correctness", report("correctness", 0, 2, 1), "FIX",
+               root=r5root).returncode == 0
+    last = state(r5root)["audit_trail"][-1]
+    assert last["counts"] == {"critical": 0, "important": 2, "minor": 1}
+    assert len(last["findings"]) == 3 and all(f["status"] == "open" for f in last["findings"])
+    refused = run(STATE, "done", "correctness", "0", root=r5root)
+    assert refused.returncode == 2 and "its findings are not clean" in refused.stderr
+
+
+def test_a_report_off_the_contract_records_the_reviewer_unavailable(r5root):
+    start(r5root)
+    run(STATE, "pass", "correctness", root=r5root)
+    hook(r5root)
+    bad = _REPORTS["dir"] / "prose-only.md"
+    bad.write_text("Looks fine to me.\n")
+    refused = run(STATE, "findings", "correctness", str(bad), root=r5root)
+    assert refused.returncode == 2 and "recorded UNAVAILABLE" in refused.stderr
+    assert events(r5root)[-1] == "reviewer_unavailable"
+    assert state(r5root)["rounds"][-1]["lenses"]["correctness"]["status"] == "UNAVAILABLE"
+    blocked = hook(r5root)
+    assert blocked.returncode == 2 and "UNAVAILABLE; request it again" in blocked.stderr
+    again = run(STATE, "findings", "correctness", report("correctness"), root=r5root)
+    assert again.returncode == 2 and "no reviewer is in flight" in again.stderr
+    undone = run(STATE, "done", "correctness", "0", root=r5root)
+    assert undone.returncode == 2 and "followed by later activity" in undone.stderr
+    assert run(STATE, "request", "correctness", "2", root=r5root).returncode == 0
+    assert hook(r5root).returncode == 0
+    assert run(STATE, "findings", "correctness", report("correctness"), root=r5root).returncode == 0
+    assert run(STATE, "done", "correctness", "1", root=r5root).returncode == 0
+
+
+def test_rounds_record_review_fix_and_verify_in_the_shared_shape(r5root):
+    start(r5root)
+    run(STATE, "pass", "correctness", root=r5root)
+    hook(r5root, subagent="pr-review-toolkit:code-reviewer")
+    meta = '{"model": "claude-opus-5-5", "tier": "deep", "tokens_in": 1200, "tokens_out": 300, "duration_s": 41, "status": "forged"}'
+    run(STATE, "findings", "correctness", report("correctness", 0, 1, 0), "FIX", meta, root=r5root)
+    hook(r5root)  # the fix agent
+    run(STATE, "fixed", "correctness", '{"statuses": {"abc": "fixed"}}', root=r5root)
+    run(STATE, "fixed", "correctness", '{"statuses": {"def": "superseded"}}', root=r5root)
+    run(STATE, "event", "commit_made", '{"sha": "0123abc"}', root=r5root)
+    run(STATE, "request", "correctness", "2", root=r5root)
+    hook(r5root)
+    run(STATE, "findings", "correctness", report("correctness"), "PASS", root=r5root)
+    rounds = state(r5root)["rounds"]
+    assert [(r["n"], r["kind"]) for r in rounds] == [(1, "review"), (2, "fix"), (3, "verify")]
+    first = rounds[0]["lenses"]["correctness"]
+    assert (first["mode"], first["status"], first["model"], first["tier"]) == ("review", "ok", "claude-opus-5-5", "deep")
+    assert (first["tokens_in"], first["tokens_out"], first["duration_s"]) == (1200, 300, 41)
+    assert len(first["findings"]) == 1 and rounds[0]["ended"] is not None
+    assert rounds[1]["fix"] == {"commit": "0123abc", "statuses": {"abc": "fixed", "def": "superseded"},
+                                "scope_breaches": []}
+    assert rounds[2]["lenses"]["correctness"]["mode"] == "verify"
+    assert rounds[2]["lenses"]["correctness"]["findings"] == []
+
+
+def test_an_unproven_blocking_finding_is_listed_in_its_round_and_still_blocks(r5root):
+    start(r5root)
+    run(STATE, "pass", "correctness", root=r5root)
+    hook(r5root)
+    weak = report("correctness", findings=[finding("correctness", "IMPORTANT", level="cited")])
+    run(STATE, "findings", "correctness", weak, root=r5root)
+    entry = state(r5root)["rounds"][0]["lenses"]["correctness"]
+    assert entry["unproven"] == [entry["findings"][0]["fingerprint"]]
+    assert run(STATE, "done", "correctness", "0", root=r5root).returncode == 2
+    lowered = report("correctness", findings=[finding("correctness", "IMPORTANT", 2, level="cited")])
+    run(STATE, "request", "correctness", "2", root=r5root)
+    hook(r5root)
+    run(STATE, "findings", "correctness", lowered, root=r5root,
+        env_extra={"R5_VERIFICATION_FLOOR": "cited"})
+    assert state(r5root)["rounds"][-1]["lenses"]["correctness"]["unproven"] == []
+
+
+def test_abandoning_a_reviewer_closes_its_round_entry(r5root):
+    start(r5root)
+    run(STATE, "pass", "correctness", root=r5root)
+    hook(r5root)
+    run(STATE, "abandon", "correctness", "stalled", root=r5root)
+    assert state(r5root)["rounds"][0]["lenses"]["correctness"]["status"] == "abandoned"
+
+
+def test_the_excellence_report_is_parsed_and_a_bad_one_is_unavailable(r5root):
+    start(r5root)
+    for name in ("correctness", "clarity", "edge-cases", "provenance"):
+        clear_pass(r5root, name)
+    run(STATE, "pass", "excellence", root=r5root)
+    hook(r5root)
+    bad = _REPORTS["dir"] / "excellence-prose.md"
+    bad.write_text("Ship it.\n")
+    refused = run(STATE, "advisory", str(bad), "SHIP IT", root=r5root)
+    assert refused.returncode == 2 and "recorded UNAVAILABLE" in refused.stderr
+    run(STATE, "request", "excellence", "2", root=r5root)
+    hook(r5root)
+    assert run(STATE, "advisory", report("excellence", 0, 1, 2), "SHIP WITH MINOR FIXES",
+               root=r5root).returncode == 0
+    read = state(r5root)["advisory_results"][-1]
+    assert read["counts"] == {"critical": 0, "important": 1, "minor": 2} and len(read["findings"]) == 3
+    assert state(r5root)["rounds"][-1]["lenses"]["excellence"]["unproven"] == []
+
+
+def git_root(root):
+    subprocess.run(["git", "init", "-q", str(root)], check=True)
+    (root / "a.txt").write_text("a\n")
+    subprocess.run(["git", "-C", str(root), "add", "a.txt"], check=True)
+    subprocess.run(["git", "-C", str(root), "-c", "user.name=t", "-c", "user.email=t@t",
+                    "commit", "-q", "-m", "a"], check=True)
+    return subprocess.run(["git", "-C", str(root), "rev-parse", "HEAD^{tree}", "HEAD"],
+                          capture_output=True, text=True, check=True).stdout.split()
+
+
+def test_finish_writes_a_verdict_keyed_to_the_tree(r5root):
+    tree, head = git_root(r5root)
+    start(r5root)
+    record = state(r5root)
+    assert (record["bead"], record["repo"], record["base"], record["head"]) == ("b1", r5root.name, "base", "head")
+    assert record["branch"] and record["rounds"] == [] and record["verdict"] is None
+    for name in ("correctness", "clarity", "edge-cases", "provenance"):
+        clear_pass(r5root, name)
+    run(STATE, "pass", "excellence", root=r5root)
+    hook(r5root)
+    run(STATE, "advisory", report("excellence"), "SHIP IT", root=r5root)
+    assert run(STATE, "finish", "completed", root=r5root).returncode == 0
+    archived = json.loads(next((r5root / ".claude").glob("r5-state-b1-completed-*.json")).read_text())
+    verdict = archived["verdict"]
+    assert (verdict["state"], verdict["tree_sha"], verdict["head_sha"]) == ("CLEAN", tree, head)
+    assert archived["rounds"][0]["head"] == head
+
+
+@pytest.mark.parametrize("status, expected", [("failed", "ESCALATED"), ("aborted", None)])
+def test_a_failed_run_is_escalated_and_an_aborted_one_has_no_verdict(r5root, status, expected):
+    git_root(r5root)
+    start(r5root)
+    run(STATE, "finish", status, root=r5root)
+    archived = json.loads(next((r5root / ".claude").glob(f"r5-state-b1-{status}-*.json")).read_text())
+    assert (archived["verdict"] or {}).get("state") == expected
+
+
 # ---------------------------------------------------------------- arguments and infrastructure
 
 def test_an_event_cannot_rename_itself_or_take_a_non_object(r5root):
@@ -1007,7 +1266,7 @@ def test_a_bad_or_missing_argument_exits_1_not_as_a_refusal(r5root):
     start(r5root)
     run(STATE, "pass", "correctness", root=r5root)
     hook(r5root)
-    for args in (("findings", "correctness", "x", "0", "0"), ("findings", "correctness"),
+    for args in (("findings", "correctness", "no-such-report.md"), ("findings", "correctness"),
                  ("request", "correctness", "two"), ("init",), ("abandon", "correctness", "")):
         bad = run(STATE, *args, root=r5root)
         assert bad.returncode == 1 and bad.stderr.startswith("r5-state: "), (args, bad.stderr)
@@ -1186,7 +1445,7 @@ def test_a_sibling_worktree_shares_the_main_worktree_s_lock_and_state(tmp_path):
 
 def test_a_missing_tool_fails_the_module_in_ci_and_skips_it_locally(tmp_path):
     """Run this module in a child pytest with an empty PATH (no bash, jq or
-    perl): with CI set it must not collect; without, its tests are skipped."""
+    python3): with CI set it must not collect; without, its tests are skipped."""
     env = {k: v for k, v in os.environ.items() if k != "CI"}
     env["PATH"] = str(tmp_path)
     cmd = [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", str(Path(__file__)),

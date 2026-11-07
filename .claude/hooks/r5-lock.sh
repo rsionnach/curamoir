@@ -42,7 +42,7 @@
 #         absolute TTL (or stamped in the future), so it no longer protects
 #         the run; ask the user, then `renew` or end the run
 #   2   - cross-session block, or same-session nesting refusal
-#   3   - internal error (cannot resolve the root, jq or perl missing, the
+#   3   - internal error (cannot resolve the root, jq or python3 missing, the
 #         .claude directory cannot be created, the mutex not taken within
 #         10s, a lock write failed)
 

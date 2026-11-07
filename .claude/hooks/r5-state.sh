@@ -40,8 +40,11 @@
 #   claim <subagent_type> [session]
 #                                  (the hook) let one dispatch through as
 #                                  the requested reviewer or a fix agent
-#   findings <pass> <crit> <imp> <minor> [verdict]
-#                                  the dispatched reviewer's report
+#   findings <pass> <report-file> [verdict] [meta-json]
+#                                  the dispatched reviewer's report, parsed
+#                                  from its last line (R5-FINDINGS:, below);
+#                                  a report that does not parse records the
+#                                  reviewer UNAVAILABLE (then `request`)
 #   abandon <pass> <reason>        the dispatched reviewer stalled, died or
 #                                  never started: close its window without
 #                                  findings (then `request`)
@@ -58,8 +61,9 @@
 #                                  the pass is complete (only if the run's
 #                                  last window event is that pass's findings,
 #                                  with no critical or important finding)
-#   advisory <crit> <imp> <minor> <verdict>
-#                                  the excellence reviewer's report
+#   advisory <report-file> <verdict> [meta-json]
+#                                  the excellence reviewer's report, parsed
+#                                  the same way
 #   finish <completed|failed|aborted>
 #                                  end the run (completed only when every
 #                                  pass is done and the advisory read
@@ -70,12 +74,24 @@
 #                                  exit 2 on a malformed file
 #   show                           print the state file
 #
+# Findings and rounds (cm-70j). The contract is section 10 of
+# docs/r5-gate-v2-curamoir-spec.md, shared with NthLayer's gate: a reviewer's
+# last non-empty line is `R5-FINDINGS:` and a JSON array of findings, which
+# lib/r5_findings.py validates, fingerprints and counts (the orchestrator
+# never types counts). The file records them in rounds[] (one review or
+# verify round per reviewer dispatch, one fix round per fix) and, at `finish`,
+# a verdict keyed to `git rev-parse HEAD^{tree}`. A blocking finding whose
+# verification_level is below the floor (R5_VERIFICATION_FLOOR, default
+# script) is listed in its round's `unproven`; it still blocks. meta-json
+# fills the round's model, tier, tokens_in, tokens_out and duration_s when
+# the orchestrator knows them.
+#
 # Exit codes:
 #   0   - success (claim: the dispatch may go ahead)
 #   1   - usage error or a bad argument (a missing one, a count that is not
 #         a non-negative integer, a JSON argument that is not an object)
 #   2   - refused by the run's state or order (claim: refuse the dispatch)
-#   3   - internal error (cannot resolve the root, jq or perl missing, the
+#   3   - internal error (cannot resolve the root, jq or python3 missing, the
 #         mutex not taken within 10s)
 #   4   - another session's run (claim: refuse the dispatch; any other
 #         subcommand that changes the run: adopt it first)
@@ -95,6 +111,7 @@ _DIR="$(CDPATH= cd -P -- "$(dirname -- "$_self")" && pwd)"
 # shellcheck source=lib/resolve-repo-root.sh
 source "$_DIR/lib/resolve-repo-root.sh" || exit 3
 command -v jq >/dev/null 2>&1 || { printf 'r5-state: jq is required\n' >&2; exit 3; }
+command -v python3 >/dev/null 2>&1 || { printf 'r5-state: python3 is required\n' >&2; exit 3; }
 # shellcheck source=lib/flock.sh
 source "$_DIR/lib/flock.sh"
 # shellcheck source=lib/lease.sh
@@ -107,7 +124,9 @@ STATE="$R5_STATE_FILE"
 WINDOW_EVENTS='["supervisor_started","pass_started","reviewer_requested",
   "reviewer_dispatched","reviewer_abandoned","findings_received",
   "fix_dispatched","fixes_applied","reviewer_left_tree_dirty",
-  "pass_completed","advisory_pass_completed","pass_reopened"]'
+  "pass_completed","advisory_pass_completed","pass_reopened",
+  "reviewer_unavailable"]'
+FLOOR="${R5_VERIFICATION_FLOOR:-script}"
 
 _refuse() { printf 'r5-state: %s\n' "$*" >&2; exit 2; }
 _bad_arg() { printf 'r5-state: %s\n' "$*" >&2; exit 1; }
@@ -233,6 +252,44 @@ _blocking_pass() {  # _blocking_pass <name>: one of the four blocking passes
   jq -e --arg p "$1" '.passes | index($p)' "$STATE" >/dev/null || _bad_arg "$1 is not a blocking pass"
 }
 
+# ---- findings and rounds (cm-70j) ----
+_lens_of() { [[ "$1" == edge-cases ]] && printf 'edge_cases' || printf '%s' "$1"; }
+# A git fact about R5_ROOT, or "" where it is not a git checkout.
+_git() { git -C "$R5_ROOT" "$@" 2>/dev/null || true; }
+# _parse <lens> <report-file>: sets PARSED to the parsed report (JSON) and
+# returns 0, or returns 2 with the reason in PARSE_ERROR (the report does not
+# meet the contract). Runs in this shell, not a subshell, so both survive.
+_parse() {
+  local errf="$STATE.parse.$$" rc=0
+  PARSED="$(python3 "$_DIR/lib/r5_findings.py" parse "$1" "$2" --floor "$FLOOR" 2>"$errf")" || rc=$?
+  PARSE_ERROR="$(sed 's/^r5_findings: //' "$errf" 2>/dev/null || true)"; rm -f "$errf"
+  case "$rc" in
+    0) return 0 ;;
+    2) return 2 ;;
+    *) _bad_arg "$CMD: ${PARSE_ERROR:-cannot parse $2}" ;;
+  esac
+}
+# _close_round <lens> <status> [parsed-json] [meta-json]: complete the open
+# round's entry for <lens>.
+_close_round() {
+  local parsed="${3:-}" meta="${4:-}"
+  [[ -n "$parsed" ]] || parsed='{"findings":[],"unproven":[]}'
+  [[ -n "$meta" ]] || meta='{}'
+  _apply '(.rounds | length) as $n
+    | if $n == 0 then . else
+        .rounds[$n - 1] |= (.ended = $t
+          | .lenses[$l] = ((.lenses[$l] // {}) + ($m | with_entries(select(.key
+              | IN("model", "tier", "tokens_in", "tokens_out", "duration_s"))))
+              + {status: $s, findings: $p.findings, unproven: $p.unproven}))
+      end' --arg l "$1" --arg s "$2" --argjson p "$parsed" --argjson m "$meta" --arg t "$(_now)"
+}
+# _unavailable <pass>: the reviewer's report did not meet the contract (R5-R9).
+_unavailable() {
+  _close_round "$(_lens_of "$1")" UNAVAILABLE
+  _event reviewer_unavailable --arg p "$1" --arg r "$PARSE_ERROR" '{pass:$p, reason:$r}'
+  _refuse "the $1 reviewer's report does not meet the R5-FINDINGS contract ($PARSE_ERROR); it is recorded UNAVAILABLE: request it again"
+}
+
 # Move a finished run's file to r5-state-<bead>-<status>-<ts>.json.
 _archive() {
   # Both fields are sanitised: a hand-edited file must not name a path.
@@ -258,8 +315,11 @@ case "$CMD" in
       _archive  # a finished run whose archive move failed: keep its trail
     fi
     tmp="$STATE.tmp.$$"
-    jq -n --arg b "$bead" --arg base "$base" --arg head "$head" --arg t "$(_now)" --arg s "$(_r5_session)" '{
+    jq -n --arg b "$bead" --arg base "$base" --arg head "$head" --arg t "$(_now)" --arg s "$(_r5_session)" \
+        --arg repo "$(basename "$R5_ROOT")" --arg br "$(_git branch --show-current)" '{
       supervisor: "r5-supervise", target_bead: $b, session_id: $s, started_at: $t,
+      bead: $b, repo: $repo, branch: (if $br == "" then null else $br end),
+      base: $base, head: $head, rounds: [], verdict: null,
       passes: ["correctness", "clarity", "edge-cases", "provenance"],
       advisory_passes: ["excellence"], current_pass: null, completed_passes: [],
       advisory_results: [], status: "in_progress",
@@ -318,12 +378,24 @@ case "$CMD" in
     case "$last" in
       pass_started|reviewer_requested)
         _event reviewer_dispatched --arg p "$pass" --arg s "$subagent" '{pass:$p, subagent_type:$s}'
+        # A later reviewer of the same pass re-reads the tree after a fix: a
+        # verify round.
+        _apply '([.audit_trail[] | select(.event == "findings_received" and .pass == $p)]
+                 | length > 0) as $again
+          | .rounds = ((.rounds // []) + [{n: ((.rounds // []) | length) + 1,
+              kind: (if $again then "verify" else "review" end),
+              head: (if $h == "" then null else $h end), started: $t, ended: null,
+              lenses: {($l): {model: null, tier: null,
+                mode: (if $again then "verify" else "review" end),
+                tokens_in: null, tokens_out: null, duration_s: null,
+                status: "in_flight", skip_rule: null, findings: []}}}])' \
+          --arg p "$pass" --arg l "$(_lens_of "$pass")" --arg h "$(_git rev-parse HEAD)" --arg t "$(_now)"
         exit 0 ;;
       reviewer_dispatched)
         if [[ "$pass" == excellence ]]; then report="advisory"; else report="findings $pass"; fi
         _refuse "the $pass reviewer is in flight; record its report (\`$report ...\`), or abandon it if it stalled or never started" ;;
-      reviewer_abandoned)
-        _refuse "the $pass reviewer was abandoned; request it again before dispatching" ;;
+      reviewer_abandoned|reviewer_unavailable)
+        _refuse "the $pass reviewer was abandoned or UNAVAILABLE; request it again before dispatching" ;;
       *)
         [[ -n "$pass" ]] || exit 0  # between passes: not the run's business
         ! _open_fix || _refuse "a fix agent is open; record \`fixed $pass\` when it is done"
@@ -332,19 +404,23 @@ case "$CMD" in
     esac
     ;;
   findings)
-    _need_owned_run; _arg pass pass "${2:-}"
-    _int crit critical "${3:-}"; _int imp important "${4:-}"; _int minor minor "${5:-}"
+    _need_owned_run; _arg pass pass "${2:-}"; _arg report report-file "${3:-}"
+    meta="${5:-}"; [[ -n "$meta" ]] || meta='{}'
+    _object "$meta"
     _blocking_pass "$pass"
     _need_current "$pass"
     _need_in_flight
-    _event findings_received --arg p "$pass" --argjson c "$crit" --argjson i "$imp" \
-      --argjson m "$minor" --arg v "${6:-}" \
-      '{pass:$p, counts:{critical:$c, important:$i, minor:$m}, verdict:$v}'
+    rc=0; _parse "$(_lens_of "$pass")" "$report" || rc=$?
+    (( rc == 0 )) || _unavailable "$pass"
+    _close_round "$(_lens_of "$pass")" ok "$PARSED" "$meta"
+    _event findings_received --arg p "$pass" --argjson r "$PARSED" --arg v "${4:-}" \
+      '{pass:$p, counts:$r.counts, unproven:$r.unproven, findings:$r.findings, verdict:$v}'
     ;;
   abandon)
     _need_owned_run; _arg pass pass "${2:-}"; _arg reason reason "${3:-}"
     _need_current "$pass"
     _need_in_flight
+    _close_round "$(_lens_of "$pass")" abandoned
     _event reviewer_abandoned --arg p "$pass" --arg r "$reason" '{pass:$p, reason:$r}'
     ;;
   fixed)
@@ -355,6 +431,17 @@ case "$CMD" in
     # in several steps), or a dirty tree (provenance's restore).
     _need_last_in "fixed" findings_received fix_dispatched fixes_applied reviewer_left_tree_dirty
     _event fixes_applied --argjson x "$extra" --arg p "$pass" '$x + {pass:$p}'
+    # One fix round per fix, however many `fixed` steps it takes: a step
+    # after a fix round whose commit is not yet recorded joins that round.
+    _apply '(.rounds // []) as $r | ($r | length) as $n
+      | if $n > 0 and $r[$n - 1].kind == "fix" and $r[$n - 1].fix.commit == null
+        then .rounds[$n - 1] |= (.ended = $t | .head = $h
+          | .fix.statuses += ($x.statuses // {}))
+        else .rounds = $r + [{n: ($r | length) + 1, kind: "fix",
+          head: $h, started: $t, ended: $t, lenses: {},
+          fix: {commit: null, statuses: ($x.statuses // {}), scope_breaches: []}}]
+        end' --argjson x "$extra" --arg t "$(_now)" \
+      --argjson h "$(jq -n --arg h "$(_git rev-parse HEAD)" 'if $h == "" then null else $h end')"
     ;;
   tree-dirty)
     _need_owned_run; _arg pass pass "${2:-}"
@@ -386,6 +473,12 @@ case "$CMD" in
       _bad_arg "$name is a window event, written by its own subcommand"
     fi
     _event "$name" --argjson x "$extra" '$x'
+    if [[ "$name" == commit_made ]]; then
+      _apply '((.rounds // []) | length) as $n
+        | if $n > 0 and .rounds[$n - 1].kind == "fix"
+             and .rounds[$n - 1].fix.commit == null and ($x.sha | type) == "string"
+          then .rounds[$n - 1].fix.commit = $x.sha else . end' --argjson x "$extra"
+    fi
     ;;
   done)
     _need_owned_run; _arg pass pass "${2:-}"; _int iters fix_iterations "${3:-}"; extra="${4:-}"; [[ -n "$extra" ]] || extra='{}'
@@ -405,12 +498,16 @@ case "$CMD" in
     ;;
   advisory)
     _need_owned_run
-    _int crit critical "${2:-}"; _int imp important "${3:-}"; _int minor minor "${4:-}"
-    _arg verdict verdict "${5:-}"
+    _arg report report-file "${2:-}"; _arg verdict verdict "${3:-}"
+    meta="${4:-}"; [[ -n "$meta" ]] || meta='{}'
+    _object "$meta"
     _need_current excellence
     _need_in_flight
-    rec="$(jq -cn --arg t "$(_now)" --argjson c "$crit" --argjson i "$imp" --argjson m "$minor" --arg v "$verdict" \
-      '{ts:$t, event:"advisory_pass_completed", pass:"excellence", counts:{critical:$c, important:$i, minor:$m}, verdict:$v}')"
+    rc=0; _parse excellence "$report" || rc=$?
+    (( rc == 0 )) || _unavailable excellence
+    _close_round excellence ok "$PARSED" "$meta"
+    rec="$(jq -cn --arg t "$(_now)" --argjson r "$PARSED" --arg v "$verdict" \
+      '{ts:$t, event:"advisory_pass_completed", pass:"excellence", counts:$r.counts, findings:$r.findings, verdict:$v}')"
     _apply '.advisory_results += [$r] | .current_pass = null' --argjson r "$rec"
     _append "$rec"
     ;;
@@ -426,7 +523,15 @@ case "$CMD" in
     fi
     # Repeating a finish whose archive move failed only retries the move.
     if [[ "$(jq -r '.status' "$STATE")" == in_progress ]]; then
-      _apply '.status = $s | .current_pass = null' --arg s "$status"
+      # The verdict is keyed to the tree, not the commit (R5-R49): completed
+      # is CLEAN, failed is ESCALATED, an aborted run has none.
+      _apply '.status = $s | .current_pass = null
+        | .verdict = (if $s == "aborted" then null else
+            {state: (if $s == "completed" then "CLEAN" else "ESCALATED" end),
+             tree_sha: (if $tree == "" then null else $tree end),
+             head_sha: (if $head == "" then null else $head end), at: $t} end)' \
+        --arg s "$status" --arg tree "$(_git rev-parse 'HEAD^{tree}')" \
+        --arg head "$(_git rev-parse HEAD)" --arg t "$(_now)"
       _event "supervisor_$status"
     fi
     _archive

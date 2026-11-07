@@ -10,19 +10,16 @@
 # its holder dies, so a killed process never leaves a mutex behind; there is
 # no staleness timeout to wait out, and no stale-clear race in which two
 # waiters both "clear" a mutex and both enter. macOS ships no flock(1), so
-# perl takes the lock on the shell's fd 9: the lock belongs to the open file
-# description, which the shell keeps open after perl exits. A child the shell
-# starts inherits fd 9 and keeps the lock alive while it runs: callers start
-# only short-lived children (jq, mv, date) while they hold it.
+# lib/r5_flock.py takes the lock on the shell's fd 9: the lock belongs to the
+# open file description, which the shell keeps open after the helper exits. A
+# child the shell starts inherits fd 9 and keeps the lock alive while it runs:
+# callers start only short-lived children (jq, mv, date, python3) while they
+# hold it.
+_R5_FLOCK_PY="$(dirname -- "${BASH_SOURCE[0]}")/r5_flock.py"
 _r5_flock() {
   local file="$1" who="$2"
-  command -v perl >/dev/null 2>&1 || { printf '%s: perl is required for the mutex\n' "$who" >&2; exit 3; }
+  command -v python3 >/dev/null 2>&1 || { printf '%s: python3 is required for the mutex\n' "$who" >&2; exit 3; }
   exec 9>>"$file" || { printf '%s: cannot open %s\n' "$who" "$file" >&2; exit 3; }
-  perl -MFcntl=:flock -e '
-    open(my $fh, ">&=", 9) or exit 3;
-    $SIG{ALRM} = sub { exit 4 };
-    alarm 10;
-    flock($fh, LOCK_EX) or exit 3;
-    exit 0' \
+  python3 "$_R5_FLOCK_PY" 9 10 \
     || { printf '%s: could not lock %s within 10s\n' "$who" "$file" >&2; exit 3; }
 }
