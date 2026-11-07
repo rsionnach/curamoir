@@ -1111,6 +1111,30 @@ def test_each_field_of_the_schema_is_checked(change, reason):
         parse([{**finding("correctness", "IMPORTANT"), **change}])
 
 
+def test_a_closure_record_is_kept_but_neither_counted_nor_unproven():
+    closed = finding("correctness", "IMPORTANT", 1, level="asserted", resolves="72014ca5759239ec")
+    still_open = finding("correctness", "MINOR", 2)
+    out = parse([closed, still_open])
+    assert len(out["findings"]) == 2 and out["findings"][0]["resolves"] == "72014ca5759239ec"
+    assert out["counts"] == {"critical": 0, "important": 0, "minor": 1}
+    assert out["unproven"] == []
+
+
+def test_a_re_review_whose_closures_carry_their_old_severity_can_be_done(r5root):
+    start(r5root)
+    run(STATE, "pass", "correctness", root=r5root)
+    hook(r5root)
+    run(STATE, "findings", "correctness", report("correctness", 0, 1, 0), root=r5root)
+    prior = state(r5root)["audit_trail"][-1]["findings"][0]["fingerprint"]
+    hook(r5root)
+    run(STATE, "fixed", "correctness", root=r5root)
+    run(STATE, "request", "correctness", "2", root=r5root)
+    hook(r5root)
+    closure = report("correctness", findings=[finding("correctness", "IMPORTANT", 10, resolves=prior)])
+    run(STATE, "findings", "correctness", closure, root=r5root)
+    assert run(STATE, "done", "correctness", "1", root=r5root).returncode == 0
+
+
 def test_a_blocking_finding_below_the_floor_is_unproven_and_a_minor_never_is():
     raw = [finding("correctness", "IMPORTANT", 1, level="cited"),
            finding("correctness", "CRITICAL", 2, level="script"),

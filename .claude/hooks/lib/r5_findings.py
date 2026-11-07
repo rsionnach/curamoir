@@ -11,7 +11,9 @@ orchestrator.
 
 prints one JSON object on stdout: ``findings`` (the normalised array),
 ``counts`` (critical, important, minor) and ``unproven`` (fingerprints of
-blocking findings whose verification_level is below the floor). Exit 0; 2 if
+blocking findings whose verification_level is below the floor). A finding
+with ``resolves`` set is a re-review's record that a prior finding is
+closed: it stays in ``findings`` but is neither counted nor unproven. Exit 0; 2 if
 the report does not meet the contract (the reason on stderr: the caller
 records the reviewer UNAVAILABLE, R5-R9); 1 on a usage error.
 
@@ -140,11 +142,14 @@ def parse_report(text: str, lens: str, floor: str = DEFAULT_FLOOR) -> dict:
     if not isinstance(raw, list):
         raise ReportError(f"the {PREFIX} line is not a JSON array")
     findings = [_finding(item, lens, n) for n, item in enumerate(raw, 1)]
-    counts = {s.lower(): sum(f["severity"] == s for f in findings) for s in SEVERITIES}
+    # A closure record (resolves set) says a prior finding is fixed; only the
+    # findings still open are counted, or a clean re-review would block.
+    open_findings = [f for f in findings if f["resolves"] is None]
+    counts = {s.lower(): sum(f["severity"] == s for f in open_findings) for s in SEVERITIES}
     floor_rank = LEVELS.index(floor)
     # A finding with no level is "asserted", the bottom of the ladder.
     unproven = [
-        f["fingerprint"] for f in findings
+        f["fingerprint"] for f in open_findings
         if lens not in ADVISORY_LENSES and f["severity"] in BLOCKING
         and LEVELS.index(f.get("verification_level", "asserted")) < floor_rank
     ]

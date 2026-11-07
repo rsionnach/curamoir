@@ -202,7 +202,10 @@ ESCALATED). Append this paragraph to every reviewer's brief, verbatim, with
 
 `lib/r5_findings.py` validates each finding, computes its fingerprint (the
 first 16 hex of sha256 of lens, path and the normalised claim) and sets its
-status to `open`; a reviewer's own fingerprint or status is ignored.
+status to `open`; a reviewer's own fingerprint or status is ignored. A
+finding with `resolves` set records that a prior one is closed: it stays in
+the record but is not counted, so a clean re-review is clean whatever
+severity the reviewer gives its closure records.
 
 ## Advisory stage — excellence
 
