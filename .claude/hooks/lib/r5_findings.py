@@ -37,8 +37,13 @@ BLOCKING = ("CRITICAL", "IMPORTANT")
 # Excellence is advisory: it never blocks, so it has nothing to prove.
 ADVISORY_LENSES = ("excellence",)
 
-_SHA = re.compile(r"\b[0-9a-f]{7,40}\b")
-_NUMBER = re.compile(r"\b\d+\b")
+# Removed from a claim before it is fingerprinted, so a finding keeps its key
+# when the code it points at moves: line references (line 42, lines 4-9,
+# :42, :4-9, L42) and SHA-like tokens (7 to 40 hex characters with at least
+# one digit, so a word like "defaced" stays). Other numbers stay: "exits 2"
+# and "exits 4" are different claims.
+_LINE_REF = re.compile(r"\blines?\s+\d+(?:\s*[-\u2013]\s*\d+)?\b|:\d+(?:-\d+)?\b|\bl\d+\b")
+_SHA = re.compile(r"\b(?=[0-9a-f]*\d)[0-9a-f]{7,40}\b")
 _SPACE = re.compile(r"\s+")
 
 
@@ -47,10 +52,10 @@ class ReportError(Exception):
 
 
 def normalise_claim(claim: str) -> str:
-    """Lower-case, SHAs and line numbers removed, whitespace collapsed."""
+    """Lower-case, line references and SHAs removed, whitespace collapsed."""
     text = claim.lower()
+    text = _LINE_REF.sub(" ", text)
     text = _SHA.sub(" ", text)
-    text = _NUMBER.sub(" ", text)
     return _SPACE.sub(" ", text).strip()
 
 

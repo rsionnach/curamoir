@@ -1036,13 +1036,31 @@ def parse(findings, lens="correctness", floor="script", prose="Review.\n"):
     return r5f.parse_report(prose + "R5-FINDINGS: " + json.dumps(findings) + "\n", lens, floor)
 
 
-def test_the_fingerprint_ignores_case_whitespace_line_numbers_and_shas():
+def test_the_fingerprint_ignores_case_whitespace_line_references_and_shas():
     a = r5f.fingerprint("correctness", "src/a.py", "Off by one at line 41 in abc1234def")
     b = r5f.fingerprint("correctness", "src/a.py", "off  by one at line 7 in 9f8e7d6c5b")
     assert a == b and len(a) == 16 and int(a, 16) >= 0
-    assert a != r5f.fingerprint("clarity", "src/a.py", "off by one at line in")
-    assert a != r5f.fingerprint("correctness", "src/b.py", "off by one at line in")
-    assert a != r5f.fingerprint("correctness", "src/a.py", "off by two at line in")
+    assert a != r5f.fingerprint("clarity", "src/a.py", "off by one at line 41 in abc1234def")
+    assert a != r5f.fingerprint("correctness", "src/b.py", "off by one at line 41 in abc1234def")
+    assert a != r5f.fingerprint("correctness", "src/a.py", "off by two at line 41 in abc1234def")
+
+
+@pytest.mark.parametrize("one, other", [
+    ("see lines 4-9 here", "see lines 12 - 30 here"),
+    ("broken at a.py:42", "broken at a.py:7-9"),
+    ("see L42 for it", "see L7 for it"),
+])
+def test_every_line_reference_form_is_removed(one, other):
+    assert r5f.normalise_claim(one) == r5f.normalise_claim(other)
+
+
+@pytest.mark.parametrize("one, other", [
+    ("exits 2 instead of 3", "exits 4 instead of 1"),
+    ("retries 10 times", "retries 3 times"),
+    ("the defaced cache is stale", "the cache is stale"),
+])
+def test_other_numbers_and_hex_letter_words_keep_claims_apart(one, other):
+    assert r5f.normalise_claim(one) != r5f.normalise_claim(other)
 
 
 def test_the_parser_sets_fingerprint_and_status_itself_and_counts_by_severity():
@@ -1182,6 +1200,29 @@ def test_an_unproven_blocking_finding_is_listed_in_its_round_and_still_blocks(r5
     run(STATE, "findings", "correctness", lowered, root=r5root,
         env_extra={"R5_VERIFICATION_FLOOR": "cited"})
     assert state(r5root)["rounds"][-1]["lenses"]["correctness"]["unproven"] == []
+
+
+def test_a_fix_with_non_object_statuses_is_refused_before_anything_is_written(r5root):
+    start(r5root)
+    run(STATE, "pass", "correctness", root=r5root)
+    hook(r5root)
+    run(STATE, "findings", "correctness", report("correctness", 0, 1, 0), root=r5root)
+    before = state_file(r5root).read_text()
+    bad = run(STATE, "fixed", "correctness", '{"statuses": ["x"]}', root=r5root)
+    assert bad.returncode == 1 and "statuses must be an object" in bad.stderr
+    assert state_file(r5root).read_text() == before
+
+
+def test_a_checkout_with_no_commit_records_null_shas_not_the_word_head(r5root):
+    subprocess.run(["git", "init", "-q", str(r5root)], check=True)
+    start(r5root)
+    run(STATE, "pass", "correctness", root=r5root)
+    hook(r5root)
+    assert state(r5root)["rounds"][0]["head"] is None
+    run(STATE, "finish", "failed", root=r5root)
+    archived = json.loads(next((r5root / ".claude").glob("r5-state-b1-failed-*.json")).read_text())
+    assert archived["verdict"]["state"] == "ESCALATED"
+    assert archived["verdict"]["tree_sha"] is None and archived["verdict"]["head_sha"] is None
 
 
 def test_abandoning_a_reviewer_closes_its_round_entry(r5root):

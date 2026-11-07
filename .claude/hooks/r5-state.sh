@@ -254,8 +254,13 @@ _blocking_pass() {  # _blocking_pass <name>: one of the four blocking passes
 
 # ---- findings and rounds (cm-70j) ----
 _lens_of() { [[ "$1" == edge-cases ]] && printf 'edge_cases' || printf '%s' "$1"; }
-# A git fact about R5_ROOT, or "" where it is not a git checkout.
-_git() { git -C "$R5_ROOT" "$@" 2>/dev/null || true; }
+# A git fact about R5_ROOT, or "" where it is not a git checkout (or has no
+# commit yet): git's output is kept only when git succeeds, since a failed
+# `rev-parse HEAD` still prints the word HEAD.
+_git() {
+  local out
+  if out="$(git -C "$R5_ROOT" "$@" 2>/dev/null)"; then printf '%s' "$out"; fi
+}
 # _parse <lens> <report-file>: sets PARSED to the parsed report (JSON) and
 # returns 0, or returns 2 with the reason in PARSE_ERROR (the report does not
 # meet the contract). Runs in this shell, not a subshell, so both survive.
@@ -389,7 +394,7 @@ case "$CMD" in
                 mode: (if $again then "verify" else "review" end),
                 tokens_in: null, tokens_out: null, duration_s: null,
                 status: "in_flight", skip_rule: null, findings: []}}}])' \
-          --arg p "$pass" --arg l "$(_lens_of "$pass")" --arg h "$(_git rev-parse HEAD)" --arg t "$(_now)"
+          --arg p "$pass" --arg l "$(_lens_of "$pass")" --arg h "$(_git rev-parse --verify -q HEAD)" --arg t "$(_now)"
         exit 0 ;;
       reviewer_dispatched)
         if [[ "$pass" == excellence ]]; then report="advisory"; else report="findings $pass"; fi
@@ -426,6 +431,9 @@ case "$CMD" in
   fixed)
     _need_owned_run; _arg pass pass "${2:-}"; extra="${3:-}"; [[ -n "$extra" ]] || extra='{}'
     _object "$extra"
+    # Checked before anything is written: the fix round merges statuses.
+    jq -en --argjson x "$extra" '($x.statuses // {}) | type == "object"' >/dev/null \
+      || _bad_arg "fixed: statuses must be an object of fingerprint: status"
     _need_current "$pass"
     # A fix may follow the findings, a fix agent, an earlier fix (a round
     # in several steps), or a dirty tree (provenance's restore).
@@ -441,7 +449,7 @@ case "$CMD" in
           head: $h, started: $t, ended: $t, lenses: {},
           fix: {commit: null, statuses: ($x.statuses // {}), scope_breaches: []}}]
         end' --argjson x "$extra" --arg t "$(_now)" \
-      --argjson h "$(jq -n --arg h "$(_git rev-parse HEAD)" 'if $h == "" then null else $h end')"
+      --argjson h "$(jq -n --arg h "$(_git rev-parse --verify -q HEAD)" 'if $h == "" then null else $h end')"
     ;;
   tree-dirty)
     _need_owned_run; _arg pass pass "${2:-}"
@@ -530,8 +538,8 @@ case "$CMD" in
             {state: (if $s == "completed" then "CLEAN" else "ESCALATED" end),
              tree_sha: (if $tree == "" then null else $tree end),
              head_sha: (if $head == "" then null else $head end), at: $t} end)' \
-        --arg s "$status" --arg tree "$(_git rev-parse 'HEAD^{tree}')" \
-        --arg head "$(_git rev-parse HEAD)" --arg t "$(_now)"
+        --arg s "$status" --arg tree "$(_git rev-parse --verify -q 'HEAD^{tree}')" \
+        --arg head "$(_git rev-parse --verify -q HEAD)" --arg t "$(_now)"
       _event "supervisor_$status"
     fi
     _archive
