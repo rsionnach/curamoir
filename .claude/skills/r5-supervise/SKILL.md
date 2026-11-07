@@ -195,21 +195,30 @@ ESCALATED). Append this paragraph to every reviewer's brief, verbatim, with
 > "<the lines or test output that show it>", "fix": "<one sentence: what
 > would resolve it>" or null, "verification_level": "asserted" | "cited" |
 > "walked" | "script" | "reproduced"}` (the ladder: how far you proved it,
-> from asserted, unsupported, to reproduced). On a re-review, add
-> `"resolves": "<fingerprint>"` to a finding that confirms a prior one
-> closed, or `"regression": true` to one a fix introduced. No findings:
+> from asserted, unsupported, to reproduced). On a re-review, account for
+> every prior open finding listed in your brief: either close it with a
+> closure record, `"resolves": "<its fingerprint>"`, whose path, lines and
+> evidence are the resolving lines (the code that now makes it hold), whose
+> claim says why the prior finding no longer holds, and whose severity is
+> the original's; or re-raise it by copying the prior record verbatim (path,
+> claim) with no `resolves`. A finding you do not mention stays open. Mark a
+> finding a fix introduced `"regression": true`. No findings:
 > `R5-FINDINGS: []`. Nothing may follow that line.
 
 `lib/r5_findings.py` validates each finding, computes its fingerprint (the
 first 16 hex of sha256 of lens, path and the normalised claim) and sets its
-status to `open`; a reviewer's own fingerprint or status is ignored. A
-finding with `resolves` set records that a prior one is closed: it stays in
-the record but is not counted, so a clean re-review is clean whatever
-severity the reviewer gives its closure records. That holds only when the
-closure checks out: `resolves` must name a finding of this pass that an
-earlier report left open, and the finding must not also be a
-`regression`. Any other closure claim is counted as open and listed
-in the event's `invalid_closures`.
+status to `open`; a reviewer's own fingerprint or status is ignored.
+Closures follow section 10 as settled on 2026-11-07: a record with
+`resolves` is a closure, never counted whatever its severity; it is valid
+only if `resolves` names a fingerprint in the previous round's open set and
+it has evidence; an invalid closure is ignored and logged `closure_rejected`
+(the helper prints each one: read them before `done`), and a second closure
+of the same fingerprint is dropped. The round's open set is the previous one
+minus valid closures plus new and re-raised findings; a prior finding the
+report does not mention is carried forward, `unaccounted`: silence never
+closes. A report that closes every prior finding with empty evidence is
+UNAVAILABLE. For a re-review's brief, `r5-state.sh open-set <pass>` prints
+the previous round's open findings with their fingerprints; include them.
 
 ## Advisory stage — excellence
 

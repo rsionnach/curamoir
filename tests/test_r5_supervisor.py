@@ -759,7 +759,12 @@ def test_a_pass_is_done_only_when_it_is_current_and_its_last_findings_are_clean(
     assert other.returncode == 2 and "clarity is not the current pass" in other.stderr
     run(STATE, "request", "correctness", "2", root=r5root)
     hook(r5root)
-    run(STATE, "findings", "correctness", report("correctness", 0, 0, 3), "PASS", root=r5root)
+    # Silence never closes: the re-review closes the IMPORTANT explicitly.
+    fp = state(r5root)["audit_trail"][-3]["open_set"][0]["fingerprint"]
+    closure = {**finding("correctness", "IMPORTANT", 99), "resolves": fp}
+    run(STATE, "findings", "correctness",
+        report("correctness", findings=[closure] + [finding("correctness", "MINOR", 20 + n) for n in range(3)]),
+        "PASS", root=r5root)
     assert run(STATE, "done", "correctness", "1", '{"name": "clarity", "fix_iterations": 9}',
                root=r5root).returncode == 0
     assert state(r5root)["current_pass"] is None
@@ -1111,40 +1116,164 @@ def test_each_field_of_the_schema_is_checked(change, reason):
         parse([{**finding("correctness", "IMPORTANT"), **change}])
 
 
-def test_a_closure_of_an_open_finding_is_kept_but_neither_counted_nor_unproven():
-    closed = finding("correctness", "IMPORTANT", 1, level="asserted", resolves="72014ca5759239ec")
-    still_open = finding("correctness", "MINOR", 2)
-    out = r5f.parse_report("R5-FINDINGS: " + json.dumps([closed, still_open]), "correctness",
-                           open_fingerprints=("72014ca5759239ec",))
-    assert len(out["findings"]) == 2 and out["findings"][0]["resolves"] == "72014ca5759239ec"
-    assert out["counts"] == {"critical": 0, "important": 0, "minor": 1}
-    assert out["unproven"] == [] and out["invalid_closures"] == []
+def prior(*findings_):
+    """A previous round's open set: parsed findings, as r5-state.sh hands them on."""
+    return parse(list(findings_))["open_set"]
 
 
-@pytest.mark.parametrize("resolves, regression, prior", [
-    ("anything", False, ()),                     # names no prior finding at all
-    ("72014ca5759239ec", False, ()),             # a fingerprint, but not one left open
-    ("72014ca5759239ec", True, ("72014ca5759239ec",)),  # a closure that is also a regression
+def reparse(records, prior_open, lens="correctness"):
+    return r5f.parse_report("R5-FINDINGS: " + json.dumps(records), lens, prior_open=prior_open)
+
+
+def test_a_valid_closure_is_never_counted_whatever_its_severity():
+    earlier = prior(finding("correctness", "CRITICAL", 1))
+    fp = earlier[0]["fingerprint"]
+    closure = {**finding("correctness", "CRITICAL", 50, level="asserted"), "resolves": fp,
+               "claim": "the bound is now checked before the slice", "evidence": "src/m50.py:50-52"}
+    out = reparse([closure], earlier)
+    assert out["counts"] == {"critical": 0, "important": 0, "minor": 0}
+    assert out["closures"] == [fp] and out["open_set"] == [] and out["unproven"] == []
+    assert out["closure_rejected"] == [] and len(out["findings"]) == 1
+
+
+def test_the_closure_s_own_fingerprint_is_never_compared_to_resolves():
+    earlier = prior(finding("correctness", "IMPORTANT", 1))
+    closure = {**finding("correctness", "IMPORTANT", 2), "claim": "fixed by the new guard",
+               "resolves": earlier[0]["fingerprint"]}
+    out = reparse([closure], earlier)
+    assert out["findings"][0]["fingerprint"] != earlier[0]["fingerprint"]
+    assert out["closures"] == [earlier[0]["fingerprint"]]
+
+
+@pytest.mark.parametrize("make, reason", [
+    (lambda fp: {"resolves": "0123456789abcdef"}, "names no fingerprint"),
+    (lambda fp: {"resolves": fp, "evidence": ""}, "needs evidence"),
+    (lambda fp: {"resolves": fp, "evidence": "   "}, "needs evidence"),
 ])
-def test_a_closure_that_does_not_check_out_is_counted_as_open(resolves, regression, prior):
-    raw = finding("correctness", "CRITICAL", 1, level="reproduced", resolves=resolves,
-                  regression=regression)
-    out = r5f.parse_report("R5-FINDINGS: " + json.dumps([raw]), "correctness",
-                           open_fingerprints=prior)
-    assert out["counts"]["critical"] == 1
-    assert out["invalid_closures"] == [out["findings"][0]["fingerprint"]]
+def test_an_invalid_closure_is_ignored_and_rejected_with_its_reason(make, reason):
+    earlier = prior(finding("correctness", "IMPORTANT", 1), finding("correctness", "MINOR", 2))
+    closure = {**finding("correctness", "CRITICAL", 30), **make(earlier[0]["fingerprint"])}
+    out = reparse([closure], earlier)
+    assert len(out["closure_rejected"]) == 1 and reason in out["closure_rejected"][0]["reason"]
+    assert out["closures"] == []
+    # Ignored: not counted itself, and the prior finding it named stays open.
+    assert out["counts"] == {"critical": 0, "important": 1, "minor": 1}
 
 
-def test_a_first_review_cannot_hide_a_critical_behind_a_made_up_closure(r5root):
+def test_a_second_closure_of_the_same_fingerprint_is_dropped():
+    earlier = prior(finding("correctness", "IMPORTANT", 1))
+    fp = earlier[0]["fingerprint"]
+    one = {**finding("correctness", "IMPORTANT", 40), "resolves": fp}
+    two = {**finding("correctness", "CRITICAL", 41), "resolves": fp}
+    out = reparse([one, two], earlier)
+    assert out["closures"] == [fp]
+    assert [r["reason"] for r in out["closure_rejected"]] == ["a second closure of the same fingerprint is dropped"]
+    assert out["counts"]["critical"] == 0
+
+
+def test_silence_never_closes_an_unmentioned_finding_is_carried_and_unaccounted():
+    earlier = prior(finding("correctness", "IMPORTANT", 1), finding("correctness", "MINOR", 2))
+    out = reparse([], earlier)
+    assert out["counts"] == {"critical": 0, "important": 1, "minor": 1}
+    assert sorted(out["unaccounted"]) == sorted(f["fingerprint"] for f in earlier)
+    assert all(f["unaccounted"] for f in out["open_set"])
+
+
+def test_a_verbatim_re_raise_stays_open_once_and_is_accounted_for():
+    earlier = prior(finding("correctness", "IMPORTANT", 1))
+    again = finding("correctness", "IMPORTANT", 1)  # the prior record copied verbatim
+    out = reparse([again, again], earlier)
+    assert out["counts"]["important"] == 1 and out["unaccounted"] == []
+    assert [f["fingerprint"] for f in out["open_set"]] == [earlier[0]["fingerprint"]]
+    assert "unaccounted" not in out["open_set"][0]
+
+
+def test_a_re_raise_beside_a_closure_of_the_same_finding_keeps_it_open():
+    earlier = prior(finding("correctness", "IMPORTANT", 1))
+    fp = earlier[0]["fingerprint"]
+    out = reparse([{**finding("correctness", "MINOR", 9), "resolves": fp},
+                   finding("correctness", "IMPORTANT", 1)], earlier)
+    assert out["closures"] == [] and out["counts"]["important"] == 1
+
+
+def test_closing_every_prior_finding_with_empty_evidence_is_a_contract_failure():
+    earlier = prior(finding("correctness", "IMPORTANT", 1), finding("correctness", "MINOR", 2))
+    closures = [{**finding("correctness", "MINOR", 60 + n), "resolves": f["fingerprint"], "evidence": ""}
+                for n, f in enumerate(earlier)]
+    with pytest.raises(r5f.ReportError, match="empty evidence"):
+        reparse(closures, earlier)
+
+
+def test_a_closure_without_an_evidence_key_is_rejected_not_malformed():
+    earlier = prior(finding("correctness", "IMPORTANT", 1), finding("correctness", "MINOR", 2))
+    closure = {**finding("correctness", "MINOR", 70), "resolves": earlier[0]["fingerprint"]}
+    del closure["evidence"]
+    out = reparse([closure], earlier)
+    assert "needs evidence" in out["closure_rejected"][0]["reason"]
+
+
+def test_a_first_review_s_closure_is_rejected_ignored_and_logged(r5root):
     start(r5root)
     run(STATE, "pass", "correctness", root=r5root)
     hook(r5root)
     forged = finding("correctness", "CRITICAL", level="reproduced", resolves="anything", regression=True)
-    run(STATE, "findings", "correctness", report("correctness", findings=[forged]), root=r5root)
-    recorded = state(r5root)["audit_trail"][-1]
-    assert recorded["counts"]["critical"] == 1 and len(recorded["invalid_closures"]) == 1
-    refused = run(STATE, "done", "correctness", "0", root=r5root)
+    out = run(STATE, "findings", "correctness", report("correctness", findings=[forged]), root=r5root)
+    assert out.returncode == 0 and "closure(s) rejected and ignored" in out.stderr
+    trail = state(r5root)["audit_trail"]
+    rejected = [e for e in trail if e["event"] == "closure_rejected"]
+    assert len(rejected) == 1 and rejected[0]["resolves"] == "anything"
+    assert "names no fingerprint" in rejected[0]["reason"]
+    received = [e for e in trail if e["event"] == "findings_received"][-1]
+    assert received["counts"]["critical"] == 0 and received["open_set"] == []
+
+
+def test_a_re_review_closes_what_the_last_round_left_open_and_carries_the_rest(r5root):
+    start(r5root)
+    run(STATE, "pass", "correctness", root=r5root)
+    hook(r5root)
+    run(STATE, "findings", "correctness", report("correctness", 0, 2, 1), root=r5root)
+    first = state(r5root)["audit_trail"][-1]["open_set"]
+    open_set = json.loads(run(STATE, "open-set", "correctness", root=r5root).stdout)
+    assert [f["fingerprint"] for f in open_set] == [f["fingerprint"] for f in first]
+    hook(r5root)
+    run(STATE, "fixed", "correctness", root=r5root)
+    run(STATE, "request", "correctness", "2", root=r5root)
+    hook(r5root)
+    closure = {**finding("correctness", "IMPORTANT", 80), "resolves": first[0]["fingerprint"],
+               "claim": "the guard now covers it"}
+    run(STATE, "findings", "correctness", report("correctness", findings=[closure]), root=r5root)
+    second = state(r5root)["audit_trail"][-1]
+    assert second["closures"] == [first[0]["fingerprint"]]
+    assert sorted(second["unaccounted"]) == sorted(f["fingerprint"] for f in first[1:])
+    assert second["counts"] == {"critical": 0, "important": 1, "minor": 1}
+    entry = state(r5root)["rounds"][-1]["lenses"]["correctness"]
+    assert entry["closures"] == [first[0]["fingerprint"]] and entry["unaccounted"] == 2
+    refused = run(STATE, "done", "correctness", "1", root=r5root)
     assert refused.returncode == 2 and "its findings are not clean" in refused.stderr
+
+
+def test_a_report_that_closes_everything_without_evidence_is_unavailable(r5root):
+    start(r5root)
+    run(STATE, "pass", "correctness", root=r5root)
+    hook(r5root)
+    run(STATE, "findings", "correctness", report("correctness", 0, 1, 0), root=r5root)
+    fp = state(r5root)["audit_trail"][-1]["open_set"][0]["fingerprint"]
+    hook(r5root)
+    run(STATE, "fixed", "correctness", root=r5root)
+    run(STATE, "request", "correctness", "2", root=r5root)
+    hook(r5root)
+    empty = {**finding("correctness", "IMPORTANT", 90), "resolves": fp, "evidence": ""}
+    refused = run(STATE, "findings", "correctness", report("correctness", findings=[empty]), root=r5root)
+    assert refused.returncode == 2 and "empty evidence" in refused.stderr
+    assert events(r5root)[-1] == "reviewer_unavailable"
+
+
+def test_a_bad_prior_open_set_file_is_a_usage_error(tmp_path):
+    bad = tmp_path / "prior.json"
+    bad.write_text('{"not": "a list"}')
+    good = tmp_path / "r.md"
+    good.write_text("R5-FINDINGS: []\n")
+    assert r5f.main(["parse", "correctness", str(good), "--prior", str(bad)]) == 1
 
 
 def test_a_re_review_whose_closures_carry_their_old_severity_can_be_done(r5root):

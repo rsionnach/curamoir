@@ -72,6 +72,8 @@
 #   open-window                    (r5-lock.sh) "<owner> <bead> <reviewer|
 #                                  fix-agent>" while one is in flight;
 #                                  exit 2 on a malformed file
+#   open-set <pass>                print the open set the pass's previous
+#                                  report left, for a re-review's brief
 #   show                           print the state file
 #
 # Findings and rounds (cm-70j). The contract is section 10 of
@@ -80,7 +82,12 @@
 # lib/r5_findings.py validates, fingerprints and counts (the orchestrator
 # never types counts). The file records them in rounds[] (one review or
 # verify round per reviewer dispatch, one fix round per fix) and, at `finish`,
-# a verdict keyed to `git rev-parse HEAD^{tree}`. A blocking finding whose
+# a verdict keyed to `git rev-parse HEAD^{tree}`. Each findings event carries
+# the round's open set; a re-review's closures (`resolves`) are accounted
+# against the previous one as section 10 settles it: never counted, valid
+# only for a fingerprint left open and with evidence, an invalid one ignored
+# and logged closure_rejected, and silence never closes (an unmentioned
+# prior finding is carried forward, unaccounted). A blocking finding whose
 # verification_level is below the floor (R5_VERIFICATION_FLOOR, default
 # script) is listed in its round's `unproven`; it still blocks. meta-json
 # fills the round's model, tier, tokens_in, tokens_out and duration_s when
@@ -261,23 +268,38 @@ _git() {
   local out
   if out="$(git -C "$R5_ROOT" "$@" 2>/dev/null)"; then printf '%s' "$out"; fi
 }
+# The open set this pass's previous report left (section 10): the open_set
+# of its last findings event, or, for an event written before open sets were
+# recorded, that event's non-closure findings. [] on a first review.
+_prior_open() {  # _prior_open <pass>
+  jq -c --arg p "$1" '[.audit_trail[]
+      | select((.event == "findings_received" or .event == "advisory_pass_completed") and .pass == $p)]
+    | last | if . == null then [] else (.open_set // [.findings[]? | select(.resolves == null)]) end' "$STATE"
+}
 # _parse <lens> <report-file> <pass>: sets PARSED to the parsed report (JSON) and
 # returns 0, or returns 2 with the reason in PARSE_ERROR (the report does not
 # meet the contract). Runs in this shell, not a subshell, so both survive.
 _parse() {
-  local errf="$STATE.parse.$$" rc=0 open
-  # The fingerprints a closure in this report may name: the open (non-closure)
-  # findings of this pass's earlier reports.
-  open="$(jq -r --arg p "$3" '[.audit_trail[]
-      | select((.event == "findings_received" or .event == "advisory_pass_completed") and .pass == $p)
-      | .findings[]? | select(.resolves == null) | .fingerprint] | unique | join(",")' "$STATE")"
-  PARSED="$(python3 "$_DIR/lib/r5_findings.py" parse "$1" "$2" --floor "$FLOOR" --open "$open" 2>"$errf")" || rc=$?
-  PARSE_ERROR="$(sed 's/^r5_findings: //' "$errf" 2>/dev/null || true)"; rm -f "$errf"
+  local errf="$STATE.parse.$$" priorf="$STATE.prior.$$" rc=0
+  _prior_open "$3" > "$priorf" || { rm -f "$priorf"; exit 3; }
+  PARSED="$(python3 "$_DIR/lib/r5_findings.py" parse "$1" "$2" --floor "$FLOOR" --prior "$priorf" 2>"$errf")" || rc=$?
+  PARSE_ERROR="$(sed 's/^r5_findings: //' "$errf" 2>/dev/null || true)"; rm -f "$errf" "$priorf"
   case "$rc" in
     0) return 0 ;;
     2) return 2 ;;
     *) _bad_arg "$CMD: ${PARSE_ERROR:-cannot parse $2}" ;;
   esac
+}
+# _log_rejected <pass>: one closure_rejected event per rejected closure in
+# PARSED, and a note on stderr for the orchestrator.
+_log_rejected() {
+  local n
+  n="$(jq -r '.closure_rejected | length' <<< "$PARSED")"
+  (( n > 0 )) || return 0
+  _apply '.audit_trail += [$r.closure_rejected[] | {ts: $t, event: "closure_rejected", pass: $p} + .]' \
+    --argjson r "$PARSED" --arg p "$1" --arg t "$(_now)"
+  printf 'r5-state: %s closure(s) rejected and ignored (closure_rejected in the trail):\n' "$n" >&2
+  jq -r '.closure_rejected[] | "  resolves \(.resolves): \(.reason)"' <<< "$PARSED" >&2
 }
 # _close_round <lens> <status> [parsed-json] [meta-json]: complete the open
 # round's entry for <lens>.
@@ -290,7 +312,8 @@ _close_round() {
         .rounds[$n - 1] |= (.ended = $t
           | .lenses[$l] = ((.lenses[$l] // {}) + ($m | with_entries(select(.key
               | IN("model", "tier", "tokens_in", "tokens_out", "duration_s"))))
-              + {status: $s, findings: $p.findings, unproven: $p.unproven}))
+              + {status: $s, findings: $p.findings, unproven: $p.unproven,
+                 closures: ($p.closures // []), unaccounted: (($p.unaccounted // []) | length)}))
       end' --arg l "$1" --arg s "$2" --argjson p "$parsed" --argjson m "$meta" --arg t "$(_now)"
 }
 # _unavailable <pass>: the reviewer's report did not meet the contract (R5-R9).
@@ -424,8 +447,9 @@ case "$CMD" in
     (( rc == 0 )) || _unavailable "$pass"
     _close_round "$(_lens_of "$pass")" ok "$PARSED" "$meta"
     _event findings_received --arg p "$pass" --argjson r "$PARSED" --arg v "${4:-}" \
-      '{pass:$p, counts:$r.counts, unproven:$r.unproven, invalid_closures:$r.invalid_closures,
-        findings:$r.findings, verdict:$v}'
+      '{pass:$p, counts:$r.counts, unproven:$r.unproven, findings:$r.findings,
+        open_set:$r.open_set, closures:$r.closures, unaccounted:$r.unaccounted, verdict:$v}'
+    _log_rejected "$pass"
     ;;
   abandon)
     _need_owned_run; _arg pass pass "${2:-}"; _arg reason reason "${3:-}"
@@ -521,9 +545,11 @@ case "$CMD" in
     (( rc == 0 )) || _unavailable excellence
     _close_round excellence ok "$PARSED" "$meta"
     rec="$(jq -cn --arg t "$(_now)" --argjson r "$PARSED" --arg v "$verdict" \
-      '{ts:$t, event:"advisory_pass_completed", pass:"excellence", counts:$r.counts, findings:$r.findings, verdict:$v}')"
+      '{ts:$t, event:"advisory_pass_completed", pass:"excellence", counts:$r.counts, findings:$r.findings,
+        open_set:$r.open_set, closures:$r.closures, unaccounted:$r.unaccounted, verdict:$v}')"
     _apply '.advisory_results += [$r] | .current_pass = null' --argjson r "$rec"
     _append "$rec"
+    _log_rejected excellence
     ;;
   finish)
     _need_owned_run; _arg status status "${2:-}"
@@ -564,6 +590,12 @@ case "$CMD" in
     else exit 0; fi
     printf '%s %s %s\n' "$(jq -r 'if (.session_id // "") == "" then "-" else .session_id end' "$STATE")" \
       "$(jq -r '.target_bead' "$STATE")" "$event"
+    ;;
+  open-set)
+    # The findings this pass's previous report left open (with fingerprints),
+    # for a re-review's brief. Read-only.
+    _need_run; _arg pass pass "${2:-}"
+    _prior_open "$pass"
     ;;
   show) _need_run; cat "$STATE" ;;
   *) _r5_usage "${BASH_SOURCE[0]}" ;;
