@@ -1188,6 +1188,17 @@ def test_a_verbatim_re_raise_stays_open_once_and_is_accounted_for():
     assert "unaccounted" not in out["open_set"][0]
 
 
+def test_a_re_raise_cannot_lower_a_finding_s_severity():
+    earlier = prior(finding("correctness", "IMPORTANT", 1))
+    lowered = {**finding("correctness", "IMPORTANT", 1), "severity": "MINOR"}
+    out = reparse([lowered], earlier)
+    assert out["counts"] == {"critical": 0, "important": 1, "minor": 0}
+    assert out["downgrades_refused"] == [earlier[0]["fingerprint"]]
+    raised = {**finding("correctness", "IMPORTANT", 1), "severity": "CRITICAL"}
+    up = reparse([raised], earlier)
+    assert up["counts"]["critical"] == 1 and up["downgrades_refused"] == []
+
+
 def test_a_re_raise_beside_a_closure_of_the_same_finding_keeps_it_open():
     earlier = prior(finding("correctness", "IMPORTANT", 1))
     fp = earlier[0]["fingerprint"]

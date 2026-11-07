@@ -216,7 +216,9 @@ it has evidence; an invalid closure is ignored and logged `closure_rejected`
 of the same fingerprint is dropped. The round's open set is the previous one
 minus valid closures plus new and re-raised findings; a prior finding the
 report does not mention is carried forward, `unaccounted`: silence never
-closes. A report that closes every prior finding with empty evidence is
+closes. A re-raise keeps the more severe of its own and the prior severity
+(the event lists any it held up in `downgrades_refused`): severity goes down
+only through a valid closure. A report that closes every prior finding with empty evidence is
 UNAVAILABLE. For a re-review's brief, `r5-state.sh open-set <pass>` prints
 the previous round's open findings with their fingerprints; include them.
 

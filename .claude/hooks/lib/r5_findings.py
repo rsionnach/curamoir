@@ -32,8 +32,11 @@ finding is the prior record copied verbatim (path and claim, so the same
 fingerprint) with no ``resolves``. The open set is the previous open set
 minus valid closures, plus new and re-raised findings; a prior open finding
 with neither a closure nor a re-raise is carried forward unchanged, tagged
-``unaccounted``: silence never closes. A report that closes every prior
-finding with empty evidence is a contract failure (R5-R25).
+``unaccounted``: silence never closes. A re-raise keeps the more severe of
+its own and the prior finding's severity (``downgrades_refused`` lists those
+it held up): severity goes down only through a valid closure. A report that
+closes every prior finding with empty evidence is a contract failure
+(R5-R25).
 
 Exit 0; 2 if the report does not meet the contract (the reason on stderr:
 the caller records the reviewer UNAVAILABLE, R5-R9); 1 on a usage error.
@@ -194,11 +197,19 @@ def parse_report(text: str, lens: str, floor: str = DEFAULT_FLOOR,
             for fp in prior):
         raise ReportError("every prior finding is closed with empty evidence")
 
-    current, seen = [], set()
+    current, seen, held = [], set(), []
     for record in (r for r in records if r["resolves"] is None):
-        if record["fingerprint"] not in seen:  # one entry per fingerprint
-            seen.add(record["fingerprint"])
-            current.append(record)
+        fp = record["fingerprint"]
+        if fp in seen:  # one entry per fingerprint
+            continue
+        seen.add(fp)
+        before = prior.get(fp)
+        if before and SEVERITIES.index(before["severity"]) < SEVERITIES.index(record["severity"]):
+            # A re-raise may not lower a finding's severity: only a valid
+            # closure, with evidence, takes a finding down.
+            record = {**record, "severity": before["severity"]}
+            held.append(fp)
+        current.append(record)
     # A re-raise of a closed fingerprint keeps it open.
     closed = [fp for fp in closed if fp not in seen]
     carried = [{**f, "unaccounted": True} for fp, f in prior.items()
@@ -215,7 +226,8 @@ def parse_report(text: str, lens: str, floor: str = DEFAULT_FLOOR,
     ]
     return {"findings": records, "open_set": open_set, "counts": counts,
             "unproven": unproven, "closures": closed, "closure_rejected": rejected,
-            "unaccounted": [f["fingerprint"] for f in carried]}
+            "unaccounted": [f["fingerprint"] for f in carried],
+            "downgrades_refused": held}
 
 
 def main(argv: list) -> int:

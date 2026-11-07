@@ -448,7 +448,8 @@ case "$CMD" in
     _close_round "$(_lens_of "$pass")" ok "$PARSED" "$meta"
     _event findings_received --arg p "$pass" --argjson r "$PARSED" --arg v "${4:-}" \
       '{pass:$p, counts:$r.counts, unproven:$r.unproven, findings:$r.findings,
-        open_set:$r.open_set, closures:$r.closures, unaccounted:$r.unaccounted, verdict:$v}'
+        open_set:$r.open_set, closures:$r.closures, unaccounted:$r.unaccounted,
+        downgrades_refused:$r.downgrades_refused, verdict:$v}'
     _log_rejected "$pass"
     ;;
   abandon)
