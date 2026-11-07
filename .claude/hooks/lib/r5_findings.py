@@ -7,13 +7,20 @@ for word with NthLayer: a reviewer's LAST non-empty output line is
 for `findings` and `advisory`; it never trusts counts typed by the
 orchestrator.
 
-    r5_findings.py parse <lens> <report-file> [--floor <level>]
+    r5_findings.py parse <lens> <report-file> [--floor <level>] [--open <fp,fp,...>]
 
 prints one JSON object on stdout: ``findings`` (the normalised array),
-``counts`` (critical, important, minor) and ``unproven`` (fingerprints of
-blocking findings whose verification_level is below the floor). A finding
-with ``resolves`` set is a re-review's record that a prior finding is
-closed: it stays in ``findings`` but is neither counted nor unproven. Exit 0; 2 if
+``counts`` (critical, important, minor), ``unproven`` (fingerprints of
+blocking findings whose verification_level is below the floor) and
+``invalid_closures``. A finding with ``resolves`` set is a re-review's
+record that a prior finding is closed, and it is left out of the counts only
+when the claim checks out: ``resolves`` names one of the ``--open``
+fingerprints (this lens's earlier findings, which the caller reads from the
+trail) and the finding is not also a ``regression``. A closure that restates
+the original claim has that finding's fingerprint, which is how it should
+be. Any other closure claim is counted as an open finding and
+listed in ``invalid_closures``: a reviewer cannot hide a defect by calling it
+a closure. Exit 0; 2 if
 the report does not meet the contract (the reason on stderr: the caller
 records the reviewer UNAVAILABLE, R5-R9); 1 on a usage error.
 
@@ -126,8 +133,10 @@ def _finding(raw: Any, lens: str, n: int) -> dict:
     return finding
 
 
-def parse_report(text: str, lens: str, floor: str = DEFAULT_FLOOR) -> dict:
-    """The report's findings, their counts and the unproven fingerprints."""
+def parse_report(text: str, lens: str, floor: str = DEFAULT_FLOOR,
+                 open_fingerprints: tuple = ()) -> dict:
+    """The report's findings, their counts, the unproven fingerprints and the
+    closure claims that did not check out."""
     if lens not in LENSES:
         raise ValueError(f"unknown lens {lens!r}")
     if floor not in LEVELS:
@@ -142,9 +151,17 @@ def parse_report(text: str, lens: str, floor: str = DEFAULT_FLOOR) -> dict:
     if not isinstance(raw, list):
         raise ReportError(f"the {PREFIX} line is not a JSON array")
     findings = [_finding(item, lens, n) for n, item in enumerate(raw, 1)]
-    # A closure record (resolves set) says a prior finding is fixed; only the
-    # findings still open are counted, or a clean re-review would block.
-    open_findings = [f for f in findings if f["resolves"] is None]
+    # A closure record says a prior finding is fixed, so it is not counted (a
+    # clean re-review must be clean); but only a closure of a finding that was
+    # open for this lens. Anything else that claims to be one counts as open.
+    prior = set(open_fingerprints)
+
+    def closes(f: dict) -> bool:
+        return f["resolves"] in prior and not f["regression"]
+
+    invalid = [f["fingerprint"] for f in findings
+               if f["resolves"] is not None and not closes(f)]
+    open_findings = [f for f in findings if not closes(f)]
     counts = {s.lower(): sum(f["severity"] == s for f in open_findings) for s in SEVERITIES}
     floor_rank = LEVELS.index(floor)
     # A finding with no level is "asserted", the bottom of the ladder.
@@ -153,21 +170,26 @@ def parse_report(text: str, lens: str, floor: str = DEFAULT_FLOOR) -> dict:
         if lens not in ADVISORY_LENSES and f["severity"] in BLOCKING
         and LEVELS.index(f.get("verification_level", "asserted")) < floor_rank
     ]
-    return {"findings": findings, "counts": counts, "unproven": unproven}
+    return {"findings": findings, "counts": counts, "unproven": unproven,
+            "invalid_closures": invalid}
 
 
 def main(argv: list) -> int:
     args = list(argv)
-    floor = DEFAULT_FLOOR
-    if "--floor" in args:
-        i = args.index("--floor")
-        if i + 1 >= len(args):
-            print("r5_findings: --floor needs a level", file=sys.stderr)
-            return 1
-        floor = args[i + 1]
-        del args[i:i + 2]
+    options = {"--floor": DEFAULT_FLOOR, "--open": ""}
+    for flag in options:
+        if flag in args:
+            i = args.index(flag)
+            if i + 1 >= len(args):
+                print(f"r5_findings: {flag} needs a value", file=sys.stderr)
+                return 1
+            options[flag] = args[i + 1]
+            del args[i:i + 2]
+    floor = options["--floor"]
+    open_fingerprints = tuple(fp for fp in options["--open"].split(",") if fp)
     if len(args) != 3 or args[0] != "parse":
-        print("usage: r5_findings.py parse <lens> <report-file> [--floor <level>]", file=sys.stderr)
+        print("usage: r5_findings.py parse <lens> <report-file> [--floor <level>] "
+              "[--open <fp,fp,...>]", file=sys.stderr)
         return 1
     _, lens, path = args
     try:
@@ -177,7 +199,7 @@ def main(argv: list) -> int:
         print(f"r5_findings: cannot read {path}: {exc}", file=sys.stderr)
         return 1
     try:
-        result = parse_report(text, lens, floor)
+        result = parse_report(text, lens, floor, open_fingerprints)
     except ValueError as exc:  # an unknown lens or floor: the caller's mistake
         print(f"r5_findings: {exc}", file=sys.stderr)
         return 1

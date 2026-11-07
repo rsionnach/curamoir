@@ -205,7 +205,11 @@ first 16 hex of sha256 of lens, path and the normalised claim) and sets its
 status to `open`; a reviewer's own fingerprint or status is ignored. A
 finding with `resolves` set records that a prior one is closed: it stays in
 the record but is not counted, so a clean re-review is clean whatever
-severity the reviewer gives its closure records.
+severity the reviewer gives its closure records. That holds only when the
+closure checks out: `resolves` must name a finding of this pass that an
+earlier report left open, and the finding must not also be a
+`regression`. Any other closure claim is counted as open and listed
+in the event's `invalid_closures`.
 
 ## Advisory stage — excellence
 

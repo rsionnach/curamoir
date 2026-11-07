@@ -1111,13 +1111,40 @@ def test_each_field_of_the_schema_is_checked(change, reason):
         parse([{**finding("correctness", "IMPORTANT"), **change}])
 
 
-def test_a_closure_record_is_kept_but_neither_counted_nor_unproven():
+def test_a_closure_of_an_open_finding_is_kept_but_neither_counted_nor_unproven():
     closed = finding("correctness", "IMPORTANT", 1, level="asserted", resolves="72014ca5759239ec")
     still_open = finding("correctness", "MINOR", 2)
-    out = parse([closed, still_open])
+    out = r5f.parse_report("R5-FINDINGS: " + json.dumps([closed, still_open]), "correctness",
+                           open_fingerprints=("72014ca5759239ec",))
     assert len(out["findings"]) == 2 and out["findings"][0]["resolves"] == "72014ca5759239ec"
     assert out["counts"] == {"critical": 0, "important": 0, "minor": 1}
-    assert out["unproven"] == []
+    assert out["unproven"] == [] and out["invalid_closures"] == []
+
+
+@pytest.mark.parametrize("resolves, regression, prior", [
+    ("anything", False, ()),                     # names no prior finding at all
+    ("72014ca5759239ec", False, ()),             # a fingerprint, but not one left open
+    ("72014ca5759239ec", True, ("72014ca5759239ec",)),  # a closure that is also a regression
+])
+def test_a_closure_that_does_not_check_out_is_counted_as_open(resolves, regression, prior):
+    raw = finding("correctness", "CRITICAL", 1, level="reproduced", resolves=resolves,
+                  regression=regression)
+    out = r5f.parse_report("R5-FINDINGS: " + json.dumps([raw]), "correctness",
+                           open_fingerprints=prior)
+    assert out["counts"]["critical"] == 1
+    assert out["invalid_closures"] == [out["findings"][0]["fingerprint"]]
+
+
+def test_a_first_review_cannot_hide_a_critical_behind_a_made_up_closure(r5root):
+    start(r5root)
+    run(STATE, "pass", "correctness", root=r5root)
+    hook(r5root)
+    forged = finding("correctness", "CRITICAL", level="reproduced", resolves="anything", regression=True)
+    run(STATE, "findings", "correctness", report("correctness", findings=[forged]), root=r5root)
+    recorded = state(r5root)["audit_trail"][-1]
+    assert recorded["counts"]["critical"] == 1 and len(recorded["invalid_closures"]) == 1
+    refused = run(STATE, "done", "correctness", "0", root=r5root)
+    assert refused.returncode == 2 and "its findings are not clean" in refused.stderr
 
 
 def test_a_re_review_whose_closures_carry_their_old_severity_can_be_done(r5root):

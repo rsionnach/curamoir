@@ -261,12 +261,17 @@ _git() {
   local out
   if out="$(git -C "$R5_ROOT" "$@" 2>/dev/null)"; then printf '%s' "$out"; fi
 }
-# _parse <lens> <report-file>: sets PARSED to the parsed report (JSON) and
+# _parse <lens> <report-file> <pass>: sets PARSED to the parsed report (JSON) and
 # returns 0, or returns 2 with the reason in PARSE_ERROR (the report does not
 # meet the contract). Runs in this shell, not a subshell, so both survive.
 _parse() {
-  local errf="$STATE.parse.$$" rc=0
-  PARSED="$(python3 "$_DIR/lib/r5_findings.py" parse "$1" "$2" --floor "$FLOOR" 2>"$errf")" || rc=$?
+  local errf="$STATE.parse.$$" rc=0 open
+  # The fingerprints a closure in this report may name: the open (non-closure)
+  # findings of this pass's earlier reports.
+  open="$(jq -r --arg p "$3" '[.audit_trail[]
+      | select((.event == "findings_received" or .event == "advisory_pass_completed") and .pass == $p)
+      | .findings[]? | select(.resolves == null) | .fingerprint] | unique | join(",")' "$STATE")"
+  PARSED="$(python3 "$_DIR/lib/r5_findings.py" parse "$1" "$2" --floor "$FLOOR" --open "$open" 2>"$errf")" || rc=$?
   PARSE_ERROR="$(sed 's/^r5_findings: //' "$errf" 2>/dev/null || true)"; rm -f "$errf"
   case "$rc" in
     0) return 0 ;;
@@ -415,11 +420,12 @@ case "$CMD" in
     _blocking_pass "$pass"
     _need_current "$pass"
     _need_in_flight
-    rc=0; _parse "$(_lens_of "$pass")" "$report" || rc=$?
+    rc=0; _parse "$(_lens_of "$pass")" "$report" "$pass" || rc=$?
     (( rc == 0 )) || _unavailable "$pass"
     _close_round "$(_lens_of "$pass")" ok "$PARSED" "$meta"
     _event findings_received --arg p "$pass" --argjson r "$PARSED" --arg v "${4:-}" \
-      '{pass:$p, counts:$r.counts, unproven:$r.unproven, findings:$r.findings, verdict:$v}'
+      '{pass:$p, counts:$r.counts, unproven:$r.unproven, invalid_closures:$r.invalid_closures,
+        findings:$r.findings, verdict:$v}'
     ;;
   abandon)
     _need_owned_run; _arg pass pass "${2:-}"; _arg reason reason "${3:-}"
@@ -511,7 +517,7 @@ case "$CMD" in
     _object "$meta"
     _need_current excellence
     _need_in_flight
-    rc=0; _parse excellence "$report" || rc=$?
+    rc=0; _parse excellence "$report" excellence || rc=$?
     (( rc == 0 )) || _unavailable excellence
     _close_round excellence ok "$PARSED" "$meta"
     rec="$(jq -cn --arg t "$(_now)" --argjson r "$PARSED" --arg v "$verdict" \
