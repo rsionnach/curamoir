@@ -72,6 +72,7 @@ ADVISORY_LENSES = ("excellence",)
 _LINE_REF = re.compile(r"\blines?\s+\d+(?:\s*[-\u2013]\s*\d+)?\b|:\d+(?:-\d+)?\b|\bl\d+\b")
 _SHA = re.compile(r"\b(?=[0-9a-f]*\d)[0-9a-f]{7,40}\b")
 _SPACE = re.compile(r"\s+")
+_FINGERPRINT = re.compile(r"[0-9a-f]{16}")
 
 
 class ReportError(Exception):
@@ -89,7 +90,11 @@ def normalise_claim(claim: str) -> str:
 def fingerprint(lens: str, path: str, claim: str) -> str:
     """First 16 hex of sha256(lens|path|normalised claim)."""
     key = f"{lens}|{path}|{normalise_claim(claim)}"
-    return hashlib.sha256(key.encode("utf-8")).hexdigest()[:16]
+    try:
+        data = key.encode("utf-8")
+    except UnicodeEncodeError:  # a lone surrogate, from a JSON \ud800 escape
+        raise ReportError("a path or claim is not valid Unicode") from None
+    return hashlib.sha256(data).hexdigest()[:16]
 
 
 def _last_line(text: str) -> str:
@@ -124,8 +129,10 @@ def _finding(raw: Any, lens: str, n: int) -> dict:
         raise ReportError(f"finding {n}: start_line and end_line must be integers with 1 <= start <= end")
     claim = _text(raw, "claim", n)
     resolves = raw.get("resolves")
-    if resolves is not None and not isinstance(resolves, str):
-        raise ReportError(f"finding {n}: resolves must be a fingerprint or null")
+    # A value that cannot be a fingerprint at all is a malformed record, not a
+    # closure to reject: it would otherwise turn a finding into an ignored one.
+    if resolves is not None and not (isinstance(resolves, str) and _FINGERPRINT.fullmatch(resolves)):
+        raise ReportError(f"finding {n}: resolves must be a 16-hex fingerprint or null")
     evidence = raw.get("evidence")
     if resolves is None:
         evidence = _text(raw, "evidence", n)
@@ -198,12 +205,16 @@ def parse_report(text: str, lens: str, floor: str = DEFAULT_FLOOR,
             for fp in prior):
         raise ReportError("every prior finding is closed with empty evidence")
 
-    current, seen, downgrades_refused = [], set(), []
+    # One entry per fingerprint: the same claim at two sites (or two claims
+    # differing only in a line reference) share one; the most severe wins.
+    by_fp = {}
     for record in (r for r in records if r["resolves"] is None):
-        fp = record["fingerprint"]
-        if fp in seen:  # one entry per fingerprint
-            continue
-        seen.add(fp)
+        kept = by_fp.get(record["fingerprint"])
+        if kept is None or SEVERITIES.index(record["severity"]) < SEVERITIES.index(kept["severity"]):
+            by_fp[record["fingerprint"]] = record
+    seen = set(by_fp)
+    current, downgrades_refused = [], []
+    for fp, record in by_fp.items():
         before = prior.get(fp)
         if before and SEVERITIES.index(before["severity"]) < SEVERITIES.index(record["severity"]):
             # A re-raise may not lower a finding's severity: only a valid
@@ -265,7 +276,10 @@ def main(argv: list) -> int:
     try:
         with open(path, encoding="utf-8") as handle:
             text = handle.read()
-    except (OSError, UnicodeDecodeError) as exc:
+    except UnicodeDecodeError:  # the report itself fails the contract
+        print(f"r5_findings: the report {path} is not valid UTF-8", file=sys.stderr)
+        return 2
+    except OSError as exc:
         print(f"r5_findings: cannot read {path}: {exc}", file=sys.stderr)
         return 1
     try:

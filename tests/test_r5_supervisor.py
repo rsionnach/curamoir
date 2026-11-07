@@ -1232,12 +1232,12 @@ def test_a_first_review_s_closure_is_rejected_ignored_and_logged(r5root):
     start(r5root)
     run(STATE, "pass", "correctness", root=r5root)
     hook(r5root)
-    forged = finding("correctness", "CRITICAL", level="reproduced", resolves="anything", regression=True)
+    forged = finding("correctness", "CRITICAL", level="reproduced", resolves="0123456789abcdef", regression=True)
     out = run(STATE, "findings", "correctness", report("correctness", findings=[forged]), root=r5root)
     assert out.returncode == 0 and "closure(s) rejected and ignored" in out.stderr
     trail = state(r5root)["audit_trail"]
     rejected = [e for e in trail if e["event"] == "closure_rejected"]
-    assert len(rejected) == 1 and rejected[0]["resolves"] == "anything"
+    assert len(rejected) == 1 and rejected[0]["resolves"] == "0123456789abcdef"
     assert "names no fingerprint" in rejected[0]["reason"]
     received = [e for e in trail if e["event"] == "findings_received"][-1]
     assert received["counts"]["critical"] == 0 and received["open_set"] == []
@@ -1282,6 +1282,77 @@ def test_a_report_that_closes_everything_without_evidence_is_unavailable(r5root)
     refused = run(STATE, "findings", "correctness", report("correctness", findings=[empty]), root=r5root)
     assert refused.returncode == 2 and "empty evidence" in refused.stderr
     assert events(r5root)[-1] == "reviewer_unavailable"
+
+
+def test_of_same_fingerprint_findings_in_one_report_the_most_severe_is_kept():
+    minor = {**finding("correctness", "MINOR", 10), "path": "a.sh", "claim": "jq failure ignored at line 10"}
+    critical = {**finding("correctness", "CRITICAL", 50), "path": "a.sh", "claim": "jq failure ignored at line 50"}
+    out = parse([minor, critical])
+    assert minor["path"] == critical["path"]
+    assert out["counts"] == {"critical": 1, "important": 0, "minor": 0}
+    assert len(out["open_set"]) == 1 and out["open_set"][0]["severity"] == "CRITICAL"
+
+
+@pytest.mark.parametrize("resolves", ["", "anything", "0123456789ABCDEF", "0123456789abcde"])
+def test_a_resolves_that_cannot_be_a_fingerprint_is_a_contract_failure(resolves):
+    with pytest.raises(r5f.ReportError, match="16-hex fingerprint"):
+        parse([{**finding("correctness", "CRITICAL"), "resolves": resolves}])
+
+
+def test_a_claim_that_is_not_valid_unicode_is_a_contract_failure():
+    line = 'R5-FINDINGS: [' + json.dumps(finding("correctness", "MINOR"))[:-1] + ', "claim": "bad \\ud800 char"}]'
+    with pytest.raises(r5f.ReportError, match="not valid Unicode"):
+        r5f.parse_report(line, "correctness")
+
+
+def test_a_report_that_is_not_utf8_exits_2_and_records_the_reviewer_unavailable(r5root, tmp_path):
+    bad = tmp_path / "latin1.md"
+    bad.write_bytes(b"caf\xe9\nR5-FINDINGS: []\n")
+    assert r5f.main(["parse", "correctness", str(bad)]) == 2
+    assert r5f.main(["parse", "correctness", str(tmp_path)]) == 1  # a directory: unreadable
+    start(r5root)
+    run(STATE, "pass", "correctness", root=r5root)
+    hook(r5root)
+    refused = run(STATE, "findings", "correctness", str(bad), root=r5root)
+    assert refused.returncode == 2 and "not valid UTF-8" in refused.stderr
+    assert events(r5root)[-1] == "reviewer_unavailable"
+
+
+def test_a_report_larger_than_the_argument_limit_is_recorded(r5root):
+    start(r5root)
+    run(STATE, "pass", "correctness", root=r5root)
+    hook(r5root)
+    many = [{**finding("correctness", "MINOR", n), "evidence": "x" * 400} for n in range(1, 1600)]
+    path = report("correctness", findings=many)
+    assert Path(path).stat().st_size > 650_000
+    recorded = run(STATE, "findings", "correctness", path, root=r5root)
+    assert recorded.returncode == 0, recorded.stderr
+    assert state(r5root)["audit_trail"][-1]["counts"]["minor"] == len(many)
+
+
+def test_open_set_refuses_a_pass_it_does_not_know(r5root):
+    start(r5root)
+    for name in ("edge_cases", "bogus"):
+        bad = run(STATE, "open-set", name, root=r5root)
+        assert bad.returncode == 1 and "must be one of" in bad.stderr and "edge-cases" in bad.stderr
+    assert run(STATE, "open-set", "edge-cases", root=r5root).stdout.strip() == "[]"
+
+
+def test_findings_after_a_lost_round_append_reconstruct_a_round_not_the_fix_round(r5root):
+    start(r5root)
+    run(STATE, "pass", "correctness", root=r5root)
+    hook(r5root)
+    run(STATE, "findings", "correctness", report("correctness", 0, 1, 0), root=r5root)
+    hook(r5root)
+    run(STATE, "fixed", "correctness", root=r5root)
+    run(STATE, "request", "correctness", "2", root=r5root)
+    hook(r5root)
+    edit_state(r5root, lambda d: d.update(rounds=d["rounds"][:-1]))  # as if claim crashed mid-way
+    assert state(r5root)["rounds"][-1]["kind"] == "fix"
+    run(STATE, "findings", "correctness", report("correctness"), root=r5root)
+    rounds = state(r5root)["rounds"]
+    assert rounds[-2]["kind"] == "fix" and "correctness" not in rounds[-2]["lenses"]
+    assert rounds[-1]["reconstructed"] is True and rounds[-1]["lenses"]["correctness"]["status"] == "ok"
 
 
 def test_a_bad_prior_open_set_file_is_a_usage_error(tmp_path):

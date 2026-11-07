@@ -278,13 +278,18 @@ _prior_open() {  # _prior_open <pass>
       | select((.event == "findings_received" or .event == "advisory_pass_completed") and .pass == $p)]
     | last | if . == null then [] else (.open_set // [.findings[]? | select(.resolves == null)]) end' "$STATE"
 }
-# _parse <lens> <report-file> <pass>: sets PARSED to the parsed report (JSON) and
-# returns 0, or returns 2 with the reason in PARSE_ERROR (the report does not
-# meet the contract). Runs in this shell, not a subshell, so both survive.
+# _parse <lens> <report-file> <pass>: writes the parsed report (JSON) to the
+# file PARSED_FILE and returns 0, or returns 2 with the reason in PARSE_ERROR
+# (the report does not meet the contract). Runs in this shell, not a
+# subshell, so both survive. The parsed report reaches jq as a file, never as
+# a command-line argument, so a large report cannot hit the argument limit.
 _parse() {
   local errf="$STATE.parse.$$" priorf="$STATE.prior.$$" rc=0
+  PARSED_FILE="$STATE.parsed.$$"
+  trap 'rm -f "$STATE.parsed.$$" "$STATE.event.$$" "$STATE.empty.$$"' EXIT
   _prior_open "$3" > "$priorf" || { rm -f "$priorf"; exit 3; }
-  PARSED="$(python3 "$_DIR/lib/r5_findings.py" parse "$1" "$2" --floor "$FLOOR" --prior "$priorf" 2>"$errf")" || rc=$?
+  python3 "$_DIR/lib/r5_findings.py" parse "$1" "$2" --floor "$FLOOR" --prior "$priorf" \
+    > "$PARSED_FILE" 2>"$errf" || rc=$?
   PARSE_ERROR="$(sed 's/^r5_findings: //' "$errf" 2>/dev/null || true)"; rm -f "$errf" "$priorf"
   case "$rc" in
     0) return 0 ;;
@@ -293,31 +298,44 @@ _parse() {
   esac
 }
 # _log_rejected <pass>: one closure_rejected event per rejected closure in
-# PARSED, and a note on stderr for the orchestrator.
+# the parsed report, and a note on stderr for the orchestrator.
 _log_rejected() {
   local n
-  n="$(jq -r '.closure_rejected | length' <<< "$PARSED")"
+  n="$(jq -r '.closure_rejected | length' "$PARSED_FILE")"
   (( n > 0 )) || return 0
-  _apply '.audit_trail += [$r.closure_rejected[] | {ts: $t, event: "closure_rejected", pass: $p} + .]' \
-    --argjson r "$PARSED" --arg p "$1" --arg t "$(_now)"
+  _apply '.audit_trail += [$pf[0].closure_rejected[] | {ts: $t, event: "closure_rejected", pass: $p} + .]' \
+    --slurpfile pf "$PARSED_FILE" --arg p "$1" --arg t "$(_now)"
   printf 'r5-state: %s closure(s) rejected and ignored (closure_rejected in the trail):\n' "$n" >&2
-  jq -r '.closure_rejected[] | "  resolves \(.resolves): \(.reason)"' <<< "$PARSED" >&2
+  jq -r '.closure_rejected[] | "  resolves \(.resolves): \(.reason)"' "$PARSED_FILE" >&2
 }
-# _close_round <lens> <status> [parsed-json] [meta-json]: complete the open
-# round's entry for <lens>.
+# _close_round <lens> <status> [parsed-file] [meta-json]: complete the round
+# entry this lens's dispatch opened (the last one still in_flight for it).
+# If that entry is missing (a crash in claim between reviewer_dispatched and
+# the round's append) a round is reconstructed for it, rather than writing
+# into an unrelated (fix) round.
 _close_round() {
-  local parsed="${3:-}" meta="${4:-}"
-  [[ -n "$parsed" ]] || parsed='{"findings":[],"unproven":[]}'
+  local parsed="${3:-}" meta="${4:-}" empty=""
+  if [[ -z "$parsed" ]]; then
+    empty="$STATE.empty.$$"
+    printf '%s' '{"findings":[],"unproven":[]}' > "$empty"
+    parsed="$empty"
+  fi
   [[ -n "$meta" ]] || meta='{}'
-  _apply '(.rounds | length) as $n
-    | if $n == 0 then . else
-        .rounds[$n - 1] |= (.ended = $t
-          | .lenses[$l] = ((.lenses[$l] // {}) + ($m | with_entries(select(.key
-              | IN("model", "tier", "tokens_in", "tokens_out", "duration_s"))))
-              + {status: $s, findings: $p.findings, unproven: $p.unproven,
-                 closures: ($p.closures // []),
-                 unaccounted_count: (($p.unaccounted // []) | length)}))
-      end' --arg l "$1" --arg s "$2" --argjson p "$parsed" --argjson m "$meta" --arg t "$(_now)"
+  _apply '$pf[0] as $p | (.rounds // []) as $r
+    | ([range(0; $r | length) as $k | select($r[$k].lenses[$l].status == "in_flight") | $k] | last) as $found
+    | (if $found == null then
+         .rounds = $r + [{n: ($r | length) + 1, kind: "review", head: null, started: null,
+                          ended: null, reconstructed: true, lenses: {($l): {status: "in_flight"}}}]
+       else . end)
+    | ($found // ((.rounds | length) - 1)) as $i
+    | .rounds[$i] |= (.ended = $t
+        | .lenses[$l] = ((.lenses[$l] // {}) + ($m | with_entries(select(.key
+            | IN("model", "tier", "tokens_in", "tokens_out", "duration_s"))))
+            + {status: $s, findings: $p.findings, unproven: $p.unproven,
+               closures: ($p.closures // []),
+               unaccounted_count: (($p.unaccounted // []) | length)}))' \
+    --arg l "$1" --arg s "$2" --slurpfile pf "$parsed" --argjson m "$meta" --arg t "$(_now)"
+  [[ -z "$empty" ]] || rm -f "$empty"
 }
 # _unavailable <pass>: the reviewer's report did not meet the contract (R5-R9).
 _unavailable() {
@@ -448,11 +466,13 @@ case "$CMD" in
     _need_in_flight
     rc=0; _parse "$(_lens_of "$pass")" "$report" "$pass" || rc=$?
     (( rc == 0 )) || _unavailable "$pass"
-    _close_round "$(_lens_of "$pass")" ok "$PARSED" "$meta"
-    _event findings_received --arg p "$pass" --argjson r "$PARSED" --arg v "${4:-}" \
-      '{pass:$p, counts:$r.counts, unproven:$r.unproven, findings:$r.findings,
-        open_set:$r.open_set, closures:$r.closures, unaccounted:$r.unaccounted,
-        downgrades_refused:$r.downgrades_refused, verdict:$v}'
+    _close_round "$(_lens_of "$pass")" ok "$PARSED_FILE" "$meta"
+    evf="$STATE.event.$$"
+    jq -cn --slurpfile pf "$PARSED_FILE" --arg t "$(_now)" --arg p "$pass" --arg v "${4:-}" \
+      '$pf[0] as $r | {ts:$t, event:"findings_received", pass:$p, counts:$r.counts,
+        unproven:$r.unproven, findings:$r.findings, open_set:$r.open_set, closures:$r.closures,
+        unaccounted:$r.unaccounted, downgrades_refused:$r.downgrades_refused, verdict:$v}' > "$evf"
+    _apply '.audit_trail += $e' --slurpfile e "$evf"
     _log_rejected "$pass"
     ;;
   abandon)
@@ -547,13 +567,13 @@ case "$CMD" in
     _need_in_flight
     rc=0; _parse excellence "$report" excellence || rc=$?
     (( rc == 0 )) || _unavailable excellence
-    _close_round excellence ok "$PARSED" "$meta"
-    rec="$(jq -cn --arg t "$(_now)" --argjson r "$PARSED" --arg v "$verdict" \
-      '{ts:$t, event:"advisory_pass_completed", pass:"excellence", counts:$r.counts, unproven:$r.unproven,
-        findings:$r.findings, open_set:$r.open_set, closures:$r.closures, unaccounted:$r.unaccounted,
-        downgrades_refused:$r.downgrades_refused, verdict:$v}')"
-    _apply '.advisory_results += [$r] | .current_pass = null' --argjson r "$rec"
-    _append "$rec"
+    _close_round excellence ok "$PARSED_FILE" "$meta"
+    evf="$STATE.event.$$"
+    jq -cn --slurpfile pf "$PARSED_FILE" --arg t "$(_now)" --arg v "$verdict" \
+      '$pf[0] as $r | {ts:$t, event:"advisory_pass_completed", pass:"excellence", counts:$r.counts,
+        unproven:$r.unproven, findings:$r.findings, open_set:$r.open_set, closures:$r.closures,
+        unaccounted:$r.unaccounted, downgrades_refused:$r.downgrades_refused, verdict:$v}' > "$evf"
+    _apply '.advisory_results += $r | .current_pass = null | .audit_trail += $r' --slurpfile r "$evf"
     _log_rejected excellence
     ;;
   finish)
@@ -600,6 +620,8 @@ case "$CMD" in
     # The findings this pass's previous report left open (with fingerprints),
     # for a re-review's brief. Read-only.
     _need_run; _arg pass pass "${2:-}"
+    jq -e --arg p "$pass" '(.passes + .advisory_passes) | index($p)' "$STATE" >/dev/null \
+      || _bad_arg "open-set: <pass> must be one of $(jq -r '(.passes + .advisory_passes) | join(", ")' "$STATE")"
     _prior_open "$pass"
     ;;
   show) _need_run; cat "$STATE" ;;
