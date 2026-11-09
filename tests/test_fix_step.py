@@ -1007,11 +1007,21 @@ TOKEN_SHAPED = "ghp_0123456789abcdefghijklmnopqrstuvwxyz"
 AWKWARD_COMMAND = f"pytest -q tests\n`echo` {TOKEN_SHAPED}"
 
 
+def test_the_detected_test_commands_still_get_rules_past_the_redaction_check():
+    """The gate's detected commands (green_gate) and their `&&` join, which
+    redaction leaves unchanged, are still offered and named."""
+    assert bash_rules("python3 -m pytest -q  &&npm test") == (
+        "Bash(python3 -m pytest -q *)", "Bash(npm test *)")
+    assert offered_test_command("pytest tests/test_token.py") == "pytest tests/test_token.py"
+
+
 @pytest.mark.parametrize("command", [
     f"pytest -q --token {TOKEN_SHAPED}",
     "pytest tests/test_token.py::test_refresh_works",
     "pytest --secret-store=memoryonly",
-], ids=["secret-shaped-word", "secret-like-name-in-a-node-id", "secret-like-flag"])
+    "pytest --token=abc&&defghijk",
+], ids=["secret-shaped-word", "secret-like-name-in-a-node-id", "secret-like-flag",
+        "secret-split-at-and"])
 def test_a_command_redaction_would_change_gets_no_bash_and_is_not_shown(
         tmp_path, sandboxed, command):
     """The prompt shows the command redacted (pr_markdown.code_span), so a
