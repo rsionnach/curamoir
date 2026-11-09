@@ -333,7 +333,7 @@ _close_round() {
        else . end)
     | ($found // ((.rounds | length) - 1)) as $i
     | .rounds[$i] |= (.ended = $t
-        | .lenses[$l] = ((.lenses[$l] // {}) + ($m | with_entries(select(.key
+        | .lenses[$l] = (((.lenses[$l] // {}) | del(.abandoned)) + ($m | with_entries(select(.key
             | IN("model", "tier", "tokens_in", "tokens_out", "duration_s"))))
             # An abandoned dispatch is UNAVAILABLE in the section 10 enum
             # (ok | UNAVAILABLE | skipped), flagged so the reason survives.

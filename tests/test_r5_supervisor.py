@@ -1846,6 +1846,19 @@ def test_a_second_excellence_read_carries_the_first_read_s_open_set(r5root):
     assert second["counts"] == {"critical": 0, "important": 0, "minor": 1}
 
 
+def test_findings_retried_onto_an_abandoned_round_drop_the_abandoned_flag(r5root):
+    start(r5root)
+    run(STATE, "pass", "correctness", root=r5root)
+    hook(r5root)
+    run(STATE, "abandon", "correctness", "stalled", root=r5root)
+    # As if abandon died after closing the round, before its event.
+    edit_state(r5root, lambda d: d.update(audit_trail=d["audit_trail"][:-1]))
+    assert run(STATE, "findings", "correctness", report("correctness"), root=r5root).returncode == 0
+    rounds = state(r5root)["rounds"]
+    assert len(rounds) == 1 and rounds[0]["lenses"]["correctness"]["status"] == "ok"
+    assert "abandoned" not in rounds[0]["lenses"]["correctness"]
+
+
 def test_a_second_excellence_read_is_a_verify_round(r5root):
     start(r5root)
     for name in ("correctness", "clarity", "edge-cases", "provenance"):
