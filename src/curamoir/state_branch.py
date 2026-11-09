@@ -358,13 +358,17 @@ def _run_lines(repo):
 MAX_LEDGER_BYTES = 64 * 1024 * 1024
 
 #: How a directory on the ledger's path is opened: never through a link.
-#: O_CLOEXEC as git_guard opens its own (no descriptor leaks into the git
-#: processes the push runs).
-_DIRECTORY_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+#: The same flags, under the same name, as git_guard's own walk
+#: (git_guard._NO_FOLLOW_DIRECTORY); O_CLOEXEC so no descriptor leaks into
+#: the git processes the push runs.
+_NO_FOLLOW_DIRECTORY = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
 #: How the ledger itself is opened: never through a link, and without
 #: waiting (a FIFO swapped in after the check would otherwise block the
 #: open until a writer came) or taking a terminal as the controlling one.
 _FILE_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_NOCTTY | os.O_CLOEXEC
+
+#: How much of the ledger one read takes.
+_READ_CHUNK = 1 << 16
 
 _NOT_A_DIRECTORY = "a directory in the work tree, so the ledger under it is not read"
 _NOT_A_FILE = "a regular file in the work tree, so it is not read"
@@ -390,6 +394,9 @@ def _work_tree_ledger(repo):
     descriptors = []
     try:
         try:
+            # The root is the caller's own checkout, trusted, so it is
+            # opened as given; only the components under it are walked
+            # without following a link.
             descriptors.append(os.open(repo, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC))
         except OSError as error:
             raise _Failed(f"the work tree could not be opened ({error})") from None
@@ -399,7 +406,7 @@ def _work_tree_ledger(repo):
             if not _check_component(descriptors[-1], name, component, stat.S_ISDIR,
                                     _NOT_A_DIRECTORY):
                 return None
-            descriptor = _open(descriptors[-1], name, component, _DIRECTORY_FLAGS)
+            descriptor = _open(descriptors[-1], name, component, _NO_FOLLOW_DIRECTORY)
             if descriptor is None:
                 return None
             descriptors.append(descriptor)
@@ -415,7 +422,7 @@ def _work_tree_ledger(repo):
         if status.st_size > MAX_LEDGER_BYTES:
             raise _Refused(_too_large())
         chunks, total = [], 0
-        while chunk := os.read(descriptor, min(1 << 16, MAX_LEDGER_BYTES + 1 - total)):
+        while chunk := os.read(descriptor, min(_READ_CHUNK, MAX_LEDGER_BYTES + 1 - total)):
             chunks.append(chunk)
             total += len(chunk)
             if total > MAX_LEDGER_BYTES:
@@ -429,6 +436,7 @@ def _work_tree_ledger(repo):
 
 
 def _too_large():
+    """The refusal for a ledger over MAX_LEDGER_BYTES."""
     return (f"{_LEDGER!r} is larger than {MAX_LEDGER_BYTES // (1024 * 1024)} MiB, which no "
             "run's ledger is, so it is not read")
 

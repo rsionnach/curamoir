@@ -364,14 +364,15 @@ def test_a_ledger_that_is_a_symlink_is_refused(world, tmp_path):
 
 # --- cm-2qp.13: no symbolic link at any component of the ledger's path --------------------
 
-def _lured(world, tmp_path, run_id="from-the-link"):
-    """A copy of the work tree's `.curamoir` outside the checkout whose
-    ledger also holds a valid line with `run_id`: what a link would make
-    the push read and publish if it were followed. Its path."""
+def _decoy_curamoir(world, tmp_path):
+    """A decoy copy of the work tree's `.curamoir` outside the checkout,
+    whose ledger also holds a valid line (run `from-the-link`): what a
+    link would make the push read and publish if it were followed. Its
+    path."""
     elsewhere = tmp_path / "elsewhere" / ".curamoir"
     ledger = elsewhere.joinpath(*LEDGER_PATH[1:])
     ledger.parent.mkdir(parents=True)
-    line = json.dumps({"job": "sweep", "kind": "job", "run_id": run_id,
+    line = json.dumps({"job": "sweep", "kind": "job", "run_id": "from-the-link",
                        "outcome": "success"}, sort_keys=True)
     ledger.write_bytes(world.ledger.read_bytes() + line.encode("utf-8") + b"\n")
     return elsewhere
@@ -385,7 +386,7 @@ def test_a_curamoir_directory_that_is_a_symlink_is_refused_and_not_followed(worl
     world.run("r1")
     first = state_branch.push_ledger(world.repo, BRANCH)
     world.fresh_run("r2")
-    target = _lured(world, tmp_path)
+    target = _decoy_curamoir(world, tmp_path)
     real = world.repo / ".curamoir"
     real.rename(tmp_path / "real-curamoir")
     real.symlink_to(target, target_is_directory=True)
@@ -401,7 +402,7 @@ def test_a_curamoir_directory_that_is_a_symlink_is_refused_and_not_followed(worl
 
 def test_a_state_directory_that_is_a_symlink_is_refused_and_not_followed(world, tmp_path):
     world.run("r1")
-    target = _lured(world, tmp_path) / "state"
+    target = _decoy_curamoir(world, tmp_path) / "state"
     state = world.ledger.parent
     state.rename(tmp_path / "real-state")
     state.symlink_to(target, target_is_directory=True)
@@ -454,11 +455,11 @@ def test_a_ledger_that_is_a_fifo_is_refused_without_blocking(world):
     assert world.origin_sha(BRANCH) is None
 
 
-@pytest.mark.parametrize("missing", ["state", "curamoir"])
+@pytest.mark.parametrize("missing", [".curamoir/state", ".curamoir"])
 def test_a_missing_directory_on_the_ledgers_path_has_nothing_to_push(world, missing):
     world.ledger.unlink()
     world.ledger.parent.rmdir()
-    if missing == "curamoir":
+    if missing == ".curamoir":
         (world.repo / ".curamoir").rmdir()
 
     pushed = state_branch.push_ledger(world.repo, BRANCH)
@@ -467,7 +468,8 @@ def test_a_missing_directory_on_the_ledgers_path_has_nothing_to_push(world, miss
     assert world.origin_sha(BRANCH) is None
 
 
-@pytest.mark.parametrize("linked", ["curamoir", "state", "ledger"])
+@pytest.mark.parametrize("linked", [".curamoir", ".curamoir/state",
+                                    ".curamoir/state/ledger.jsonl"])
 def test_a_link_swapped_in_after_the_check_is_refused_by_the_open_itself(world, tmp_path,
                                                                         monkeypatch,
                                                                         linked):
@@ -475,13 +477,13 @@ def test_a_link_swapped_in_after_the_check_is_refused_by_the_open_itself(world, 
     O_NOFOLLOW open. With the check blinded (a link swapped in between
     the two), the open still refuses and reads nothing through the link."""
     world.run("r1")
-    target = _lured(world, tmp_path)
-    path = {"curamoir": world.repo / ".curamoir", "state": world.ledger.parent,
-            "ledger": world.ledger}[linked]
-    pointed = {"curamoir": target, "state": target / "state",
-               "ledger": target.joinpath(*LEDGER_PATH[1:])}[linked]
+    target = _decoy_curamoir(world, tmp_path)
+    path = {".curamoir": world.repo / ".curamoir", ".curamoir/state": world.ledger.parent,
+            ".curamoir/state/ledger.jsonl": world.ledger}[linked]
+    pointed = {".curamoir": target, ".curamoir/state": target / "state",
+               ".curamoir/state/ledger.jsonl": target.joinpath(*LEDGER_PATH[1:])}[linked]
     path.rename(tmp_path / "moved-aside")
-    path.symlink_to(pointed, target_is_directory=linked != "ledger")
+    path.symlink_to(pointed, target_is_directory=not linked.endswith(".jsonl"))
     monkeypatch.setattr(state_branch, "_check_component", lambda *args: True)
 
     pushed = state_branch.push_ledger(world.repo, BRANCH)
@@ -634,7 +636,7 @@ def test_reading_the_ledger_leaves_no_descriptor_open(world, tmp_path):
     before = open_fds()
     for _ in range(3):
         assert state_branch._work_tree_ledger(str(world.repo)) is not None
-    target = _lured(world, tmp_path) / "state"
+    target = _decoy_curamoir(world, tmp_path) / "state"
     state = world.ledger.parent
     state.rename(tmp_path / "real-state")
     state.symlink_to(target, target_is_directory=True)
