@@ -61,6 +61,7 @@ from curamoir.idempotence import DUPLICATE_OPEN_PR, NO_WORK, WORK, parse_sweep_m
 from curamoir.job_run import FAILURE, SUCCESS
 from curamoir.ledger import parse_ledger_timestamp, repo_ledger
 from tests.os_sandbox_stand_in import Absent, Unconfined
+from tests.test_fix_step import NO_TESTS_SENTENCE
 from tests.test_lint import ALL_REGEX_RULES
 from tests.test_sweep_job import (  # noqa: F401  (isolated_home is an autouse fixture)
     GH_REPO,
@@ -612,8 +613,6 @@ def test_test_run_debris_in_the_clone_is_dropped_and_the_pr_still_opens(
     assert not set(TEST_RUN_DEBRIS) & set(line["test_gate"]["kept"])
     assert set(line["test_gate"]["kept"]) == set(FILES)  # the deletion of handlers_v2 too
 
-
-NO_TESTS_SENTENCE = "No test command is available to you, so do not run tests"
 
 
 def _no_command(sandbox):

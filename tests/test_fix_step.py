@@ -297,9 +297,10 @@ def fake_claude(tmp_path, edits=(), writes=None, sleep=0, exit_code=0, backgroun
                 commands=()):
     """A stand-in for `claude`: records argv, cwd, the GIT_* variables it
     was given, the HOSTED_TEST_ENVIRONMENT variables (as given, or None)
-    and the names of every variable it was given (`env`) to a file beside it, replaces text in files of the directory it is run
-    in (`edits`: (path, old, new) triples), writes new files there
-    (`writes`: path -> text), runs `commands` (shell commands, in order and
+    and the names of every variable it was given (`env`) to a file beside
+    it; replaces text in files of the directory it is run in (`edits`:
+    (path, old, new) triples), writes new files there (`writes`: path ->
+    text), runs `commands` (shell commands, in order and
     to completion, as the hosted agent's Bash would), optionally starts
     `background` (a shell command) as a grandchild, and prints a
     `--output-format json`-shaped result."""

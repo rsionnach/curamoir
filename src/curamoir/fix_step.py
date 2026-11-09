@@ -362,6 +362,10 @@ FIX_TOOLS = ("Read", "Grep", "Glob", "Edit")
 #: when those rules exist (cm-2qp.12).
 HOSTED_FIX_TOOLS = (*FIX_TOOLS, "Bash")
 
+#: A read-only toolset (tier1.SCAN_TOOLS is one): the only call on the
+#: hosted runner whose process keeps the run's tokens (_keeps_run_tokens).
+_READ_ONLY_TOOLS = frozenset({"Read", "Grep", "Glob"})
+
 #: The only tools a job's agent may be given (cm-xq9, user decision
 #: 2026-10-28: no release with known security gaps). None runs a command or
 #: code. The command guard (hooks/policy.py) is defence in depth, not a
@@ -432,8 +436,8 @@ _HOOK_IMPORT_TIMEOUT = 10
 #: tools the allow and deny rules name.
 _RULE_TOOLS = ("Read", "Edit")
 
-#: The hosted fix agent's one Bash allow rule (cm-2qp.12): the base's test
-#: command, alone or with arguments after it, so the agent can name the
+#: The template for the hosted fix agent's Bash allow rules, one per `&&`
+#: part (cm-2qp.12): the base's test command, alone or with arguments after it, so the agent can name the
 #: tests for the files it edited. "A `*` at the end, with a space before it,
 #: also matches the bare command", "The space before a trailing `*` is part
 #: of the rule" (`Bash(ls *)` matches `ls -la` and `ls`, not `lsof`), and
@@ -474,22 +478,24 @@ HOSTED_BASH_DENY_RULES = ("Bash(git *)",)
 _STRIPPED_WRAPPERS = frozenset({"timeout", "time", "nice", "nohup", "stdbuf", "command",
                                 "builtin", "noglob", "xargs"})
 
+#: The docs' "Exec wrappers" (`watch`, `setsid`, `ionice`, `flock`), which
+#: run the command after them but which a prefix rule "can't auto-approve"
+#: (same page, "Exec wrappers and `find` actions"): like _STRIPPED_WRAPPERS,
+#: a rule that starts with one would approve no call, so it is refused.
+_EXEC_WRAPPERS = frozenset({"watch", "setsid", "ionice", "flock"})
+
 #: First words whose rule would approve ANY command, since the words after
 #: them are a command or a script: a shell (sh, bash, zsh, dash, ksh, mksh,
 #: ash, fish, csh, tcsh, busybox), `eval`, `source` and `.`, `exec`, an
-#: elevator (sudo, su, doas), `env`. Beside them the docs' "Exec wrappers"
-#: (`watch`, `setsid`, `ionice`, `flock`), which run a command too but which
-#: a prefix rule "can't auto-approve" (same page, "Exec wrappers and `find`
-#: actions"), so a rule for one would approve nothing. Refused
-#: (bash_rules), so the test command never approves a shell. A general
-#: runner (make, npx, `uv run`, an interpreter) still approves any target,
-#: package or code it is given, as the test command itself runs repository
-#: code; the VM boundary accepts that (module docstring, "Limits on the
-#: hosted runner").
-_GENERAL_COMMAND_RUNNERS = frozenset({
+#: elevator (sudo, su, doas), `env`. Refused, so the test command never
+#: approves a shell. Not refused, though its rule approves any target,
+#: package or code it is given: a command that runs a project's own code
+#: (make, npx, `uv run`, an interpreter), as the test command itself does;
+#: the VM boundary accepts that (module docstring, "Limits on the hosted
+#: runner").
+_ANY_COMMAND_FIRST_WORDS = frozenset({
     "sh", "bash", "zsh", "dash", "ksh", "mksh", "ash", "fish", "csh", "tcsh", "busybox",
-    "eval", "source", ".", "exec", "sudo", "su", "doas", "env",
-    "watch", "setsid", "ionice", "flock"})
+    "eval", "source", ".", "exec", "sudo", "su", "doas", "env"})
 
 #: A leading `NAME=value` or `NAME+=value`. The docs' "Wrappers" section
 #: (same page) describes how a CALL is matched past an assignment: Claude
@@ -503,10 +509,15 @@ _GENERAL_COMMAND_RUNNERS = frozenset({
 #: (fixtures/sample-repo/PLANTED.json) gets no Bash.
 _ASSIGNMENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\+?=")
 
-#: The one command separator bash_rules splits on: "Every subcommand must be
-#: allowed", so each part gets its own rule. Every other separator is in
-#: _NOT_IN_BASH_RULE and refused.
+#: The one command separator a test command may use: "Every subcommand must
+#: be allowed", so offered_test_command splits on it and bash_rules gives
+#: each part its own rule. Every other separator is in _NOT_IN_BASH_RULE and
+#: refused.
 _AND = "&&"
+
+#: How offered_test_command joins the normalised parts, and so how
+#: bash_rules splits them again.
+_AND_JOIN = f" {_AND} "
 
 #: What a part of a test command (between `&&`s) may not contain to be named
 #: by _BASH_RULE_TEMPLATE (bash_rules refuses it, and the hosted fix step
@@ -566,38 +577,35 @@ HOSTED_RUN_TOKEN_VARIABLES = frozenset({
 def bash_rules(test_command):
     """The allow rules for `test_command` (the base's, as
     green_gate.resolve_test_command gives it): one `Bash(<part> *)`
-    (_BASH_RULE_TEMPLATE) per part between `&&`s, each approving that part
-    alone or with arguments after it, its whitespace normalised (single
-    spaces, none around it). Empty when there is no command, or when any
-    part cannot be named safely in a rule (empty, _NOT_IN_BASH_RULE, a
-    character that is not printable), or would approve no call (a first
-    word Claude Code strips before matching, _STRIPPED_WRAPPERS, or a
-    leading assignment, _ASSIGNMENT; or `git`, which
-    HOSTED_BASH_DENY_RULES refuses whatever the allow rule says), or would
-    approve any command (_GENERAL_COMMAND_RUNNERS). The first word is
-    compared by its last path component, so `/usr/bin/git` and `/bin/sh`
-    are caught. A general runner (make, npx, `uv run`, an interpreter) is
-    not refused: its rule approves any target, package or code, which the
-    VM boundary accepts.
-
-    Three functions agree through offered_test_command, which this calls:
-    fix_tools gives Bash only when it names a command, fix_prompt offers
-    that command only then (else the no-tests sentence), and fix_step_argv
-    refuses Bash without rules. So the agent is offered a command exactly
-    when it may run it."""
+    (_BASH_RULE_TEMPLATE) per `&&` part of offered_test_command's text,
+    each approving that part alone or with arguments after it; empty when
+    offered_test_command gives None (its docstring has the cases)."""
     command = offered_test_command(test_command)
     if command is None:
         return ()
     # dict.fromkeys: a part named twice (`pytest && pytest`) is one rule,
     # in first-seen order.
     return tuple(dict.fromkeys(_BASH_RULE_TEMPLATE.format(command=part)
-                               for part in command.split(" && ")))
+                               for part in command.split(_AND_JOIN)))
 
 
 def offered_test_command(test_command):
     """`test_command` as the hosted prompt shows it and bash_rules names it:
-    its whitespace normalised and its `&&` parts joined by ` && `; None when
-    bash_rules would give no rule (its docstring has the cases)."""
+    its `&&` parts with their whitespace normalised (single spaces, none
+    around them), joined by _AND_JOIN. None when there is no command, or
+    when any part cannot be named safely in a rule (empty,
+    _NOT_IN_BASH_RULE, a character that is not printable), or would approve
+    no call (a first word Claude Code strips before matching,
+    _STRIPPED_WRAPPERS, or an exec wrapper, _EXEC_WRAPPERS; a leading
+    assignment, _ASSIGNMENT; or `git`, which HOSTED_BASH_DENY_RULES refuses
+    whatever the allow rule says), or would approve any command
+    (_ANY_COMMAND_FIRST_WORDS). The first word is compared by its last path
+    component, so `/usr/bin/git` and `/bin/sh` are caught.
+
+    Three functions agree through this one: fix_tools gives Bash only when
+    it names a command, fix_prompt offers that command only then (else the
+    no-tests sentence), and fix_step_argv refuses Bash without rules. So the
+    agent is offered a command exactly when it may run it."""
     command = (test_command or "").strip()
     if not command or not command.isprintable():
         return None
@@ -607,10 +615,10 @@ def offered_test_command(test_command):
             return None
         word = part.split()[0]
         name = os.path.basename(word)
-        if (_ASSIGNMENT.match(word) or name in _STRIPPED_WRAPPERS
-                or name in _GENERAL_COMMAND_RUNNERS or name == "git"):
+        if (_ASSIGNMENT.match(word) or name in _STRIPPED_WRAPPERS or name in _EXEC_WRAPPERS
+                or name in _ANY_COMMAND_FIRST_WORDS or name == "git"):
             return None
-    return " && ".join(parts)
+    return _AND_JOIN.join(parts)
 
 
 def fix_tools(runner, test_command=None):
@@ -1067,11 +1075,6 @@ def run_fix_step(sandbox, prompt, model=None, timeout=DEFAULT_TIMEOUT,
                           git_state=git_state)
     return FixStepRun(tuple(argv), result.returncode, _text(result.stdout),
                       _text(result.stderr), git_state=git_state)
-
-
-#: A read-only toolset (tier1.SCAN_TOOLS is one): the only call on the
-#: hosted runner whose process keeps the run's tokens (_keeps_run_tokens).
-_READ_ONLY_TOOLS = frozenset({"Read", "Grep", "Glob"})
 
 
 def _keeps_run_tokens(runner, tools):
