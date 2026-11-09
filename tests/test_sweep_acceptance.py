@@ -614,7 +614,6 @@ def test_test_run_debris_in_the_clone_is_dropped_and_the_pr_still_opens(
     assert set(line["test_gate"]["kept"]) == set(FILES)  # the deletion of handlers_v2 too
 
 
-
 def _no_command(sandbox):
     """resolve_test_command as for a base with no test command at all."""
     from curamoir.green_gate import NO_TEST_COMMAND, GateCommand

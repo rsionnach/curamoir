@@ -437,20 +437,21 @@ _HOOK_IMPORT_TIMEOUT = 10
 _RULE_TOOLS = ("Read", "Edit")
 
 #: The template for the hosted fix agent's Bash allow rules, one per `&&`
-#: part (cm-2qp.12): the base's test command, alone or with arguments after it, so the agent can name the
-#: tests for the files it edited. "A `*` at the end, with a space before it,
-#: also matches the bare command", "The space before a trailing `*` is part
-#: of the rule" (`Bash(ls *)` matches `ls -la` and `ls`, not `lsof`), and
-#: "Claude Code matches everything before the first `*` as written"
+#: part (cm-2qp.12): the base's test command, alone or with arguments after
+#: it, so the agent can name the tests for the files it edited. "A `*` at
+#: the end, with a space before it, also matches the bare command", "The
+#: space before a trailing `*` is part of the rule" (`Bash(ls *)` matches
+#: `ls -la` and `ls`, not `lsof`), and "Claude Code matches everything
+#: before the first `*` as written"
 #: (https://code.claude.com/docs/en/permissions, "Wildcard patterns"; the
 #: legacy `Bash(ls:*)` "matches the same commands"). Not the bare `Bash`,
-#: which "Matches all Bash commands" (same page) although the prompt
-#: allows the test command alone. Under dontAsk anything else the agent
-#: runs is refused. The PreToolUse denylist (`--settings`) still runs first:
-#: "A hook that exits with code 2 stops the tool call before permission
-#: rules are evaluated" (same page, "Extend permissions with hooks").
-#: Compound commands are split: "a rule like `Bash(safe-cmd *)` won't give
-#: it permission to run the command `safe-cmd && other-cmd`. The recognized
+#: which "Matches all Bash commands" (same page) although the prompt allows
+#: the test command alone. Under dontAsk anything else the agent runs is
+#: refused. The PreToolUse denylist (`--settings`) still runs first: "A hook
+#: that exits with code 2 stops the tool call before permission rules are
+#: evaluated" (same page, "Extend permissions with hooks"). Compound
+#: commands are split: "a rule like `Bash(safe-cmd *)` won't give it
+#: permission to run the command `safe-cmd && other-cmd`. The recognized
 #: command separators are `&&`, `||`, `;`, `|`, `|&`, `&`, and newlines.
 #: Every subcommand must be allowed" (same page, "Compound commands"), so a
 #: test command joined with `&&` (as green_gate suggests for two detected
