@@ -335,7 +335,11 @@ _close_round() {
     | .rounds[$i] |= (.ended = $t
         | .lenses[$l] = ((.lenses[$l] // {}) + ($m | with_entries(select(.key
             | IN("model", "tier", "tokens_in", "tokens_out", "duration_s"))))
-            + {status: $s, findings: $p.findings, unproven: $p.unproven,
+            # An abandoned dispatch is UNAVAILABLE in the section 10 enum
+            # (ok | UNAVAILABLE | skipped), flagged so the reason survives.
+            + {status: (if $s == "abandoned" then "UNAVAILABLE" else $s end)}
+            + (if $s == "abandoned" then {abandoned: true} else {} end)
+            + {findings: $p.findings, unproven: $p.unproven,
                closures: ($p.closures // []),
                unaccounted_count: (($p.unaccounted // []) | length)}))' \
     --arg l "$1" --arg s "$2" --slurpfile pf "$parsed" --argjson m "$meta" --arg t "$(_now)"
@@ -440,9 +444,11 @@ case "$CMD" in
         round_n="$(jq -r '((.rounds // []) | length) + 1' "$STATE")"
         _event reviewer_dispatched --arg p "$pass" --arg s "$subagent" --argjson n "$round_n" \
           '{pass:$p, subagent_type:$s, round:$n}'
-        # A later reviewer of the same pass re-reads the tree after a fix: a
-        # verify round.
-        _apply '([.audit_trail[] | select(.event == "findings_received" and .pass == $p)]
+        # A later reviewer of the same pass re-reads the tree after a fix (or
+        # an earlier advisory read): a verify round, on the events
+        # _prior_open reads the prior open set from.
+        _apply '([.audit_trail[] | select((.event == "findings_received"
+                   or .event == "advisory_pass_completed") and .pass == $p)]
                  | length > 0) as $again
           | .rounds = ((.rounds // []) + [{n: $n,
               kind: (if $again then "verify" else "review" end),

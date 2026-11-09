@@ -1547,7 +1547,12 @@ def test_abandoning_a_reviewer_closes_its_round_entry(r5root):
     run(STATE, "pass", "correctness", root=r5root)
     hook(r5root)
     run(STATE, "abandon", "correctness", "stalled", root=r5root)
-    assert state(r5root)["rounds"][0]["lenses"]["correctness"]["status"] == "abandoned"
+    entry = state(r5root)["rounds"][0]["lenses"]["correctness"]
+    assert (entry["status"], entry["abandoned"]) == ("UNAVAILABLE", True)  # the section 10 enum
+    run(STATE, "request", "correctness", "2", root=r5root)
+    hook(r5root)
+    run(STATE, "findings", "correctness", report("correctness"), root=r5root)
+    assert "abandoned" not in state(r5root)["rounds"][-1]["lenses"]["correctness"]
 
 
 def test_the_excellence_report_is_parsed_and_a_bad_one_is_unavailable(r5root):
@@ -1839,6 +1844,20 @@ def test_a_second_excellence_read_carries_the_first_read_s_open_set(r5root):
     second = state(r5root)["advisory_results"][-1]
     assert second["unaccounted"] == [first[0]["fingerprint"]]
     assert second["counts"] == {"critical": 0, "important": 0, "minor": 1}
+
+
+def test_a_second_excellence_read_is_a_verify_round(r5root):
+    start(r5root)
+    for name in ("correctness", "clarity", "edge-cases", "provenance"):
+        clear_pass(r5root, name)
+    run(STATE, "pass", "excellence", root=r5root)
+    hook(r5root)
+    run(STATE, "advisory", report("excellence", 0, 0, 1), "SHIP IT", root=r5root)
+    assert state(r5root)["rounds"][-1]["kind"] == "review"
+    run(STATE, "pass", "excellence", root=r5root)
+    hook(r5root)
+    last = state(r5root)["rounds"][-1]
+    assert (last["kind"], last["lenses"]["excellence"]["mode"]) == ("verify", "verify")
 
 
 def test_a_rejected_closure_in_an_excellence_report_is_logged(r5root):
