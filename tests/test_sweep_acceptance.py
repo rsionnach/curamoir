@@ -675,7 +675,10 @@ def test_a_hosted_fix_agent_with_no_resolvable_test_command_gets_no_bash(
     ("", "none (no test command)"),
     ("pytest -q\n`echo` ghp_0123456789abcdefghijklmnopqrstuvwxyz",
      "none (not nameable as a rule)"),
-], ids=["normalised", "none", "empty", "unnameable"])
+    ("pytest -q --token ghp_0123456789abcdefghijklmnopqrstuvwxyz",
+     "none (not nameable as a rule)"),
+    ("pytest tests/test_token.py::test_refresh_works", "none (not nameable as a rule)"),
+], ids=["normalised", "none", "empty", "unnameable", "redacted-secret", "redacted-name"])
 def test_the_fix_bash_field_names_the_command_or_a_fixed_reason(command, value):
     """FIX_BASH_FIELD's value: the command as the rules name it, or fixed
     text, never a command no rule can name (it may hold a secret)."""

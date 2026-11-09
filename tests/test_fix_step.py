@@ -1007,20 +1007,32 @@ TOKEN_SHAPED = "ghp_0123456789abcdefghijklmnopqrstuvwxyz"
 AWKWARD_COMMAND = f"pytest -q tests\n`echo` {TOKEN_SHAPED}"
 
 
-def test_the_hosted_prompt_shows_the_command_redacted(sandboxed):
-    """The command reaches the prompt through pr_markdown.code_span, so a
-    secret-looking word in it is redacted. The allow rule names the command
-    as configured, so the agent's copy of a redacted command matches no
-    rule and is refused: fail safe (the gate decides)."""
-    from curamoir.pr_markdown import code_span
+@pytest.mark.parametrize("command", [
+    f"pytest -q --token {TOKEN_SHAPED}",
+    "pytest tests/test_token.py::test_refresh_works",
+    "pytest --secret-store=memoryonly",
+], ids=["secret-shaped-word", "secret-like-name-in-a-node-id", "secret-like-flag"])
+def test_a_command_redaction_would_change_gets_no_bash_and_is_not_shown(
+        tmp_path, sandboxed, command):
+    """The prompt shows the command redacted (pr_markdown.code_span), so a
+    command redaction would change is one the agent could not type as its
+    rule names it: no rule and no Bash, the no-tests sentence, and neither
+    the command nor a secret in it in the prompt or the fix step's argv."""
+    from curamoir.redaction import redact
 
-    command = f"pytest -q --token {TOKEN_SHAPED}"
+    assert redact(command) != command  # the case under test
     hosted = fix_prompt(sandboxed.work_list, base_principles(sandboxed), runner=HOSTED,
                         test_command=command)
-    opening = hosted.split("\n\n", 1)[0]
-
-    assert code_span(command) in opening
+    assert offered_test_command(command) is None and bash_rules(command) == ()
+    assert fix_tools(HOSTED, command) == FIX_TOOLS
+    assert NO_TESTS_SENTENCE in flat(hosted) and command not in hosted
     assert TOKEN_SHAPED not in hosted
+    argv = fix_step_argv(hosted, "m", tmp_path, tools=FIX_TOOLS, runner=HOSTED,
+                         test_command=command)
+    assert not any(command in arg for arg in argv)
+    with pytest.raises(ValueError):  # Bash with no rule is refused, never a bare `Bash`
+        fix_step_argv(hosted, "m", tmp_path, tools=HOSTED_FIX_TOOLS, runner=HOSTED,
+                      test_command=command)
 
 
 def test_a_command_no_rule_can_name_is_not_offered_in_the_hosted_prompt(sandboxed):

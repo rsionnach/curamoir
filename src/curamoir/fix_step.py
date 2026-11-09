@@ -309,6 +309,7 @@ from curamoir.git_guard import (
     snapshot_git_state,
 )
 from curamoir.pr_markdown import code_span
+from curamoir.redaction import redact
 from curamoir.repo_config import config_value
 from curamoir.sweep import work_list_document
 
@@ -601,7 +602,12 @@ def offered_test_command(test_command):
     assignment, _ASSIGNMENT; or `git`, which HOSTED_BASH_DENY_RULES refuses
     whatever the allow rule says), or would approve any command
     (_ANY_COMMAND_FIRST_WORDS). The first word is compared by its last path
-    component, so `/usr/bin/git` and `/bin/sh` are caught.
+    component, so `/usr/bin/git` and `/bin/sh` are caught. None, too, when
+    redaction would change it (a word that looks like a secret, or a
+    `name=value` with a secret-like name): the prompt shows the command
+    redacted (_hosted_tests_sentence), so the agent could not type the
+    command its rule names, and the rule, the argv and the job line's
+    fix_bash would carry the unredacted text.
 
     Three functions agree through this one: fix_tools gives Bash only when
     it names a command, fix_prompt offers that command only then (else the
@@ -619,7 +625,8 @@ def offered_test_command(test_command):
         if (_ASSIGNMENT.match(word) or name in _STRIPPED_WRAPPERS or name in _EXEC_WRAPPERS
                 or name in _ANY_COMMAND_FIRST_WORDS or name == "git"):
             return None
-    return _AND_JOIN.join(parts)
+    command = _AND_JOIN.join(parts)
+    return command if redact(command) == command else None
 
 
 def fix_tools(runner, test_command=None):
@@ -671,9 +678,10 @@ def _hosted_tests_sentence(test_command):
     fix_prompt passes as None), it runs no tests.
 
     The command is shown through pr_markdown.code_span, which makes it one
-    line and redacts what looks like a secret, so what the agent reads can
-    differ from what the gate runs. Fail safe: the agent's run is only a
-    check for itself, and the gate (green_gate.run_test_gate) decides."""
+    line and redacts what looks like a secret; offered_test_command passes
+    only a command redaction leaves unchanged, so the agent reads the
+    command its rule names. The agent's run is only a check for itself:
+    the gate (green_gate.run_test_gate) decides."""
     if not test_command:
         return ("No test command is available to you, so do not run tests, and do not "
                 "run any package-manager or install command.")
