@@ -18,6 +18,7 @@ HEAD^{tree}.
 """
 
 import datetime
+import hashlib
 import importlib.util
 import json
 import os
@@ -1565,7 +1566,10 @@ def test_finish_writes_a_verdict_keyed_to_the_tree(r5root):
     start(r5root)
     record = state(r5root)
     assert (record["bead"], record["repo"], record["base"], record["head"]) == ("b1", r5root.name, "base", "head")
-    assert record["branch"] and record["rounds"] == [] and record["verdict"] is None
+    branch = subprocess.run(["git", "-C", str(r5root), "branch", "--show-current"],
+                            capture_output=True, text=True, check=True).stdout.strip()
+    assert branch and record["branch"] == branch
+    assert record["rounds"] == [] and record["verdict"] is None
     for name in ("correctness", "clarity", "edge-cases", "provenance"):
         clear_pass(r5root, name)
     run(STATE, "pass", "excellence", root=r5root)
@@ -1578,6 +1582,12 @@ def test_finish_writes_a_verdict_keyed_to_the_tree(r5root):
     assert archived["rounds"][0]["head"] == head
 
 
+def test_init_outside_git_records_a_null_branch(r5root):
+    assert subprocess.run(["git", "-C", str(r5root), "rev-parse"], capture_output=True).returncode != 0
+    start(r5root)
+    assert state(r5root)["branch"] is None
+
+
 @pytest.mark.parametrize("status, expected", [("failed", "ESCALATED"), ("aborted", None)])
 def test_a_failed_run_is_escalated_and_an_aborted_one_has_no_verdict(r5root, status, expected):
     git_root(r5root)
@@ -1585,6 +1595,232 @@ def test_a_failed_run_is_escalated_and_an_aborted_one_has_no_verdict(r5root, sta
     run(STATE, "finish", status, root=r5root)
     archived = json.loads(next((r5root / ".claude").glob(f"r5-state-b1-{status}-*.json")).read_text())
     assert (archived["verdict"] or {}).get("state") == expected
+
+
+def test_the_fingerprint_is_a_known_sha256_of_lens_path_and_claim_joined_by_bars():
+    """Section 10: the first 16 hex of sha256(lens|path|normalised claim),
+    computed here independently of the parser."""
+    assert r5f.fingerprint("correctness", "src/a.py", "x") \
+        == hashlib.sha256(b"correctness|src/a.py|x").hexdigest()[:16]
+    assert r5f.normalise_claim("See Line 42") == "see"
+    assert r5f.fingerprint("edge_cases", "lib/b.sh", "See Line 42") \
+        == hashlib.sha256(b"edge_cases|lib/b.sh|see").hexdigest()[:16]
+
+
+def test_a_null_fix_is_allowed_on_a_finding_and_on_a_closure():
+    out = parse([finding("correctness", "IMPORTANT", 1, fix=None)])
+    assert out["findings"][0]["fix"] is None and out["counts"]["important"] == 1
+    earlier = prior(finding("correctness", "IMPORTANT", 1))
+    closure = {**finding("correctness", "IMPORTANT", 40, fix=None),
+               "resolves": earlier[0]["fingerprint"]}
+    closed = reparse([closure], earlier)
+    assert closed["closures"] == [earlier[0]["fingerprint"]] and closed["findings"][0]["fix"] is None
+
+
+# Real reviewer reports, produced under the section 10 contract during cm-70j's
+# own R5 run and copied verbatim from .claude/r5-reports (gitignored there).
+R5_REPORTS = Path(__file__).resolve().parent / "fixtures" / "r5-reports"
+
+
+def _lens_of_report(name):
+    """cm-70j-edge-cases-1.md -> edge_cases."""
+    return name.removeprefix("cm-70j-").rsplit("-", 1)[0].replace("-", "_")
+
+
+@pytest.mark.parametrize("name", ["cm-70j-correctness-1.md", "cm-70j-correctness-4.md",
+                                  "cm-70j-correctness-5.md", "cm-70j-clarity-1.md",
+                                  "cm-70j-clarity-2.md", "cm-70j-edge-cases-1.md"])
+def test_a_real_reviewer_report_parses_for_its_lens(name, capsys):
+    path = R5_REPORTS / name
+    assert r5f.main(["parse", _lens_of_report(name), str(path)]) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert len(out["findings"]) == len(r5f.parse_report(path.read_text(), _lens_of_report(name))["findings"]) > 0
+
+
+@pytest.mark.parametrize(("before", "after", "closed"), [
+    ("cm-70j-correctness-4.md", "cm-70j-correctness-5.md", 2),
+    ("cm-70j-clarity-1.md", "cm-70j-clarity-2.md", 7)])
+def test_a_real_verify_report_closes_its_real_prior_open_set(before, after, closed):
+    """The later report's closures (each with "fix": null) name fingerprints
+    the parser computes from the earlier report's findings."""
+    lens = _lens_of_report(before)
+    earlier = r5f.parse_report((R5_REPORTS / before).read_text(), lens)["open_set"]
+    out = r5f.parse_report((R5_REPORTS / after).read_text(), lens, prior_open=earlier)
+    assert len(out["closures"]) == closed and out["closure_rejected"] == []
+    assert out["unaccounted"] == [] and out["open_set"] == []
+    assert all(r["fix"] is None for r in out["findings"] if r["resolves"])
+
+
+def test_a_closure_whose_evidence_is_not_valid_unicode_is_a_contract_failure():
+    record = (json.dumps({**finding("correctness", "MINOR"), "resolves": "0123456789abcdef"})[:-1]
+              + ', "evidence": "bad \\ud800"}')
+    with pytest.raises(r5f.ReportError, match="finding 1: evidence is not valid Unicode"):
+        r5f.parse_report("R5-FINDINGS: [" + record + "]", "correctness")
+
+
+def test_an_empty_evidence_closure_beside_a_valid_one_of_the_sole_prior_is_not_unavailable():
+    earlier = prior(finding("correctness", "IMPORTANT", 1))
+    fp = earlier[0]["fingerprint"]
+    valid = {**finding("correctness", "IMPORTANT", 40), "resolves": fp}
+    empty = {**finding("correctness", "IMPORTANT", 41), "resolves": fp, "evidence": ""}
+    out = reparse([valid, empty], earlier)
+    assert out["closures"] == [fp] and out["open_set"] == []
+    assert [r["reason"] for r in out["closure_rejected"]] == ["a closure needs evidence (the resolving lines)"]
+
+
+def test_a_carried_blocking_finding_below_the_floor_stays_unproven():
+    earlier = prior(finding("correctness", "IMPORTANT", 1, level="cited"))
+    out = reparse([], earlier)
+    assert out["unaccounted"] == [earlier[0]["fingerprint"]]
+    assert out["unproven"] == [earlier[0]["fingerprint"]]
+
+
+@pytest.mark.parametrize(("args", "prior_text", "fragment"), [
+    (["--floor"], None, "--floor needs a value"),
+    (["--prior"], None, "--prior needs a value"),
+    (["--prior", "MISSING"], None, "cannot read the prior open set"),
+    (["--prior", "PRIOR"], "[1]", "must be a list of findings"),
+    (["--prior", "PRIOR"], '[{"severity": "MINOR"}]', "must be a list of findings"),
+    (["--floor", "proven"], None, "unknown verification floor"),
+], ids=["floor-without-value", "prior-without-value", "prior-unreadable",
+        "prior-of-non-objects", "prior-without-fingerprints", "unknown-floor"])
+def test_each_cli_usage_mistake_exits_1(tmp_path, capsys, args, prior_text, fragment):
+    good = tmp_path / "r.md"
+    good.write_text("R5-FINDINGS: []\n")
+    if prior_text is not None:
+        (tmp_path / "prior.json").write_text(prior_text)
+    args = [str(tmp_path / "prior.json") if a == "PRIOR" else str(tmp_path / "none.json")
+            if a == "MISSING" else a for a in args]
+    assert r5f.main(["parse", "correctness", str(good), *args]) == 1
+    assert fragment in capsys.readouterr().err
+
+
+def test_a_subcommand_other_than_parse_exits_1(tmp_path, capsys):
+    good = tmp_path / "r.md"
+    good.write_text("R5-FINDINGS: []\n")
+    assert r5f.main(["check", "correctness", str(good)]) == 1
+    assert "usage: r5_findings.py parse" in capsys.readouterr().err
+
+
+def test_an_unknown_verification_floor_is_a_usage_error_not_unavailable(r5root):
+    start(r5root)
+    run(STATE, "pass", "correctness", root=r5root)
+    hook(r5root)
+    bad = run(STATE, "findings", "correctness", report("correctness", 0, 1, 0), root=r5root,
+              env_extra={"R5_VERIFICATION_FLOOR": "bogus"})
+    assert bad.returncode == 1 and "unknown verification floor 'bogus'" in bad.stderr
+    assert events(r5root)[-1] == "reviewer_dispatched"
+    assert state(r5root)["rounds"][-1]["lenses"]["correctness"]["status"] == "in_flight"
+
+
+def re_review(root, name, n, findings_):
+    """Request the pass's reviewer again (iteration n), dispatch it and record
+    its report of `findings_`; returns the findings_received event."""
+    assert run(STATE, "request", name, str(n), root=root).returncode == 0
+    assert hook(root).returncode == 0
+    recorded = run(STATE, "findings", name, report(name, findings=findings_), root=root)
+    assert recorded.returncode == 0, recorded.stderr
+    return state(root)["audit_trail"][-1]
+
+
+def test_the_open_set_is_the_last_round_s_across_three_rounds(r5root):
+    start(r5root)
+    run(STATE, "pass", "correctness", root=r5root)
+    hook(r5root)
+    run(STATE, "findings", "correctness", report("correctness", 0, 1, 1), root=r5root)
+    first = state(r5root)["audit_trail"][-1]["open_set"]
+    closed, silent = (f["fingerprint"] for f in first)
+    closure = {**finding("correctness", "IMPORTANT", 80), "resolves": closed, "claim": "guarded now"}
+    second = re_review(r5root, "correctness", 2, [closure])
+    assert second["closures"] == [closed] and second["unaccounted"] == [silent]
+    third = re_review(r5root, "correctness", 3, [])
+    assert [f["fingerprint"] for f in third["open_set"]] == [silent]
+    assert third["unaccounted"] == [silent] and third["closures"] == []
+    assert third["counts"] == {"critical": 0, "important": 0, "minor": 1}
+    out = json.loads(run(STATE, "open-set", "correctness", root=r5root).stdout)
+    assert [f["fingerprint"] for f in out] == [silent]
+
+
+def test_a_second_pass_does_not_inherit_the_first_pass_s_open_set(r5root):
+    start(r5root)
+    run(STATE, "pass", "correctness", root=r5root)
+    hook(r5root)
+    run(STATE, "findings", "correctness", report("correctness", 0, 0, 1), root=r5root)
+    assert state(r5root)["audit_trail"][-1]["open_set"] != []  # a MINOR left open
+    assert run(STATE, "done", "correctness", "0", root=r5root).returncode == 0
+    run(STATE, "pass", "clarity", root=r5root)
+    assert json.loads(run(STATE, "open-set", "clarity", root=r5root).stdout) == []
+    hook(r5root)
+    run(STATE, "findings", "clarity", report("clarity", 0, 0, 1), root=r5root)
+    received = state(r5root)["audit_trail"][-1]
+    assert received["pass"] == "clarity" and received["unaccounted"] == []
+    assert [f["lens"] for f in received["open_set"]] == ["clarity"]
+    last = state(r5root)["rounds"][-1]
+    assert last["kind"] == "review" and last["lenses"]["clarity"]["mode"] == "review"
+    assert last["lenses"]["clarity"]["unaccounted_count"] == 0
+
+
+def test_meta_keys_outside_the_telemetry_fields_never_reach_the_round(r5root):
+    start(r5root)
+    run(STATE, "pass", "correctness", root=r5root)
+    hook(r5root)
+    meta = '{"mode": "forged", "skip_rule": "x", "extra": 1, "model": "m"}'
+    assert run(STATE, "findings", "correctness", report("correctness"), "PASS", meta,
+               root=r5root).returncode == 0
+    entry = state(r5root)["rounds"][0]["lenses"]["correctness"]
+    assert (entry["mode"], entry["skip_rule"], entry["model"]) == ("review", None, "m")
+    assert "extra" not in entry
+
+
+def test_a_fix_round_takes_only_the_first_string_commit_and_a_later_fix_opens_a_new_round(r5root):
+    start(r5root)
+    run(STATE, "pass", "correctness", root=r5root)
+    hook(r5root)
+    run(STATE, "findings", "correctness", report("correctness", 0, 1, 0), root=r5root)
+    run(STATE, "fixed", "correctness", root=r5root)
+    run(STATE, "event", "commit_made", '{"sha": 123}', root=r5root)
+    assert state(r5root)["rounds"][-1]["fix"]["commit"] is None  # not a string
+    run(STATE, "event", "commit_made", '{"sha": "aaa1111"}', root=r5root)
+    run(STATE, "event", "commit_made", '{"sha": "bbb2222"}', root=r5root)
+    assert state(r5root)["rounds"][-1]["fix"]["commit"] == "aaa1111"  # not overwritten
+    assert run(STATE, "fixed", "correctness", '{"statuses": {"x": "fixed"}}', root=r5root).returncode == 0
+    rounds = state(r5root)["rounds"]
+    assert [(r["n"], r["kind"]) for r in rounds] == [(1, "review"), (2, "fix"), (3, "fix")]
+    assert rounds[1]["fix"]["statuses"] == {} and rounds[2]["fix"]["statuses"] == {"x": "fixed"}
+    assert rounds[2]["fix"]["commit"] is None
+
+
+def test_a_second_excellence_read_carries_the_first_read_s_open_set(r5root):
+    start(r5root)
+    for name in ("correctness", "clarity", "edge-cases", "provenance"):
+        clear_pass(r5root, name)
+    run(STATE, "pass", "excellence", root=r5root)
+    hook(r5root)
+    run(STATE, "advisory", report("excellence", 0, 0, 1), "SHIP IT", root=r5root)
+    first = state(r5root)["advisory_results"][-1]["open_set"]
+    shown = json.loads(run(STATE, "open-set", "excellence", root=r5root).stdout)
+    assert [f["fingerprint"] for f in shown] == [f["fingerprint"] for f in first] != []
+    run(STATE, "pass", "excellence", root=r5root)
+    hook(r5root)
+    run(STATE, "advisory", report("excellence", findings=[]), "SHIP IT", root=r5root)
+    second = state(r5root)["advisory_results"][-1]
+    assert second["unaccounted"] == [first[0]["fingerprint"]]
+    assert second["counts"] == {"critical": 0, "important": 0, "minor": 1}
+
+
+def test_a_rejected_closure_in_an_excellence_report_is_logged(r5root):
+    start(r5root)
+    for name in ("correctness", "clarity", "edge-cases", "provenance"):
+        clear_pass(r5root, name)
+    run(STATE, "pass", "excellence", root=r5root)
+    hook(r5root)
+    forged = finding("excellence", "MINOR", resolves="0123456789abcdef")
+    out = run(STATE, "advisory", report("excellence", findings=[forged]), "SHIP IT", root=r5root)
+    assert out.returncode == 0 and "closure(s) rejected and ignored" in out.stderr
+    rejected = state(r5root)["audit_trail"][-1]
+    assert (rejected["event"], rejected["pass"], rejected["resolves"]) \
+        == ("closure_rejected", "excellence", "0123456789abcdef")
+    assert "names no fingerprint" in rejected["reason"]
 
 
 # ---------------------------------------------------------------- arguments and infrastructure
@@ -1639,6 +1875,53 @@ def test_a_killed_process_holding_the_mutex_does_not_block_the_next_call(r5root)
                 proc.kill()
                 proc.wait()
         holder.stdout.close()
+
+
+def test_a_waiter_on_a_held_mutex_gives_up_after_the_timeout_with_exit_3(r5root):
+    start(r5root)
+    mutex = r5root / ".claude" / "r5-state.json.flock"
+    holder = hold_mutex(mutex)
+    try:
+        waiter = run(STATE, "show", root=r5root, env_extra={"R5_FLOCK_TIMEOUT": "1"})
+    finally:
+        holder.kill()
+        holder.wait()
+        holder.stdout.close()
+    assert waiter.returncode == 3
+    assert f"r5-state: could not lock {mutex} within 1s" in waiter.stderr
+    assert waiter.stdout == ""
+
+
+def test_a_mutex_failure_other_than_the_timeout_names_the_helper_s_exit(r5root):
+    start(r5root)
+    failed = run(STATE, "show", root=r5root, env_extra={"R5_FLOCK_TIMEOUT": "soon"})
+    assert failed.returncode == 3
+    assert "r5-state: cannot lock " in failed.stderr and "(r5_flock.py exit 1)" in failed.stderr
+    assert "within" not in failed.stderr
+
+
+FLOCK_PY = HOOKS / "lib" / "r5_flock.py"
+
+
+def test_r5_flock_exits_4_on_a_held_lock_1_on_usage_and_3_on_an_fd_it_cannot_lock(tmp_path):
+    mutex = tmp_path / "m.flock"
+    holder = hold_mutex(mutex)
+    fd = os.open(mutex, os.O_WRONLY | os.O_APPEND)
+    try:
+        timed_out = subprocess.run([sys.executable, str(FLOCK_PY), str(fd), "1"], pass_fds=(fd,),
+                                   capture_output=True, text=True, timeout=30)
+    finally:
+        os.close(fd)
+        holder.kill()
+        holder.wait()
+        holder.stdout.close()
+    assert timed_out.returncode == 4
+    usage = subprocess.run([sys.executable, str(FLOCK_PY), "9"], capture_output=True, text=True,
+                           timeout=30)
+    assert usage.returncode == 1 and "usage: r5_flock.py" in usage.stderr
+    closed = subprocess.run([sys.executable, str(FLOCK_PY), "200", "1"], capture_output=True,
+                            text=True, timeout=30)  # fd 200 is not open in the child
+    assert closed.returncode == 3 and "r5_flock: cannot lock fd 200" in closed.stderr
 
 
 def test_without_jq_a_run_in_flight_refuses_every_dispatch(r5root, tmp_path_factory):

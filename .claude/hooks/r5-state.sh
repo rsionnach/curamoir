@@ -269,14 +269,11 @@ _git() {
   if out="$(git -C "$R5_ROOT" "$@" 2>/dev/null)"; then printf '%s' "$out"; fi
 }
 # The open set this pass's previous report left (section 10): the open_set
-# of its last findings event; [] on a first review. The fallback to an
-# event's non-closure findings serves events written before open sets were
-# recorded (341c94f): only cm-70j's own R5 run has them, so it can go once
-# that run is archived.
+# of its last findings event; [] on a first review.
 _prior_open() {  # _prior_open <pass>
   jq -c --arg p "$1" '[.audit_trail[]
       | select((.event == "findings_received" or .event == "advisory_pass_completed") and .pass == $p)]
-    | last | if . == null then [] else (.open_set // [.findings[]? | select(.resolves == null)]) end' "$STATE"
+    | last | if . == null then [] else (.open_set // []) end' "$STATE"
 }
 # _parse <lens> <report-file> <pass>: writes the parsed report (JSON) to the
 # file PARSED_FILE and returns 0, or returns 2 with the reason in PARSE_ERROR
