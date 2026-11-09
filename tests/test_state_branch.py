@@ -14,6 +14,7 @@ The checkout's ledger is TRACKED, as it is in a real repository
 appends to the work tree's copy, as `curamoir run sweep` does on a runner.
 """
 
+import errno
 import json
 import os
 import stat
@@ -455,6 +456,37 @@ def test_a_ledger_that_is_a_fifo_is_refused_without_blocking(world):
     assert world.origin_sha(BRANCH) is None
 
 
+def _opened_names(monkeypatch):
+    """Record every name os.open is given (and open it as usual); the list."""
+    real_open, opened = os.open, []
+
+    def recording_open(path, *args, **kwargs):
+        opened.append(os.fsdecode(path))
+        return real_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", recording_open)
+    return opened
+
+
+@pytest.mark.parametrize("kind", ["fifo", "directory"])
+def test_a_ledger_of_another_kind_is_refused_before_it_is_ever_opened(world, monkeypatch,
+                                                                      kind):
+    """The lstat check refuses a FIFO or a directory at the ledger's name
+    before any open (module docstring: never opened), not only the fstat
+    check after it: the ledger's name is never passed to os.open."""
+    world.ledger.unlink()
+    if kind == "fifo":
+        os.mkfifo(world.ledger)
+    else:
+        world.ledger.mkdir()
+    opened = _opened_names(monkeypatch)
+
+    pushed = state_branch.push_ledger(world.repo, BRANCH)
+
+    assert pushed.outcome == state_branch.REFUSED, pushed.sentence
+    assert LEDGER_PATH[-1] not in {os.path.basename(name) for name in opened}
+    assert world.origin_sha(BRANCH) is None
+
 @pytest.mark.parametrize("missing", [".curamoir/state", ".curamoir"])
 def test_a_missing_directory_on_the_ledgers_path_has_nothing_to_push(world, missing):
     world.ledger.unlink()
@@ -613,12 +645,25 @@ def _understated_size(monkeypatch):
 
 def test_a_ledger_that_grows_past_the_bound_after_fstat_stops_being_read(world,
                                                                         monkeypatch):
+    """Each read asks for no more than the bound leaves, so a ledger that
+    grows past it is refused having read at most MAX_LEDGER_BYTES + 1
+    bytes, never a whole chunk beyond."""
     world.run("r1")
+    assert world.ledger.stat().st_size > 17  # more than the bound plus one to read
     monkeypatch.setattr(state_branch, "MAX_LEDGER_BYTES", 16)
     _understated_size(monkeypatch)
+    real_read, taken = os.read, []
+
+    def counting_read(descriptor, size):
+        chunk = real_read(descriptor, size)
+        taken.append(len(chunk))
+        return chunk
+
+    monkeypatch.setattr(os, "read", counting_read)
 
     with pytest.raises(state_branch._Refused, match="is larger than"):
         state_branch._work_tree_ledger(str(world.repo))
+    assert sum(taken) <= 16 + 1
 
 
 def test_a_ledger_of_exactly_the_bound_is_read(world, monkeypatch):
@@ -645,6 +690,62 @@ def test_a_ledger_that_cannot_be_read_fails_with_exit_1(world):
     assert "could not be read" in pushed.sentence
     assert world.origin_sha(BRANCH) is None
 
+
+def test_the_bytes_pushed_are_the_ones_the_walk_read(world, tmp_path, monkeypatch):
+    """What was checked is what is read: the push takes the walk's own
+    bytes. A ledger swapped for a link to a decoy right after the walk
+    returns changes nothing on the branch."""
+    world.run("r1")
+    decoy = _decoy_curamoir(world, tmp_path).joinpath(*LEDGER_PATH[1:])
+    real_walk = state_branch._work_tree_ledger
+
+    def walk_then_swap(repo):
+        written = real_walk(repo)
+        world.ledger.unlink()
+        world.ledger.symlink_to(decoy)
+        return written
+
+    monkeypatch.setattr(state_branch, "_work_tree_ledger", walk_then_swap)
+
+    pushed = state_branch.push_ledger(world.repo, BRANCH)
+
+    assert pushed.outcome == state_branch.PUSHED, pushed.sentence
+    assert world.run_ids() == ["r1"]  # never "from-the-link"
+
+
+def test_a_work_tree_root_that_cannot_be_opened_is_a_failure(tmp_path):
+    """The walk's root open failing (here, the root is a file) is _Failed,
+    never nothing to push. push_ledger checks the checkout first, so this
+    is the walk's own contract."""
+    not_a_directory = tmp_path / "file"
+    not_a_directory.write_text("x", encoding="utf-8")
+
+    with pytest.raises(state_branch._Failed, match="could not be opened"):
+        state_branch._work_tree_ledger(str(not_a_directory))
+
+
+def test_a_read_error_is_a_failure_with_exit_1_as_root_too(world, monkeypatch):
+    """The OSError-to-FAILED mapping, independent of file modes (root reads
+    a mode-000 file, so the test above is skipped there): a read error in
+    the walk is _Failed, and push_ledger makes _Failed FAILED, exit 1."""
+    world.run("r1")
+
+    def failing_read(descriptor, size):
+        raise OSError(errno.EIO, "Input/output error")
+
+    with monkeypatch.context() as patched:
+        patched.setattr(os, "read", failing_read)
+        with pytest.raises(state_branch._Failed, match="could not be read"):
+            state_branch._work_tree_ledger(str(world.repo))
+
+    def failed(repo):
+        raise state_branch._Failed("the work tree's ledger could not be read (EIO)")
+
+    monkeypatch.setattr(state_branch, "_work_tree_ledger", failed)
+    pushed = state_branch.push_ledger(world.repo, BRANCH)
+
+    assert pushed.outcome == state_branch.FAILED and pushed.exit_code == 1, pushed.sentence
+    assert world.origin_sha(BRANCH) is None
 
 def test_reading_the_ledger_leaves_no_descriptor_open(world, tmp_path):
     """Every directory and file descriptor the walk opens is closed, on
