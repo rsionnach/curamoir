@@ -1331,6 +1331,24 @@ def test_a_report_larger_than_the_argument_limit_is_recorded(r5root):
     assert state(r5root)["audit_trail"][-1]["counts"]["minor"] == len(many)
 
 
+def test_rejected_closures_in_a_report_larger_than_the_argument_limit_are_logged(r5root):
+    start(r5root)
+    run(STATE, "pass", "correctness", root=r5root)
+    hook(r5root)
+    run(STATE, "findings", "correctness", report("correctness", 0, 0, 1), root=r5root)
+    forged = [{**finding("correctness", "MINOR", n), "evidence": "x" * 400,
+               "resolves": f"{n:016x}"} for n in range(1, 1600)]
+    path = report("correctness", findings=forged)
+    assert Path(path).stat().st_size > 650_000
+    assert run(STATE, "request", "correctness", "2", root=r5root).returncode == 0
+    assert hook(r5root).returncode == 0
+    recorded = run(STATE, "findings", "correctness", path, root=r5root)
+    assert recorded.returncode == 0, recorded.stderr
+    assert f"{len(forged)} closure(s) rejected" in recorded.stderr
+    rejected = [e for e in state(r5root)["audit_trail"] if e["event"] == "closure_rejected"]
+    assert [e["resolves"] for e in rejected] == [f["resolves"] for f in forged]
+
+
 def test_open_set_refuses_a_pass_it_does_not_know(r5root):
     start(r5root)
     for name in ("edge_cases", "bogus"):
@@ -1681,9 +1699,11 @@ def test_a_carried_blocking_finding_below_the_floor_stays_unproven():
     (["--prior", "MISSING"], None, "cannot read the prior open set"),
     (["--prior", "PRIOR"], "[1]", "must be a list of findings"),
     (["--prior", "PRIOR"], '[{"severity": "MINOR"}]', "must be a list of findings"),
+    (["--prior", "PRIOR"], "{}", "must be a list of findings"),
     (["--floor", "proven"], None, "unknown verification floor"),
 ], ids=["floor-without-value", "prior-without-value", "prior-unreadable",
-        "prior-of-non-objects", "prior-without-fingerprints", "unknown-floor"])
+        "prior-of-non-objects", "prior-without-fingerprints", "prior-not-a-list",
+        "unknown-floor"])
 def test_each_cli_usage_mistake_exits_1(tmp_path, capsys, args, prior_text, fragment):
     good = tmp_path / "r.md"
     good.write_text("R5-FINDINGS: []\n")
@@ -1739,6 +1759,19 @@ def test_the_open_set_is_the_last_round_s_across_three_rounds(r5root):
     assert third["counts"] == {"critical": 0, "important": 0, "minor": 1}
     out = json.loads(run(STATE, "open-set", "correctness", root=r5root).stdout)
     assert [f["fingerprint"] for f in out] == [silent]
+
+
+def test_a_findings_event_without_an_open_set_leaves_nothing_open(r5root):
+    start(r5root)
+    run(STATE, "pass", "correctness", root=r5root)
+    hook(r5root)
+    run(STATE, "findings", "correctness", report("correctness", 0, 0, 1), root=r5root)
+    saved = state(r5root)
+    del saved["audit_trail"][-1]["open_set"]
+    state_file(r5root).write_text(json.dumps(saved))
+    assert json.loads(run(STATE, "open-set", "correctness", root=r5root).stdout) == []
+    received = re_review(r5root, "correctness", 2, [])
+    assert received["unaccounted"] == [] and received["open_set"] == []
 
 
 def test_a_second_pass_does_not_inherit_the_first_pass_s_open_set(r5root):
