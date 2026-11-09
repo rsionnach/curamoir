@@ -468,6 +468,26 @@ def test_a_missing_directory_on_the_ledgers_path_has_nothing_to_push(world, miss
     assert world.origin_sha(BRANCH) is None
 
 
+@pytest.mark.parametrize("vanished", [".curamoir/state/ledger.jsonl", ".curamoir/state",
+                                      ".curamoir"])
+def test_a_component_that_vanishes_after_the_check_has_nothing_to_push(world, monkeypatch,
+                                                                       vanished):
+    """A component that passed the lstat check and is gone by its open
+    (FileNotFoundError at the open) is a missing ledger: nothing to push,
+    not a failure, and the branch does not move."""
+    world.run("r1")
+    world.ledger.unlink()
+    if vanished != ".curamoir/state/ledger.jsonl":
+        world.ledger.parent.rmdir()
+    if vanished == ".curamoir":
+        (world.repo / ".curamoir").rmdir()
+    monkeypatch.setattr(state_branch, "_check_component", lambda *args: True)
+
+    pushed = state_branch.push_ledger(world.repo, BRANCH)
+
+    assert pushed.outcome == state_branch.NOTHING_TO_PUSH, pushed.sentence
+    assert world.origin_sha(BRANCH) is None
+
 @pytest.mark.parametrize("linked", [".curamoir", ".curamoir/state",
                                     ".curamoir/state/ledger.jsonl"])
 def test_a_link_swapped_in_after_the_check_is_refused_by_the_open_itself(world, tmp_path,
