@@ -1015,6 +1015,33 @@ def test_the_detected_test_commands_still_get_rules_past_the_redaction_check():
     assert offered_test_command("pytest tests/test_token.py") == "pytest tests/test_token.py"
 
 
+def test_a_command_whose_offered_form_alone_redaction_would_change_gets_no_bash(
+        monkeypatch):
+    """The check on the offered text holds by itself: with a stand-in
+    redaction that changes only the normalised form (`a && b`, not the
+    configured `a&&b`), the command is still refused. Today's patterns
+    never do this (the configured check implies it); this pins the
+    property should a pattern change."""
+    from curamoir import fix_step as module
+
+    monkeypatch.setattr(module, "redact", lambda text: text.replace("pytest && npm", "[X]"))
+    assert offered_test_command("pytest&&npm test") is None
+    assert offered_test_command("npm test&&pytest") == "npm test && pytest"  # not matched
+
+
+def test_the_sample_repos_documented_test_command_gets_no_bash():
+    """fixtures/sample-repo's own test command (PLANTED.json), a real
+    artefact rather than a hand-written near-copy: its leading `PYTHONPATH=`
+    assignment is refused (_ASSIGNMENT, an inferred fail-safe), so a hosted
+    fix agent on the sample gets no Bash."""
+    from tests.test_bundled_rules import PLANTED
+
+    command = PLANTED["test_command"]
+    assert command.startswith("PYTHONPATH=")
+    assert bash_rules(command) == () and offered_test_command(command) is None
+    assert fix_tools(HOSTED, command) == FIX_TOOLS
+
+
 @pytest.mark.parametrize("command", [
     f"pytest -q --token {TOKEN_SHAPED}",
     "pytest tests/test_token.py::test_refresh_works",
@@ -1040,7 +1067,7 @@ def test_a_command_redaction_would_change_gets_no_bash_and_is_not_shown(
     argv = fix_step_argv(hosted, "m", tmp_path, tools=FIX_TOOLS, runner=HOSTED,
                          test_command=command)
     assert not any(command in arg for arg in argv)
-    with pytest.raises(ValueError):  # Bash with no rule is refused, never a bare `Bash`
+    with pytest.raises(ValueError, match="Bash cannot be approved"):  # never a bare `Bash`
         fix_step_argv(hosted, "m", tmp_path, tools=HOSTED_FIX_TOOLS, runner=HOSTED,
                       test_command=command)
 

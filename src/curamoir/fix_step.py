@@ -603,13 +603,16 @@ def offered_test_command(test_command):
     whatever the allow rule says), or would approve any command
     (_ANY_COMMAND_FIRST_WORDS). The first word is compared by its last path
     component, so `/usr/bin/git` and `/bin/sh` are caught. None, too, when
-    redaction would change it, as configured or as offered (normalising can
-    split a secret-shaped `name=value` at `&&` below redaction's length
-    floor): a word that looks like a secret, or a `name=value` with a
-    secret-like name. The prompt shows the command redacted
-    (_hosted_tests_sentence), so the agent could not type the command its
-    rule names, and the rule, the argv and the job line's fix_bash would
-    carry the unredacted text.
+    redaction would change it (a word that looks like a secret, or a
+    `name=value` with a secret-like name), checked twice. As configured, so
+    no secret reaches the rule, the argv or the job line's fix_bash
+    (normalising can split a secret-shaped `name=value` at `&&` below
+    redaction's length floor). As offered, because that is the text the
+    prompt shows redacted (_hosted_tests_sentence): the agent must be able
+    to type the command its rule names. With today's redaction patterns
+    the first check implies the second (whitespace and `&&` spacing change
+    no match); the second holds the property directly should a pattern
+    change, and a test pins it with a stand-in redaction.
 
     Three functions agree through this one: fix_tools gives Bash only when
     it names a command, fix_prompt offers that command only then (else the

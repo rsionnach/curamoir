@@ -43,9 +43,11 @@ Acceptance criteria, and the tests that hold them:
   test_a_fix_that_breaks_a_test_is_left_out_of_a_reduced_pr.
 """
 
+import contextlib
 import json
 import re
 import shlex
+import signal
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -60,6 +62,7 @@ from curamoir.green_gate import GREEN, REDUCED
 from curamoir.idempotence import DUPLICATE_OPEN_PR, NO_WORK, WORK, parse_sweep_marker
 from curamoir.job_run import FAILURE, SUCCESS
 from curamoir.ledger import parse_ledger_timestamp, repo_ledger
+from curamoir.termination import Terminated
 from tests.os_sandbox_stand_in import Absent, Unconfined
 from tests.test_fix_step import NO_TESTS_SENTENCE
 from tests.test_lint import ALL_REGEX_RULES
@@ -667,6 +670,34 @@ def test_a_hosted_fix_agent_with_no_resolvable_test_command_gets_no_bash(
     # The job line gives a fixed reason, never the command no rule can name.
     line = job_lines(repo)[-1]
     assert line[sweep_job.FIX_BASH_FIELD] == fix_bash
+
+
+@pytest.mark.parametrize("stop", [Terminated(signal.SIGTERM), KeyboardInterrupt(),
+                                  ValueError("a reply the checks choked on")],
+                         ids=["Terminated", "KeyboardInterrupt", "ValueError"])
+def test_a_hosted_run_that_ends_during_the_fix_call_still_records_fix_bash(
+        tmp_path, no_real_gh, monkeypatch, stop):
+    """fix_bash is noted before the fix call, so whatever ends the run once
+    the call has begun (a signal, ^C, an exception) leaves it on the job
+    line: every line of a run whose fix agent was called says what its Bash
+    was (cm-2qp.12)."""
+    monkeypatch.setattr(green_gate, "OS_SANDBOX", Absent())
+    repo = sample(tmp_path)
+    stand_in(tmp_path, monkeypatch)
+
+    def ends_during_the_call(*_args, before_call, **_kwargs):
+        before_call()
+        raise stop
+
+    monkeypatch.setattr(sweep_job, "run_fix_step", ends_during_the_call)
+    # Caught here as well, so a regression fails on the asserts rather than
+    # letting a KeyboardInterrupt stop the test session.
+    with contextlib.suppress(type(stop)):
+        runner.run_job(repo, "sweep", now=lambda: NOW, environ=HOSTED_ENVIRON)
+
+    line = job_lines(repo)[-1]
+    assert line["outcome"] == FAILURE
+    assert line[sweep_job.FIX_BASH_FIELD] == TEST_COMMAND
 
 
 @pytest.mark.parametrize("command, value", [
