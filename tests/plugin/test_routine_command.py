@@ -440,7 +440,8 @@ def test_steps_1_and_3_wait_for_their_command_to_exit_too():
     first, third = flat(step(prompt(), 1)), flat(step(prompt(), 3))
 
     assert ("Run it with a Bash tool timeout of 300000 ms (5 minutes). If that timeout ends "
-            'it, stop here the same way as for "did not resolve".') in first
+            'it or moves it to the background, stop here the same way as for "did not '
+            'resolve", and use no later output from it.') in first
     assert "WAIT until it has exited, as in step 2" in third
     assert ("Do not stop or kill it yourself; if Claude Code stops it, record that as a "
             "failure.") in third
@@ -538,9 +539,9 @@ def test_the_prompt_reports_the_outcome_and_the_pr_link():
     fourth = flat(step(prompt(), 4))
 
     assert "- the cúramóir SHA from step 1;" in fourth
-    assert ("- step 2's exit code and its sentence, quoted exactly; if the sentence names a "
-            'pull request it opened (a link after "opened"), give that link on its own line;'
-            in fourth)
+    assert ("- step 2's exit code and its sentence, quoted exactly, or, if Claude Code "
+            "stopped it, say so plainly as a failure; if the sentence names a pull request it "
+            'opened (a link after "opened"), give that link on its own line;' in fourth)
     assert ("- step 3's exit code and its sentence, quoted exactly, saying plainly if it was "
             "a failure or carried a warning.") in fourth
     assert "Do nothing else." in fourth

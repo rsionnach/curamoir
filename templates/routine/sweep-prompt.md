@@ -44,7 +44,8 @@ fi
 ```
 
 Run it with a Bash tool timeout of 300000 ms (5 minutes). If that timeout
-ends it, stop here the same way as for "did not resolve".
+ends it or moves it to the background, stop here the same way as for "did
+not resolve", and use no later output from it.
 
 If it printed "cúramóir SHA: " and 40 characters, that SHA is the one every
 later command runs: in steps 2 and 3, replace `<SHA>` with it, character for
@@ -104,9 +105,10 @@ it as a warning, whatever the exit code.
 Step 4. Report, then stop.
 Report, briefly:
 - the cúramóir SHA from step 1;
-- step 2's exit code and its sentence, quoted exactly; if the sentence names
-  a pull request it opened (a link after "opened"), give that link on its
-  own line;
+- step 2's exit code and its sentence, quoted exactly, or, if Claude Code
+  stopped it, say so plainly as a failure; if the sentence names a pull
+  request it opened (a link after "opened"), give that link on its own
+  line;
 - step 3's exit code and its sentence, quoted exactly, saying plainly if it
   was a failure or carried a warning.
 Do nothing else.
