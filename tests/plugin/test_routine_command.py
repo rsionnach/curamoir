@@ -418,7 +418,7 @@ def test_step_2_waits_for_the_sweep_to_exit_before_step_3():
     assert "is not the command finishing" in second
     assert "still running 60 minutes after it started, stop it: send it SIGTERM first" \
         in second
-    assert "SIGKILL. Record that as a failure, and go on to step 3." in second
+    assert "Record that as a failure, and go on to step 3." in second
 
 
 def test_steps_1_and_3_wait_for_their_command_to_exit_too():
@@ -427,8 +427,8 @@ def test_steps_1_and_3_wait_for_their_command_to_exit_too():
     assert "Wait until it has exited, as step 2 says" in first
     assert "still running 5 minutes after it started, stop it" in first
     assert "WAIT until it has exited, as in step 2" in third
-    assert ("still running 45 minutes after it started, stop it the same way and record "
-            "that as a failure") in third
+    assert "still running 45 minutes after it started, stop it the same way" in third
+    assert "record that as a failure" in third
 
 
 def test_the_60_minute_stop_lets_curamoir_write_its_ledger_line():
@@ -437,7 +437,18 @@ def test_the_60_minute_stop_lets_curamoir_write_its_ledger_line():
     second = flat(step(prompt(), 2))
 
     assert ("send it SIGTERM first, which lets cúramóir write the run's ledger line, and "
-            "only if it has not exited a minute later, SIGKILL") in second
+            "only if it has not exited a minute later, SIGKILL the whole process tree, not "
+            "only uvx") in second
+
+
+def test_a_sigkill_reaches_curamoir_itself_not_only_uvx():
+    """uvx passes SIGTERM on to its child but not SIGKILL, which would leave
+    cúramóir running beside step 3 (or still pushing after a reported
+    failure); each fallback names the process by its own command line."""
+    second, third = flat(step(prompt(), 2)), flat(step(prompt(), 3))
+
+    assert "`pkill -KILL -f 'curamoir run sweep'`" in second
+    assert "`pkill -KILL -f 'curamoir state push'`" in third
 
 
 def test_nothing_to_push_after_a_sweep_that_ran_is_a_warning():
