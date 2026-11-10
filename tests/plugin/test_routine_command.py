@@ -354,6 +354,29 @@ def test_the_prompt_runs_the_sweep_then_the_state_push_from_the_resolved_commit(
     assert text.count(REF_PLACEHOLDER) == 1
 
 
+@pytest.mark.parametrize("arguments", [["run", "sweep"],
+                                       ["state", "push", "--branch", STATE_BRANCH]],
+                         ids=["run-sweep", "state-push"])
+def test_the_prompts_commands_are_ones_the_installed_package_provides(arguments, capsys):
+    """What the prompt runs through uvx is the package's own console script
+    (pyproject's [project.scripts]: uvx installs that, never the plugin's
+    scripts/ wrapper), and the subcommand it names parses: at 864bd19 the
+    package declared no script, so both steps could not start (cm-2qp.5's
+    R5 redo). The executable is the word after the pinned `uvx --from`."""
+    import tomllib
+
+    from curamoir import cli
+
+    executable = PINNED.rsplit(" ", 1)[-1]
+    scripts = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))[
+        "project"]["scripts"]
+    assert scripts[executable] == "curamoir.cli:main"
+    assert f"{PINNED} {' '.join(arguments)}\n" in prompt()
+    with pytest.raises(SystemExit) as parsed:
+        cli.main([*arguments, "--help"])
+    assert parsed.value.code == 0
+    assert "usage:" in capsys.readouterr().out
+
 def test_the_state_branch_is_the_users_choice_exactly():
     pushes = re.findall(r"state push --branch (\S+)", prompt())
 
