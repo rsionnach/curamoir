@@ -1,0 +1,3316 @@
+diff --git a/CLAUDE.md b/CLAUDE.md
+index a0b8a4c..838a7a6 100644
+--- a/CLAUDE.md
++++ b/CLAUDE.md
+@@ -36,11 +36,14 @@ These are load-bearing — wrong-side mistakes cause silent breakage.
+        package-internal but cross-module, so deliberately not
+        re-exported (hard rule 3):
+        - judgment polarity — `JUDGMENT_TARGET_FIELDS` (type → target
+-         field), `TARGET_FIELD_IS_CEILING` (complement / scale / leave
+-         alone), `converts_to_sli_floor()` (membership, i.e. "is this
++         field), `TARGET_FIELD_IS_CEILING` (complement / scale),
++         `converts_to_sli_floor()` (membership, i.e. "is this
+          converted at all"), `judgment_target_percent()` [inbound],
+          `judgment_target_ratio()` [outbound],
+          `judgment_promise_direction()`, `judgment_promise()` [factory].
++       - thresholds — `manifest/thresholds.py` (bound tables,
++         `FORBIDDEN_THRESHOLD_KEYS`, `parse_bounds()`, `normalise_bins()`,
++         `srm_v1_threshold()`), also package-internal and not re-exported.
+        - domain guards, used on the CLASSICAL writers too, not just
+          judgment — `require_number()` (numeric or a string spelling
+          one; raises ValueError where a bare `float()` raised an
+@@ -53,9 +56,11 @@ These are load-bearing — wrong-side mistakes cause silent breakage.
+          and taken as-is. Exactly one of the two, per OpenSLO.
+      - Only the three MAXIMA complement (`reversal_rate`,
+        `high_confidence_failure`, `escalation`). `outcomes` and
+-       `audit_sampling` are already floors — scale only. Error
+-       magnitudes (`segments`, `stability`, `calibration`) are left
+-       unconverted pending decision 3c.
++       `audit_sampling` are already floors — scale only. Error magnitudes
++       are not SLO targets. They are `JudgmentThreshold` bounds
++       (`manifest/thresholds.py`, decision 3c, opensrm-l33e), stored as
++       declared and never converted, and they are not in
++       `SLODefinition.target` at all.
+    - Load-time validator in `manifest/target_validation.py` flags
+      targets in `(0, 1)` as likely ratio author errors via
+      `TargetConventionWarning(UserWarning)`. Tests in
+diff --git a/docs/architecture.md b/docs/architecture.md
+index 6b1d047..61d43d6 100644
+--- a/docs/architecture.md
++++ b/docs/architecture.md
+@@ -47,6 +47,9 @@ src/nthlayer_common/
+     manifest/            # Unified OpenSRM manifest parsing (v1, v2, OpenSLO, legacy)
+                          #   + scan.py: walking a directory that holds
+                          #     manifests alongside other YAML
++                         #   + thresholds.py: judgment-threshold bound tables and
++                         #     checks, normalise_bins, FORBIDDEN_THRESHOLD_KEYS
++                         #     (package-internal, not re-exported)
+ ```
+ 
+ ## Subsystem references
+@@ -307,6 +310,13 @@ a fourth directory walk** — three existed before this was shared
+   underlying predicate and the shared error wording. Only an `ai-gate` may declare
+   `judgment_slo`, matching schema.json's `ServiceManifest.allOf`.
+   OpenSLO `$refs` resolved relative to manifest's directory.
++- Judgment thresholds (decision 3c, opensrm-l33e): segments, stability,
++  calibration, audit_backlog and feedback_latency are error magnitudes, not
++  SLOs. They parse to `JudgmentThreshold` (`models.py`; reuses
++  `JudgmentMeasurement` for measurement/probe/segment fields) and land in
++  `ReliabilityManifest.judgment_thresholds`, never in `slos`. Bounds are stored
++  as declared, never converted. Vocabulary sets: `V2_JUDGMENT_SLO_TYPES` and
++  `V2_JUDGMENT_THRESHOLD_TYPES`. See `docs/upgrading-4.0.md`.
+ - v1→v2 compat helpers in `v1_compat.py`:
+   `default_statistical_requirements`, `default_measurement`,
+   `convert_v1_contract`, `convert_v1_to_v2(v1_data: dict) -> dict`.
+diff --git a/docs/upgrading-4.0.md b/docs/upgrading-4.0.md
+new file mode 100644
+index 0000000..6a9e0f3
+--- /dev/null
++++ b/docs/upgrading-4.0.md
+@@ -0,0 +1,100 @@
++# Upgrading to nthlayer-common 4.0
++
++4.0 implements OpenSRM decision 3c (opensrm-l33e): judgment error magnitudes
++are no longer SLOs. The release notes link here for detail.
++
++## What changed
++
++| | 3.x | 4.0 |
++|---|---|---|
++| segments / stability / calibration | `SLODefinition` in `manifest.slos`, `judgment_type` set | `JudgmentThreshold` in `manifest.judgment_thresholds` |
++| audit backlog bound | `audit_sampling.target.audit_backlog_maximum_age` (never read) | `JudgmentThreshold(type="audit_backlog", bounds={"maximum_age": ...})`; the old key is a parse error that prints the replacement block |
++| feedback latency | srm/v1 only, parsed as a latency `SLODefinition` with `judgment_type=None` | `JudgmentThreshold(type="feedback_latency", bounds={"maximum_p50": "<n>s"})` |
++| calibration bounds | only `maximum_brier_score` read; `maximum_expected_calibration_error` was dropped | each declared bound kept |
++| `JUDGMENT_SLO_TYPES` | 8 names | **removed, no alias**; use `V2_JUDGMENT_SLO_TYPES` (5) and `V2_JUDGMENT_THRESHOLD_TYPES` (5) |
++| contract promise on a threshold or unknown type | silently matched nothing | parse error. The published opensrm/v1 schema's `ContractJudgment` keys (`max_reversal_rate`, `max_hcf_rate`, `max_escalation_rate`, ...) are not supported by the srm/v1 parser and now raise (tracked in opensrm-pnmv) |
++| srm/v1 threshold config with bound-like keys | `p50`, `p90`, `bins`, `method`, `maximum_*` silently ignored | `ValueError` (`OpenSRMParseError` from the parser) naming the key: srm/v1 cannot express them; declare the threshold in an `opensrm.nthlayer.io/v2` manifest under `spec.judgment_threshold` (OPENSRM-CORE-v2 §5.5) |
++| `TargetConventionWarning` on magnitudes | fired (e.g. "write '5.0'" for `maximum_drift: 0.05`) | never |
++
++The five judgment SLO types are `reversal_rate`, `high_confidence_failure`,
++`escalation`, `outcomes` and `audit_sampling`. The five threshold types are
++`segments`, `stability`, `calibration`, `audit_backlog` and `feedback_latency`.
++
++Code that imported `JUDGMENT_SLO_TYPES` now fails at import time. Code that read
++`segments`, `stability` or `calibration` out of `manifest.slos` finds nothing
++there: read `ReliabilityManifest.judgment_thresholds` instead.
++
++## Evaluating a threshold
++
++A breach is the measured value exceeding ANY declared bound. Bounds are stored as
++declared: Ratio bounds are floats in [0, 1], Duration bounds are strings such as
++"24h" (`<integer><ms|s|m|h|d|w>`). There is no complement and no 0-100 conversion.
++This parser does not evaluate anything. The evaluation rules (strictly-exceeds,
++units, not-evaluable, precedence) are OPENSRM-CORE-v2.md section 5.5.6 E1-E4, for
++evaluators such as nthlayer-workers.
++
++## Manifests
++
++v2 manifests must move these entries from `judgment_slo` to `judgment_threshold`.
++The parser's error shows the replacement block. srm/v1 manifests need no change
++for `calibration` or `feedback_latency` (an srm/v1 `calibration` target reads as
++`maximum_expected_calibration_error`); srm/v1 `segments`, `stability` and `audit_backlog`
++are now rejected and must be declared in a v2 manifest.
++
++## Threshold entries
++
++- Entries are flat (`type`, `bounds`, ...), not wrapped in `metadata`/`spec`.
++- Other keys that do not belong to a threshold's type are ignored.
++- `breach_actions`, `target`, `judgment_type` and `service` on a threshold raise
++  `OpenSRMV2ParseError`, as does `measurement.method` on a `calibration` threshold.
++- `segment_dimension` and every `segment_values` entry must be non-empty strings.
++- An integral float `bins` (for example `10.0`) is accepted and stored as an int.
++
++## Templates
++
++A template's `judgment_threshold` list CONCATENATES with the manifest's: template
++entries first, then manifest entries. Unlike every other list, the manifest's does
++not replace the template's, so a manifest cannot remove a template's threshold.
++`overrides.judgment_threshold` may only `append` (mapping form, with a list value).
++`replace`, the list form and any other shape raise `OpenSRMV2ParseError`
++(OPENSRM-CORE-v2.md section 5.5; the section 9 list form is tracked in
++opensrm-r78t). The ai-gate requirement applies to the resolved manifest.
++
++## API
++
++- `JudgmentThreshold`
++- `ReliabilityManifest.judgment_thresholds`
++- `get_judgment_thresholds()`
++- `V2_JUDGMENT_SLO_TYPES`
++- `V2_JUDGMENT_THRESHOLD_TYPES`
++- `SRM_V1_JUDGMENT_THRESHOLD_TYPES`
++
++### `JudgmentThreshold` fields
++
++| Field | Holds |
++|---|---|
++| `type` | One of `V2_JUDGMENT_THRESHOLD_TYPES`. |
++| `bounds` | Dict of bound name to value, stored as declared: a float for Ratio bounds, a duration string such as `"24h"` for Duration bounds. |
++| `measurement` | A `JudgmentMeasurement`. calibration: `bins` (int) and `window`. stability: `probe` (`frozen_input_set`, `frequency`). segments: `segment_dimension` and `segment_values`. Other types: empty (all fields at their defaults). |
++
++Worked example. An srm/v1 `calibration: {target: 0.05, window: 30d}` becomes
++`JudgmentThreshold(type="calibration", bounds={"maximum_expected_calibration_error": 0.05}, measurement=JudgmentMeasurement(window="30d", bins=10))`.
++The real repr from `parse_srm_v1` (unset fields shown as the parser leaves them):
++
++```
++JudgmentThreshold(type='calibration', bounds={'maximum_expected_calibration_error': 0.05}, measurement=JudgmentMeasurement(source=None, confidence_threshold=None, bins=10, method=None, window='30d', frequency=None, probe=None, sampling=None, segment_dimension=None, segment_values=[]))
++```
++
++## What consumers must change
++
++- Replace `JUDGMENT_SLO_TYPES` imports with `V2_JUDGMENT_SLO_TYPES` (SLOs) or
++  `V2_JUDGMENT_THRESHOLD_TYPES` (thresholds).
++- Read thresholds from `judgment_thresholds`, not `slos`.
++- Widen the nthlayer-common requirement to `>=4.0.0,<5.0.0`.
++- Evaluators implement OPENSRM-CORE-v2 §5.5.6 E1-E4.
++- Reconcile local copies of the old vocabulary. For example nthlayer-generate
++  `src/nthlayer_generate/specs/manifest.py` defines its own `JUDGMENT_SLO_TYPES`
++  (including calibration and feedback_latency), used at about line 267.
++- Grep consumers for `JUDGMENT_SLO_TYPES`, "eight judgment", and the departed type
++  names (`segments`, `stability`, `calibration`). For example nthlayer-workers
++  `measure/adapters/prometheus.py` carries comments about "the 8 JUDGMENT_SLO_TYPES".
+diff --git a/src/nthlayer_common/manifest/__init__.py b/src/nthlayer_common/manifest/__init__.py
+index 41ccf5b..f91c16a 100644
+--- a/src/nthlayer_common/manifest/__init__.py
++++ b/src/nthlayer_common/manifest/__init__.py
+@@ -7,9 +7,11 @@ Public API:
+ """
+ 
+ from nthlayer_common.manifest.models import (
+-    JUDGMENT_SLO_TYPES,
+     SERVICE_TYPE_ALIASES,
++    SRM_V1_JUDGMENT_THRESHOLD_TYPES,
+     STANDARD_SLO_TYPES,
++    V2_JUDGMENT_SLO_TYPES,
++    V2_JUDGMENT_THRESHOLD_TYPES,
+     VALID_EXHAUSTION_BEHAVIORS,
+     VALID_SERVICE_TYPES,
+     VALID_TIERS,
+@@ -32,6 +34,7 @@ from nthlayer_common.manifest.models import (
+     Instrumentation,
+     JudgmentMeasurement,
+     JudgmentPromise,
++    JudgmentThreshold,
+     ManifestEscalationStep,
+     Observability,
+     OnCallConfig,
+@@ -94,7 +97,9 @@ __all__ = [
+     "OpenSRMParseError",
+     "OpenSRMV2ParseError",
+     # Constants
+-    "JUDGMENT_SLO_TYPES",
++    "V2_JUDGMENT_SLO_TYPES",
++    "V2_JUDGMENT_THRESHOLD_TYPES",
++    "SRM_V1_JUDGMENT_THRESHOLD_TYPES",
+     "STANDARD_SLO_TYPES",
+     "SERVICE_TYPE_ALIASES",
+     "VALID_EXHAUSTION_BEHAVIORS",
+@@ -120,6 +125,7 @@ __all__ = [
+     # SLO
+     "SLODefinition",
+     "JudgmentMeasurement",
++    "JudgmentThreshold",
+     "BreachAction",
+     "StatisticalRequirements",
+     "ProbeConfig",
+diff --git a/src/nthlayer_common/manifest/models.py b/src/nthlayer_common/manifest/models.py
+index 34534a1..3ac0d6b 100644
+--- a/src/nthlayer_common/manifest/models.py
++++ b/src/nthlayer_common/manifest/models.py
+@@ -146,17 +146,37 @@ def is_valid_service_type(value: object) -> bool:
+     )
+ 
+ 
+-# 8 standard judgment SLO types (v2 spec §5.2)
+-JUDGMENT_SLO_TYPES = {
++# Decision 3c (opensrm-l33e) splits the judgment vocabulary in two. Both sets
++# are pinned against opensrm/spec/v2/schema.json in BOTH directions by
++# tests/test_judgment_thresholds_against_spec.py.
++V2_JUDGMENT_SLO_TYPES: frozenset[str] = frozenset({
+     "reversal_rate",
+     "high_confidence_failure",
+     "audit_sampling",
+     "outcomes",
+     "escalation",
++})
++
++# Error magnitudes: bounds, not SLOs. See manifest/thresholds.py.
++V2_JUDGMENT_THRESHOLD_TYPES: frozenset[str] = frozenset({
+     "segments",
+     "stability",
+     "calibration",
+-}
++    "audit_backlog",
++    "feedback_latency",
++})
++
++# The judgment types srm/v1 can express as thresholds when parsed. srm/v1 writes
++# judgment types flat under spec.slos (its SLO names are V2_JUDGMENT_SLO_TYPES).
++# segments and stability are absent deliberately: their v2 forms need fields
++# (segment_dimension, probe) the flat format cannot express, so srm/v1 rejects
++# them. Published for consumers that need the srm/v1 lift set; parser/v1.py
++# routes on V2_JUDGMENT_THRESHOLD_TYPES instead, so segments, stability and
++# audit_backlog reach their rejection rather than falling through.
++SRM_V1_JUDGMENT_THRESHOLD_TYPES: frozenset[str] = frozenset({
++    "calibration",
++    "feedback_latency",
++})
+ 
+ # Standard (classical) SLO types
+ STANDARD_SLO_TYPES = {
+@@ -419,7 +439,7 @@ class SLODefinition:
+     source_ref: str | None = None  # Original $ref path (OpenSLO)
+ 
+     # Judgment SLO fields (None for classical SLOs)
+-    judgment_type: str | None = None  # one of 8 JUDGMENT_SLO_TYPES
++    judgment_type: str | None = None  # one of V2_JUDGMENT_SLO_TYPES
+     measurement: JudgmentMeasurement | None = None
+     breach_actions: list[BreachAction] = field(default_factory=list)
+     statistical_requirements: StatisticalRequirements | None = None
+@@ -429,6 +449,26 @@ class SLODefinition:
+         return self.judgment_type is not None
+ 
+ 
++@dataclass
++class JudgmentThreshold:
++    """A bound on a judgment ERROR MAGNITUDE (decision 3c, opensrm-l33e).
++
++    Not an SLO, and deliberately not an SLODefinition: there is no target in
++    SLI-floor space, no error budget and no complement. A breach is the
++    measured value exceeding ANY declared bound. ``bounds`` holds the values
++    exactly as declared: floats for Ratio bounds, duration strings such as
++    ``"24h"`` for Duration bounds. Validated by manifest/thresholds.py.
++
++    ``measurement`` reuses JudgmentMeasurement for the type-specific fields
++    (calibration bins/window, stability probe, segments dimension/values) so
++    consumers read them from the same place they did when these were SLOs.
++    """
++
++    type: str  # one of V2_JUDGMENT_THRESHOLD_TYPES
++    bounds: dict[str, float | str]
++    measurement: JudgmentMeasurement = field(default_factory=JudgmentMeasurement)
++
++
+ # =============================================================================
+ # Contract Models
+ # =============================================================================
+@@ -438,7 +478,7 @@ class SLODefinition:
+ class JudgmentPromise:
+     """A single judgment-type promise within a reliability contract."""
+ 
+-    judgment_type: str  # one of JUDGMENT_SLO_TYPES
++    judgment_type: str  # one of V2_JUDGMENT_SLO_TYPES
+     threshold: float
+     direction: Literal["above", "below"]  # "above" = value must stay above threshold
+ 
+@@ -866,6 +906,7 @@ class ReliabilityManifest:
+     # Spec
+     # ==========================================================================
+     slos: list[SLODefinition] = field(default_factory=list)
++    judgment_thresholds: list[JudgmentThreshold] = field(default_factory=list)
+     dependencies: list[Dependency] = field(default_factory=list)
+     ownership: Ownership | None = None
+     observability: Observability | None = None
+@@ -955,6 +996,10 @@ class ReliabilityManifest:
+         """Get all standard (non-judgment) SLOs."""
+         return [s for s in self.slos if not s.is_judgment_slo()]
+ 
++    def get_judgment_thresholds(self) -> list[JudgmentThreshold]:
++        """Get all judgment thresholds (bounds on error magnitudes)."""
++        return list(self.judgment_thresholds)
++
+     def validate_contracts(self) -> list[str]:
+         """Validate that internal SLOs are tighter than external contracts."""
+         errors: list[str] = []
+diff --git a/src/nthlayer_common/manifest/parser/v1.py b/src/nthlayer_common/manifest/parser/v1.py
+index a68a903..8dffb62 100644
+--- a/src/nthlayer_common/manifest/parser/v1.py
++++ b/src/nthlayer_common/manifest/parser/v1.py
+@@ -15,7 +15,8 @@ import structlog
+ import yaml
+ 
+ from nthlayer_common.manifest.models import (
+-    JUDGMENT_SLO_TYPES,
++    V2_JUDGMENT_SLO_TYPES,
++    V2_JUDGMENT_THRESHOLD_TYPES,
+     AuditConfig,
+     BudgetPolicy,
+     BudgetThresholds,
+@@ -26,6 +27,7 @@ from nthlayer_common.manifest.models import (
+     DeploymentGates,
+     ErrorBudgetGate,
+     Instrumentation,
++    JudgmentThreshold,
+     ManifestEscalationStep,
+     OnCallConfig,
+     Override,
+@@ -46,6 +48,7 @@ from nthlayer_common.manifest.target_validation import (
+     check_finite,
+     require_number,
+ )
++from nthlayer_common.manifest.thresholds import srm_v1_threshold
+ from nthlayer_common.manifest.v1_compat import (
+     convert_v1_contract,
+     default_measurement,
+@@ -94,7 +97,7 @@ def parse_srm_v1(
+     if not service_type:
+         raise OpenSRMParseError("spec.type is required")
+ 
+-    slos = _parse_slos(spec.get("slos", {}), service_type)
++    slos, judgment_thresholds = _parse_slos(spec.get("slos", {}), service_type)
+     dependencies = _parse_dependencies(spec.get("dependencies", []))
+     ownership = _parse_ownership(spec.get("ownership"))
+     observability = parse_observability(spec.get("observability"))
+@@ -105,14 +108,17 @@ def parse_srm_v1(
+     contracts = []
+     contract_data = spec.get("contract")
+     if contract_data:
+-        contracts.append(
+-            convert_v1_contract(
+-                service_name=name,
+-                availability=contract_data.get("availability"),
+-                latency=contract_data.get("latency"),
+-                judgment=contract_data.get("judgment"),
++        try:
++            contracts.append(
++                convert_v1_contract(
++                    service_name=name,
++                    availability=contract_data.get("availability"),
++                    latency=contract_data.get("latency"),
++                    judgment=contract_data.get("judgment"),
++                )
+             )
+-        )
++        except ValueError as exc:
++            raise OpenSRMParseError(str(exc)) from exc
+ 
+     # Alerting: store raw dict, nthlayer-generate post-processes
+     alerting = spec.get("alerting")
+@@ -126,6 +132,7 @@ def parse_srm_v1(
+         labels=metadata.get("labels", {}),
+         annotations=metadata.get("annotations", {}),
+         slos=slos,
++        judgment_thresholds=judgment_thresholds,
+         dependencies=dependencies,
+         ownership=ownership,
+         observability=observability,
+@@ -217,7 +224,7 @@ def _infer_slo_type(name: str, config: dict[str, Any], service_type: str) -> str
+         return explicit
+ 
+     # Check if this is a judgment SLO
+-    if name in JUDGMENT_SLO_TYPES:
++    if name in V2_JUDGMENT_SLO_TYPES:
+         return "availability"  # judgment SLOs track a rate metric; slo_type describes the indicator shape
+ 
+     # Exact name match
+@@ -264,14 +271,31 @@ def _infer_slo_type(name: str, config: dict[str, Any], service_type: str) -> str
+ def _parse_slos(
+     slos_data: dict[str, Any],
+     service_type: str,
+-) -> list[SLODefinition]:
+-    """Parse SLOs from srm/v1 spec.slos section."""
++) -> tuple[list[SLODefinition], list[JudgmentThreshold]]:
++    """Parse SLOs from srm/v1 spec.slos section.
++
++    Returns the SLOs and, separately, the judgment thresholds (calibration,
++    feedback_latency) that srm/v1 declares in the same mapping.
++    """
+     slos = []
++    thresholds: list[JudgmentThreshold] = []
+ 
+     for name, config in slos_data.items():
+         if not isinstance(config, dict):
+             config = {"target": config}
+ 
++        # Decision 3c (opensrm-l33e): error magnitudes are thresholds, not SLOs.
++        # V2_JUDGMENT_THRESHOLD_TYPES, not the srm/v1 subset, so segments and
++        # stability reach srm_v1_threshold's explicit rejection rather than
++        # falling through to classical-SLO inference.
++        if name in V2_JUDGMENT_THRESHOLD_TYPES:
++            try:
++                thresholds.append(srm_v1_threshold(name, config))
++            except ValueError as exc:
++                # srm_v1_threshold's messages already name the entry.
++                raise OpenSRMParseError(str(exc)) from exc
++            continue
++
+         target = config.get("target")
+         if target is None:
+             target = config.get("minimum")
+@@ -285,7 +309,7 @@ def _parse_slos(
+         measurement = None
+         statistical_requirements = None
+ 
+-        if name in JUDGMENT_SLO_TYPES:
++        if name in V2_JUDGMENT_SLO_TYPES:
+             judgment_type = name
+             window = config.get("window", "30d")
+             measurement = default_measurement(judgment_type, window)
+@@ -325,7 +349,7 @@ def _parse_slos(
+         )
+         slos.append(slo)
+ 
+-    return slos
++    return slos, thresholds
+ 
+ 
+ def _parse_dependencies(deps_data: list[dict[str, Any]]) -> list[Dependency]:
+diff --git a/src/nthlayer_common/manifest/parser/v2.py b/src/nthlayer_common/manifest/parser/v2.py
+index e93c093..8cce83d 100644
+--- a/src/nthlayer_common/manifest/parser/v2.py
++++ b/src/nthlayer_common/manifest/parser/v2.py
+@@ -15,7 +15,8 @@ import structlog
+ import yaml
+ 
+ from nthlayer_common.manifest.models import (
+-    JUDGMENT_SLO_TYPES,
++    V2_JUDGMENT_SLO_TYPES,
++    V2_JUDGMENT_THRESHOLD_TYPES,
+     APIRef,
+     BreachAction,
+     BreachSemantics,
+@@ -28,6 +29,7 @@ from nthlayer_common.manifest.models import (
+     FallbackDeclaration,
+     Instrumentation,
+     JudgmentMeasurement,
++    JudgmentThreshold,
+     Outcomes,
+     Ownership,
+     ProbeConfig,
+@@ -57,6 +59,12 @@ from nthlayer_common.manifest.target_validation import (
+     judgment_promise,
+     judgment_target_percent,
+ )
++from nthlayer_common.manifest.thresholds import (
++    THRESHOLD_REQUIRED_FIELDS,
++    check_type_fields,
++    normalise_bins,
++    parse_bounds,
++)
+ 
+ logger = structlog.get_logger()
+ 
+@@ -167,14 +175,17 @@ def parse_opensrm_v2(
+     #
+     # Presence, not truthiness: the schema's `judgment_slo: false` rejects
+     # any value, so `judgment_slo: []` is invalid too.
+-    if "judgment_slo" in spec and service_type != "ai-gate":
+-        raise OpenSRMV2ParseError(
+-            f"spec.judgment_slo is only permitted on an 'ai-gate' service, "
+-            f"but spec.service.type is '{service_type}'. Judgment SLOs measure "
+-            f"decision quality and are only meaningful on a decision-making "
+-            f"service. Remove the judgment_slo block, or declare the service "
+-            f"as an ai-gate if it does make decisions."
+-        )
++    #
++    # judgment_threshold shares the rule (schema.json ServiceManifest.allOf, opensrm-l33e).
++    for judgment_key in ("judgment_slo", "judgment_threshold"):
++        if judgment_key in spec and service_type != "ai-gate":
++            raise OpenSRMV2ParseError(
++                f"spec.{judgment_key} is only permitted on an 'ai-gate' service, "
++                f"but spec.service.type is '{service_type}'. Judgment SLOs and "
++                f"thresholds measure decision quality and are only meaningful on "
++                f"a decision-making service. Remove the {judgment_key} block, or "
++                f"declare the service as an ai-gate if it does make decisions."
++            )
+ 
+     # Parse classical SLOs (OpenSLO v1 documents)
+     slos: list[SLODefinition] = []
+@@ -207,8 +218,26 @@ def parse_opensrm_v2(
+                 f"spec.judgment_slo[{index}] must be a mapping, got "
+                 f"{type(js_data).__name__}."
+             )
++        _reject_pre_3c_placement(index, js_data)
+         slos.append(_parse_judgment_slo(js_data))
+ 
++    # Parse judgment thresholds (§5.5) - bounds on error magnitudes, decision
++    # 3c. Same list/element guards as judgment_slo above, for the same reason.
++    thresholds_block = spec.get("judgment_threshold", [])
++    if not isinstance(thresholds_block, list):
++        raise OpenSRMV2ParseError(
++            f"spec.judgment_threshold must be a list, got "
++            f"{type(thresholds_block).__name__}."
++        )
++    judgment_thresholds: list[JudgmentThreshold] = []
++    for index, th_data in enumerate(thresholds_block):
++        if not isinstance(th_data, dict):
++            raise OpenSRMV2ParseError(
++                f"spec.judgment_threshold[{index}] must be a mapping, got "
++                f"{type(th_data).__name__}."
++            )
++        judgment_thresholds.append(_parse_judgment_threshold(index, th_data))
++
+     # Parse contracts (§6)
+     contracts = _parse_contracts(spec.get("contracts", []))
+ 
+@@ -241,6 +270,7 @@ def parse_opensrm_v2(
+         labels=labels,
+         annotations=metadata.get("annotations", {}),
+         slos=slos,
++        judgment_thresholds=judgment_thresholds,
+         dependencies=dependencies,
+         ownership=ownership,
+         observability=observability,
+@@ -355,29 +385,127 @@ def _resolve_backstage_ref(ref: str, expected_kind: str) -> str:
+ # =============================================================================
+ 
+ 
++# Fields a departing type carries besides target (schema JudgmentThresholdSpec),
++# derived from the thresholds table so there is one source.
++_THRESHOLD_OWN_FIELDS: dict[str, tuple[str, ...]] = {
++    t: fields for t, fields in THRESHOLD_REQUIRED_FIELDS.items() if fields
++}
++
++
++def _render_threshold_block(entry: dict[str, Any]) -> str:
++    """Render a judgment_threshold block, indented as a message example.
++
++    yaml.safe_dump raises RepresenterError for values the dict API admits but
++    YAML does not (a Decimal); fall back to repr so only OpenSRMV2ParseError
++    ever leaves the caller.
++    """
++    try:
++        text = yaml.safe_dump(
++            {"judgment_threshold": [entry]}, default_flow_style=False, sort_keys=False
++        )
++    except yaml.YAMLError:
++        text = f"judgment_threshold:\n- {entry!r}\n"
++    return "".join(f"  {line}\n" for line in text.splitlines())
++
++
++def _reject_pre_3c_placement(index: int, js_data: dict[str, Any]) -> None:
++    """Fail a judgment_slo item that uses a placement decision 3c removed.
++
++    Reads both item shapes - the wrapped JudgmentSLO document this parser
++    handles, and the schema's flat inline item (opensrm-a742) - so a manifest
++    written for nthlayer-common 3.x gets the fix-it error whichever shape it
++    used, instead of a KeyError or an unrelated 'missing metadata.name'.
++
++    Raises only OpenSRMV2ParseError; any other odd shape (a non-string
++    judgment_type, a scalar target or spec) falls through to
++    _parse_judgment_slo, which reports it.
++    """
++    body = js_data.get("spec") if isinstance(js_data.get("spec"), dict) else js_data
++    judgment_type = body.get("judgment_type")
++    if not isinstance(judgment_type, str):
++        return
++    target = body.get("target") if isinstance(body.get("target"), dict) else {}
++    where = f"spec.judgment_slo[{index}]"
++
++    if judgment_type in V2_JUDGMENT_THRESHOLD_TYPES:
++        # A loadable judgment_threshold entry: the type's own fields carry
++        # over (schema JudgmentThresholdSpec requires them), `target` becomes
++        # `bounds`, and measurement.method is dropped (the schema forbids it).
++        entry: dict[str, Any] = {"type": judgment_type}
++        for field in _THRESHOLD_OWN_FIELDS.get(judgment_type, ()):
++            if field not in body:
++                continue
++            value = body[field]
++            if field == "measurement" and isinstance(value, dict):
++                value = {k: v for k, v in value.items() if k != "method"}
++            entry[field] = value
++        entry["bounds"] = target
++        dropped = ""
++        measurement = entry.get("measurement")
++        if judgment_type == "calibration" and not (
++            isinstance(measurement, dict) and "bins" in measurement and "window" in measurement
++        ):
++            dropped = (
++                "\n\nA calibration threshold requires `measurement` with `bins` "
++                "and `window`; add one."
++            )
++        if "breach_actions" in body or "service" in body:
++            dropped += (
++                "\n\n`breach_actions` and `service` do not carry over: "
++                "thresholds do not declare them."
++            )
++        raise OpenSRMV2ParseError(
++            f"{where}: '{judgment_type}' is not a judgment SLO in OpenSRM v2 "
++            f"(OPENSRM-CORE-v2 §5.5) - it bounds an error magnitude and has "
++            f"no error budget. Move it to spec.judgment_threshold, renaming "
++            f"'target' to 'bounds':\n\n"
++            + _render_threshold_block(entry)
++            + dropped
++        )
++    if judgment_type == "audit_sampling" and "audit_backlog_maximum_age" in target:
++        suggested = {
++            "type": "audit_backlog",
++            "bounds": {"maximum_age": target["audit_backlog_maximum_age"]},
++        }
++        raise OpenSRMV2ParseError(
++            f"{where}: audit_backlog_maximum_age left audit_sampling's target in "
++            f"OpenSRM v2 (OPENSRM-CORE-v2 §5.5). Only the backlog bound moves; "
++            f"audit_completion_rate stays in the audit_sampling target. "
++            f"Declare the backlog as:\n\n" + _render_threshold_block(suggested)
++        )
++
++
+ def _parse_judgment_slo(data: dict[str, Any]) -> SLODefinition:
+     """Parse a v2 judgment SLO entry into SLODefinition.
+ 
+-    Handles all 8 standard types from §5.2.
++    Handles the five standard types from §5.2.
+     """
+     js_spec = data.get("spec", {})
+     js_metadata = data.get("metadata", {})
++    # Mapping guards: a scalar spec/metadata/target otherwise leaked
++    # AttributeError on `.get`, escaping every caller's except clause.
++    if not isinstance(js_metadata, dict):
++        raise OpenSRMV2ParseError("Judgment SLO metadata must be a mapping")
+ 
+     name = js_metadata.get("name")
+     if not name:
+         raise OpenSRMV2ParseError("Judgment SLO missing metadata.name")
++    if not isinstance(js_spec, dict):
++        raise OpenSRMV2ParseError(f"Judgment SLO '{name}' spec must be a mapping")
+ 
+     judgment_type = js_spec.get("judgment_type")
+     if not judgment_type:
+         raise OpenSRMV2ParseError(f"Judgment SLO '{name}' missing spec.judgment_type")
+-    if judgment_type not in JUDGMENT_SLO_TYPES:
++    if not isinstance(judgment_type, str) or judgment_type not in V2_JUDGMENT_SLO_TYPES:
+         raise OpenSRMV2ParseError(
+             f"Unknown judgment_type '{judgment_type}' in '{name}'. "
+-            f"Valid types: {', '.join(sorted(JUDGMENT_SLO_TYPES))}"
++            f"Valid types: {', '.join(sorted(V2_JUDGMENT_SLO_TYPES))}"
+         )
+ 
+     # Extract target value from type-specific target block
+     target_data = js_spec.get("target", {})
++    if not isinstance(target_data, dict):
++        raise OpenSRMV2ParseError(f"Judgment SLO '{name}' target must be a mapping")
+     target = _extract_judgment_target(judgment_type, target_data, name)
+ 
+     # Measurement config
+@@ -453,14 +581,6 @@ def _parse_judgment_measurement(
+         frequency=m_data.get("frequency"),
+     )
+ 
+-    # Probe config (stability type)
+-    probe_data = spec.get("probe")
+-    if probe_data:
+-        measurement.probe = ProbeConfig(
+-            frozen_input_set=probe_data.get("frozen_input_set", ""),
+-            frequency=probe_data.get("frequency", "daily"),
+-        )
+-
+     # Sampling config (audit_sampling type)
+     sampling_data = spec.get("sampling")
+     if sampling_data:
+@@ -475,15 +595,80 @@ def _parse_judgment_measurement(
+             stratified=stratified,
+         )
+ 
+-    # Segment config (segments type)
+-    measurement.segment_dimension = spec.get("segment_dimension")
+-    segment_values = spec.get("segment_values", [])
+-    if segment_values:
+-        measurement.segment_values = segment_values
+-
++    # No probe/segment_* parsing: only the stability and segments thresholds
++    # use those keys, and they are parsed by _threshold_measurement.
+     return measurement
+ 
+ 
++def _parse_judgment_threshold(index: int, data: dict[str, Any]) -> JudgmentThreshold:
++    """Parse one flat ``spec.judgment_threshold`` entry (§5.5, opensrm-l33e)."""
++    where = f"spec.judgment_threshold[{index}]"
++    threshold_type = data.get("type")
++    # The schema's `type` is an enum of strings. Checked first: a list or
++    # mapping here would otherwise raise TypeError (unhashable) at the set
++    # membership tests below, escaping the loader's error handling.
++    if not isinstance(threshold_type, str):
++        raise OpenSRMV2ParseError(
++            f"{where}: 'type' must be one of "
++            f"{', '.join(sorted(V2_JUDGMENT_THRESHOLD_TYPES))}, got {threshold_type!r}."
++        )
++    if threshold_type in V2_JUDGMENT_SLO_TYPES:
++        raise OpenSRMV2ParseError(
++            f"{where}: '{threshold_type}' is a judgment SLO, not a threshold. "
++            f"Declare it under spec.judgment_slo."
++        )
++    if threshold_type not in V2_JUDGMENT_THRESHOLD_TYPES:
++        raise OpenSRMV2ParseError(
++            f"{where}: 'type' must be one of "
++            f"{', '.join(sorted(V2_JUDGMENT_THRESHOLD_TYPES))}, got {threshold_type!r}."
++        )
++    try:
++        check_type_fields(threshold_type, data)
++        bounds = parse_bounds(threshold_type, data.get("bounds"))
++    except ValueError as exc:
++        raise OpenSRMV2ParseError(f"{where} ({threshold_type}): {exc}") from exc
++    return JudgmentThreshold(
++        type=threshold_type,
++        bounds=bounds,
++        measurement=_threshold_measurement(threshold_type, data),
++    )
++
++
++def _threshold_measurement(threshold_type: str, data: dict[str, Any]) -> JudgmentMeasurement:
++    """Build a threshold's measurement from the keys its type uses, only.
++
++    JudgmentThresholdSpec is open: ``measurement``, ``probe``, ``sampling`` and
++    the ``segment_*`` keys are constrained only inside the branch of the type
++    that uses them, so on any other type the schema accepts any value for them.
++    Those keys are ignored here. The keys read are exactly the ones
++    ``check_type_fields`` has already validated for this type, which is why
++    this does not reuse ``_parse_judgment_measurement`` (the judgment_slo path).
++    """
++    if threshold_type == "calibration":
++        m_data = data["measurement"]
++        # check_type_fields accepted bins (integral float allowed) but never
++        # rewrites it; the model carries an int.
++        return JudgmentMeasurement(
++            bins=normalise_bins(m_data["bins"]),
++            window=m_data["window"],
++        )
++    if threshold_type == "stability":
++        probe = data["probe"]
++        return JudgmentMeasurement(
++            probe=ProbeConfig(
++                frozen_input_set=probe["frozen_input_set"],
++                frequency=probe["frequency"],
++            ),
++        )
++    if threshold_type == "segments":
++        return JudgmentMeasurement(
++            segment_dimension=data["segment_dimension"],
++            segment_values=list(data["segment_values"]),
++        )
++    # audit_backlog, feedback_latency: bounds only.
++    return JudgmentMeasurement()
++
++
+ def _parse_breach_actions(actions_data: list[dict[str, Any]]) -> list[BreachAction]:
+     """Parse breach actions from v2 spec §5.4."""
+     actions = []
+@@ -956,6 +1141,9 @@ def resolve_v2_template(
+     return result
+ 
+ 
++_THRESHOLD_KEY = "judgment_threshold"
++
++
+ def _merge_template_spec(
+     template_spec: dict[str, Any],
+     manifest_spec: dict[str, Any],
+@@ -967,6 +1155,10 @@ def _merge_template_spec(
+       - append: add items to a list
+       - replace: replace a section entirely
+       - (default): manifest values override template values
++
++    ``judgment_threshold`` is the exception (CORE §5.5): the resolved list is
++    the template's entries followed by the manifest's, and an override may
++    only append. A manifest cannot remove a threshold its template declares.
+     """
+     result = dict(template_spec)
+ 
+@@ -975,7 +1167,9 @@ def _merge_template_spec(
+         if key == "template":
+             continue  # Skip template block itself
+ 
+-        if key in result and isinstance(result[key], list) and isinstance(value, list):
++        if key == _THRESHOLD_KEY and key in result:
++            result[key] = _concatenate_thresholds(result[key], value)
++        elif key in result and isinstance(result[key], list) and isinstance(value, list):
+             # Lists: manifest replaces template by default
+             result[key] = value
+         elif key in result and isinstance(result[key], dict) and isinstance(value, dict):
+@@ -988,6 +1182,8 @@ def _merge_template_spec(
+ 
+     # Apply explicit overrides
+     for key, directive in overrides.items():
++        if key == _THRESHOLD_KEY:
++            _check_threshold_override(directive)
+         if not isinstance(directive, dict):
+             continue
+ 
+@@ -1002,3 +1198,56 @@ def _merge_template_spec(
+             result[key] = directive["replace"]
+ 
+     return result
++
++
++def _concatenate_thresholds(template_value: Any, manifest_value: Any) -> list[Any]:
++    """Template entries followed by manifest entries (CORE §5.5).
++
++    Both sides must be lists. Any other list key lets a manifest value replace
++    the template's, so a manifest-side ``null`` here would silently discard
++    every template threshold before the parser's own list guard could see it.
++    """
++    for side, value in (("template", template_value), ("manifest", manifest_value)):
++        if not isinstance(value, list):
++            raise OpenSRMV2ParseError(
++                f"spec.judgment_threshold must be a list, got "
++                f"{type(value).__name__} in the {side}."
++            )
++    return template_value + manifest_value
++
++
++def _check_threshold_override(directive: Any) -> None:
++    """``overrides.judgment_threshold`` may only append (CORE §5.5).
++
++    Every other key ignores a directive it cannot act on; here an ignored
++    directive would drop thresholds the author declared, so each shape the
++    merger would not apply is an error instead.
++    """
++    if not isinstance(directive, dict):
++        hint = (
++            " Write `judgment_threshold: {append: [...]}`; the list form shown "
++            "in CORE §9 is not yet supported."
++            if isinstance(directive, list)
++            else ""
++        )
++        raise OpenSRMV2ParseError(
++            f"spec.template.overrides.judgment_threshold must be a mapping "
++            f"with an 'append' list, got {type(directive).__name__}.{hint}"
++        )
++    if "replace" in directive:
++        raise OpenSRMV2ParseError(
++            "spec.template.overrides.judgment_threshold must not 'replace': "
++            "an override MUST NOT remove or replace a template's thresholds "
++            "(OPENSRM-CORE-v2 §5.5). Use 'append' to add entries."
++        )
++    unknown = sorted(set(directive) - {"append"}, key=repr)
++    if unknown:
++        raise OpenSRMV2ParseError(
++            f"spec.template.overrides.judgment_threshold supports only "
++            f"'append', got {', '.join(map(repr, unknown))}."
++        )
++    if not isinstance(directive.get("append"), list):
++        raise OpenSRMV2ParseError(
++            f"spec.template.overrides.judgment_threshold 'append' must be a "
++            f"list, got {type(directive.get('append')).__name__}."
++        )
+diff --git a/src/nthlayer_common/manifest/target_validation.py b/src/nthlayer_common/manifest/target_validation.py
+index 7ded401..0742b74 100644
+--- a/src/nthlayer_common/manifest/target_validation.py
++++ b/src/nthlayer_common/manifest/target_validation.py
+@@ -37,6 +37,7 @@ import math
+ import warnings
+ 
+ from nthlayer_common.manifest.models import (
++    V2_JUDGMENT_THRESHOLD_TYPES,
+     JudgmentPromise,
+     ReliabilityManifest,
+     SLODefinition,
+@@ -59,19 +60,15 @@ from nthlayer_common.manifest.models import (
+ # if/then blocks. Contract promises are keyed by judgment TYPE while polarity is
+ # a property of the FIELD, so the contract parsers need this indirection.
+ #
+-# `calibration` requires TWO fields (maximum_brier_score and
+-# maximum_expected_calibration_error) and only the first is named here —
+-# pre-existing, and resolved by decision 3c, which removes calibration from the
+-# SLO concept altogether.
++# Five entries, one per judgment SLO type. The error magnitudes left the SLO
++# concept in decision 3c (opensrm-l33e) and are bounds now, see thresholds.py;
++# nothing here converts them.
+ JUDGMENT_TARGET_FIELDS: dict[str, str] = {
+     "reversal_rate": "maximum_reversal_rate",
+     "high_confidence_failure": "maximum_failure_rate",
+     "audit_sampling": "audit_completion_rate",
+     "outcomes": "desired_outcome_rate",
+     "escalation": "maximum_escalation_rate",
+-    "segments": "maximum_variance_from_overall",
+-    "stability": "maximum_drift",
+-    "calibration": "maximum_brier_score",
+ }
+ 
+ # TWO SPACES, and the whole convention turns on telling them apart:
+@@ -93,7 +90,9 @@ JUDGMENT_TARGET_FIELDS: dict[str, str] = {
+ #
+ #   True   declared value is a CEILING (a maximum bad rate) -> complement
+ #   False  declared value is already a FLOOR                -> scale only
+-#   ABSENT an error MAGNITUDE, left in its own space         -> untouched
++#
++# Every field this module sees is in TARGET_FIELD_IS_CEILING; anything else is
++# an error.
+ #
+ # Per decision section 2, only the three maxima complement. `outcomes` and
+ # `audit_sampling` are floors: complementing them would invert the constraint
+@@ -118,8 +117,7 @@ TARGET_FIELD_IS_CEILING: dict[str, bool] = {
+ def converts_to_sli_floor(field_name: str) -> bool:
+     """Whether this module converts *field_name* into SLI-floor space at all.
+ 
+-    Membership, not value: the three error magnitudes are absent from
+-    TARGET_FIELD_IS_CEILING and stay in declared space.
++    Membership, not value.
+     """
+     return field_name in TARGET_FIELD_IS_CEILING
+ 
+@@ -155,21 +153,9 @@ def require_number(field_name: str, value: object, *, what: str) -> float:
+ def check_finite(field_name: str, value: float, *, what: str) -> None:
+     """No judgment value is ever legitimately NaN or infinite, in any space.
+ 
+-    SEPARATE from the range check, and applied BEFORE the magnitude
+-    early-return, because the two have different scopes. Error magnitudes are
+-    legitimately UNRANGED — a Brier score or a drift bound is not a ratio — so
+-    they cannot take the [0, 1] check. They are never legitimately non-finite.
+-
+-    The first version of this guard ran the combined check after the magnitude
+-    early-return, so it covered the six converted fields and left
+-    maximum_drift, maximum_variance_from_overall and maximum_brier_score
+-    laundering NaN exactly as before. Measured on the unguarded half: a
+-    stability target of .nan against a real promise gave
+-    validate_contracts() -> [], a breach reporting CLEAN — the same worst
+-    outcome the range check was added to stop, on half the field set.
+-
+-    Splitting the checks also means this needs NO decision about the magnitudes'
+-    taxonomy, which 3c is about to change.
++    Finiteness is checked first and separately from range so the message
++    names the actual defect. (Error magnitudes, which motivated the split, are
++    thresholds since opensrm-l33e; thresholds.py checks theirs.)
+     """
+     if not math.isfinite(value):
+         raise ValueError(
+@@ -212,19 +198,18 @@ def _check_declared_ratio(field_name: str, value: float) -> None:
+ def judgment_target_percent(field_name: str, value: object) -> float:
+     """A judgment target as the canonical 0-100 SLI floor.
+ 
+-    Fields absent from TARGET_FIELD_IS_CEILING pass through UNCHANGED rather
+-    than being guessed at: a wrong conversion is indistinguishable from a right
+-    one downstream, whereas an unconverted value still trips
+-    TargetConventionWarning.
+-
+     Raises ValueError for a non-numeric value, and — for a field this module
+     converts — for one outside the Ratio domain. See _check_declared_ratio.
+     """
+     numeric = require_number(field_name, value, what="target")
+     check_finite(field_name, numeric, what="target")
+     is_ceiling = TARGET_FIELD_IS_CEILING.get(field_name)
+-    if is_ceiling is None:  # error magnitude — stays in declared space
+-        return numeric
++    if is_ceiling is None:
++        raise ValueError(
++            f"'{field_name}' is not a judgment SLO target field; judgment error "
++            f"magnitudes are thresholds in OpenSRM v2 (OPENSRM-CORE-v2 §5.5) and are never "
++            f"converted"
++        )
+     _check_declared_ratio(field_name, numeric)
+     if is_ceiling:
+         return (1.0 - numeric) * 100.0
+@@ -246,15 +231,18 @@ def judgment_target_ratio(field_name: str, percent: float) -> float:
+     The classical path has had its counterpart all along (_v1_slo_to_openslo
+     divides by 100); only the judgment path lacked one.
+ 
+-    Composes with judgment_target_percent() to the identity, for converted
+-    fields and for untouched magnitudes alike. Not bit-exact — float round trips
+-    differ by up to ~7e-15 for some values — but exact for every realistic SLI
+-    floor, and nothing compares a target with ``==``.
++    Composes with judgment_target_percent() to the identity. Not bit-exact: float
++    round trips differ by up to ~7e-15 for some values, but it is exact for every
++    realistic SLI floor, and nothing compares a target with ``==``.
+     """
+     check_finite(field_name, percent, what="target")
+     is_ceiling = TARGET_FIELD_IS_CEILING.get(field_name)
+-    if is_ceiling is None:  # error magnitude — already in declared space
+-        return percent
++    if is_ceiling is None:
++        raise ValueError(
++            f"'{field_name}' is not a judgment SLO target field; judgment error "
++            f"magnitudes are thresholds in OpenSRM v2 (OPENSRM-CORE-v2 §5.5) and are never "
++            f"converted"
++        )
+     # Symmetric with the inbound check, and it catches the v1 manifest that
+     # already wrote a RATIO where hard rule 1 wants a percentage: `target:
+     # 0.985` complemented to 0.99015, which is a LEGAL Ratio and re-parsed to
+@@ -274,21 +262,19 @@ def judgment_promise_direction(field_name: str) -> str:
+ 
+     MUST be derived from the same lookup as judgment_target_percent(), because
+     the two answers have to describe the same space. Hardcoding either one is
+-    how this bead produced a defect in each direction:
++    how this bead produced a defect: hardcoded "below" put a 0-100 floor
++    against a raw ratio, so any converted target exceeded any threshold and every
++    judgment SLO read as looser.
+ 
+-    - hardcoded "below" put a 0-100 floor against a raw ratio, so any converted
+-      target exceeded any threshold and every judgment SLO read as looser.
+-    - hardcoded "above" then inverted the three error MAGNITUDES, which
+-      judgment_target_percent deliberately leaves unconverted — measured, a
+-      stability SLO at 0.02 drift against a 0.05 promise reported "looser"
+-      while 0.08 against 0.05 reported clean.
++    Before decision 3c, unconverted error magnitudes compared 'below'; they are
++    thresholds now and never reach this function.
+ 
+     A field this module converts is in SLI-floor space, where higher is better,
+-    so the promise is a FLOOR and the comparison is "above". A field it leaves
+-    alone is a raw error magnitude, where lower is better, so the promise is a
+-    CEILING and the comparison is "below".
++    so the promise is a FLOOR and the comparison is "above".
+     """
+-    return "above" if converts_to_sli_floor(field_name) else "below"
++    if not converts_to_sli_floor(field_name):
++        raise ValueError(f"'{field_name}' is not a judgment SLO target field")
++    return "above"
+ 
+ 
+ def judgment_promise(judgment_type: str, declared: object) -> JudgmentPromise:
+@@ -301,11 +287,21 @@ def judgment_promise(judgment_type: str, declared: object) -> JudgmentPromise:
+     passthrough branch. Duplicating that in two modules is how they diverged in
+     the first place.
+ 
+-    An unknown judgment_type still yields a self-consistent pair: declared value
+-    untouched, compared "below". Inert in practice, because validate_contracts()
+-    finds no SLO for a type the parser could not read.
++    An unknown type or a threshold type is an error: either would produce a
++    promise no SLO can match, which validate_contracts() then silently never
++    reports.
+     """
+-    field = JUDGMENT_TARGET_FIELDS.get(judgment_type, "")
++    if judgment_type in V2_JUDGMENT_THRESHOLD_TYPES:
++        raise ValueError(
++            f"'{judgment_type}' is a judgment threshold, not an SLO; OpenSRM "
++            f"defines no contract promise for it (OPENSRM-CORE-v2 §5.5)"
++        )
++    field = JUDGMENT_TARGET_FIELDS.get(judgment_type)
++    if field is None:
++        raise ValueError(
++            f"unknown judgment type '{judgment_type}' in a contract promise; "
++            f"promisable types are {', '.join(sorted(JUDGMENT_TARGET_FIELDS))}"
++        )
+     return JudgmentPromise(
+         judgment_type=judgment_type,
+         threshold=judgment_target_percent(field, declared),
+diff --git a/src/nthlayer_common/manifest/thresholds.py b/src/nthlayer_common/manifest/thresholds.py
+new file mode 100644
+index 0000000..5ceba71
+--- /dev/null
++++ b/src/nthlayer_common/manifest/thresholds.py
+@@ -0,0 +1,293 @@
++"""Judgment THRESHOLDS: bounds on error magnitudes (decision 3c, opensrm-l33e).
++
++Not SLOs. A threshold has no population of good events, no complement and no
++error budget; a breach is the measured value exceeding a declared bound. So
++nothing here converts a bound: bounds are stored exactly as declared, which is
++the opposite of target_validation.py's job for judgment SLO targets. (The one
++coercion is normalise_bins(), which turns an integral float bins into an int.)
++
++This module also holds the srm/v1 lift (srm_v1_threshold) and the v2 emit
++(threshold_to_v2_entry).
++
++The tables restate opensrm/spec/v2/schema.json's JudgmentThresholdSpec so the
++parsers can enforce it without a JSON-Schema dependency. They are pinned against
++the live schema in BOTH directions by
++tests/test_judgment_thresholds_against_spec.py; edit the schema first, then
++these, or that test fails.
++
++Package-internal, cross-module (both parsers and v1_compat use it), and so not
++re-exported from manifest/__init__.py (hard rule 3), the same as
++target_validation.
++"""
++
++from __future__ import annotations
++
++import math
++from typing import Any
++
++from nthlayer_common.manifest.models import JudgmentMeasurement, JudgmentThreshold
++
++RATIO = "ratio"
++DURATION = "duration"
++
++THRESHOLD_BOUNDS: dict[str, dict[str, str]] = {
++    "segments": {"maximum_variance_from_overall": RATIO},
++    "stability": {"maximum_drift": RATIO},
++    "calibration": {
++        "maximum_brier_score": RATIO,
++        "maximum_expected_calibration_error": RATIO,
++    },
++    "audit_backlog": {"maximum_age": DURATION},
++    "feedback_latency": {"maximum_p50": DURATION, "maximum_p90": DURATION},
++}
++
++THRESHOLD_REQUIRED_FIELDS: dict[str, tuple[str, ...]] = {
++    "segments": ("segment_dimension", "segment_values"),
++    "stability": ("probe",),
++    "calibration": ("measurement",),
++    "audit_backlog": (),
++    "feedback_latency": (),
++}
++
++# Keys the schema sets to {"not": {}} on a threshold item: stale carry-overs
++# from judgment_slo entries, rejected so they fail instead of being ignored.
++FORBIDDEN_THRESHOLD_KEYS: tuple[str, ...] = (
++    "breach_actions",
++    "target",
++    "judgment_type",
++    "service",
++)
++
++_PROBE_FREQUENCIES = ("hourly", "daily", "weekly")
++
++# Longest suffix first: "5ms" must not be read as "5m" + a stray "s".
++_DURATION_UNITS = ("ms", "s", "m", "h", "d", "w")
++
++
++def is_duration(value: object) -> bool:
++    """Whether *value* matches schema.json's Duration: ``^[0-9]+(ms|s|m|h|d|w)$``.
++
++    A suffix lookup rather than a regex. ``isascii`` matters: ``str.isdigit``
++    accepts superscripts such as ``²``, which the schema's ``[0-9]`` does not.
++    """
++    if not isinstance(value, str):
++        return False
++    for unit in _DURATION_UNITS:
++        if value.endswith(unit):
++            digits = value[: -len(unit)]
++            return digits.isascii() and digits.isdigit()
++    return False
++
++
++def _ratio(name: str, value: object) -> float:
++    # bool first: it is an int subclass, and YAML 1.1 reads `yes` as True.
++    if isinstance(value, bool) or not isinstance(value, (int, float)):
++        raise ValueError(
++            f"bound '{name}' must be a number, got {type(value).__name__}: {value!r}"
++        )
++    # Only floats can be non-finite. math.isfinite on a huge YAML int raises
++    # OverflowError, which is not a parse error, so ints go straight to range.
++    if isinstance(value, float) and not math.isfinite(value):
++        raise ValueError(f"bound '{name}' must be a finite number, got {value!r}")
++    if not 0.0 <= value <= 1.0:
++        raise ValueError(f"bound '{name}' must be in [0, 1], got {value!r}")
++    return float(value)
++
++
++def parse_bounds(threshold_type: str, raw: object) -> dict[str, float | str]:
++    """Validate a ``bounds`` mapping for *threshold_type*; return it as declared.
++
++    Raises ValueError naming the offending bound. Callers re-raise as their own
++    parser's error type.
++    """
++    kinds = THRESHOLD_BOUNDS.get(threshold_type)
++    if kinds is None:
++        raise ValueError(
++            f"'{threshold_type}' is not a judgment threshold type; expected one "
++            f"of {', '.join(THRESHOLD_BOUNDS)}"
++        )
++    if not isinstance(raw, dict):
++        raise ValueError(
++            f"bounds must be a mapping, got {type(raw).__name__}: {raw!r}"
++        )
++    unknown = sorted(set(raw) - set(kinds), key=repr)
++    if unknown:
++        raise ValueError(
++            f"bound(s) {', '.join(map(str, unknown))} do not belong to "
++            f"'{threshold_type}'; its bounds are {', '.join(kinds)}"
++        )
++    if not raw:
++        if len(kinds) == 1:
++            raise ValueError(f"'{threshold_type}' requires bound '{next(iter(kinds))}'")
++        raise ValueError(
++            f"'{threshold_type}' requires at least one of: {', '.join(kinds)}"
++        )
++    bounds: dict[str, float | str] = {}
++    for name, value in raw.items():
++        if kinds[name] == RATIO:
++            bounds[name] = _ratio(name, value)
++        elif is_duration(value):
++            bounds[name] = value  # type: ignore[assignment]  # is_duration narrows to str
++        else:
++            raise ValueError(
++                f"bound '{name}' must be a duration such as '24h' "
++                f"(<integer><ms|s|m|h|d|w>), got {value!r}"
++            )
++    return bounds
++
++
++def normalise_bins(value: int | float) -> int:
++    """Return a validated ``measurement.bins`` as an int.
++
++    ``check_type_fields`` accepts an integral float (10.0) because the schema's
++    ``type: integer`` does, but it never rewrites its input. Callers building a
++    JudgmentMeasurement from a validated entry must pass bins through this.
++    """
++    return int(value)
++
++
++def check_type_fields(threshold_type: str, entry: dict[str, Any]) -> None:
++    """Enforce the non-``bounds`` fields schema.json requires per type.
++
++    Order: forbidden keys, then required fields, then type-specific shape.
++    """
++    for key in FORBIDDEN_THRESHOLD_KEYS:
++        if key in entry:
++            raise ValueError(
++                f"'{key}' is not allowed on a '{threshold_type}' threshold; "
++                f"thresholds do not carry it (OPENSRM-CORE-v2 §5.5)"
++            )
++    for name in THRESHOLD_REQUIRED_FIELDS.get(threshold_type, ()):
++        if entry.get(name) in (None, "", [], {}):
++            raise ValueError(f"'{threshold_type}' requires '{name}'")
++
++    if threshold_type == "segments":
++        # Emptiness is enforced by the required-field guard above.
++        if not isinstance(entry["segment_dimension"], str):
++            raise ValueError("'segment_dimension' must be a non-empty string")
++        values = entry["segment_values"]
++        if not isinstance(values, list) or not all(isinstance(v, str) and v for v in values):
++            raise ValueError("'segment_values' must be a non-empty list of non-empty strings")
++    elif threshold_type == "stability":
++        probe = entry["probe"]
++        if not isinstance(probe, dict) or not isinstance(probe.get("frozen_input_set"), str):
++            raise ValueError("'probe' must be a mapping with a 'frozen_input_set' string")
++        if probe.get("frequency") not in _PROBE_FREQUENCIES:
++            raise ValueError(
++                f"'probe.frequency' must be one of {', '.join(_PROBE_FREQUENCIES)}, "
++                f"got {probe.get('frequency')!r}"
++            )
++    elif threshold_type == "calibration":
++        measurement = entry["measurement"]
++        if not isinstance(measurement, dict):
++            raise ValueError("'measurement' must be a mapping")
++        if "method" in measurement:
++            raise ValueError(
++                "'measurement.method' is not part of a calibration threshold in "
++                "OpenSRM v2 (OPENSRM-CORE-v2 §5.5); the declared "
++                "bounds decide what is evaluated"
++            )
++        bins = measurement.get("bins")
++        # schema.json: bins is `type: integer`, which draft-07 satisfies with an
++        # integral float such as 10.0, so the parser accepts it too. This is a
++        # pure check; callers convert with normalise_bins().
++        valid_float = isinstance(bins, float) and bins.is_integer()
++        if isinstance(bins, bool) or not (isinstance(bins, int) or valid_float) or bins < 2:
++            raise ValueError(f"'measurement.bins' must be an integer >= 2, got {bins!r}")
++        if not is_duration(measurement.get("window")):
++            raise ValueError(
++                f"'measurement.window' must be a duration such as '30d', got "
++                f"{measurement.get('window')!r}"
++            )
++
++
++# srm/v1 defaulted calibration to 10 bins (before 3c, v1_compat.default_measurement);
++# v2's calibration threshold requires bins, so the lift keeps that default.
++_SRM_V1_CALIBRATION_BINS = 10
++
++
++# Bound-like keys an srm/v1 entry may carry that the lift has no home for. Checked
++# before anything else so they cannot be dropped, nor hidden behind a
++# "target must be..." message when target is absent.
++_SRM_V1_UNCARRIABLE_KEYS: dict[str, tuple[str, ...]] = {
++    "feedback_latency": ("p50", "p90"),
++    "calibration": ("bins", "method"),
++}
++
++
++def srm_v1_threshold(name: str, config: dict[str, Any]) -> JudgmentThreshold:
++    """Lift an srm/v1 ``spec.slos.<name>`` entry into a JudgmentThreshold.
++
++    Shared by parser/v1.py and v1_compat.convert_v1_to_v2 so the two cannot
++    map one srm/v1 entry to different thresholds. Raises ValueError.
++    """
++    if name == "audit_backlog":
++        raise ValueError(
++            "srm/v1 cannot declare 'audit_backlog': it has no srm/v1 form. "
++            "Declare it in an opensrm.nthlayer.io/v2 manifest under "
++            "spec.judgment_threshold."
++        )
++    if name in ("segments", "stability"):
++        raise ValueError(
++            f"srm/v1 cannot declare '{name}': its threshold form needs "
++            f"{' and '.join(THRESHOLD_REQUIRED_FIELDS[name])}, which the flat "
++            f"srm/v1 format cannot express. Declare it in an "
++            f"opensrm.nthlayer.io/v2 manifest under spec.judgment_threshold."
++        )
++    if name in _SRM_V1_UNCARRIABLE_KEYS:
++        lost = sorted(
++            (
++                k for k in config
++                if k in _SRM_V1_UNCARRIABLE_KEYS[name]
++                or (isinstance(k, str) and k.startswith("maximum_"))
++            ),
++            key=repr,
++        )
++        if lost:
++            raise ValueError(
++                f"srm/v1 '{name}' cannot express {', '.join(map(str, lost))}: the "
++                f"lift would drop it silently. Declare the threshold in an "
++                f"opensrm.nthlayer.io/v2 manifest under spec.judgment_threshold "
++                f"(OPENSRM-CORE-v2 §5.5)."
++            )
++    target = config.get("target")
++    if name == "calibration":
++        if target is None:
++            raise ValueError("srm/v1 'calibration' requires a target (maximum ECE)")
++        window = config.get("window", "30d")
++        if not is_duration(window):
++            raise ValueError(f"srm/v1 'calibration' window must be a duration, got {window!r}")
++        bound = _ratio("maximum_expected_calibration_error", target)
++        return JudgmentThreshold(
++            type="calibration",
++            bounds={"maximum_expected_calibration_error": bound},
++            measurement=JudgmentMeasurement(window=window, bins=_SRM_V1_CALIBRATION_BINS),
++        )
++    if name == "feedback_latency":
++        # An integral float (3600.0) is a whole number of seconds, as for bins.
++        whole = isinstance(target, int) or (isinstance(target, float) and target.is_integer())
++        if isinstance(target, bool) or not whole or target < 0:
++            raise ValueError(
++                f"srm/v1 'feedback_latency' target must be a non-negative whole "
++                f"number of seconds, got {target!r}"
++            )
++        return JudgmentThreshold(type="feedback_latency", bounds={"maximum_p50": f"{int(target)}s"})
++    raise ValueError(f"'{name}' is not an srm/v1 judgment threshold")
++
++
++def threshold_to_v2_entry(threshold: JudgmentThreshold) -> dict[str, Any]:
++    """The flat ``spec.judgment_threshold`` entry for *threshold*.
++
++    Inverse of parser/v2.py::_parse_judgment_threshold for every type, so that
++    convert_v1_to_v2's output re-parses to an equal JudgmentThreshold.
++    """
++    entry: dict[str, Any] = {"type": threshold.type, "bounds": dict(threshold.bounds)}
++    m = threshold.measurement
++    if threshold.type == "calibration":
++        entry["measurement"] = {"bins": m.bins, "window": m.window}
++    elif threshold.type == "stability" and m.probe is not None:
++        entry["probe"] = {"frozen_input_set": m.probe.frozen_input_set, "frequency": m.probe.frequency}
++    elif threshold.type == "segments":
++        entry["segment_dimension"] = m.segment_dimension
++        entry["segment_values"] = list(m.segment_values)
++    return entry
+diff --git a/src/nthlayer_common/manifest/v1_compat.py b/src/nthlayer_common/manifest/v1_compat.py
+index ff359da..bf7288a 100644
+--- a/src/nthlayer_common/manifest/v1_compat.py
++++ b/src/nthlayer_common/manifest/v1_compat.py
+@@ -10,7 +10,8 @@ values explicitly.
+ 
+ Defaults:
+   - Statistical requirements: 95% confidence intervals for all judgment types.
+-    Method inferred from judgment_type.
++    Method inferred from judgment_type (currently hypothesis_test for every
++    judgment SLO type).
+   - JudgmentMeasurement: source and method inferred from judgment_type.
+   - Contract conversion: v1's flat Contract(availability, latency, judgment)
+     becomes a single-element contracts list with name derived from service name.
+@@ -26,7 +27,8 @@ import warnings
+ from typing import Any
+ 
+ from nthlayer_common.manifest.models import (
+-    JUDGMENT_SLO_TYPES,
++    V2_JUDGMENT_SLO_TYPES,
++    V2_JUDGMENT_THRESHOLD_TYPES,
+     ContractPromise,
+     JudgmentMeasurement,
+     ReliabilityContract,
+@@ -37,11 +39,11 @@ from nthlayer_common.manifest.models import (
+ from nthlayer_common.manifest.target_validation import (
+     JUDGMENT_TARGET_FIELDS,
+     TargetConventionWarning,
+-    converts_to_sli_floor,
+     judgment_promise,
+     judgment_target_ratio,
+     require_number,
+ )
++from nthlayer_common.manifest.thresholds import srm_v1_threshold, threshold_to_v2_entry
+ 
+ # =============================================================================
+ # Statistical Requirements Defaults
+@@ -55,9 +57,6 @@ _JUDGMENT_METHOD: dict[str, str] = {
+     "audit_sampling": "hypothesis_test",
+     "outcomes": "hypothesis_test",
+     "escalation": "hypothesis_test",
+-    "segments": "hypothesis_test",
+-    "stability": "hypothesis_test",
+-    "calibration": "brier_score",
+ }
+ 
+ 
+@@ -66,8 +65,9 @@ def default_statistical_requirements(judgment_type: str) -> StatisticalRequireme
+ 
+     Assumptions:
+       - 95% confidence intervals (standard for SRE metrics)
+-      - Method inferred from judgment_type: calibration → brier_score,
+-        all others → hypothesis_test (appropriate for rate comparisons)
++      - Method is hypothesis_test for every judgment SLO type (appropriate
++        for rate comparisons). Calibration is a threshold, not an SLO; its
++        defaults live in thresholds.srm_v1_threshold.
+       - No minimum_sample_size default — sample size requirements vary
+         too much by use case to pick a safe default
+     """
+@@ -87,7 +87,6 @@ _JUDGMENT_SOURCE: dict[str, str] = {
+     "reversal_rate": "lineage",
+     "high_confidence_failure": "lineage",
+     "outcomes": "downstream_signal",
+-    "calibration": "calibration_sample",
+ }
+ 
+ 
+@@ -99,10 +98,10 @@ def default_measurement(judgment_type: str, window: str) -> JudgmentMeasurement:
+         (verdict chain tracks reversals naturally)
+       - outcomes: source is downstream_signal (outcomes are resolved
+         by downstream feedback)
+-      - calibration: source is calibration_sample, method is brier_score,
+-        10 bins (standard calibration curve resolution)
+-      - audit_sampling, escalation, segments, stability: no source default
+-        (these require service-specific configuration)
++      - audit_sampling, escalation: no source default (these require
++        service-specific configuration)
++      - Calibration is a threshold, not an SLO; its srm/v1 defaults (10 bins)
++        live in thresholds.srm_v1_threshold.
+       - window: carried from the SLO definition's window field
+     """
+     source = _JUDGMENT_SOURCE.get(judgment_type)
+@@ -112,11 +111,6 @@ def default_measurement(judgment_type: str, window: str) -> JudgmentMeasurement:
+         window=window,
+     )
+ 
+-    # Calibration gets additional defaults
+-    if judgment_type == "calibration":
+-        measurement.method = "brier_score"
+-        measurement.bins = 10
+-
+     # High-confidence failure gets default threshold
+     if judgment_type == "high_confidence_failure":
+         measurement.confidence_threshold = 0.9
+@@ -182,8 +176,10 @@ def convert_v1_to_v2(v1_data: dict[str, Any]) -> dict[str, Any]:
+       through :data:`SERVICE_TYPE_ALIASES`, and an absent value raises)
+     - ``spec.slos.<name>`` (dict-of-dicts):
+ 
+-      - judgment SLO names (one of :data:`JUDGMENT_SLO_TYPES`) →
++      - judgment SLO names (one of :data:`V2_JUDGMENT_SLO_TYPES`) →
+         ``spec.judgment_slo`` entries with the type-specific target field.
++      - threshold names (:data:`V2_JUDGMENT_THRESHOLD_TYPES`) →
++        ``spec.judgment_threshold`` entries via ``thresholds.srm_v1_threshold``.
+       - all other SLOs → ``spec.slo`` OpenSLO list using a thresholdMetric
+         carrying the v1 ``indicator.query``. v1 percentage targets
+         (e.g. ``99.9``) are normalised to OpenSLO ratio (``0.999``).
+@@ -262,10 +258,12 @@ def convert_v1_to_v2(v1_data: dict[str, Any]) -> dict[str, Any]:
+         v2_spec["owner"] = {"group": f"group:default/{team}"}
+ 
+     # SLOs: split into classical (OpenSLO) + judgment lists
+-    classical_slos, judgment_slos = _convert_v1_slos(name, spec.get("slos") or {})
++    classical_slos, judgment_slos, judgment_thresholds = _convert_v1_slos(
++        name, spec.get("slos") or {}
++    )
+     if classical_slos:
+         v2_spec["slo"] = classical_slos
+-    if judgment_slos:
++    if (judgment_slos or judgment_thresholds) and service_type != "ai-gate":
+         # v2 permits judgment_slo only on an ai-gate (ServiceManifest.allOf).
+         # v1's shipped schema never enforced its own §11 equivalent, so v1
+         # manifests pairing a non-ai-gate type with a judgment SLO really do
+@@ -273,21 +271,27 @@ def convert_v1_to_v2(v1_data: dict[str, Any]) -> dict[str, Any]:
+         # document anyway produced output that failed its own round-trip
+         # inside migrate_manifest_command, and handed direct callers an
+         # invalid manifest with no error at all.
+-        if service_type != "ai-gate":
+-            # Names come from the entries actually routed, not from
+-            # intersecting JUDGMENT_SLO_TYPES with the raw slos keys:
+-            # _convert_v1_slos skips entries whose value is not a dict, so
+-            # the intersection would name SLOs that were never routed.
+-            slo_names = ", ".join(
+-                sorted(js["spec"]["judgment_type"] for js in judgment_slos)
+-            )
+-            raise ValueError(
+-                f"v1 manifest '{name}' declares spec.type '{service_type}' but "
+-                f"defines judgment SLOs ({slo_names}). v2 permits judgment SLOs "
+-                f"only on an 'ai-gate' service. Either declare the service as "
+-                f"an ai-gate, or remove the judgment SLOs before upconverting."
++        # Names come from the entries actually routed, not from
++        # intersecting the judgment type sets with the raw slos keys: a
++        # non-dict judgment SLO entry is skipped by _convert_v1_slos, so the
++        # intersection would name SLOs that were never routed. (Thresholds are
++        # normalised, not skipped.)
++        slo_names = ", ".join(
++            sorted(
++                [js["spec"]["judgment_type"] for js in judgment_slos]
++                + [th["type"] for th in judgment_thresholds]
+             )
++        )
++        raise ValueError(
++            f"v1 manifest '{name}' declares spec.type '{service_type}' but "
++            f"defines judgment SLOs or thresholds ({slo_names}). v2 permits "
++            f"them only on an 'ai-gate' service. Either declare the service "
++            f"as an ai-gate, or remove them before upconverting."
++        )
++    if judgment_slos:
+         v2_spec["judgment_slo"] = judgment_slos
++    if judgment_thresholds:
++        v2_spec["judgment_threshold"] = judgment_thresholds
+ 
+     # Dependencies: name → component ref
+     v1_deps = spec.get("dependencies") or []
+@@ -304,21 +308,30 @@ def convert_v1_to_v2(v1_data: dict[str, Any]) -> dict[str, Any]:
+ 
+ def _convert_v1_slos(
+     service_name: str, v1_slos: dict[str, Any]
+-) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+-    """Split v1's flat slos dict into v2's (classical, judgment) lists."""
++) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
++    """Split v1's flat slos dict into v2's (classical, judgment SLO, judgment threshold) lists."""
+     classical: list[dict[str, Any]] = []
+     judgment: list[dict[str, Any]] = []
++    thresholds: list[dict[str, Any]] = []
+ 
+     for slo_name, slo_def in v1_slos.items():
++        if slo_name in V2_JUDGMENT_THRESHOLD_TYPES:
++            # srm/v1 lets `name: value` stand for `name: {target: value}`
++            # (parser/v1.py::_parse_slos); normalise so conversion never drops
++            # a threshold the direct parse keeps.
++            if not isinstance(slo_def, dict):
++                slo_def = {"target": slo_def}
++            thresholds.append(threshold_to_v2_entry(srm_v1_threshold(slo_name, slo_def)))
++            continue
+         if not isinstance(slo_def, dict):
+             continue
+ 
+-        if slo_name in JUDGMENT_SLO_TYPES:
++        if slo_name in V2_JUDGMENT_SLO_TYPES:
+             judgment.append(_v1_slo_to_judgment(service_name, slo_name, slo_def))
+         else:
+             classical.append(_v1_slo_to_openslo(service_name, slo_name, slo_def))
+ 
+-    return classical, judgment
++    return classical, judgment, thresholds
+ 
+ 
+ def _v1_slo_to_openslo(
+@@ -405,13 +418,9 @@ def _v1_slo_to_judgment(
+     # "loud enough to catch contributor mistakes; it never rejects". 0.985% is
+     # a legal floor, just an implausible one, so rejecting it would be this
+     # module deciding something the convention deliberately leaves open.
+-    # ONLY for fields this converts. The error MAGNITUDES (segments, stability,
+-    # calibration) legitimately live in (0, 1) — a Brier score of 0.2 is a
+-    # perfectly ordinary value — and they pass through unconverted, so a
+-    # sub-1 target is correct for them. The first version of this warning fired
+-    # on `calibration: {target: 0.2}` in the repo's own suite, which is the same
+-    # converted-vs-unconverted distinction this whole bead turns on.
+-    if converts_to_sli_floor(target_field) and 0.0 < percent < 1.0:
++    # Only rate fields reach here (thresholds are routed away before this
++    # point), so every target in this function is converted.
++    if 0.0 < percent < 1.0:
+         warnings.warn(
+             f"v1 SLO '{slo_name}' on service '{service_name}' has "
+             f"target={percent}, which looks like a ratio (0.0-1.0). v1 targets "
+diff --git a/tests/test_judgment_targets_against_spec_examples.py b/tests/test_judgment_targets_against_spec_examples.py
+index 141608e..23824a2 100644
+--- a/tests/test_judgment_targets_against_spec_examples.py
++++ b/tests/test_judgment_targets_against_spec_examples.py
+@@ -6,7 +6,7 @@ own green suite — there was no external authority either could be measured
+ against, so both were free to be wrong in their own direction.
+ 
+ ``opensrm/spec/v2/examples/judgment-slos/*.yaml`` is that authority. Every one
+-of the eight judgment types has a worked example there with a declared target
++of the five judgment SLO types has a worked example there with a declared target
+ value chosen by the spec, not by this implementation. Running the complement
+ rule over them answers the question the other fixtures cannot: does the rule
+ agree with something nobody here wrote?
+@@ -50,7 +50,10 @@ JUDGMENT_EXAMPLES_DIR = (
+ #
+ #   three maxima        complement -> (1 - declared) * 100
+ #   outcomes, audit     scale      -> declared * 100
+-#   error magnitudes    untouched  -> declared
++#
++# The three error-magnitude examples left this directory in opensrm-l33e
++# (decision 3c); they are judgment THRESHOLDS now, pinned against the spec in
++# tests/test_judgment_thresholds_against_spec.py.
+ #
+ # Written as literals rather than computed, so a change to the converter cannot
+ # quietly redefine what "correct" means here. If a spec example's declared value
+@@ -61,9 +64,6 @@ EXPECTED_FLOORS: dict[str, float] = {
+     "03-audit-sampling.yaml": 95.0,             # audit_completion_rate 0.95, SCALED
+     "04-outcomes.yaml": 90.0,                   # desired_outcome_rate 0.9, SCALED
+     "05-escalation.yaml": 85.0,                 # maximum_escalation_rate 0.15
+-    "06-segments.yaml": 0.05,                   # maximum_variance..., UNTOUCHED
+-    "07-stability.yaml": 0.02,                  # maximum_drift, UNTOUCHED
+-    "08-calibration.yaml": 0.05,                # maximum_brier_score, UNTOUCHED
+ }
+ 
+ 
+diff --git a/tests/test_judgment_thresholds_against_spec.py b/tests/test_judgment_thresholds_against_spec.py
+new file mode 100644
+index 0000000..c21f214
+--- /dev/null
++++ b/tests/test_judgment_thresholds_against_spec.py
+@@ -0,0 +1,239 @@
++"""The threshold bound tables, derived from opensrm's schema.json at runtime.
++
++thresholds.py restates the schema's bound names, kinds and required fields so
++the parser can enforce them without a JSON-Schema dependency at runtime. A
++restatement is a second copy, and a second copy drifts - that is how vrpa and
++ih0v happened. These tests read the copy that is authoritative and assert the
++restatement agrees in BOTH directions, so a bound added to either side alone
++fails here.
++
++Fixtures are the live spec files, never copies (the convention
++test_manifest_v2_archetypes.py sets). The presence check is an assertion, not a
++skip: CLAUDE.md records this module shape silently skipping under a misplaced
++worktree.
++"""
++from __future__ import annotations
++
++import json
++from pathlib import Path
++from typing import Any
++
++import jsonschema
++import pytest
++import yaml
++
++from nthlayer_common.manifest import (
++    V2_JUDGMENT_SLO_TYPES,
++    V2_JUDGMENT_THRESHOLD_TYPES,
++)
++from nthlayer_common.manifest.parser.v2 import parse_opensrm_v2, parse_opensrm_v2_file
++from nthlayer_common.manifest.thresholds import (
++    DURATION,
++    FORBIDDEN_THRESHOLD_KEYS,
++    RATIO,
++    THRESHOLD_BOUNDS,
++    THRESHOLD_REQUIRED_FIELDS,
++    check_type_fields,
++)
++
++# parents: [0]=tests/ [1]=nthlayer-common/ [2]=<ecosystem>/
++SPEC_V2_DIR = Path(__file__).resolve().parents[2] / "opensrm" / "spec" / "v2"
++SCHEMA_PATH = SPEC_V2_DIR / "schema.json"
++THRESHOLD_EXAMPLES_DIR = SPEC_V2_DIR / "examples" / "judgment-thresholds"
++
++
++def _schema() -> dict[str, Any]:
++    return json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
++
++
++def _branches() -> dict[str, dict[str, Any]]:
++    spec = _schema()["definitions"]["JudgmentThresholdSpec"]
++    return {
++        branch["if"]["properties"]["type"]["const"]: branch["then"]
++        for branch in spec["allOf"]
++    }
++
++
++def _kind(prop: dict[str, Any]) -> str:
++    ref = prop.get("$ref", "")
++    if ref == "#/definitions/Duration":
++        return DURATION
++    if ref == "#/definitions/Ratio":
++        return RATIO
++    # maximum_brier_score is bounded inline ("not a Ratio semantically"), but
++    # it has exactly Ratio's domain, which is all the parser enforces.
++    if prop.get("type") == "number" and prop.get("minimum") == 0 and prop.get("maximum") == 1:
++        return RATIO
++    raise AssertionError(f"bound shape not classified by this test: {prop!r}")
++
++
++def test_the_spec_is_present():
++    assert SCHEMA_PATH.is_file(), f"missing: {SCHEMA_PATH}"
++    assert "JudgmentThresholdSpec" in _schema()["definitions"]
++    assert sorted(THRESHOLD_EXAMPLES_DIR.glob("*.yaml")), f"no examples in {THRESHOLD_EXAMPLES_DIR}"
++
++
++def test_threshold_types_match_the_schema_enum_and_branches():
++    spec = _schema()["definitions"]["JudgmentThresholdSpec"]
++    enum = set(spec["properties"]["type"]["enum"])
++    assert set(THRESHOLD_BOUNDS) == enum
++    assert set(_branches()) == enum
++
++
++def test_bound_names_and_kinds_match_the_schema():
++    derived = {
++        t: {name: _kind(prop) for name, prop in then["properties"]["bounds"]["properties"].items()}
++        for t, then in _branches().items()
++    }
++    assert derived == THRESHOLD_BOUNDS
++
++
++def test_every_bounds_object_is_closed():
++    for t, then in _branches().items():
++        assert then["properties"]["bounds"].get("additionalProperties") is False, t
++
++
++def test_single_bound_types_require_it_and_multi_bound_types_need_one():
++    """parse_bounds encodes ONE rule for this: a lone bound is required, and
++    several are an anyOf. Pin that the schema still says exactly that."""
++    for t, then in _branches().items():
++        bounds = then["properties"]["bounds"]
++        names = list(bounds["properties"])
++        if len(names) == 1:
++            assert bounds.get("required") == names, t
++            assert "anyOf" not in bounds, t
++        else:
++            assert "required" not in bounds, t
++            assert bounds["anyOf"] == [{"required": [n]} for n in names], t
++
++
++def test_required_type_fields_match_the_schema():
++    derived = {
++        t: tuple(f for f in then.get("required", []) if f != "bounds")
++        for t, then in _branches().items()
++    }
++    assert derived == THRESHOLD_REQUIRED_FIELDS
++
++
++@pytest.mark.parametrize(
++    "example",
++    sorted(THRESHOLD_EXAMPLES_DIR.glob("*.yaml")),
++    ids=lambda p: p.name,
++)
++def test_threshold_examples_validate_against_the_schema(example: Path):
++    """Half one of the seam; the parser half is
++    test_threshold_examples_parse_to_the_declared_bounds, over the same files."""
++    jsonschema.validate(yaml.safe_load(example.read_text(encoding="utf-8")), _schema())
++
++
++def _is_forbidden(prop: object) -> bool:
++    """A schema property that no value satisfies: `false`, or `{"not": {}}`
++    optionally carrying a `description`."""
++    if prop is False:
++        return True
++    return (
++        isinstance(prop, dict)
++        and prop.get("not") == {}
++        and set(prop) <= {"not", "description"}
++    )
++
++
++def test_forbidden_keys_match_the_schema():
++    props = _schema()["definitions"]["JudgmentThresholdSpec"]["properties"]
++    derived = {name for name, prop in props.items() if _is_forbidden(prop)}
++    assert derived, "no forbidden keys derived; the derivation is broken"
++    assert derived == set(FORBIDDEN_THRESHOLD_KEYS)
++
++    method = _branches()["calibration"]["properties"]["measurement"]["properties"]["method"]
++    assert _is_forbidden(method)
++    with pytest.raises(ValueError, match="method"):
++        check_type_fields(
++            "calibration",
++            {"measurement": {"bins": 10, "window": "30d", "method": "brier_score"}},
++        )
++
++
++def test_segment_strings_must_be_non_empty_per_schema():
++    props = _branches()["segments"]["properties"]
++    assert props["segment_dimension"]["minLength"] == 1
++    assert props["segment_values"]["items"]["minLength"] == 1
++
++
++def test_v2_judgment_vocabularies_match_the_schema_both_ways():
++    """vrpa's acceptance test, on the half that has a schema the parser
++    implements. Read from schema.json, never restated: a hard-coded copy
++    would be a third list to drift."""
++    defs = _schema()["definitions"]
++    assert set(
++        defs["JudgmentSLOSpec"]["properties"]["judgment_type"]["enum"]
++    ) == V2_JUDGMENT_SLO_TYPES
++    assert set(
++        defs["JudgmentThresholdSpec"]["properties"]["type"]["enum"]
++    ) == V2_JUDGMENT_THRESHOLD_TYPES
++    assert not V2_JUDGMENT_SLO_TYPES & V2_JUDGMENT_THRESHOLD_TYPES
++
++
++def _parse_example(example: Path, doc: dict[str, Any], tmp_path: Path):
++    """Parse an example the way its `kind` says it is consumed.
++
++    A ServiceManifest is parsed directly. A ServiceManifestTemplate is never a
++    manifest: it is copied, byte for byte, to where template resolution looks
++    for it and extended by a minimal ai-gate manifest that declares no
++    thresholds of its own, so the resolved list is exactly the template's.
++    """
++    kind = doc.get("kind")
++    if kind == "ServiceManifest":
++        return parse_opensrm_v2(doc, base_dir=example.parent)
++    if kind == "ServiceManifestTemplate":
++        name = doc["metadata"]["name"]
++        templates = tmp_path / "templates"
++        templates.mkdir()
++        (templates / f"{name}.yaml").write_bytes(example.read_bytes())
++        manifest = tmp_path / "extending.yaml"
++        manifest.write_text(yaml.safe_dump({
++            "apiVersion": "opensrm.nthlayer.io/v2",
++            "kind": "ServiceManifest",
++            "metadata": {"name": "extending", "labels": {"tier": "critical"}},
++            "spec": {
++                "owner": {"group": "group:default/team"},
++                "service": {"name": "extending", "type": "ai-gate"},
++                "template": {"extends": f"template:default/{name}"},
++            },
++        }))
++        return parse_opensrm_v2_file(manifest)
++    raise AssertionError(f"{example.name}: unhandled kind {kind!r}")
++
++
++@pytest.mark.parametrize(
++    "example",
++    sorted(THRESHOLD_EXAMPLES_DIR.glob("*.yaml")),
++    ids=lambda p: p.name,
++)
++def test_threshold_examples_parse_to_the_declared_bounds(example: Path, tmp_path: Path):
++    """Half two: the parser accepts the same bytes, and every declared bound
++    survives unchanged, compared against the file rather than a literal."""
++    doc = yaml.safe_load(example.read_text(encoding="utf-8"))
++
++    manifest = _parse_example(example, doc, tmp_path)
++
++    declared = [(t["type"], t["bounds"]) for t in doc["spec"]["judgment_threshold"]]
++    assert declared, f"{example.name} declares no thresholds"
++    parsed = [(t.type, t.bounds) for t in manifest.judgment_thresholds]
++    assert parsed == declared
++    assert manifest.get_judgment_slos() == []
++
++    # The measurement fields too, against the file: bounds-only comparison let
++    # a hardcoded frequency/window survive, because every example uses the
++    # defaults.
++    for entry, threshold in zip(doc["spec"]["judgment_threshold"], manifest.judgment_thresholds, strict=True):
++        m = threshold.measurement
++        if entry["type"] == "stability":
++            assert m.probe is not None
++            assert m.probe.frozen_input_set == entry["probe"]["frozen_input_set"]
++            assert m.probe.frequency == entry["probe"]["frequency"]
++        elif entry["type"] == "calibration":
++            assert m.bins == entry["measurement"]["bins"]
++            assert m.window == entry["measurement"]["window"]
++        elif entry["type"] == "segments":
++            assert m.segment_dimension == entry["segment_dimension"]
++            assert m.segment_values == entry["segment_values"]
+diff --git a/tests/test_manifest_models.py b/tests/test_manifest_models.py
+index 2247452..04ac3f9 100644
+--- a/tests/test_manifest_models.py
++++ b/tests/test_manifest_models.py
+@@ -3,7 +3,8 @@
+ import pytest
+ 
+ from nthlayer_common.manifest.models import (
+-    JUDGMENT_SLO_TYPES,
++    SRM_V1_JUDGMENT_THRESHOLD_TYPES,
++    V2_JUDGMENT_THRESHOLD_TYPES,
+     BreachAction,
+     ContractPromise,
+     Dependency,
+@@ -11,6 +12,7 @@ from nthlayer_common.manifest.models import (
+     FallbackDeclaration,
+     JudgmentMeasurement,
+     JudgmentPromise,
++    JudgmentThreshold,
+     Ownership,
+     ReliabilityContract,
+     ReliabilityManifest,
+@@ -91,14 +93,14 @@ class TestSLODefinition:
+         assert slo.good_query is not None
+ 
+ 
+-class TestJudgmentSLOTypes:
+-    def test_eight_standard_types(self):
+-        assert len(JUDGMENT_SLO_TYPES) == 8
+-        expected = {
+-            "reversal_rate", "high_confidence_failure", "audit_sampling",
+-            "outcomes", "escalation", "segments", "stability", "calibration",
+-        }
+-        assert JUDGMENT_SLO_TYPES == expected  # noqa: SIM300 — pytest convention: subject-under-test on left
++def test_the_pre_3c_vocabulary_is_gone():
++    """Removed without an alias in 4.0.0 (opensrm-l33e): a stale import must
++    fail at import time, not classify against the wrong list."""
++    import nthlayer_common.manifest as manifest_pkg
++    import nthlayer_common.manifest.models as models_mod
++
++    assert not hasattr(models_mod, "JUDGMENT_SLO_TYPES")
++    assert "JUDGMENT_SLO_TYPES" not in manifest_pkg.__all__
+ 
+ 
+ # =============================================================================
+@@ -249,3 +251,25 @@ class TestOwnership:
+         )
+         assert o.group_ref is not None
+         assert o.team == "payments-ml"
++
++
++def test_srm_v1_threshold_types_are_v2_threshold_types():
++    """srm/v1 lifts into v2's concept, so it may only name types v2 has."""
++    assert SRM_V1_JUDGMENT_THRESHOLD_TYPES <= V2_JUDGMENT_THRESHOLD_TYPES
++    assert frozenset({"calibration", "feedback_latency"}) == SRM_V1_JUDGMENT_THRESHOLD_TYPES
++
++
++def test_manifest_carries_thresholds_separately_from_slos():
++    threshold = JudgmentThreshold(type="stability", bounds={"maximum_drift": 0.02})
++    manifest = ReliabilityManifest(
++        name="svc", team="t", tier="critical", type="ai-gate",
++        judgment_thresholds=[threshold],
++    )
++    assert manifest.get_judgment_thresholds() == [threshold]
++    assert manifest.get_judgment_slos() == []
++    assert manifest.slos == []
++
++
++def test_threshold_defaults_to_an_empty_measurement():
++    threshold = JudgmentThreshold(type="audit_backlog", bounds={"maximum_age": "24h"})
++    assert threshold.measurement == JudgmentMeasurement()
+diff --git a/tests/test_manifest_parser.py b/tests/test_manifest_parser.py
+index 4853252..bb8e857 100644
+--- a/tests/test_manifest_parser.py
++++ b/tests/test_manifest_parser.py
+@@ -384,8 +384,8 @@ class TestV2Parser:
+             parse_opensrm_v2(data)
+ 
+ 
+-# All 8 judgment SLO types declared in OPENSRM-CORE-v2 §5.2 (opensrm-b22.1
+-# acceptance criterion: "All 8 judgment SLO types parseable"). Each type
++# All five judgment SLO types declared in OPENSRM-CORE-v2 §5.2 (opensrm-b22.1;
++# three of its original eight left the SLO concept in opensrm-l33e). Each type
+ # has a distinct target field name; both parsers map them via
+ # target_validation.JUDGMENT_TARGET_FIELDS. (Was _extract_judgment_target's
+ # local target_fields dict, which opensrm-ocvu replaced with the shared map so
+@@ -402,9 +402,6 @@ class TestV2Parser:
+ # Three conversions, by polarity:
+ #   MAXIMA  (1 - x) * 100   reversal_rate, high_confidence_failure, escalation
+ #   FLOORS  x * 100         audit_sampling, outcomes
+-#   PASS    unchanged       segments, stability, calibration — error
+-#                           magnitudes, no SLI-floor reading; they leave the
+-#                           SLO concept under decision 3c
+ #
+ # escalation 0.10 and outcomes 0.90 both land on 90.0 by DIFFERENT rules.
+ # Applying the wrong one gives 10.0 for either, so the pair does not mask a
+@@ -415,9 +412,8 @@ _JUDGMENT_TYPE_TARGETS = [
+     ("audit_sampling", "audit_completion_rate", 0.95, 95.0),
+     ("outcomes", "desired_outcome_rate", 0.90, 90.0),
+     ("escalation", "maximum_escalation_rate", 0.10, 90.0),
+-    ("segments", "maximum_variance_from_overall", 0.15, 0.15),
+-    ("stability", "maximum_drift", 0.05, 0.05),
+-    ("calibration", "maximum_brier_score", 0.20, 0.20),
++    # segments / stability / calibration rows retired (opensrm-l33e): replaced by
++    # test_threshold_migration_errors.py::test_departing_type_under_judgment_slo_shows_the_threshold_form
+ ]
+ 
+ 
+@@ -429,7 +425,7 @@ def test_v2_parser_handles_each_judgment_slo_type(
+ ) -> None:
+     """Every judgment_type in OPENSRM-CORE-v2 §5.2 parses via the v2 parser.
+ 
+-    Pins opensrm-b22.1 acceptance: "All 8 judgment SLO types parseable".
++    All five judgment SLO types (opensrm-b22.1; three left the SLO concept in opensrm-l33e).
+     Each type carries its own target field name; verifies the type survives the
+     round-trip and that its target is converted to the canonical 0-100 SLI
+     floor by the rule its polarity requires (opensrm-ocvu).
+diff --git a/tests/test_manifest_parser_thresholds.py b/tests/test_manifest_parser_thresholds.py
+new file mode 100644
+index 0000000..e2a7cfe
+--- /dev/null
++++ b/tests/test_manifest_parser_thresholds.py
+@@ -0,0 +1,438 @@
++"""v2 judgment_threshold parsing: the shape, the guards and the ai-gate rule.
++
++Every rejection mirrors a schema clause; the matching negative fixture is named
++where one exists in opensrm/spec/v2/tests/invalid/. Template resolution follows
++OPENSRM-CORE-v2 §5.5: the resolved list is the template's entries followed by
++the manifest's, and an override may append but never replace.
++"""
++from __future__ import annotations
++
++import json
++from pathlib import Path
++from typing import Any
++
++import jsonschema
++import pytest
++import yaml
++
++from nthlayer_common.manifest.parser.v2 import (
++    OpenSRMV2ParseError,
++    parse_opensrm_v2,
++    parse_opensrm_v2_file,
++)
++
++# parents: [0]=tests/ [1]=nthlayer-common/ [2]=<ecosystem>/
++SCHEMA_PATH = Path(__file__).resolve().parents[2] / "opensrm" / "spec" / "v2" / "schema.json"
++
++
++def _forbidden_threshold_keys() -> list[str]:
++    """Properties of JudgmentThresholdSpec that no value satisfies, read from
++    the schema rather than restated. Reading at import time is deliberate: a
++    missing spec is a collection error, not an empty (silently passing)
++    parametrize list."""
++    props = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))["definitions"][
++        "JudgmentThresholdSpec"
++    ]["properties"]
++    return sorted(
++        name
++        for name, prop in props.items()
++        if prop is False
++        or (isinstance(prop, dict) and prop.get("not") == {} and set(prop) <= {"not", "description"})
++    )
++
++
++FORBIDDEN_KEYS = _forbidden_threshold_keys()
++
++
++def _manifest(service_type: str = "ai-gate", **spec: Any) -> dict[str, Any]:
++    return {
++        "apiVersion": "opensrm.nthlayer.io/v2",
++        "kind": "ServiceManifest",
++        "metadata": {"name": "svc", "labels": {"tier": "critical"}},
++        "spec": {
++            "owner": {"group": "group:default/team"},
++            "service": {"name": "svc", "type": service_type},
++            **spec,
++        },
++    }
++
++
++STABILITY = {
++    "type": "stability",
++    "probe": {"frozen_input_set": "s3://p.jsonl", "frequency": "daily"},
++    "bounds": {"maximum_drift": 0.02},
++}
++AUDIT_BACKLOG = {"type": "audit_backlog", "bounds": {"maximum_age": "24h"}}
++FEEDBACK_LATENCY = {"type": "feedback_latency", "bounds": {"maximum_p50": "1h"}}
++
++
++def test_threshold_measurement_fields_are_carried():
++    manifest = parse_opensrm_v2(_manifest(judgment_threshold=[STABILITY]))
++
++    [threshold] = manifest.judgment_thresholds
++    assert threshold.type == "stability"
++    assert threshold.bounds == {"maximum_drift": 0.02}
++    assert threshold.measurement.probe is not None
++    assert threshold.measurement.probe.frozen_input_set == "s3://p.jsonl"
++    assert threshold.measurement.probe.frequency == "daily"
++
++
++def test_non_default_probe_frequency_and_calibration_window_are_carried():
++    """Every other fixture uses the defaults (daily / 30d), so a hardcoded
++    value would pass them. weekly and 7d are allowed by the schema's enum and
++    Duration pattern."""
++    stability = {**STABILITY, "probe": {"frozen_input_set": "s3://p.jsonl", "frequency": "weekly"}}
++    calibration = {
++        "type": "calibration",
++        "measurement": {"bins": 10, "window": "7d"},
++        "bounds": {"maximum_brier_score": 0.05},
++    }
++    parsed = parse_opensrm_v2(_manifest(judgment_threshold=[stability, calibration]))
++
++    by_type = {t.type: t for t in parsed.judgment_thresholds}
++    assert by_type["stability"].measurement.probe.frequency == "weekly"
++    assert by_type["calibration"].measurement.window == "7d"
++
++
++def test_scalar_judgment_slo_metadata_is_a_parse_error_not_an_attribute_error():
++    item = {
++        "metadata": "x",
++        "spec": {
++            "judgment_type": "reversal_rate",
++            "measurement": {"window": "7d"},
++            "target": {"maximum_reversal_rate": 0.05},
++        },
++    }
++    with pytest.raises(OpenSRMV2ParseError, match="metadata must be a mapping"):
++        parse_opensrm_v2(_manifest(judgment_slo=[item]))
++
++
++def test_segment_fields_are_carried():
++    entry = {
++        "type": "segments",
++        "segment_dimension": "customer_tier",
++        "segment_values": ["enterprise", "smb"],
++        "bounds": {"maximum_variance_from_overall": 0.05},
++    }
++    [threshold] = parse_opensrm_v2(_manifest(judgment_threshold=[entry])).judgment_thresholds
++    assert threshold.measurement.segment_dimension == "customer_tier"
++    assert threshold.measurement.segment_values == ["enterprise", "smb"]
++
++
++def test_integral_float_bins_become_an_int():
++    """The schema's `type: integer` accepts 10.0; the model carries an int."""
++    entry = {
++        "type": "calibration",
++        "measurement": {"bins": 10.0, "window": "30d"},
++        "bounds": {"maximum_brier_score": 0.05},
++    }
++    [threshold] = parse_opensrm_v2(_manifest(judgment_threshold=[entry])).judgment_thresholds
++    assert threshold.measurement.bins == 10
++    assert isinstance(threshold.measurement.bins, int)
++    assert threshold.measurement.window == "30d"
++
++
++def test_absent_block_means_no_thresholds():
++    assert parse_opensrm_v2(_manifest()).judgment_thresholds == []
++
++
++def test_thresholds_are_not_slos():
++    manifest = parse_opensrm_v2(_manifest(judgment_threshold=[STABILITY]))
++    assert manifest.get_judgment_slos() == []
++    assert manifest.slos == []
++
++
++@pytest.mark.parametrize("value", [None, "stability", 3, {"type": "stability"}])
++def test_block_must_be_a_list(value):
++    with pytest.raises(OpenSRMV2ParseError, match="must be a list"):
++        parse_opensrm_v2(_manifest(judgment_threshold=value))
++
++
++@pytest.mark.parametrize("item", [None, "stability", ["stability"]])
++def test_elements_must_be_mappings(item):
++    with pytest.raises(OpenSRMV2ParseError, match=r"judgment_threshold\[0\] must be a mapping"):
++        parse_opensrm_v2(_manifest(judgment_threshold=[item]))
++
++
++def test_rejected_on_a_non_ai_gate():
++    # opensrm spec/v2/tests/invalid/n24-threshold-on-non-ai-gate.yaml
++    with pytest.raises(OpenSRMV2ParseError, match="only permitted on an 'ai-gate'"):
++        parse_opensrm_v2(_manifest("api", judgment_threshold=[STABILITY]))
++
++
++def test_an_empty_block_on_a_non_ai_gate_is_still_rejected():
++    """Presence, not truthiness, as for judgment_slo: the schema's `false`
++    rejects any value, including []."""
++    with pytest.raises(OpenSRMV2ParseError, match="only permitted on an 'ai-gate'"):
++        parse_opensrm_v2(_manifest("api", judgment_threshold=[]))
++
++
++def test_missing_type():
++    # n29-threshold-missing-type.yaml
++    with pytest.raises(OpenSRMV2ParseError, match=r"judgment_threshold\[0\].*type"):
++        parse_opensrm_v2(_manifest(judgment_threshold=[{"bounds": {"maximum_drift": 0.02}}]))
++
++
++def test_an_slo_type_points_back_to_judgment_slo():
++    entry = {"type": "reversal_rate", "bounds": {"maximum_reversal_rate": 0.05}}
++    with pytest.raises(OpenSRMV2ParseError, match="judgment_slo"):
++        parse_opensrm_v2(_manifest(judgment_threshold=[entry]))
++
++
++@pytest.mark.parametrize(
++    ("entry", "match"),
++    [
++        ({**STABILITY, "bounds": {"maximum_drift": 0.02, "maximum_variance_from_overall": 0.05}},
++         "maximum_variance_from_overall"),                                        # n25
++        ({"type": "calibration", "measurement": {"bins": 10, "window": "30d"}, "bounds": {}},
++         "at least one"),                                                          # n26
++        ({"type": "feedback_latency", "bounds": {"maximum_p50": 0.5}}, "duration"),  # n27
++        ({"type": "calibration",
++          "measurement": {"bins": 10, "window": "30d", "method": "brier_score"},
++          "bounds": {"maximum_brier_score": 0.05}}, "method"),                     # n28
++        ({"type": "segments", "segment_values": ["a"],
++          "bounds": {"maximum_variance_from_overall": 0.05}}, "segment_dimension"),  # n30
++        ({"type": "calibration", "measurement": {"bins": 1, "window": "30d"},
++          "bounds": {"maximum_brier_score": 0.05}}, "bins"),                       # n12
++        ({**STABILITY, "bounds": None}, "mapping"),
++        # schema.json: `type` is an enum of strings; an unhashable or null
++        # value is an unknown type, not a TypeError.
++        ({"type": ["x"], "bounds": {}}, r"'type' must be one of"),
++        ({"type": {"a": 1}, "bounds": {}}, r"'type' must be one of"),
++        ({"type": None, "bounds": {}}, r"'type' must be one of"),
++    ],
++)
++def test_invalid_entries_raise_the_parser_error(entry, match):
++    with pytest.raises(OpenSRMV2ParseError, match=match):
++        parse_opensrm_v2(_manifest(judgment_threshold=[entry]))
++
++
++@pytest.mark.parametrize("bounds", [{1: "1h", "x": "2h"}, {None: "1h", "x": "2h"}], ids=["int-key", "null-key"])
++def test_mixed_type_bound_keys_raise_the_parser_error(bounds):
++    entry = {"type": "audit_backlog", "bounds": bounds}
++    with pytest.raises(OpenSRMV2ParseError):
++        parse_opensrm_v2(_manifest(judgment_threshold=[entry]))
++
++
++# JudgmentThresholdSpec is open: `measurement`, `probe`, `sampling` and the
++# segment_* keys are constrained only inside the allOf branch of the type that
++# uses them, so on any other type the schema accepts every value for them.
++_STRAY_KEYS = ("measurement", "probe", "sampling", "segment_values")
++_STRAY_VALUES = (None, "x", [1])
++
++
++def _assert_empty_measurement(threshold: Any) -> None:
++    m = threshold.measurement
++    assert (m.source, m.confidence_threshold, m.bins, m.method, m.window, m.frequency) == (
++        None, None, None, None, None, None,
++    )
++    assert m.probe is None
++    assert m.sampling is None
++    assert m.segment_dimension is None
++    assert m.segment_values == []
++
++
++@pytest.mark.parametrize("value", _STRAY_VALUES, ids=repr)
++@pytest.mark.parametrize("key", _STRAY_KEYS)
++def test_keys_irrelevant_to_the_type_are_ignored(key, value):
++    entry = {**AUDIT_BACKLOG, key: value}
++    [threshold] = parse_opensrm_v2(_manifest(judgment_threshold=[entry])).judgment_thresholds
++    _assert_empty_measurement(threshold)
++
++
++def test_keys_irrelevant_to_feedback_latency_are_ignored():
++    entry = {**FEEDBACK_LATENCY, "probe": "x", "measurement": [1], "segment_values": "abc"}
++    [threshold] = parse_opensrm_v2(_manifest(judgment_threshold=[entry])).judgment_thresholds
++    _assert_empty_measurement(threshold)
++
++
++def test_the_schema_accepts_stray_keys_on_a_type_that_does_not_use_them():
++    """Pins the premise of the two tests above: if the schema ever closes
++    JudgmentThresholdSpec, the parser must start rejecting these too."""
++    entry = {**AUDIT_BACKLOG, "measurement": "x", "probe": [1], "sampling": None,
++             "segment_values": "abc"}
++    schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
++    jsonschema.validate(_manifest(judgment_threshold=[entry]), schema)
++    parse_opensrm_v2(_manifest(judgment_threshold=[entry]))
++
++
++def test_stability_carries_only_its_probe():
++    entry = {**STABILITY, "measurement": "x", "sampling": "x", "segment_values": "abc"}
++    [threshold] = parse_opensrm_v2(_manifest(judgment_threshold=[entry])).judgment_thresholds
++    assert threshold.measurement.probe is not None
++    assert threshold.measurement.sampling is None
++    assert threshold.measurement.segment_values == []
++
++
++def test_forbidden_keys_were_derived():
++    assert FORBIDDEN_KEYS, "no forbidden keys derived from schema.json"
++
++
++@pytest.mark.parametrize("key", FORBIDDEN_KEYS)
++def test_forbidden_keys_surface_as_the_parser_error(key):
++    # schema.json JudgmentThresholdSpec sets each of these to {"not": {}}.
++    entry = {**AUDIT_BACKLOG, key: "anything"}
++    with pytest.raises(OpenSRMV2ParseError, match=rf"judgment_threshold\[0\].*'{key}'"):
++        parse_opensrm_v2(_manifest(judgment_threshold=[entry]))
++
++
++@pytest.mark.parametrize(
++    "entry",
++    [
++        {"segment_dimension": "", "segment_values": ["a"]},
++        {"segment_dimension": "tier", "segment_values": ["a", ""]},
++    ],
++    ids=["empty-dimension", "empty-value"],
++)
++def test_segment_strings_must_be_non_empty(entry):
++    # schema.json segments branch: minLength 1 on both.
++    full = {"type": "segments", **entry, "bounds": {"maximum_variance_from_overall": 0.05}}
++    with pytest.raises(OpenSRMV2ParseError, match="segment_"):
++        parse_opensrm_v2(_manifest(judgment_threshold=[full]))
++
++
++# =============================================================================
++# Template resolution (CORE §5.5), through parse_opensrm_v2_file, which
++# resolves the template exactly as load_manifest does.
++# =============================================================================
++
++
++def _write_pair(
++    tmp_path: Path,
++    template_spec: dict[str, Any],
++    service_type: str = "ai-gate",
++    overrides: dict[str, Any] | None = None,
++    **manifest_spec: Any,
++) -> Path:
++    templates = tmp_path / "templates"
++    templates.mkdir()
++    (templates / "base.yaml").write_text(yaml.safe_dump({
++        "apiVersion": "opensrm.nthlayer.io/v2",
++        "kind": "ServiceManifestTemplate",
++        "metadata": {"name": "base"},
++        "spec": template_spec,
++    }))
++    template_block: dict[str, Any] = {"extends": "template:default/base"}
++    if overrides is not None:
++        template_block["overrides"] = overrides
++    doc = _manifest(service_type, template=template_block, **manifest_spec)
++    path = tmp_path / "svc.yaml"
++    path.write_text(yaml.safe_dump(doc))
++    return path
++
++
++def _types(path: Path) -> list[str]:
++    return [t.type for t in parse_opensrm_v2_file(path).judgment_thresholds]
++
++
++def test_template_only_thresholds_survive(tmp_path):
++    path = _write_pair(tmp_path, {"judgment_threshold": [STABILITY]})
++    [threshold] = parse_opensrm_v2_file(path).judgment_thresholds
++    assert threshold.type == "stability"
++    assert threshold.bounds == {"maximum_drift": 0.02}
++
++
++def test_template_and_manifest_thresholds_concatenate_in_that_order(tmp_path):
++    """A manifest cannot remove a template's threshold: unlike every other
++    list, judgment_threshold is not replaced by the manifest's."""
++    path = _write_pair(
++        tmp_path,
++        {"judgment_threshold": [STABILITY]},
++        judgment_threshold=[AUDIT_BACKLOG],
++    )
++    assert _types(path) == ["stability", "audit_backlog"]
++
++
++def test_override_append_lands_after_the_concatenation(tmp_path):
++    path = _write_pair(
++        tmp_path,
++        {"judgment_threshold": [STABILITY]},
++        overrides={"judgment_threshold": {"append": [FEEDBACK_LATENCY]}},
++        judgment_threshold=[AUDIT_BACKLOG],
++    )
++    assert _types(path) == ["stability", "audit_backlog", "feedback_latency"]
++
++
++def test_override_replace_is_rejected(tmp_path):
++    """CORE §5.5: overrides MUST NOT remove or replace a template's entries."""
++    path = _write_pair(
++        tmp_path,
++        {"judgment_threshold": [STABILITY]},
++        overrides={"judgment_threshold": {"replace": [AUDIT_BACKLOG]}},
++    )
++    with pytest.raises(OpenSRMV2ParseError, match=r"must not 'replace'.*MUST NOT remove or replace.*§5\.5"):
++        parse_opensrm_v2_file(path)
++
++
++def test_override_append_must_be_a_list(tmp_path):
++    """Any other list key ignores a non-list append; here that would drop a
++    declared threshold without a word."""
++    path = _write_pair(
++        tmp_path,
++        {"judgment_threshold": [STABILITY]},
++        overrides={"judgment_threshold": {"append": AUDIT_BACKLOG}},
++    )
++    with pytest.raises(OpenSRMV2ParseError, match=r"judgment_threshold.*append.*list"):
++        parse_opensrm_v2_file(path)
++
++
++def test_a_non_list_manifest_block_does_not_mask_the_template(tmp_path):
++    """Without a guard the manifest's null would replace the template's list
++    and the parser would see a valid-looking manifest-side value."""
++    path = _write_pair(
++        tmp_path,
++        {"judgment_threshold": [STABILITY]},
++        judgment_threshold=None,
++    )
++    with pytest.raises(OpenSRMV2ParseError, match="must be a list"):
++        parse_opensrm_v2_file(path)
++
++
++def test_template_thresholds_on_a_non_ai_gate_are_rejected(tmp_path):
++    """CORE §5.5: the ai-gate requirement applies to the resolved manifest."""
++    path = _write_pair(tmp_path, {"judgment_threshold": [STABILITY]}, service_type="api")
++    with pytest.raises(OpenSRMV2ParseError, match="only permitted on an 'ai-gate'"):
++        parse_opensrm_v2_file(path)
++
++
++def test_other_lists_still_replace(tmp_path):
++    """Only judgment_threshold concatenates; every other list keeps the
++    manifest-replaces-template default."""
++    path = _write_pair(
++        tmp_path,
++        {"contracts": [{"name": "from-template", "promise": {"availability": 0.999}}]},
++        contracts=[{"name": "from-manifest", "promise": {"availability": 0.99}}],
++    )
++    assert [c.name for c in parse_opensrm_v2_file(path).contracts] == ["from-manifest"]
++
++
++@pytest.mark.parametrize(
++    ("directive", "match"),
++    [
++        ([{"append": [AUDIT_BACKLOG]}], r"must be a mapping.*\{append: \[\.\.\.\]\}.*CORE §9"),
++        ({"prepend": [AUDIT_BACKLOG]}, "only 'append'"),
++        ({}, "'append' must be a list"),
++    ],
++    ids=["list-form", "unknown-directive", "empty-directive"],
++)
++def test_threshold_override_directives_the_merger_would_ignore_are_rejected(tmp_path, directive, match):
++    """Each of these is inert for any other key; for judgment_threshold an
++    inert directive silently drops thresholds the author declared."""
++    path = _write_pair(
++        tmp_path,
++        {"judgment_threshold": [STABILITY]},
++        overrides={"judgment_threshold": directive},
++    )
++    with pytest.raises(OpenSRMV2ParseError, match=match):
++        parse_opensrm_v2_file(path)
++
++
++def test_mixed_type_override_keys_raise_the_parser_error(tmp_path):
++    """YAML allows int mapping keys; sorting them with str keys is a TypeError."""
++    path = _write_pair(
++        tmp_path,
++        {"judgment_threshold": [STABILITY]},
++        overrides={"judgment_threshold": {"append": [], 1: 2, "b": 3}},
++    )
++    with pytest.raises(OpenSRMV2ParseError, match="only 'append'"):
++        parse_opensrm_v2_file(path)
+diff --git a/tests/test_manifest_service_type.py b/tests/test_manifest_service_type.py
+index 48564ad..6f8b2c4 100644
+--- a/tests/test_manifest_service_type.py
++++ b/tests/test_manifest_service_type.py
+@@ -311,7 +311,7 @@ def test_v1_upconversion_rejects_judgment_slos_on_non_ai_gate():
+     """v1 never enforced its own §11, so v1 manifests carrying this shape
+     genuinely exist — they are exactly what migration encounters.
+ 
+-    ``convert_v1_to_v2`` routes any SLO named in JUDGMENT_SLO_TYPES into
++    ``convert_v1_to_v2`` routes any SLO named in V2_JUDGMENT_SLO_TYPES into
+     ``spec.judgment_slo`` regardless of the service's type, so a v1
+     ``type: api`` service with a ``reversal_rate`` SLO produced a v2
+     document that ServiceManifest.allOf rejects — and which failed its own
+@@ -396,7 +396,7 @@ def test_v1_judgment_slo_error_names_only_routed_slos():
+     """The message must name what was actually routed.
+ 
+     _convert_v1_slos skips entries whose value is not a dict, so building
+-    the list by intersecting JUDGMENT_SLO_TYPES with the raw slos keys named
++    the list by intersecting JUDGMENT_SLO_TYPES and V2_JUDGMENT_THRESHOLD_TYPES with the raw slos keys named
+     SLOs that never reached spec.judgment_slo.
+     """
+     v1 = _v1_doc("api")
+diff --git a/tests/test_srm_v1_thresholds.py b/tests/test_srm_v1_thresholds.py
+new file mode 100644
+index 0000000..fb5fa34
+--- /dev/null
++++ b/tests/test_srm_v1_thresholds.py
+@@ -0,0 +1,123 @@
++"""srm/v1 calibration and feedback_latency become judgment thresholds.
++
++Provenance: nthlayer-generate/examples/opensrm/ai-gate.reliability.yaml - the
++only srm/v1 file in the workspace using either - declares
++
++    calibration:      {target: 0.05, window: 30d}   # "Max 5% ECE"
++    feedback_latency: {target: 3600, window: 30d}   # "within 1 hour"
++
++ECE, not Brier, because opensrm/v1's FlatCalibrationSLO describes its target as
++"Expected Calibration Error". feedback_latency maps to p50 by decision
++(spec 2.3): a bare "within an hour" is the weaker, typical-case claim.
++"""
++from __future__ import annotations
++
++from typing import Any
++
++import pytest
++
++from nthlayer_common.manifest.parser.v1 import OpenSRMParseError, parse_srm_v1
++
++
++def _srm_v1(slos: dict[str, Any]) -> dict[str, Any]:
++    return {
++        "apiVersion": "srm/v1",
++        "kind": "ServiceReliabilityManifest",
++        "metadata": {"name": "svc", "team": "t", "tier": "critical"},
++        "spec": {"type": "ai-gate", "slos": slos},
++    }
++
++
++def test_generate_example_shapes_become_thresholds():
++    manifest = parse_srm_v1(_srm_v1({
++        "calibration": {"target": 0.05, "window": "30d"},
++        "feedback_latency": {"target": 3600, "window": "30d"},
++    }))
++
++    by_type = {t.type: t for t in manifest.judgment_thresholds}
++    assert by_type["calibration"].bounds == {"maximum_expected_calibration_error": 0.05}
++    assert by_type["calibration"].measurement.window == "30d"
++    assert by_type["calibration"].measurement.bins == 10
++    assert by_type["feedback_latency"].bounds == {"maximum_p50": "3600s"}
++    # vrpa's observable defect: this used to be a ratio SLO with judgment_type=None.
++    assert [s.name for s in manifest.slos] == []
++
++
++def test_rate_types_stay_judgment_slos():
++    manifest = parse_srm_v1(_srm_v1({"reversal_rate": {"target": 98.5}}))
++    assert [(s.name, s.judgment_type) for s in manifest.slos] == [("reversal_rate", "reversal_rate")]
++    assert manifest.judgment_thresholds == []
++
++
++@pytest.mark.parametrize("name", ["segments", "stability", "audit_backlog"])
++def test_types_the_flat_format_cannot_express_are_rejected(name):
++    with pytest.raises(OpenSRMParseError, match="v2"):
++        parse_srm_v1(_srm_v1({name: {"target": 0.05}}))
++
++
++@pytest.mark.parametrize(
++    ("config", "match"),
++    [
++        ({"target": 5.0}, r"\[0, 1\]"),       # a percentage written for a ratio bound
++        ({"target": True}, "number"),
++        ({}, "target"),
++    ],
++)
++def test_calibration_target_is_a_ratio(config, match):
++    with pytest.raises(OpenSRMParseError, match=match):
++        parse_srm_v1(_srm_v1({"calibration": config}))
++
++
++@pytest.mark.parametrize("target", [-1, 1.5, -2.0, "1h", True, None])
++def test_feedback_latency_target_is_whole_seconds(target):
++    with pytest.raises(OpenSRMParseError, match="seconds"):
++        parse_srm_v1(_srm_v1({"feedback_latency": {"target": target}}))
++
++
++def test_scalar_shorthand_is_accepted_like_other_srm_v1_slos():
++    """srm/v1 lets `name: value` stand for `name: {target: value}`
++    (parser/v1.py _parse_slos); thresholds keep that."""
++    manifest = parse_srm_v1(_srm_v1({"feedback_latency": 60}))
++    assert manifest.judgment_thresholds[0].bounds == {"maximum_p50": "60s"}
++
++
++def test_feedback_latency_accepts_an_integral_float_target():
++    manifest = parse_srm_v1(_srm_v1({"feedback_latency": {"target": 3600.0}}))
++    assert manifest.judgment_thresholds[0].bounds == {"maximum_p50": "3600s"}
++
++
++@pytest.mark.parametrize(
++    ("name", "config", "key"),
++    [
++        ("feedback_latency", {"target": 3600, "p90": "24h"}, "p90"),
++        ("feedback_latency", {"p50": "1h", "p90": "24h"}, "p50"),  # no target: bound-like keys win
++        ("feedback_latency", {"p50": "1h", "p90": "24h"}, "p90"),
++        ("feedback_latency", {"target": 3600, "maximum_p90": "24h"}, "maximum_p90"),
++        ("calibration", {"target": 0.05, "bins": 20}, "bins"),
++        ("calibration", {"target": 0.05, "method": "ece"}, "method"),
++        ("calibration", {"target": 0.05, "maximum_brier_score": 0.1}, "maximum_brier_score"),
++    ],
++)
++def test_bound_like_keys_srm_v1_cannot_carry_are_rejected_not_dropped(name, config, key):
++    with pytest.raises(OpenSRMParseError, match=key) as exc_info:
++        parse_srm_v1(_srm_v1({name: config}))
++    assert "judgment_threshold" in str(exc_info.value)
++
++
++def test_keys_the_lift_ignores_harmlessly_stay_accepted():
++    manifest = parse_srm_v1(_srm_v1({
++        "feedback_latency": {"target": 60, "window": "30d", "description": "d", "labels": {"a": "b"}},
++    }))
++    assert manifest.judgment_thresholds[0].bounds == {"maximum_p50": "60s"}
++
++
++def test_calibration_window_defaults_to_30d_when_absent():
++    manifest = parse_srm_v1(_srm_v1({"calibration": {"target": 0.05}}))
++    [threshold] = manifest.judgment_thresholds
++    assert threshold.measurement.window == "30d"
++
++
++@pytest.mark.parametrize("window", [30, "30 days"])
++def test_calibration_rejects_a_non_duration_window(window):
++    with pytest.raises(OpenSRMParseError, match="window"):
++        parse_srm_v1(_srm_v1({"calibration": {"target": 0.05, "window": window}}))
+diff --git a/tests/test_target_unit_equivalence.py b/tests/test_target_unit_equivalence.py
+index b252d23..63f3115 100644
+--- a/tests/test_target_unit_equivalence.py
++++ b/tests/test_target_unit_equivalence.py
+@@ -227,31 +227,7 @@ def test_no_target_convention_warning_on_a_valid_v2_manifest(tmp_path):
+             load_manifest(path, suppress_deprecation_warning=True)
+ 
+ 
+-# --- out of scope: error magnitudes are untouched until 3c -----------------
+-
+-
+-@pytest.mark.parametrize(
+-    ("judgment_type", "target_block"),
+-    [
+-        ("segments", "maximum_variance_from_overall: 0.15"),
+-        ("stability", "maximum_drift: 0.10"),
+-        ("calibration", "maximum_brier_score: 0.20"),
+-    ],
+-)
+-def test_error_magnitude_targets_are_left_alone(judgment_type, target_block, tmp_path):
+-    """Deliberately unchanged by sections 1 and 2.
+-
+-    These leave the SLO concept under 3c and have no SLI-floor reading: there is
+-    no complement of a drift or a Brier score. Converting them here would be
+-    inventing semantics the spec does not define — the very thing that produced
+-    this bead. They keep parsing as they do today, and keep warning, until 3c
+-    is implemented.
+-    """
+-    manifest = parse_opensrm_v2(
+-        _v2_judgment(judgment_type, target_block), base_dir=tmp_path
+-    )
+-    raw = float(target_block.split(":")[1])
+-    assert _targets(manifest)[0] == pytest.approx(raw)
++# test_error_magnitude_targets_are_left_alone retired (opensrm-l33e): replaced by test_threshold_migration_errors.py::test_departing_type_under_judgment_slo_shows_the_threshold_form
+ 
+ 
+ # --- contract validation must compare like with like -----------------------
+@@ -292,23 +268,7 @@ spec:
+         # backwards for floor types and never fired.
+         ("outcomes", "desired_outcome_rate: 0.90", 0.95, True),
+         ("outcomes", "desired_outcome_rate: 0.98", 0.95, False),
+-        # ERROR MAGNITUDES — segments / stability / calibration. These are
+-        # deliberately NOT converted (decision 3c takes them out of the SLO
+-        # concept), so both sides stay in raw lower-is-better magnitude space
+-        # and the promise is a CEILING, not a floor.
+-        #
+-        # This block is the regression test for a defect the FIX for the round-1
+-        # CRITICAL introduced: making direction uniformly "above" read these
+-        # unconverted magnitudes as floors and inverted them BOTH ways —
+-        # measured, drift 0.02 against a 0.05 promise reported "looser" while
+-        # 0.08 against 0.05 reported clean. The parametrise then covered only
+-        # reversal_rate and outcomes, so nothing saw it.
+-        ("stability", "maximum_drift: 0.02", 0.05, False),
+-        ("stability", "maximum_drift: 0.08", 0.05, True),
+-        ("segments", "maximum_variance_from_overall: 0.01", 0.03, False),
+-        ("segments", "maximum_variance_from_overall: 0.04", 0.03, True),
+-        ("calibration", "maximum_brier_score: 0.05", 0.10, False),
+-        ("calibration", "maximum_brier_score: 0.15", 0.10, True),
++        # error-magnitude rows retired (opensrm-l33e): replaced by test_threshold_migration_errors.py::test_contract_promise_on_a_threshold_type_is_rejected
+     ],
+ )
+ def test_contract_validation_compares_in_sli_floor_space(
+@@ -502,7 +462,7 @@ def test_non_numeric_promise_raises_a_declared_error(bad):
+         },
+     }
+ 
+-    with pytest.raises(ValueError):
++    with pytest.raises(OpenSRMParseError):
+         parse_srm_v1(doc)
+ 
+ 
+@@ -584,59 +544,14 @@ def test_migration_does_not_warn_for_an_error_magnitude_in_zero_to_one():
+     assert not [
+         w for w in caught if issubclass(w.category, TargetConventionWarning)
+     ]
+-    # and it is emitted unchanged, since magnitudes are not converted
+-    target = v2["spec"]["judgment_slo"][0]["spec"]["target"]
+-    assert target["maximum_brier_score"] == pytest.approx(0.2)
++    # and it is lifted to a threshold, never converted (opensrm-l33e)
++    [entry] = v2["spec"]["judgment_threshold"]
++    assert entry["bounds"] == {"maximum_expected_calibration_error": pytest.approx(0.2)}
+ 
+ 
+-# Finiteness is checked for EVERY field; the [0, 1] range only for converted
+-# ones. The first version of the guard combined them and ran both AFTER the
+-# magnitude early-return, so the three error magnitudes kept laundering NaN:
+-# measured, a stability target of .nan against a real promise gave
+-# validate_contracts() -> [], a breach reporting CLEAN, on half the field set.
+-@pytest.mark.parametrize(
+-    ("judgment_type", "field"),
+-    [
+-        ("stability", "maximum_drift"),
+-        ("segments", "maximum_variance_from_overall"),
+-        ("calibration", "maximum_brier_score"),
+-    ],
+-)
+-@pytest.mark.parametrize("bad", [".nan", ".inf", "-.inf"])
+-def test_error_magnitudes_reject_non_finite_targets(judgment_type, field, bad, tmp_path):
+-    doc = _v2_judgment(judgment_type, f"{field}: {bad}")
+-
+-    # match="finite", not a bare raises: _extract_judgment_target raises the
+-    # SAME type for a MISSING target, so a typo in the field name above would
+-    # otherwise go green while testing nothing.
+-    with pytest.raises(OpenSRMV2ParseError, match="finite"):
+-        parse_opensrm_v2(doc, base_dir=tmp_path)
+-
+-
+-@pytest.mark.parametrize("bad", [".nan", ".inf", "-.inf"])
+-def test_error_magnitude_promises_reject_non_finite(bad, tmp_path):
+-    """The promise side too — a NaN THRESHOLD silenced the comparison just as
+-    effectively as a NaN target."""
+-    doc = _v2_with_contract("stability", "maximum_drift: 0.02", bad)
+-
+-    with pytest.raises(OpenSRMV2ParseError, match="finite"):
+-        parse_opensrm_v2(doc, base_dir=tmp_path)
+-
+-
+-@pytest.mark.parametrize("declared", ["0.2", "1.5", "12"])
+-def test_error_magnitudes_stay_unranged(declared, tmp_path):
+-    """The other half, and the reason finiteness had to be SEPARATED from range.
+-
+-    A Brier score or a drift bound is not a ratio, so magnitudes are
+-    legitimately outside [0, 1]. Applying the range check to them would reject
+-    valid manifests, and would also encode a taxonomy decision 3c is about to
+-    change.
+-    """
+-    doc = _v2_judgment("stability", f"maximum_drift: {declared}")
+-
+-    manifest = parse_opensrm_v2(doc, base_dir=tmp_path)
+-
+-    assert manifest.slos[0].target == pytest.approx(float(declared))
++# test_error_magnitudes_reject_non_finite_targets retired (opensrm-l33e): replaced by test_thresholds.py::test_parse_bounds_rejects_what_the_schema_rejects (nan/inf rows)
++# test_error_magnitude_promises_reject_non_finite retired (opensrm-l33e): replaced by test_threshold_migration_errors.py::test_contract_promise_on_a_threshold_type_is_rejected
++# test_error_magnitudes_stay_unranged retired (opensrm-l33e): contradicted schema.json (maximum_drift is Ratio, maximum 1); replaced by test_thresholds.py::test_parse_bounds_rejects_what_the_schema_rejects
+ 
+ 
+ # =============================================================================
+diff --git a/tests/test_threshold_migration_errors.py b/tests/test_threshold_migration_errors.py
+new file mode 100644
+index 0000000..a2854d1
+--- /dev/null
++++ b/tests/test_threshold_migration_errors.py
+@@ -0,0 +1,284 @@
++"""Manifests written for nthlayer-common 3.x, loaded by 4.0.0.
++
++Each pre-3c placement is rejected with an error that shows its replacement.
++The fixtures are the spec's own retired examples, both wrapped (a JudgmentSLO
++document inline) and flat (the schema's inline item) shapes, because the
++parser must reject either. The flat shape is otherwise unparsed (opensrm-a742),
++so these tests are what keeps the rejection from depending on that bead.
++"""
++from __future__ import annotations
++
++import warnings
++from decimal import Decimal
++from pathlib import Path
++from typing import Any
++
++import pytest
++import yaml
++
++from nthlayer_common.manifest import load_manifest
++from nthlayer_common.manifest.parser.v2 import OpenSRMV2ParseError, parse_opensrm_v2
++from nthlayer_common.manifest.target_validation import (
++    TargetConventionWarning,
++    judgment_promise_direction,
++    judgment_target_percent,
++    judgment_target_ratio,
++)
++from nthlayer_common.manifest.v1_compat import convert_v1_contract
++
++INVALID_DIR = Path(__file__).resolve().parents[2] / "opensrm" / "spec" / "v2" / "tests" / "invalid"
++
++
++def _manifest(**spec: Any) -> dict[str, Any]:
++    return {
++        "apiVersion": "opensrm.nthlayer.io/v2",
++        "kind": "ServiceManifest",
++        "metadata": {"name": "svc", "labels": {"tier": "critical"}},
++        "spec": {
++            "owner": {"group": "group:default/team"},
++            "service": {"name": "svc", "type": "ai-gate"},
++            **spec,
++        },
++    }
++
++
++@pytest.mark.parametrize(
++    "fixture",
++    [
++        "n20-segments-as-judgment-slo.yaml",
++        "n21-stability-as-judgment-slo.yaml",
++        "n22-calibration-as-judgment-slo.yaml",
++    ],
++)
++@pytest.mark.parametrize("shape", ["wrapped", "flat"])
++def test_departing_type_under_judgment_slo_shows_the_threshold_form(fixture, shape):
++    doc = yaml.safe_load((INVALID_DIR / fixture).read_text(encoding="utf-8"))
++    item = {"metadata": doc["metadata"], "spec": doc["spec"]} if shape == "wrapped" else doc["spec"]
++    judgment_type = doc["spec"]["judgment_type"]
++
++    with pytest.raises(OpenSRMV2ParseError) as exc_info:
++        parse_opensrm_v2(_manifest(judgment_slo=[item]))
++
++    message = str(exc_info.value)
++    assert "judgment_threshold" in message
++    assert f"type: {judgment_type}" in message
++    # target -> bounds, with every declared bound name carried over
++    for bound in doc["spec"]["target"]:
++        assert bound in message
++
++
++@pytest.mark.parametrize("shape", ["wrapped", "flat"])
++def test_audit_backlog_in_audit_sampling_target_shows_the_threshold_form(shape):
++    doc = yaml.safe_load(
++        (INVALID_DIR / "n23-audit-backlog-in-audit-sampling-target.yaml").read_text(encoding="utf-8")
++    )
++    item = {"metadata": doc["metadata"], "spec": doc["spec"]} if shape == "wrapped" else doc["spec"]
++
++    with pytest.raises(
++        OpenSRMV2ParseError,
++        match=r"audit_completion_rate stays in the audit_sampling target(?s:.*)type: audit_backlog",
++    ) as exc_info:
++        parse_opensrm_v2(_manifest(judgment_slo=[item]))
++    assert "maximum_age: 24h" in str(exc_info.value)
++
++
++def test_audit_backlog_suggestion_is_safe_dumped_not_interpolated():
++    item = {
++        "judgment_type": "audit_sampling",
++        "target": {"audit_backlog_maximum_age": "24h\nx"},
++    }
++    with pytest.raises(OpenSRMV2ParseError) as exc_info:
++        parse_opensrm_v2(_manifest(judgment_slo=[item]))
++    entry = _suggested_entry(str(exc_info.value))
++    assert entry == {"type": "audit_backlog", "bounds": {"maximum_age": "24h\nx"}}
++
++
++@pytest.mark.parametrize(
++    "measurement",
++    [None, {"method": "expected_calibration_error"}, {"window": "30d"}, {"bins": 10}],
++    ids=["absent", "method-only", "no-bins", "no-window"],
++)
++def test_calibration_without_measurement_says_one_is_required(measurement):
++    item = {"judgment_type": "calibration", "target": {"maximum_brier_score": 0.1}}
++    if measurement is not None:
++        item["measurement"] = measurement
++    with pytest.raises(
++        OpenSRMV2ParseError,
++        match=r"calibration threshold requires `measurement` with `bins` and `window`",
++    ):
++        parse_opensrm_v2(_manifest(judgment_slo=[item]))
++
++
++def _suggested_entry(message: str) -> dict[str, Any]:
++    """The YAML block the error message offers, parsed back."""
++    block = message.split(":\n\n", 1)[1].split("\n\n", 1)[0]
++    return yaml.safe_load(block)["judgment_threshold"][0]
++
++
++@pytest.mark.parametrize(
++    "fixture",
++    [
++        "n20-segments-as-judgment-slo.yaml",
++        "n21-stability-as-judgment-slo.yaml",
++        "n22-calibration-as-judgment-slo.yaml",
++    ],
++)
++@pytest.mark.parametrize("shape", ["wrapped", "flat"])
++def test_suggested_threshold_entry_loads_unchanged(fixture, shape):
++    """Round trip: copying the fix-it block into judgment_threshold must load."""
++    doc = yaml.safe_load((INVALID_DIR / fixture).read_text(encoding="utf-8"))
++    item = {"metadata": doc["metadata"], "spec": doc["spec"]} if shape == "wrapped" else doc["spec"]
++    with pytest.raises(OpenSRMV2ParseError) as exc_info:
++        parse_opensrm_v2(_manifest(judgment_slo=[item]))
++
++    entry = _suggested_entry(str(exc_info.value))
++    manifest = parse_opensrm_v2(_manifest(judgment_threshold=[entry]))
++
++    assert [t.type for t in manifest.judgment_thresholds] == [doc["spec"]["judgment_type"]]
++    assert manifest.judgment_thresholds[0].bounds == doc["spec"]["target"]
++
++
++def test_suggested_calibration_entry_drops_measurement_method():
++    doc = yaml.safe_load(
++        (INVALID_DIR / "n22-calibration-as-judgment-slo.yaml").read_text(encoding="utf-8")
++    )
++    assert "method" in doc["spec"]["measurement"]
++    with pytest.raises(OpenSRMV2ParseError) as exc_info:
++        parse_opensrm_v2(_manifest(judgment_slo=[doc["spec"]]))
++    entry = _suggested_entry(str(exc_info.value))
++    assert "method" not in entry["measurement"]
++    assert entry["measurement"] == {"bins": 10, "window": "30d"}
++
++
++def test_message_says_breach_actions_and_service_do_not_carry_over():
++    doc = yaml.safe_load(
++        (INVALID_DIR / "n21-stability-as-judgment-slo.yaml").read_text(encoding="utf-8")
++    )
++    assert "service" in doc["spec"]
++    with pytest.raises(
++        OpenSRMV2ParseError,
++        match="`breach_actions` and `service` do not carry over: thresholds do not declare them",
++    ):
++        parse_opensrm_v2(_manifest(judgment_slo=[doc["spec"]]))
++
++
++def test_non_yaml_native_target_still_raises_only_the_parse_error():
++    """The dict API can pass values safe_dump refuses (RepresenterError)."""
++    item = {"judgment_type": "stability", "target": {"maximum_drift": Decimal("0.02")}}
++    with pytest.raises(OpenSRMV2ParseError, match="judgment_threshold"):
++        parse_opensrm_v2(_manifest(judgment_slo=[item]))
++
++
++@pytest.mark.parametrize(
++    "item",
++    [
++        # judgment_type of a non-string shape: unhashable values must not
++        # reach a frozenset membership test (TypeError).
++        {"judgment_type": ["stability"], "target": {"maximum_drift": 0.02}},
++        {"judgment_type": {"stability": 1}, "target": {"maximum_drift": 0.02}},
++        {"metadata": {"name": "x"}, "spec": {"judgment_type": ["calibration"]}},
++        # target a scalar, on both a departing type and audit_sampling
++        {"judgment_type": "audit_sampling", "target": "24h"},
++        {"metadata": {"name": "x"}, "spec": {"judgment_type": "audit_sampling", "target": 5}},
++        {"metadata": {"name": "x"}, "spec": {"judgment_type": "stability", "target": "0.02"}},
++        # spec a scalar
++        {"metadata": {"name": "x"}, "spec": "stability"},
++        {"metadata": {"name": "x"}, "spec": None},
++    ],
++    ids=[
++        "judgment_type-list-flat",
++        "judgment_type-dict-flat",
++        "judgment_type-list-wrapped",
++        "target-scalar-audit_sampling-flat",
++        "target-int-audit_sampling-wrapped",
++        "target-scalar-stability-wrapped",
++        "spec-scalar",
++        "spec-null",
++    ],
++)
++def test_odd_judgment_slo_shapes_raise_only_the_parse_error(item):
++    """The pre-3c check reads untrusted shapes; it must never leak a
++    TypeError/AttributeError past the loader's except clauses."""
++    with pytest.raises(OpenSRMV2ParseError):
++        parse_opensrm_v2(_manifest(judgment_slo=[item]))
++
++
++def test_departing_type_with_scalar_target_still_shows_the_threshold_form():
++    item = {"metadata": {"name": "x"}, "spec": {"judgment_type": "stability", "target": "0.02"}}
++    with pytest.raises(OpenSRMV2ParseError, match="type: stability"):
++        parse_opensrm_v2(_manifest(judgment_slo=[item]))
++
++
++@pytest.mark.parametrize("threshold_type", ["calibration", "segments", "stability", "audit_backlog", "feedback_latency"])
++def test_contract_promise_on_a_threshold_type_is_rejected(threshold_type):
++    contract = {"name": "c", "promise": {"judgment": {threshold_type: 0.1}}}
++    with pytest.raises(OpenSRMV2ParseError, match="threshold"):
++        parse_opensrm_v2(_manifest(contracts=[contract]))
++
++
++def test_srm_v1_contract_promise_on_a_threshold_type_is_rejected():
++    """The same spec 2.4 rule, reached through the v1 path."""
++    with pytest.raises(ValueError, match="threshold"):
++        convert_v1_contract("svc", None, None, {"calibration": 0.1})
++
++
++def test_parse_srm_v1_reports_a_contract_promise_on_a_threshold_as_a_parse_error():
++    from nthlayer_common.manifest.parser.v1 import OpenSRMParseError, parse_srm_v1
++
++    doc = {
++        "apiVersion": "srm/v1",
++        "kind": "ServiceReliabilityManifest",
++        "metadata": {"name": "svc", "team": "t", "tier": "critical"},
++        "spec": {
++            "type": "ai-gate",
++            "slos": {},
++            "contract": {"judgment": {"calibration": 0.1}},
++        },
++    }
++    with pytest.raises(OpenSRMParseError, match="threshold"):
++        parse_srm_v1(doc)
++
++
++def test_contract_promise_on_an_unknown_type_is_rejected():
++    """Was silently inert: a promise that matched no SLO, so
++    validate_contracts() could never report it (spec 2.4, Review Focus 5)."""
++    contract = {"name": "c", "promise": {"judgment": {"reversal_rat": 0.05}}}
++    with pytest.raises(OpenSRMV2ParseError, match="reversal_rat"):
++        parse_opensrm_v2(_manifest(contracts=[contract]))
++
++
++# The parser rejects magnitudes before these are reached, so only a direct call
++# exercises the removed passthrough. Field names are schema.json's
++# JudgmentThresholdSpec bound names, which were never SLO target fields.
++@pytest.mark.parametrize(
++    "field", ["maximum_drift", "maximum_variance_from_overall", "maximum_brier_score"]
++)
++@pytest.mark.parametrize(
++    "convert",
++    [
++        lambda f: judgment_target_percent(f, 0.05),
++        lambda f: judgment_target_ratio(f, 5.0),
++        judgment_promise_direction,
++    ],
++    ids=["percent", "ratio", "direction"],
++)
++def test_magnitude_fields_are_no_longer_passed_through(convert, field):
++    with pytest.raises(ValueError, match="not a judgment SLO target field"):
++        convert(field)
++
++
++def test_thresholds_never_trip_the_target_convention_warning(tmp_path):
++    """l33e acceptance. Before 3c, `maximum_drift: 0.05` warned 'write 5.0'."""
++    path = tmp_path / "svc.yaml"
++    path.write_text(yaml.safe_dump(_manifest(judgment_threshold=[
++        {"type": "stability", "probe": {"frozen_input_set": "s3://p", "frequency": "daily"},
++         "bounds": {"maximum_drift": 0.05}},
++        {"type": "calibration", "measurement": {"bins": 10, "window": "30d"},
++         "bounds": {"maximum_brier_score": 0.05}},
++    ])), encoding="utf-8")
++
++    with warnings.catch_warnings():
++        warnings.simplefilter("error", TargetConventionWarning)
++        manifest = load_manifest(path, suppress_deprecation_warning=True)
++
++    assert len(manifest.judgment_thresholds) == 2
+diff --git a/tests/test_thresholds.py b/tests/test_thresholds.py
+new file mode 100644
+index 0000000..9f5103b
+--- /dev/null
++++ b/tests/test_thresholds.py
+@@ -0,0 +1,205 @@
++"""parse_bounds / check_type_fields / is_duration, against the schema's rules.
++
++Every rejected input below is something schema.json rejects (the comment names
++the schema clause), so the parser and the schema give one verdict. Python's
++bool is an int subclass and YAML 1.1 reads `yes` as True, so booleans are
++listed explicitly: the schema's `type: number` rejects them, and a bare
++isinstance(x, (int, float)) would not.
++"""
++from __future__ import annotations
++
++import copy
++import math
++from pathlib import Path
++
++import pytest
++
++from nthlayer_common.manifest.thresholds import (
++    FORBIDDEN_THRESHOLD_KEYS,
++    THRESHOLD_BOUNDS,
++    check_type_fields,
++    is_duration,
++    normalise_bins,
++    parse_bounds,
++    threshold_to_v2_entry,
++)
++
++
++@pytest.mark.parametrize("value", ["1ms", "30s", "5m", "24h", "30d", "2w", "0s"])
++def test_is_duration_accepts_the_schema_pattern(value):
++    assert is_duration(value)
++
++
++@pytest.mark.parametrize(
++    "value",
++    ["", "h", "24", "24H", "1.5h", "-1h", " 24h", "24h ", "²h", "24hh", 24, None, True],
++)
++def test_is_duration_rejects_what_the_schema_pattern_rejects(value):
++    # schema: Duration = {type: string, pattern: ^[0-9]+(ms|s|m|h|d|w)$}
++    assert not is_duration(value)
++
++
++def test_parse_bounds_returns_declared_values_untouched():
++    assert parse_bounds("stability", {"maximum_drift": 0.02}) == {"maximum_drift": 0.02}
++    assert parse_bounds("audit_backlog", {"maximum_age": "24h"}) == {"maximum_age": "24h"}
++    assert parse_bounds(
++        "calibration",
++        {"maximum_brier_score": 0.05, "maximum_expected_calibration_error": 0.03},
++    ) == {"maximum_brier_score": 0.05, "maximum_expected_calibration_error": 0.03}
++
++
++@pytest.mark.parametrize(
++    ("threshold_type", "raw", "match"),
++    [
++        ("stability", None, "mapping"),                                   # bounds: type object
++        ("stability", [0.02], "mapping"),
++        ("stability", {}, "maximum_drift"),                               # required
++        ("calibration", {}, "at least one"),                              # anyOf
++        ("feedback_latency", {}, "at least one"),
++        ("stability", {"maximum_drift": 0.02, "maximum_p50": "1h"}, "maximum_p50"),  # closed
++        ("stability", {"maximum_drift": True}, "number"),                 # Ratio: number
++        ("stability", {"maximum_drift": "0.02"}, "number"),
++        ("stability", {"maximum_drift": None}, "number"),
++        ("stability", {"maximum_drift": 1.5}, r"\[0, 1\]"),               # Ratio: max 1
++        ("stability", {"maximum_drift": -0.1}, r"\[0, 1\]"),              # Ratio: min 0
++        ("stability", {"maximum_drift": math.nan}, "finite"),
++        ("stability", {"maximum_drift": math.inf}, "finite"),
++        ("calibration", {"maximum_brier_score": 2}, r"\[0, 1\]"),         # inline 0-1
++        ("audit_backlog", {"maximum_age": 24}, "duration"),               # Duration: string
++        ("audit_backlog", {"maximum_age": "1 day"}, "duration"),
++        ("feedback_latency", {"maximum_p50": 0.5}, "duration"),
++    ],
++)
++def test_parse_bounds_rejects_what_the_schema_rejects(threshold_type, raw, match):
++    with pytest.raises(ValueError, match=match):
++        parse_bounds(threshold_type, raw)
++
++
++@pytest.mark.parametrize("raw", [{1: "1h", "x": "2h"}, {None: "1h", "x": "2h"}], ids=["int-key", "null-key"])
++def test_parse_bounds_reports_mixed_type_keys_as_a_value_error(raw):
++    """YAML allows int/null mapping keys; sorting them with str keys is a TypeError."""
++    with pytest.raises(ValueError, match=r"do not belong to 'audit_backlog'"):
++        parse_bounds("audit_backlog", raw)
++
++
++def test_parse_bounds_rejects_an_unknown_type():
++    with pytest.raises(ValueError, match="threshold type"):
++        parse_bounds("reversal_rate", {"maximum_reversal_rate": 0.05})
++
++
++@pytest.mark.parametrize(
++    ("threshold_type", "entry", "match"),
++    [
++        ("segments", {"segment_values": ["a"]}, "segment_dimension"),
++        ("segments", {"segment_dimension": "tier", "segment_values": []}, "segment_values"),
++        ("segments", {"segment_dimension": "tier", "segment_values": "a"}, "segment_values"),
++        ("segments", {"segment_dimension": "tier", "segment_values": [1]}, "segment_values"),
++        ("stability", {}, "probe"),
++        ("stability", {"probe": {"frozen_input_set": "s3://x"}}, "frequency"),
++        ("stability", {"probe": {"frozen_input_set": "s3://x", "frequency": "monthly"}}, "frequency"),
++        ("calibration", {}, "measurement"),
++        ("calibration", {"measurement": {"bins": 1, "window": "30d"}}, "bins"),
++        ("calibration", {"measurement": {"bins": True, "window": "30d"}}, "bins"),
++        # schema `type: integer` accepts 10.0 but not 2.5
++        ("calibration", {"measurement": {"bins": 2.5, "window": "30d"}}, "bins"),
++        ("calibration", {"measurement": {"bins": 10, "window": "30"}}, "window"),
++        ("calibration", {"measurement": {"bins": 10, "window": "30d", "method": "brier_score"}}, "method"),
++        ("segments", {"segment_dimension": "", "segment_values": ["a"]}, "segment_dimension"),
++        ("segments", {"segment_dimension": 5, "segment_values": ["a"]}, "segment_dimension"),
++        ("stability", {"probe": {"frequency": "daily"}}, "frozen_input_set"),
++        ("stability", {"probe": {"frozen_input_set": 5, "frequency": "daily"}}, "frozen_input_set"),
++        ("segments", {"segment_dimension": "tier", "segment_values": ["a", ""]}, "segment_values"),
++    ],
++)
++def test_check_type_fields_rejects_what_the_schema_rejects(threshold_type, entry, match):
++    with pytest.raises(ValueError, match=match):
++        check_type_fields(threshold_type, entry)
++
++
++@pytest.mark.parametrize(
++    ("threshold_type", "entry"),
++    [
++        ("segments", {"segment_dimension": "tier", "segment_values": ["a", "b"]}),
++        ("stability", {"probe": {"frozen_input_set": "s3://x", "frequency": "daily"}}),
++        ("calibration", {"measurement": {"bins": 10, "window": "30d"}}),
++        # schema.json bins `type: integer`: draft-07 accepts an integral float
++        ("calibration", {"measurement": {"bins": 10.0, "window": "30d"}}),
++        ("audit_backlog", {}),
++        ("feedback_latency", {}),
++    ],
++)
++def test_check_type_fields_accepts_the_schema_shapes(threshold_type, entry):
++    check_type_fields(threshold_type, entry)
++
++
++@pytest.mark.parametrize("key", FORBIDDEN_THRESHOLD_KEYS)
++@pytest.mark.parametrize(
++    ("threshold_type", "entry"),
++    [
++        ("segments", {"segment_dimension": "tier", "segment_values": ["a"]}),
++        ("stability", {"probe": {"frozen_input_set": "s3://x", "frequency": "daily"}}),
++        ("calibration", {"measurement": {"bins": 10, "window": "30d"}}),
++        ("audit_backlog", {}),
++        ("feedback_latency", {}),
++    ],
++)
++def test_check_type_fields_rejects_forbidden_keys_for_every_type(threshold_type, entry, key):
++    with pytest.raises(ValueError, match=key):
++        check_type_fields(threshold_type, {**entry, key: "x"})
++
++
++def test_forbidden_keys_are_rejected_before_required_fields():
++    with pytest.raises(ValueError, match="breach_actions"):
++        check_type_fields("stability", {"breach_actions": []})
++
++
++def test_check_type_fields_does_not_mutate_its_input():
++    entry = {"measurement": {"bins": 10.0, "window": "30d"}}
++    before = copy.deepcopy(entry)
++    check_type_fields("calibration", entry)
++    assert entry == before
++    assert isinstance(entry["measurement"]["bins"], float)
++
++
++def test_normalise_bins_converts_integral_float_to_int():
++    result = normalise_bins(10.0)
++    assert result == 10
++    assert isinstance(result, int)
++
++
++def test_normalise_bins_leaves_int_unchanged():
++    result = normalise_bins(10)
++    assert result == 10
++    assert isinstance(result, int)
++
++
++def test_a_huge_integer_bound_is_a_range_error_not_an_overflow():
++    """math.isfinite(10**400) raises OverflowError, which no parser catches;
++    an integer is always finite, so it must reach the [0, 1] check instead."""
++    with pytest.raises(ValueError, match=r"\[0, 1\]"):
++        parse_bounds("stability", {"maximum_drift": 10**400})
++
++
++# parents: [0]=tests/ [1]=nthlayer-common/ [2]=<ecosystem>/
++_ALL_FIVE = (
++    Path(__file__).resolve().parents[2]
++    / "opensrm" / "spec" / "v2" / "examples" / "judgment-thresholds" / "all-five-types.yaml"
++)
++
++
++def test_threshold_to_v2_entry_round_trips_all_five_types():
++    """The docstring claims it inverts the v2 parser for every type; callers
++    only reach calibration/feedback_latency, so check the rest directly."""
++    import yaml
++
++    from nthlayer_common.manifest.parser.v2 import parse_opensrm_v2
++
++    assert _ALL_FIVE.is_file(), f"spec example missing: {_ALL_FIVE}"
++    doc = yaml.safe_load(_ALL_FIVE.read_text(encoding="utf-8"))
++    originals = parse_opensrm_v2(doc, base_dir=_ALL_FIVE.parent).judgment_thresholds
++    assert {t.type for t in originals} == set(THRESHOLD_BOUNDS)
++
++    doc["spec"]["judgment_threshold"] = [threshold_to_v2_entry(t) for t in originals]
++    reparsed = parse_opensrm_v2(doc, base_dir=_ALL_FIVE.parent).judgment_thresholds
++    assert reparsed == originals
++
+diff --git a/tests/test_v1_to_v2_thresholds.py b/tests/test_v1_to_v2_thresholds.py
+new file mode 100644
+index 0000000..ab56ba2
+--- /dev/null
++++ b/tests/test_v1_to_v2_thresholds.py
+@@ -0,0 +1,95 @@
++"""srm/v1 -> v2 conversion of thresholds: schema-valid output and a lossless
++round trip through the v2 parser.
++
++Checked against the schema with jsonschema directly (a dev dependency), not via
++importorskip: a skip would let this go silently untested.
++"""
++from __future__ import annotations
++
++import json
++from pathlib import Path
++
++import jsonschema
++import pytest
++
++from nthlayer_common.manifest.parser.v1 import parse_srm_v1
++from nthlayer_common.manifest.parser.v2 import parse_opensrm_v2
++from nthlayer_common.manifest.v1_compat import convert_v1_to_v2
++
++SCHEMA_PATH = Path(__file__).resolve().parents[2] / "opensrm" / "spec" / "v2" / "schema.json"
++
++# The generate example's two threshold entries, verbatim (see test_srm_v1_thresholds.py).
++# No judgment SLO here, deliberately: convert_v1_to_v2 emits judgment_slo items
++# in the wrapped metadata/spec shape, which the schema's flat JudgmentSLOSpec
++# rejects - pre-existing, opensrm-a742 - and that would fail the schema check
++# below for a reason unrelated to thresholds.
++SRM_V1 = {
++    "apiVersion": "srm/v1",
++    "kind": "ServiceReliabilityManifest",
++    "metadata": {"name": "svc", "team": "t", "tier": "critical"},
++    "spec": {
++        "type": "ai-gate",
++        "slos": {
++            "calibration": {"target": 0.05, "window": "30d"},
++            "feedback_latency": {"target": 3600, "window": "30d"},
++        },
++    },
++}
++
++
++def test_converted_document_validates_against_the_v2_schema():
++    v2 = convert_v1_to_v2(SRM_V1)
++    jsonschema.validate(v2, json.loads(SCHEMA_PATH.read_text(encoding="utf-8")))
++    assert {e["type"] for e in v2["spec"]["judgment_threshold"]} == {"calibration", "feedback_latency"}
++    assert "judgment_slo" not in v2["spec"]
++
++
++def test_rate_types_still_route_to_judgment_slo():
++    doc = {**SRM_V1, "spec": {"type": "ai-gate", "slos": {
++        **SRM_V1["spec"]["slos"], "reversal_rate": {"target": 98.5, "window": "30d"},
++    }}}
++    v2 = convert_v1_to_v2(doc)
++    assert [e["spec"]["judgment_type"] for e in v2["spec"]["judgment_slo"]] == ["reversal_rate"]
++    assert len(v2["spec"]["judgment_threshold"]) == 2
++
++
++def test_round_trip_preserves_every_threshold():
++    direct = parse_srm_v1(SRM_V1).judgment_thresholds
++    via_v2 = parse_opensrm_v2(convert_v1_to_v2(SRM_V1)).judgment_thresholds
++    assert via_v2 == direct
++
++
++def test_thresholds_alone_on_a_non_ai_gate_are_rejected():
++    doc = {**SRM_V1, "spec": {"type": "api", "slos": {"calibration": {"target": 0.05}}}}
++    with pytest.raises(ValueError, match="calibration"):
++        convert_v1_to_v2(doc)
++
++
++@pytest.mark.parametrize("name", ["segments", "stability"])
++def test_types_srm_v1_cannot_express_raise_value_error(name):
++    doc = {**SRM_V1, "spec": {"type": "ai-gate", "slos": {name: {"target": 0.05}}}}
++    with pytest.raises(ValueError, match="v2"):
++        convert_v1_to_v2(doc)
++
++
++def test_bound_like_key_raises_value_error_rather_than_being_dropped():
++    doc = {**SRM_V1, "spec": {"type": "ai-gate", "slos": {"feedback_latency": {"target": 3600, "p90": "24h"}}}}
++    with pytest.raises(ValueError, match="p90"):
++        convert_v1_to_v2(doc)
++
++
++def test_scalar_shorthand_threshold_is_converted_not_dropped():
++    doc = {**SRM_V1, "spec": {"type": "ai-gate", "slos": {"feedback_latency": 60}}}
++    direct = parse_srm_v1(doc).judgment_thresholds
++    via_v2 = parse_opensrm_v2(convert_v1_to_v2(doc)).judgment_thresholds
++    assert len(direct) == 1
++    assert via_v2 == direct
++
++
++def test_calibration_bins_are_emitted_as_int():
++    [entry] = [
++        e for e in convert_v1_to_v2(SRM_V1)["spec"]["judgment_threshold"]
++        if e["type"] == "calibration"
++    ]
++    assert isinstance(entry["measurement"]["bins"], int)
++    assert not isinstance(entry["measurement"]["bins"], bool)

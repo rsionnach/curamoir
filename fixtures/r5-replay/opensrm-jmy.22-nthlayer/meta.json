@@ -1,0 +1,78 @@
+{
+ "schema_version": 1,
+ "entry": "opensrm-jmy.22-nthlayer",
+ "bead": "opensrm-jmy.22",
+ "record": "jmy.22",
+ "archive": "r5-state-jmy.22-completed.json",
+ "record_repos": [
+  "nthlayer-workers",
+  "nthlayer"
+ ],
+ "repo": "nthlayer",
+ "part": null,
+ "base": "665786d85b3d6539db8e8d6fcfc8d0930392e615",
+ "head": "f6cc1c44a54b717ca2b6e2addfe8bcac6cb4221d",
+ "record_head": null,
+ "synthetic_base": "fca94313eb1ed51acf69d1386c73b65d58df5d55",
+ "synthetic_head": "bb7bc46b0c92a30321414a540e87b8ef77049228",
+ "base_tree": "0cc70701101ea9d51d172bdb9335ca76d3b5ac69",
+ "tree_sha": "d935ad11df73d0b73ac63caf01552b391cdfd643",
+ "unavailable": null,
+ "bundle": {
+  "repo": "nthlayer",
+  "sha256": "46087845a4b5b8e2275091e728f99e5dd635bd712a9d9344386afe3a8f045272"
+ },
+ "sequential_steps": null,
+ "record_sequential_steps": 6,
+ "bead_sequential_steps": 6,
+ "fidelity": "counts_only",
+ "blocking_findings": null,
+ "escape": false,
+ "brief_source": "bead",
+ "roster": {
+  "record_version": 1,
+  "passes": [
+   "correctness",
+   "clarity",
+   "edge-cases",
+   "excellence"
+  ]
+ },
+ "lens_order": [
+  "correctness",
+  "clarity",
+  "edge-cases",
+  "excellence"
+ ],
+ "counts": {},
+ "baseline": {
+  "correctness": {
+   "reviews": 1,
+   "fix_rounds": 0,
+   "findings_first_review": 1,
+   "unattributed": 1,
+   "steps": 1
+  },
+  "clarity": {
+   "reviews": 1,
+   "fix_rounds": 0,
+   "findings_first_review": 2,
+   "unattributed": 2,
+   "steps": 1
+  },
+  "edge-cases": {
+   "reviews": 2,
+   "fix_rounds": 1,
+   "findings_first_review": 3,
+   "unattributed": 3,
+   "steps": 3
+  },
+  "excellence": {
+   "reviews": 1,
+   "fix_rounds": 0,
+   "findings_first_review": 0,
+   "unattributed": 0,
+   "steps": 1
+  }
+ }
+}

@@ -1,0 +1,753 @@
+diff --git a/pyproject.toml b/pyproject.toml
+index 1c68cad..0c2accc 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -9,14 +9,19 @@ description = "NthLayer workers — Tier 2 background computation (observe, meas
+ readme = "README.md"
+ requires-python = ">=3.11"
+ dependencies = [
+-    # >=2.1.0: foreign_yaml_reason / iter_manifest_files land there
+-    # (opensrm-3470). The previous <2.0.0 ceiling was already WRONG before
+-    # this change — opensrm-ih0v made spec.service.type required in 2.0.0 and
+-    # this package's fixtures depend on it, so an install resolving 1.7.x
+-    # would fail. CI hides that by resolving nthlayer-common from a sibling
+-    # checkout rather than PyPI; anyone installing nthlayer-workers from PyPI
+-    # would have hit it.
+-    "nthlayer-common>=2.1.0,<3.0.0",
++    # >=2.1.2, NOT >=2.1.0 or 2.1.1. 2.1.0 introduced foreign_yaml_reason with an
++    # INERT body-recovery step: it tested spec.slos as a list, but v1 writes
++    # a mapping and v2 has no spec.slos at all, so a header-stripped manifest
++    # was dropped with parse_failures == 0 — the exact silent drop this
++    # package uses the gate to prevent. Fixed across 2.1.1 and 2.1.2;
++    # 2.1.1 still counted every Backstage catalog-info.yaml as a broken
++    # manifest, which 2.1.2 corrected.
++    #
++    # CI resolves nthlayer-common from a sibling checkout, so it would not
++    # notice a bad resolve. tests/observe/test_slo_spec_loader.py's
++    # TestSharedGateResolvesCorrectly exists for that: it uses the shapes the
++    # PARSERS produce and fails against 2.1.0.
++    "nthlayer-common>=2.1.2,<3.0.0",
+     "httpx>=0.27",
+     "pyyaml>=6.0",
+     "structlog>=24.1.0",
+diff --git a/src/nthlayer_workers/measure/adapters/prometheus.py b/src/nthlayer_workers/measure/adapters/prometheus.py
+index 3b1215a..1a0cabd 100644
+--- a/src/nthlayer_workers/measure/adapters/prometheus.py
++++ b/src/nthlayer_workers/measure/adapters/prometheus.py
+@@ -2,12 +2,17 @@
+ from __future__ import annotations
+ 
+ import logging
+-from dataclasses import dataclass
++from dataclasses import dataclass, field
+ from pathlib import Path
+ from typing import Any
+ 
+ import httpx
+-import yaml
++from nthlayer_common.manifest import (
++    ManifestLoadError,
++    foreign_yaml_reason,
++    iter_manifest_files,
++    load_manifest,
++)
+ 
+ logger = logging.getLogger(__name__)
+ 
+@@ -22,6 +27,11 @@ class SLODefinition:
+     target: float
+     window: str
+     query: str  # PromQL query that returns the current value
++    # The judgment kind (reversal_rate, calibration, ...). The breach check
++    # dispatches on THIS, not on slo_name: in v2 metadata.name is
++    # author-chosen and independent of spec.judgment_type, so a judgment SLO
++    # called anything else would fall to the classical branch (opensrm-fxln).
++    judgment_type: str | None = None
+ 
+ 
+ @dataclass
+@@ -37,64 +47,102 @@ class EvaluationResult:
+     consecutive: int
+ 
+ 
+-def load_specs(specs_dir: Path) -> list[SLODefinition]:
+-    """Load all OpenSRM specs from a directory and extract SLO definitions."""
++@dataclass(frozen=True)
++class LoadedSpecs:
++    """Outcome of scanning a specs directory (opensrm-fxln).
++
++    ``parse_failures`` counts FILES that failed to load while aiming to be a
++    manifest. It travels with the SLOs because everything downstream
++    evaluates ``slos`` alone: without it, a service whose manifest failed to
++    parse contributes nothing and is indistinguishable from one declaring no
++    SLOs — so the SLOs that would have breached are simply never evaluated.
++    """
++
++    slos: list[SLODefinition] = field(default_factory=list)
++    parse_failures: int = 0
++
++
++def load_specs(specs_dir: Path) -> LoadedSpecs:
++    """Load OpenSRM specs from a directory and extract SLO definitions.
++
++    Uses ``load_manifest`` rather than reading YAML by hand. The previous
++    implementation read ``spec.slos``, which exists only in srm/v1 — a v2
++    manifest carries ``spec.slo`` and ``spec.judgment_slo``, so it yielded
++    ZERO SLOs with no error and no warning (opensrm-fxln). The ecosystem
++    migrated to v2 under opensrm-ih0v, so anything migrated was silently
++    unmeasured.
++
++    Going through the parser also removes two reimplementations that had
++    drifted: a four-name judgment-type list that disagreed with
++    JUDGMENT_SLO_TYPES, and a target normalisation that duplicated the
++    0-100 convention nthlayer-common owns.
++    """
+     slos: list[SLODefinition] = []
++    parse_failures = 0
+     if not specs_dir.is_dir():
+-        return slos
++        return LoadedSpecs()
+ 
+-    for spec_file in sorted(specs_dir.glob("*.yaml")):
++    for spec_file in iter_manifest_files(specs_dir):
+         try:
+-            raw = yaml.safe_load(spec_file.read_text())
+-        except Exception:
+-            logger.warning("Failed to parse spec: %s", spec_file)
+-            continue
+-        if not isinstance(raw, dict):
++            manifest = load_manifest(spec_file, suppress_deprecation_warning=True)
++        except (ManifestLoadError, FileNotFoundError, ValueError, OSError) as exc:
++            reason = foreign_yaml_reason(spec_file)
++            if reason is not None:
++                logger.debug("Ignoring non-manifest file %s: %s", spec_file, reason)
++                continue
++            parse_failures += 1
++            logger.warning("Failed to load manifest %s: %s", spec_file, exc)
+             continue
+ 
+-        metadata = raw.get("metadata", {})
+-        service = metadata.get("name", spec_file.stem)
+-        spec = raw.get("spec", {})
+-        slo_defs = spec.get("slos", {})
+-
+-        for slo_name, slo_data in slo_defs.items():
+-            if not isinstance(slo_data, dict):
++        for slo in manifest.slos:
++            # Deliberately NOT slo.indicator_query. evaluate_slos' branches
++            # are hard-coded to the semantics of the synthesised queries:
++            # availability breaches on `current < 0.0`, meaningful only for
++            # slo:error_budget:ratio, and judgment inverts, right only for
++            # the overrides/decisions RATIO. A manifest's own query supplies
++            # an SLI instead, which would make availability unbreachable and
++            # double-invert judgment. Query and breach rule travel together.
++            query = _query_for(manifest.name, slo)
++            if query is None:
++                logger.debug(
++                    "No query for %s/%s; skipping", manifest.name, slo.name
++                )
+                 continue
+-            target = slo_data.get("target")
+-            if target is None:
+-                continue
+-
+-            # Normalize target (e.g., 99.9 → 0.999 for availability)
+-            if slo_name == "availability" and target > 1:
+-                target = target / 100.0
+-
+-            window = slo_data.get("window", "7d")
+-
+-            # Determine SLO type and PromQL query
+-            if slo_name in ("reversal_rate", "high_confidence_failure", "calibration", "feedback_latency"):
+-                slo_type = "judgment"
+-                query = _judgment_slo_query(service, slo_name, window)
+-            elif slo_name == "availability":
+-                slo_type = "traditional"
+-                query = f'slo:error_budget:ratio{{service="{service}"}}'
+-            elif slo_name == "latency":
+-                slo_type = "traditional"
+-                percentile = slo_data.get("percentile", "p99")
+-                query = f'slo:http_request_duration_seconds:{percentile}{{service="{service}"}}'
+-            else:
+-                slo_type = "traditional"
+-                query = f'slo:{slo_name}:ratio{{service="{service}"}}'
+-
+             slos.append(SLODefinition(
+-                service=service,
+-                slo_name=slo_name,
+-                slo_type=slo_type,
+-                target=target,
+-                window=window,
++                service=manifest.name,
++                slo_name=slo.name,
++                slo_type="judgment" if slo.judgment_type else "traditional",
++                judgment_type=slo.judgment_type,
++                target=slo.target,
++                window=slo.window or "7d",
+                 query=query,
+             ))
+ 
+-    return slos
++    return LoadedSpecs(slos=slos, parse_failures=parse_failures)
++
++
++def _query_for(service: str, slo) -> str | None:
++    """PromQL for an SLO whose manifest declared no indicator query.
++
++    Judgment SLOs get the interim raw-metric queries below. Classical SLOs
++    fall back to the recording-rule naming convention.
++    """
++    name = slo.name
++    if slo.judgment_type:
++        # Keyed by judgment_type, not name: _JUDGMENT_SLO_QUERIES is a map of
++        # judgment KINDS. Only 4 of the 8 JUDGMENT_SLO_TYPES have a builder;
++        # the rest fall through to the recording-rule convention below rather
++        # than yielding an empty query, which Prometheus 400s and which then
++        # reads as no-data (opensrm-fxln).
++        builder = _JUDGMENT_SLO_QUERIES.get(slo.judgment_type)
++        if builder is not None:
++            return builder(service, slo.window or "7d")
++    if name == "availability":
++        return f'slo:error_budget:ratio{{service="{service}"}}'
++    if name == "latency":
++        percentile = getattr(slo, "percentile", None) or "p99"
++        return f'slo:http_request_duration_seconds:{percentile}{{service="{service}"}}'
++    return f'slo:{name}:ratio{{service="{service}"}}'
+ 
+ 
+ # PromQL builders keyed by judgment SLO name. Lambdas take (service,
+@@ -239,10 +287,32 @@ async def evaluate_slos(
+                 continue
+ 
+             # Determine if current value breaches the target
+-            if slo.slo_name in ("reversal_rate", "high_confidence_failure", "calibration"):
+-                # These are "lower is better" — breach if current > target
+-                raw_breach = current_value > slo.target
+-            elif slo.slo_name == "feedback_latency":
++            if slo.slo_type == "judgment" and slo.judgment_type != "feedback_latency":
++                # Judgment SLOs. Prometheus returns a 0.0-1.0 ratio; targets
++                # use the canonical 0-100 percentage convention
++                # (nthlayer-common CLAUDE.md hard rule 1, opensrm-5fff.1), and
++                # the SLI is the INVERSE of the measured rate: reversal_rate
++                # target 98.5 means "at least 98.5% of decisions not reversed".
++                #
++                # Comparing the raw ratio against the 0-100 target made these
++                # SLOs unbreachable — 0.05 > 98.5 is never true (opensrm-fxln).
++                #
++                # Dispatched on slo_TYPE, not on the SLO's name and not on a
++                # list of known judgment_types. In v2 metadata.name is
++                # author-chosen and independent of spec.judgment_type, and
++                # only 4 of the 8 JUDGMENT_SLO_TYPES are enumerated anywhere
++                # here — either narrower test would send a real judgment SLO
++                # to the classical branch below, where a 0-1 ratio against a
++                # 0-100 target breaches every single window.
++                #
++                # NOT the same as measure/worker.py:242, which does not
++                # invert: it feeds get_sli_value(indicator_query), whose
++                # value is ALREADY an SLI. The inversion belongs to the
++                # synthesised overrides/decisions ratio, not to judgment
++                # SLOs in general.
++                sli_pct = (1.0 - current_value) * 100
++                raw_breach = sli_pct < slo.target
++            elif slo.slo_type == "judgment":  # feedback_latency: a duration, not a rate
+                 # Breach if latency exceeds target (in seconds)
+                 raw_breach = current_value > slo.target
+             elif slo.slo_name == "availability":
+diff --git a/src/nthlayer_workers/measure/cli.py b/src/nthlayer_workers/measure/cli.py
+index 7560f2c..a7d1306 100644
+--- a/src/nthlayer_workers/measure/cli.py
++++ b/src/nthlayer_workers/measure/cli.py
+@@ -118,7 +118,17 @@ def cmd_evaluate_once(args: argparse.Namespace) -> None:
+     from nthlayer_workers.measure.adapters.prometheus import evaluate_slos, load_specs
+ 
+     specs_dir = Path(args.specs_dir)
+-    slos = load_specs(specs_dir)
++    loaded = load_specs(specs_dir)
++    slos = loaded.slos
++    if loaded.parse_failures:
++        # Surfaced, not just logged: the SLOs below are evaluated over what
++        # parsed, and an operator reading measure output is the one who needs
++        # to know the view is partial (opensrm-fxln).
++        print(
++            f"Warning: {loaded.parse_failures} manifest(s) in {specs_dir} "
++            f"failed to parse and were not evaluated",
++            file=sys.stderr,
++        )
+     if not slos:
+         print(f"No SLO definitions found in {specs_dir}", file=sys.stderr)
+         sys.exit(1)
+diff --git a/tests/measure/test_prometheus.py b/tests/measure/test_prometheus.py
+index 97ef24f..00c05fc 100644
+--- a/tests/measure/test_prometheus.py
++++ b/tests/measure/test_prometheus.py
+@@ -23,6 +23,7 @@ apiVersion: srm/v1
+ kind: ServiceReliabilityManifest
+ metadata:
+   name: fraud-detect
++  team: payments-ml
+   tier: critical
+ spec:
+   type: ai-gate
+@@ -31,7 +32,7 @@ spec:
+       target: 99.9
+       window: 30d
+     reversal_rate:
+-      target: 0.05
++      target: 98.5
+       window: 7d
+     latency:
+       target: 100
+@@ -57,28 +58,37 @@ def verdict_store():
+ # --- load_specs tests ---
+ 
+ def test_load_specs_parses_slos(specs_dir):
+-    slos = load_specs(specs_dir)
++    slos = load_specs(specs_dir).slos
+     assert len(slos) == 3
+     names = {s.slo_name for s in slos}
+     assert names == {"availability", "reversal_rate", "latency"}
+ 
+ 
+ def test_load_specs_classifies_judgment_slos(specs_dir):
+-    slos = load_specs(specs_dir)
++    slos = load_specs(specs_dir).slos
+     by_name = {s.slo_name: s for s in slos}
+     assert by_name["reversal_rate"].slo_type == "judgment"
+     assert by_name["availability"].slo_type == "traditional"
+     assert by_name["latency"].slo_type == "traditional"
+ 
+ 
+-def test_load_specs_normalizes_availability_target(specs_dir):
+-    slos = load_specs(specs_dir)
++def test_load_specs_keeps_the_canonical_target_convention(specs_dir):
++    """Renamed from test_load_specs_normalizes_availability_target.
++
++    The adapter used to divide availability targets by 100, producing 0.999
++    from a 99.9 spec — a second, local copy of a convention
++    nthlayer-common owns (CLAUDE.md hard rule 1: targets are 0-100).
++    Nothing consumed the normalised value: evaluate_slos ignores
++    availability's target entirely, comparing an error-budget ratio against
++    zero. Deleted with the hand-rolled reader (opensrm-fxln).
++    """
++    slos = load_specs(specs_dir).slos
+     avail = next(s for s in slos if s.slo_name == "availability")
+-    assert avail.target == pytest.approx(0.999)
++    assert avail.target == pytest.approx(99.9)
+ 
+ 
+ def test_load_specs_builds_promql(specs_dir):
+-    slos = load_specs(specs_dir)
++    slos = load_specs(specs_dir).slos
+     rev = next(s for s in slos if s.slo_name == "reversal_rate")
+     assert "gen_ai_overrides_total" in rev.query
+     assert "gen_ai_decisions_total" in rev.query
+@@ -86,7 +96,7 @@ def test_load_specs_builds_promql(specs_dir):
+ 
+ 
+ def test_load_specs_empty_dir(tmp_path):
+-    slos = load_specs(tmp_path)
++    slos = load_specs(tmp_path).slos
+     assert slos == []
+ 
+ 
+@@ -285,11 +295,11 @@ def test_consecutive_breaches_zero_when_no_breach():
+ async def test_evaluate_slos_healthy_no_breach(verdict_store):
+     slo = SLODefinition(
+         service="fraud-detect", slo_name="reversal_rate", slo_type="judgment",
+-        target=0.05, window="7d", query="test_query",
++        target=95.0, window="7d", query="test_query",
+     )
+ 
+     with patch("nthlayer_workers.measure.adapters.prometheus.query_prometheus") as mock_query:
+-        mock_query.return_value = 0.02  # Under target
++        mock_query.return_value = 0.02  # 2% reversed -> 98% SLI, above 95
+         results = await evaluate_slos("http://prom", [slo], verdict_store)
+ 
+     assert len(results) == 1
+@@ -300,13 +310,16 @@ async def test_evaluate_slos_healthy_no_breach(verdict_store):
+ @pytest.mark.asyncio
+ async def test_evaluate_slos_judgment_hysteresis_not_reached(verdict_store):
+     """Judgment SLO breaches but hasn't hit consecutive threshold yet."""
++    # target in the canonical 0-100 convention: at least 95% not reversed
++    # (opensrm-fxln — these fixtures previously used a 0.05 RATIO, which
++    # agreed with the dead comparison and is why it looked correct).
+     slo = SLODefinition(
+         service="fraud-detect", slo_name="reversal_rate", slo_type="judgment",
+-        target=0.05, window="7d", query="test_query",
++        target=95.0, window="7d", query="test_query",
+     )
+ 
+     with patch("nthlayer_workers.measure.adapters.prometheus.query_prometheus") as mock_query:
+-        mock_query.return_value = 0.08  # Over target
++        mock_query.return_value = 0.08  # 8% reversed -> 92% SLI, under 95
+         results = await evaluate_slos("http://prom", [slo], verdict_store, hysteresis_threshold=3)
+ 
+     assert len(results) == 1
+@@ -329,13 +342,16 @@ async def test_evaluate_slos_judgment_hysteresis_reached(verdict_store):
+         )
+         verdict_store.put(v)
+ 
++    # target in the canonical 0-100 convention: at least 95% not reversed
++    # (opensrm-fxln — these fixtures previously used a 0.05 RATIO, which
++    # agreed with the dead comparison and is why it looked correct).
+     slo = SLODefinition(
+         service="fraud-detect", slo_name="reversal_rate", slo_type="judgment",
+-        target=0.05, window="7d", query="test_query",
++        target=95.0, window="7d", query="test_query",
+     )
+ 
+     with patch("nthlayer_workers.measure.adapters.prometheus.query_prometheus") as mock_query:
+-        mock_query.return_value = 0.08  # Over target — this makes it 3 consecutive
++        mock_query.return_value = 0.08  # 8% reversed -> 92% SLI, under 95 — this makes it 3 consecutive
+         results = await evaluate_slos("http://prom", [slo], verdict_store, hysteresis_threshold=3)
+ 
+     assert len(results) == 1
+@@ -376,11 +392,11 @@ async def test_evaluate_slos_recovery_resets_consecutive(verdict_store):
+ 
+     slo = SLODefinition(
+         service="fraud-detect", slo_name="reversal_rate", slo_type="judgment",
+-        target=0.05, window="7d", query="test_query",
++        target=95.0, window="7d", query="test_query",
+     )
+ 
+     with patch("nthlayer_workers.measure.adapters.prometheus.query_prometheus") as mock_query:
+-        mock_query.return_value = 0.03  # Under target — recovery
++        mock_query.return_value = 0.03  # 3% reversed -> 97% SLI, recovered
+         results = await evaluate_slos("http://prom", [slo], verdict_store)
+ 
+     assert len(results) == 1
+@@ -393,7 +409,7 @@ async def test_evaluate_slos_skips_missing_data(verdict_store):
+     """SLOs with no Prometheus data are skipped."""
+     slo = SLODefinition(
+         service="fraud-detect", slo_name="reversal_rate", slo_type="judgment",
+-        target=0.05, window="7d", query="test_query",
++        target=95.0, window="7d", query="test_query",
+     )
+ 
+     with patch("nthlayer_workers.measure.adapters.prometheus.query_prometheus") as mock_query:
+@@ -401,3 +417,254 @@ async def test_evaluate_slos_skips_missing_data(verdict_store):
+         results = await evaluate_slos("http://prom", [slo], verdict_store)
+ 
+     assert len(results) == 0
++
++
++# --- opensrm-fxln: judgment SLO targets use the 0-100 convention ---
++
++
++@pytest.mark.asyncio
++async def test_judgment_slo_breaches_when_reversal_exceeds_target(verdict_store):
++    """fraud-detect declares `reversal_rate: target: 98.5` — "at least 98.5% of
++    decisions must not be reversed" (nthlayer-common CLAUDE.md hard rule 1,
++    opensrm-5fff.1). The query returns a reversal RATIO.
++
++    The adapter compared the raw ratio against the 0-100 target:
++
++        0.05 > 98.5  ->  False, always
++
++    so the SLO could never breach. measure/worker.py:240 already does this
++    correctly — `current_pct = current_value * 100`, healthy when
++    `current_pct >= target` — so the adapter was the outlier, disagreeing
++    with its own sibling and with the spec.
++
++    Here 4% reversed means a 96% non-reversal SLI against a 98.5 target:
++    a breach.
++    """
++    slo = SLODefinition(
++        service="fraud-detect", slo_name="reversal_rate", slo_type="judgment",
++        target=98.5, window="7d", query="test_query",
++    )
++
++    with patch("nthlayer_workers.measure.adapters.prometheus.query_prometheus") as mock_query:
++        mock_query.return_value = 0.04  # 4% reversed -> 96% SLI, under 98.5
++        results = await evaluate_slos("http://prom", [slo], verdict_store)
++
++    assert results[0].consecutive == 1, "a 96% SLI against a 98.5 target is a breach"
++
++
++@pytest.mark.asyncio
++async def test_judgment_slo_healthy_when_reversal_within_target(verdict_store):
++    """The other side: 1% reversed is a 99% SLI, comfortably above 98.5.
++
++    Without this, a fix that simply inverted the comparison would pass the
++    breach test above while breaching on everything.
++    """
++    slo = SLODefinition(
++        service="fraud-detect", slo_name="reversal_rate", slo_type="judgment",
++        target=98.5, window="7d", query="test_query",
++    )
++
++    with patch("nthlayer_workers.measure.adapters.prometheus.query_prometheus") as mock_query:
++        mock_query.return_value = 0.01  # 1% reversed -> 99% SLI
++        results = await evaluate_slos("http://prom", [slo], verdict_store)
++
++    assert results[0].breach is False
++    assert results[0].consecutive == 0
++
++
++# --- opensrm-fxln: load_specs must understand v2, .yml, and count failures ---
++
++
++def _v1(name: str) -> str:
++    return (
++        "apiVersion: srm/v1\nkind: ServiceReliabilityManifest\n"
++        f"metadata: {{name: {name}, team: t, tier: critical}}\n"
++        "spec:\n  type: api\n  slos:\n    availability:\n"
++        "      target: 99.9\n      window: 30d\n"
++        '      indicator: {query: \'up{job="x"}\'}\n'
++    )
++
++
++def _v2(name: str) -> str:
++    return (
++        "apiVersion: opensrm.nthlayer.io/v2\nkind: ServiceManifest\n"
++        f"metadata: {{name: {name}, labels: {{tier: critical}}}}\n"
++        "spec:\n  owner: {group: 'group:default/t'}\n"
++        f"  service: {{name: {name}, type: api}}\n"
++        "  slo:\n    - apiVersion: openslo/v1\n      kind: SLO\n"
++        "      metadata: {name: availability}\n"
++        f"      spec:\n        service: {name}\n"
++        "        objectives: [{target: 0.999}]\n"
++    )
++
++
++class TestLoadSpecsUnderstandsBothFormats:
++    """opensrm-fxln — the adapter hand-rolled v1 parsing and silently
++    ignored v2.
++
++    It read `spec.slos`, which exists only in srm/v1. A v2 manifest carries
++    `spec.slo` and `spec.judgment_slo`, so slo_defs came back empty and the
++    service contributed ZERO SLOs — no error, no warning, exit 0. The whole
++    ecosystem migrated to v2 under opensrm-ih0v, so anything migrated was
++    silently unmeasured.
++    """
++
++    def test_v2_manifest_yields_slos(self, tmp_path):
++        (tmp_path / "svc.yaml").write_text(_v2("checkout"))
++
++        loaded = load_specs(tmp_path)
++
++        assert [s.service for s in loaded.slos] == ["checkout"]
++
++    def test_v1_and_v2_in_one_directory_both_load(self, tmp_path):
++        (tmp_path / "old.yaml").write_text(_v1("legacy"))
++        (tmp_path / "new.yaml").write_text(_v2("checkout"))
++
++        loaded = load_specs(tmp_path)
++
++        assert {s.service for s in loaded.slos} == {"legacy", "checkout"}
++
++    def test_yml_suffix_is_seen(self, tmp_path):
++        """`.glob("*.yaml")` missed `.yml` — the same silent subset reached
++        by file extension rather than parse error (opensrm-oh27)."""
++        (tmp_path / "svc.yml").write_text(_v1("legacy"))
++
++        assert [s.service for s in load_specs(tmp_path).slos] == ["legacy"]
++
++    def test_broken_manifest_is_counted_not_swallowed(self, tmp_path):
++        (tmp_path / "good.yaml").write_text(_v1("legacy"))
++        (tmp_path / "bad.yaml").write_text(
++            "apiVersion: srm/v1\nkind: ServiceReliabilityManifest\n"
++            "metadata: {name: b, team: t, tier: nonexistent-tier}\n"
++            "spec: {type: api, slos: {}}\n"
++        )
++
++        loaded = load_specs(tmp_path)
++
++        assert [s.service for s in loaded.slos] == ["legacy"]
++        assert loaded.parse_failures == 1
++
++    def test_foreign_yaml_is_not_counted(self, tmp_path):
++        (tmp_path / "prometheus.yaml").write_text("groups:\n  - name: g\n    rules: []\n")
++        (tmp_path / "svc.yaml").write_text(_v1("legacy"))
++
++        loaded = load_specs(tmp_path)
++
++        assert loaded.parse_failures == 0
++
++    def test_manifest_without_a_name_is_not_named_after_its_file(self, tmp_path):
++        """`metadata.get("name", spec_file.stem)` attributed a nameless
++        manifest's SLOs to a service named after the file — measuring them
++        against the wrong service rather than not at all."""
++        (tmp_path / "checkout.yaml").write_text(
++            "apiVersion: srm/v1\nkind: ServiceReliabilityManifest\n"
++            "metadata: {team: t, tier: critical}\n"
++            "spec: {type: api, slos: {availability: {target: 99.9}}}\n"
++        )
++
++        loaded = load_specs(tmp_path)
++
++        assert [s.service for s in loaded.slos] == []
++        assert loaded.parse_failures == 1
++
++
++class TestQueryAndBreachLogicAreAMatchedPair:
++    """opensrm-fxln R5 correctness — the adapter's breach branches are
++    hard-coded to the semantics of its OWN synthesised queries.
++
++    `availability` breaches on `current < 0.0`, which is only meaningful for
++    the synthesised `slo:error_budget:ratio`. Judgment SLOs invert
++    (`(1-rate)*100`), which is only right for the synthesised
++    overrides/decisions RATIO — measure/worker.py does not invert because it
++    feeds get_sli_value(indicator_query), whose value is already an SLI.
++
++    So preferring a manifest's indicator_query over the synthesised one
++    silently breaks both: availability compares a plain ratio against zero
++    and can never breach, and a judgment SLI gets inverted twice.
++    """
++
++    def test_availability_uses_the_synthesised_error_budget_query(self, tmp_path):
++        """Even though this manifest declares its own indicator query."""
++        (tmp_path / "svc.yaml").write_text(
++            "apiVersion: srm/v1\nkind: ServiceReliabilityManifest\n"
++            "metadata: {name: svc, team: t, tier: critical}\n"
++            "spec:\n  type: api\n  slos:\n    availability:\n"
++            "      target: 99.9\n      window: 30d\n"
++            "      indicator: {query: 'up{job=\"x\"}'}\n"
++        )
++
++        slo = load_specs(tmp_path).slos[0]
++
++        assert "slo:error_budget:ratio" in slo.query, (
++            "availability's breach check is `current < 0.0`, which only the "
++            "synthesised error-budget query can satisfy"
++        )
++
++    def test_judgment_slo_is_classified_by_type_not_by_name(self, tmp_path):
++        """In v2, metadata.name and spec.judgment_type are independent.
++
++        Dispatching the breach check on the NAME sends a judgment SLO called
++        anything else to the classical `current < target` branch — and with a
++        0-100 target against a 0-1 ratio that is always a breach, then
++        hysteresis turns it into a real one. The exact inverse of the bug
++        this bead fixed.
++        """
++        (tmp_path / "svc.yaml").write_text(
++            "apiVersion: opensrm.nthlayer.io/v2\nkind: ServiceManifest\n"
++            "metadata: {name: svc, labels: {tier: critical}}\n"
++            "spec:\n  owner: {group: 'group:default/t'}\n"
++            "  service: {name: svc, type: ai-gate}\n"
++            "  judgment_slo:\n    - metadata: {name: reversal-guard}\n"
++            "      spec:\n        service: svc\n"
++            "        judgment_type: reversal_rate\n"
++            "        target: {maximum_reversal_rate: 0.05}\n"
++        )
++
++        slo = load_specs(tmp_path).slos[0]
++
++        assert slo.slo_name == "reversal-guard"
++        assert slo.judgment_type == "reversal_rate", (
++            "the breach check must dispatch on judgment_type; the NAME is "
++            "author-chosen and independent of it in v2"
++        )
++
++    def test_a_judgment_type_with_no_builder_is_skipped_not_queried_empty(self, tmp_path):
++        """_JUDGMENT_SLO_QUERIES covers 4 of the 8 JUDGMENT_SLO_TYPES and
++        returns "" for the rest. An empty PromQL string is not None, so it
++        passed the guard, got sent to Prometheus, 400'd, and came back None —
++        skipped silently."""
++        (tmp_path / "svc.yaml").write_text(
++            "apiVersion: opensrm.nthlayer.io/v2\nkind: ServiceManifest\n"
++            "metadata: {name: svc, labels: {tier: critical}}\n"
++            "spec:\n  owner: {group: 'group:default/t'}\n"
++            "  service: {name: svc, type: ai-gate}\n"
++            "  judgment_slo:\n    - metadata: {name: seg}\n"
++            "      spec:\n        service: svc\n"
++            "        judgment_type: segments\n"
++            "        target: {maximum_variance_from_overall: 0.15}\n"
++        )
++
++        for slo in load_specs(tmp_path).slos:
++            assert slo.query, f"{slo.slo_name} got an empty query"
++
++
++@pytest.mark.asyncio
++async def test_breach_dispatches_on_judgment_type_not_name(verdict_store):
++    """A judgment SLO whose author named it something other than its type.
++
++    Dispatching on slo_name sent this to the classical `current < target`
++    branch: 0.04 < 98.5 is always true, so it breached every window and
++    hysteresis turned that into a real breach after three — the inverse of
++    the bug this bead fixed, on the path v2 manifests actually take.
++    """
++    slo = SLODefinition(
++        service="fraud-detect", slo_name="reversal-guard", slo_type="judgment",
++        target=98.5, window="7d", query="test_query", judgment_type="reversal_rate",
++    )
++
++    with patch("nthlayer_workers.measure.adapters.prometheus.query_prometheus") as mock_query:
++        mock_query.return_value = 0.01  # 1% reversed -> 99% SLI, healthy
++        results = await evaluate_slos("http://prom", [slo], verdict_store)
++
++    assert results[0].breach is False
++    assert results[0].consecutive == 0, "a healthy judgment SLO must not breach"
+diff --git a/tests/observe/test_slo_spec_loader.py b/tests/observe/test_slo_spec_loader.py
+index 19827f1..cb757f4 100644
+--- a/tests/observe/test_slo_spec_loader.py
++++ b/tests/observe/test_slo_spec_loader.py
+@@ -218,3 +218,66 @@ class TestParseFailuresAreVisible:
+         result = load_specs(tmp_path)
+ 
+         assert result.parse_failures == 0
++
++
++class TestSharedGateResolvesCorrectly:
++    """Guards the CROSS-REPO version boundary, not local behaviour.
++
++    workers depends on nthlayer-common by RANGE (>=2.1.1,<3.0.0) and CI
++    resolves it from a sibling checkout, so nothing here would otherwise
++    notice an install picking up a common whose scan gate is broken.
++
++    That is not hypothetical: common 2.1.0 shipped a body-recovery step that
++    was INERT — it tested spec.slos as a list, but v1 writes a mapping and v2
++    has no spec.slos at all — so a header-stripped manifest was dropped with
++    parse_failures == 0. workers' own fixtures used the unreal list shape and
++    agreed with the broken predicate, so they passed either way.
++
++    These use the shapes the PARSERS actually produce. Against a common
++    without the 2.1.1 fixes they fail; that is the point.
++    """
++
++    def _count(self, tmp_path, body: str) -> int:
++        import textwrap
++
++        (tmp_path / "headerless.yaml").write_text(textwrap.dedent(body).strip() + "\n")
++        return load_specs(tmp_path).parse_failures
++
++    def test_headerless_v1_slos_mapping_is_counted(self, tmp_path):
++        """v1 writes spec.slos as a MAPPING — parser/v1 does slos_data.items()."""
++        assert self._count(tmp_path, """
++            spec:
++              type: api
++              slos:
++                availability:
++                  target: 99.9
++        """) == 1
++
++    def test_headerless_v2_slo_list_is_counted(self, tmp_path):
++        """v2 has no spec.slos at all; its key is spec.slo, a list."""
++        assert self._count(tmp_path, """
++            spec:
++              slo:
++                - apiVersion: openslo/v1
++                  kind: SLO
++        """) == 1
++
++    def test_headerless_manifest_with_only_a_required_key_is_counted(self, tmp_path):
++        """spec.owner is REQUIRED by parse_opensrm_v2. A file carrying the one
++        key its format cannot be parsed without is making about as strong a
++        claim to being a manifest as a body can."""
++        assert self._count(tmp_path, """
++            spec:
++              owner:
++                group: group:default/team
++              contracts: []
++        """) == 1
++
++    def test_foreign_yaml_is_still_not_counted(self, tmp_path):
++        """The other half of the boundary: widening must not start counting
++        the Prometheus rules file sharing the directory."""
++        assert self._count(tmp_path, """
++            groups:
++              - name: g
++                rules: []
++        """) == 0

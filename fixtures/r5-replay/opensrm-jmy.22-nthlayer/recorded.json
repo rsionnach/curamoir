@@ -1,0 +1,15 @@
+{
+ "schema_version": 1,
+ "entry": "opensrm-jmy.22-nthlayer",
+ "fidelity": "counts_only",
+ "lens_order": [
+  "correctness",
+  "clarity",
+  "edge-cases",
+  "excellence"
+ ],
+ "iterations": {},
+ "rounds": [],
+ "cross_repo_findings": [],
+ "escaped": []
+}

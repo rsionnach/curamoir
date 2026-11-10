@@ -1,0 +1,1492 @@
+diff --git a/docs/api/openapi.json b/docs/api/openapi.json
+index a72e498..395aa18 100644
+--- a/docs/api/openapi.json
++++ b/docs/api/openapi.json
+@@ -2615,48 +2615,427 @@
+           },
+           "judgment_thresholds": {
+             "type": "array",
++            "description": "Each item is the OpenSRM v2 ``spec.judgment_threshold`` entry (OPENSRM-CORE-v2 \u00a75.5), emitted by nthlayer-common's ``threshold_to_v2_entry``. Items are closed: only the keys their ``type`` defines appear. Changed in 3.0 (was {type, bounds, measurement}): segment_dimension, segment_values and probe are now entry-level, not under measurement; segments gain required ``metric`` and optional ``outcome_signal``; audit_backlog and feedback_latency have no ``measurement`` key (2.x sent {}). Branch on ``type``.",
+             "items": {
+-              "type": "object",
++              "$ref": "#/components/schemas/JudgmentThreshold"
++            }
++          }
++        },
++        "additionalProperties": true
++      },
++      "JudgmentThreshold": {
++        "description": "A bound on a judgment error magnitude (OpenSRM decision 3c): breached when the measured value exceeds a bound. Not an SLO -- no error budget, no complement. One shape per ``type``.",
++        "oneOf": [
++          {
++            "$ref": "#/components/schemas/JudgmentThresholdSegments"
++          },
++          {
++            "$ref": "#/components/schemas/JudgmentThresholdStability"
++          },
++          {
++            "$ref": "#/components/schemas/JudgmentThresholdCalibration"
++          },
++          {
++            "$ref": "#/components/schemas/JudgmentThresholdAuditBacklog"
++          },
++          {
++            "$ref": "#/components/schemas/JudgmentThresholdFeedbackLatency"
++          }
++        ],
++        "discriminator": {
++          "propertyName": "type",
++          "mapping": {
++            "segments": "#/components/schemas/JudgmentThresholdSegments",
++            "stability": "#/components/schemas/JudgmentThresholdStability",
++            "calibration": "#/components/schemas/JudgmentThresholdCalibration",
++            "audit_backlog": "#/components/schemas/JudgmentThresholdAuditBacklog",
++            "feedback_latency": "#/components/schemas/JudgmentThresholdFeedbackLatency"
++          }
++        }
++      },
++      "JudgmentThresholdSegments": {
++        "type": "object",
++        "description": "The rate ``metric`` names must not vary across ``segment_values`` of ``segment_dimension`` by more than the bound (OPENSRM-CORE-v2 \u00a75.5.1). ``measurement.window`` is the population window and is always present (``30d`` when the manifest omits it). Parameters per metric: reversal_rate ``measurement.source``; high_confidence_failure ``measurement.confidence_threshold``; outcomes ``outcome_signal``; escalation none.",
++        "required": [
++          "type",
++          "metric",
++          "measurement",
++          "segment_dimension",
++          "segment_values",
++          "bounds"
++        ],
++        "properties": {
++          "type": {
++            "const": "segments"
++          },
++          "metric": {
++            "enum": [
++              "reversal_rate",
++              "high_confidence_failure",
++              "outcomes",
++              "escalation"
++            ],
++            "description": "The judgment rate compared across segments. escalation is the escalation rate, not the human agreement rate."
++          },
++          "measurement": {
++            "type": "object",
++            "required": [
++              "window"
++            ],
++            "properties": {
++              "window": {
++                "description": "Population window. Always present when served: the manifest's value or the 30d default (OPENSRM-CORE-v2 \u00a75.5.1).",
++                "allOf": [
++                  {
++                    "type": "string",
++                    "pattern": "^[0-9]+(ms|s|m|h|d|w)$",
++                    "description": "Duration: an integer followed by ms, s, m, h, d, or w."
++                  },
++                  {
++                    "not": {
++                      "pattern": "^0+(ms|s|m|h|d|w)$"
++                    },
++                    "description": "Never zero."
++                  }
++                ]
++              },
++              "source": {
++                "enum": [
++                  "lineage",
++                  "calibration_sample",
++                  "downstream_signal"
++                ]
++              },
++              "confidence_threshold": {
++                "type": "number",
++                "minimum": 0,
++                "maximum": 1,
++                "description": "Ratio value (0.0 - 1.0), not a percentage."
++              }
++            },
++            "additionalProperties": false
++          },
++          "outcome_signal": {
++            "type": "object",
++            "description": "outcomes only. ``window`` is how long after a decision to wait for its outcome, not the population window.",
++            "required": [
++              "source",
++              "window"
++            ],
++            "properties": {
++              "source": {
++                "type": "string"
++              },
++              "window": {
++                "type": "string",
++                "pattern": "^[0-9]+(ms|s|m|h|d|w)$",
++                "description": "Duration: an integer followed by ms, s, m, h, d, or w."
++              }
++            },
++            "additionalProperties": false
++          },
++          "segment_dimension": {
++            "type": "string",
++            "minLength": 1
++          },
++          "segment_values": {
++            "type": "array",
++            "items": {
++              "type": "string",
++              "minLength": 1
++            },
++            "minItems": 1
++          },
++          "bounds": {
++            "type": "object",
++            "required": [
++              "maximum_variance_from_overall"
++            ],
++            "properties": {
++              "maximum_variance_from_overall": {
++                "type": "number",
++                "minimum": 0,
++                "maximum": 1,
++                "description": "Ratio value (0.0 - 1.0), not a percentage."
++              }
++            },
++            "additionalProperties": false
++          }
++        },
++        "additionalProperties": false,
++        "allOf": [
++          {
++            "if": {
++              "properties": {
++                "metric": {
++                  "const": "reversal_rate"
++                }
++              },
+               "required": [
+-                "type",
+-                "bounds",
+-                "measurement"
+-              ],
++                "metric"
++              ]
++            },
++            "then": {
+               "properties": {
+-                "type": {
+-                  "type": "string",
+-                  "enum": [
+-                    "segments",
+-                    "stability",
+-                    "calibration",
+-                    "audit_backlog",
+-                    "feedback_latency"
++                "measurement": {
++                  "required": [
++                    "source"
+                   ]
+-                },
+-                "bounds": {
+-                  "type": "object",
+-                  "description": "Bound name to value, as declared: a number for Ratio bounds, a duration string such as ``24h`` for Duration bounds.",
+-                  "additionalProperties": {
+-                    "oneOf": [
+-                      {
+-                        "type": "number"
+-                      },
+-                      {
+-                        "type": "string"
+-                      }
+-                    ]
++                }
++              }
++            },
++            "else": {
++              "properties": {
++                "measurement": {
++                  "properties": {
++                    "source": {
++                      "not": {}
++                    }
+                   }
+-                },
++                }
++              }
++            }
++          },
++          {
++            "if": {
++              "properties": {
++                "metric": {
++                  "const": "high_confidence_failure"
++                }
++              },
++              "required": [
++                "metric"
++              ]
++            },
++            "then": {
++              "properties": {
+                 "measurement": {
+-                  "type": "object",
+-                  "description": "Only the fields set for the threshold's type: calibration bins/window; stability probe {frozen_input_set, frequency}; segments segment_dimension/segment_values; empty for audit_backlog and feedback_latency.",
+-                  "additionalProperties": true
++                  "required": [
++                    "confidence_threshold"
++                  ]
++                }
++              }
++            },
++            "else": {
++              "properties": {
++                "measurement": {
++                  "properties": {
++                    "confidence_threshold": {
++                      "not": {}
++                    }
++                  }
++                }
++              }
++            }
++          },
++          {
++            "if": {
++              "properties": {
++                "metric": {
++                  "const": "outcomes"
++                }
++              },
++              "required": [
++                "metric"
++              ]
++            },
++            "then": {
++              "required": [
++                "outcome_signal"
++              ]
++            },
++            "else": {
++              "properties": {
++                "outcome_signal": {
++                  "not": {}
+                 }
+               }
+             }
+           }
++        ]
++      },
++      "JudgmentThresholdStability": {
++        "type": "object",
++        "description": "Drift on a frozen probe input set must stay within ``maximum_drift``.",
++        "required": [
++          "type",
++          "probe",
++          "bounds"
++        ],
++        "properties": {
++          "type": {
++            "const": "stability"
++          },
++          "probe": {
++            "type": "object",
++            "required": [
++              "frozen_input_set",
++              "frequency"
++            ],
++            "properties": {
++              "frozen_input_set": {
++                "type": "string"
++              },
++              "frequency": {
++                "enum": [
++                  "hourly",
++                  "daily",
++                  "weekly"
++                ]
++              }
++            },
++            "additionalProperties": false
++          },
++          "bounds": {
++            "type": "object",
++            "required": [
++              "maximum_drift"
++            ],
++            "properties": {
++              "maximum_drift": {
++                "type": "number",
++                "minimum": 0,
++                "maximum": 1,
++                "description": "Ratio value (0.0 - 1.0), not a percentage."
++              }
++            },
++            "additionalProperties": false
++          }
+         },
+-        "additionalProperties": true
++        "additionalProperties": false
++      },
++      "JudgmentThresholdCalibration": {
++        "type": "object",
++        "description": "Calibration error over ``measurement.bins`` confidence bins in ``measurement.window``. An srm/v1 calibration SLO is served lifted to this shape (bound ``maximum_expected_calibration_error``).",
++        "required": [
++          "type",
++          "measurement",
++          "bounds"
++        ],
++        "properties": {
++          "type": {
++            "const": "calibration"
++          },
++          "measurement": {
++            "type": "object",
++            "required": [
++              "bins",
++              "window"
++            ],
++            "properties": {
++              "bins": {
++                "type": "integer",
++                "minimum": 2
++              },
++              "window": {
++                "type": "string",
++                "pattern": "^[0-9]+(ms|s|m|h|d|w)$",
++                "description": "Duration: an integer followed by ms, s, m, h, d, or w."
++              }
++            },
++            "additionalProperties": false
++          },
++          "bounds": {
++            "type": "object",
++            "anyOf": [
++              {
++                "required": [
++                  "maximum_brier_score"
++                ]
++              },
++              {
++                "required": [
++                  "maximum_expected_calibration_error"
++                ]
++              }
++            ],
++            "properties": {
++              "maximum_brier_score": {
++                "type": "number",
++                "minimum": 0,
++                "maximum": 1
++              },
++              "maximum_expected_calibration_error": {
++                "type": "number",
++                "minimum": 0,
++                "maximum": 1,
++                "description": "Ratio value (0.0 - 1.0), not a percentage."
++              }
++            },
++            "additionalProperties": false
++          }
++        },
++        "additionalProperties": false
++      },
++      "JudgmentThresholdAuditBacklog": {
++        "type": "object",
++        "description": "The oldest unaudited decision must be younger than ``maximum_age``.",
++        "required": [
++          "type",
++          "bounds"
++        ],
++        "properties": {
++          "type": {
++            "const": "audit_backlog"
++          },
++          "bounds": {
++            "type": "object",
++            "required": [
++              "maximum_age"
++            ],
++            "properties": {
++              "maximum_age": {
++                "type": "string",
++                "pattern": "^[0-9]+(ms|s|m|h|d|w)$",
++                "description": "Duration: an integer followed by ms, s, m, h, d, or w."
++              }
++            },
++            "additionalProperties": false
++          }
++        },
++        "additionalProperties": false
++      },
++      "JudgmentThresholdFeedbackLatency": {
++        "type": "object",
++        "description": "Time from decision to outcome must stay within the percentile bounds. An srm/v1 feedback_latency SLO is served lifted to this shape (target in its unit becomes ``maximum_p50``).",
++        "required": [
++          "type",
++          "bounds"
++        ],
++        "properties": {
++          "type": {
++            "const": "feedback_latency"
++          },
++          "bounds": {
++            "type": "object",
++            "anyOf": [
++              {
++                "required": [
++                  "maximum_p50"
++                ]
++              },
++              {
++                "required": [
++                  "maximum_p90"
++                ]
++              }
++            ],
++            "properties": {
++              "maximum_p50": {
++                "type": "string",
++                "pattern": "^[0-9]+(ms|s|m|h|d|w)$",
++                "description": "Duration: an integer followed by ms, s, m, h, d, or w."
++              },
++              "maximum_p90": {
++                "type": "string",
++                "pattern": "^[0-9]+(ms|s|m|h|d|w)$",
++                "description": "Duration: an integer followed by ms, s, m, h, d, or w."
++              }
++            },
++            "additionalProperties": false
++          }
++        },
++        "additionalProperties": false
+       },
+       "Suppression": {
+         "type": "object",
+diff --git a/pyproject.toml b/pyproject.toml
+index aea324c..690534b 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -15,9 +15,12 @@ dependencies = [
+     # tests/smoke/test_resolved_dependencies.py; see CLAUDE.md
+     # hard rule 10 for why both are needed [opensrm-p3bm].
+     # 4.0.0 moved segments/stability/calibration/audit_backlog/feedback_latency
+-    # out of manifest.slos into manifest.judgment_thresholds [opensrm-l33e];
+-    # catalogue.manifest_to_dict serialises them under judgment_thresholds.
+-    "nthlayer-common>=4.0.0,<5.0.0",
++    # out of manifest.slos into manifest.judgment_thresholds [opensrm-l33e].
++    # 5.0.0 gives segments a required `metric` (+ its parameter) and closes
++    # every threshold entry [opensrm-7zpz]; catalogue.manifest_to_dict
++    # serialises each threshold via threshold_to_v2_entry, common's validated
++    # emitter of the v2 spec.judgment_threshold entry, never a hand-copy.
++    "nthlayer-common>=5.0.0,<6.0.0",
+     "starlette>=0.40",
+     "uvicorn>=0.30",
+     "httpx>=0.27",
+diff --git a/src/nthlayer_core/_openapi/paths_other.py b/src/nthlayer_core/_openapi/paths_other.py
+index 8cf9306..13c3505 100644
+--- a/src/nthlayer_core/_openapi/paths_other.py
++++ b/src/nthlayer_core/_openapi/paths_other.py
+@@ -775,6 +775,247 @@ PATHS: dict[str, dict] = {
+     },
+ }
+ 
++# ---------------------------------------------------------------------------
++# Judgment threshold items (opensrm-7zpz). Each /manifests judgment_thresholds
++# item is the v2 spec.judgment_threshold entry nthlayer-common's
++# threshold_to_v2_entry emits. The shapes mirror opensrm spec/v2/schema.json
++# JudgmentThresholdSpec per type -- closed objects, closed bounds, the segments
++# metric enum and its per-metric parameters -- narrowed only where the served
++# entry is always more complete than a declared one: a segments item always
++# carries measurement.window (the 30d default stated, OPENSRM-CORE-v2 §5.5.1)
++# -- a server-side narrowing of the spec, which leaves window optional.
++# Duration and Ratio copy the spec's definitions of the same names.
++# ---------------------------------------------------------------------------
++
++_DURATION: dict = {
++    "type": "string",
++    "pattern": "^[0-9]+(ms|s|m|h|d|w)$",
++    "description": "Duration: an integer followed by ms, s, m, h, d, or w.",
++}
++_RATIO: dict = {
++    "type": "number",
++    "minimum": 0,
++    "maximum": 1,
++    "description": "Ratio value (0.0 - 1.0), not a percentage.",
++}
++
++
++def _threshold_item(type_name: str, description: str, required: list[str],
++                    properties: dict, **extra: object) -> dict:
++    """A closed threshold item whose ``type`` is *type_name*."""
++    return {
++        "type": "object",
++        "description": description,
++        "required": ["type", *required, "bounds"],
++        "properties": {"type": {"const": type_name}, **properties},
++        "additionalProperties": False,
++        **extra,
++    }
++
++
++# Matches no value: a key so marked must be absent. The spec's spelling.
++_ABSENT: dict = {"not": {}}
++
++
++def _requires_parameter_iff(metric: str, then: dict, otherwise: dict) -> dict:
++    """*then* applies when ``metric`` is *metric*, *otherwise* for every other."""
++    return {
++        "if": {"properties": {"metric": {"const": metric}}, "required": ["metric"]},
++        "then": then,
++        "else": otherwise,
++    }
++
++
++_SEGMENTS_THRESHOLD = _threshold_item(
++    "segments",
++    (
++        "The rate ``metric`` names must not vary across ``segment_values`` "
++        "of ``segment_dimension`` by more than the bound (OPENSRM-CORE-v2 "
++        "§5.5.1). ``measurement.window`` is the population window and is "
++        "always present (``30d`` when the manifest omits it). Parameters "
++        "per metric: reversal_rate ``measurement.source``; "
++        "high_confidence_failure ``measurement.confidence_threshold``; "
++        "outcomes ``outcome_signal``; escalation none."
++    ),
++    ["metric", "measurement", "segment_dimension", "segment_values"],
++    {
++        "metric": {
++            "enum": [
++                "reversal_rate",
++                "high_confidence_failure",
++                "outcomes",
++                "escalation",
++            ],
++            "description": (
++                "The judgment rate compared across segments. escalation is "
++                "the escalation rate, not the human agreement rate."
++            ),
++        },
++        "measurement": {
++            "type": "object",
++            "required": ["window"],
++            "properties": {
++                "window": {
++                    "description": (
++                        "Population window. Always present when served: the "
++                        "manifest's value or the 30d default "
++                        "(OPENSRM-CORE-v2 §5.5.1)."
++                    ),
++                    "allOf": [
++                        _DURATION,
++                        {
++                            "not": {"pattern": "^0+(ms|s|m|h|d|w)$"},
++                            "description": "Never zero.",
++                        },
++                    ],
++                },
++                "source": {
++                    "enum": ["lineage", "calibration_sample", "downstream_signal"],
++                },
++                "confidence_threshold": _RATIO,
++            },
++            "additionalProperties": False,
++        },
++        "outcome_signal": {
++            "type": "object",
++            "description": (
++                "outcomes only. ``window`` is how long after a decision to "
++                "wait for its outcome, not the population window."
++            ),
++            "required": ["source", "window"],
++            "properties": {"source": {"type": "string"}, "window": _DURATION},
++            "additionalProperties": False,
++        },
++        "segment_dimension": {"type": "string", "minLength": 1},
++        "segment_values": {
++            "type": "array",
++            "items": {"type": "string", "minLength": 1},
++            "minItems": 1,
++        },
++        "bounds": {
++            "type": "object",
++            "required": ["maximum_variance_from_overall"],
++            "properties": {"maximum_variance_from_overall": _RATIO},
++            "additionalProperties": False,
++        },
++    },
++    allOf=[
++        _requires_parameter_iff(
++            "reversal_rate",
++            {"properties": {"measurement": {"required": ["source"]}}},
++            {"properties": {"measurement": {"properties": {"source": _ABSENT}}}},
++        ),
++        _requires_parameter_iff(
++            "high_confidence_failure",
++            {"properties": {"measurement": {"required": ["confidence_threshold"]}}},
++            {"properties": {"measurement": {"properties": {"confidence_threshold": _ABSENT}}}},
++        ),
++        _requires_parameter_iff(
++            "outcomes",
++            {"required": ["outcome_signal"]},
++            {"properties": {"outcome_signal": _ABSENT}},
++        ),
++    ],
++)
++
++_STABILITY_THRESHOLD = _threshold_item(
++    "stability",
++    "Drift on a frozen probe input set must stay within ``maximum_drift``.",
++    ["probe"],
++    {
++        "probe": {
++            "type": "object",
++            "required": ["frozen_input_set", "frequency"],
++            "properties": {
++                "frozen_input_set": {"type": "string"},
++                "frequency": {"enum": ["hourly", "daily", "weekly"]},
++            },
++            "additionalProperties": False,
++        },
++        "bounds": {
++            "type": "object",
++            "required": ["maximum_drift"],
++            "properties": {"maximum_drift": _RATIO},
++            "additionalProperties": False,
++        },
++    },
++)
++
++_CALIBRATION_THRESHOLD = _threshold_item(
++    "calibration",
++    (
++        "Calibration error over ``measurement.bins`` confidence bins in "
++        "``measurement.window``. An srm/v1 calibration SLO is served lifted "
++        "to this shape (bound ``maximum_expected_calibration_error``)."
++    ),
++    ["measurement"],
++    {
++        "measurement": {
++            "type": "object",
++            "required": ["bins", "window"],
++            "properties": {
++                "bins": {"type": "integer", "minimum": 2},
++                "window": _DURATION,
++            },
++            "additionalProperties": False,
++        },
++        "bounds": {
++            "type": "object",
++            "anyOf": [
++                {"required": ["maximum_brier_score"]},
++                {"required": ["maximum_expected_calibration_error"]},
++            ],
++            "properties": {
++                "maximum_brier_score": {"type": "number", "minimum": 0, "maximum": 1},
++                "maximum_expected_calibration_error": _RATIO,
++            },
++            "additionalProperties": False,
++        },
++    },
++)
++
++_AUDIT_BACKLOG_THRESHOLD = _threshold_item(
++    "audit_backlog",
++    "The oldest unaudited decision must be younger than ``maximum_age``.",
++    [],
++    {
++        "bounds": {
++            "type": "object",
++            "required": ["maximum_age"],
++            "properties": {"maximum_age": _DURATION},
++            "additionalProperties": False,
++        },
++    },
++)
++
++_FEEDBACK_LATENCY_THRESHOLD = _threshold_item(
++    "feedback_latency",
++    (
++        "Time from decision to outcome must stay within the percentile "
++        "bounds. An srm/v1 feedback_latency SLO is served lifted to this "
++        "shape (target in its unit becomes ``maximum_p50``)."
++    ),
++    [],
++    {
++        "bounds": {
++            "type": "object",
++            "anyOf": [{"required": ["maximum_p50"]}, {"required": ["maximum_p90"]}],
++            "properties": {"maximum_p50": _DURATION, "maximum_p90": _DURATION},
++            "additionalProperties": False,
++        },
++    },
++)
++
++# Component name per threshold type, shared by the oneOf and its discriminator.
++_THRESHOLD_COMPONENTS = {
++    "segments": "JudgmentThresholdSegments",
++    "stability": "JudgmentThresholdStability",
++    "calibration": "JudgmentThresholdCalibration",
++    "audit_backlog": "JudgmentThresholdAuditBacklog",
++    "feedback_latency": "JudgmentThresholdFeedbackLatency",
++}
++
++
+ SCHEMAS: dict[str, dict] = {
+     "ChangeFreeze": {
+         "type": "object",
+@@ -900,48 +1141,46 @@ SCHEMAS: dict[str, dict] = {
+             },
+             "judgment_thresholds": {
+                 "type": "array",
+-                "items": {
+-                    "type": "object",
+-                    "required": ["type", "bounds", "measurement"],
+-                    "properties": {
+-                        "type": {
+-                            "type": "string",
+-                            "enum": [
+-                                "segments",
+-                                "stability",
+-                                "calibration",
+-                                "audit_backlog",
+-                                "feedback_latency",
+-                            ],
+-                        },
+-                        "bounds": {
+-                            "type": "object",
+-                            "description": (
+-                                "Bound name to value, as declared: a number "
+-                                "for Ratio bounds, a duration string such as "
+-                                "``24h`` for Duration bounds."
+-                            ),
+-                            "additionalProperties": {
+-                                "oneOf": [{"type": "number"}, {"type": "string"}]
+-                            },
+-                        },
+-                        "measurement": {
+-                            "type": "object",
+-                            "description": (
+-                                "Only the fields set for the threshold's type: "
+-                                "calibration bins/window; stability probe "
+-                                "{frozen_input_set, frequency}; segments "
+-                                "segment_dimension/segment_values; empty for "
+-                                "audit_backlog and feedback_latency."
+-                            ),
+-                            "additionalProperties": True,
+-                        },
+-                    },
+-                },
++                "description": (
++                    "Each item is the OpenSRM v2 ``spec.judgment_threshold`` "
++                    "entry (OPENSRM-CORE-v2 §5.5), emitted by nthlayer-common's "
++                    "``threshold_to_v2_entry``. Items are closed: only the "
++                    "keys their ``type`` defines appear. Changed in 3.0 (was "
++                    "{type, bounds, measurement}): segment_dimension, "
++                    "segment_values and probe are now entry-level, not under "
++                    "measurement; segments gain required ``metric`` and "
++                    "optional ``outcome_signal``; audit_backlog and "
++                    "feedback_latency have no ``measurement`` key (2.x sent "
++                    "{}). Branch on ``type``."
++                ),
++                "items": {"$ref": "#/components/schemas/JudgmentThreshold"},
+             },
+         },
+         "additionalProperties": True,
+     },
++    "JudgmentThreshold": {
++        "description": (
++            "A bound on a judgment error magnitude (OpenSRM decision 3c): "
++            "breached when the measured value exceeds a bound. Not an SLO -- "
++            "no error budget, no complement. One shape per ``type``."
++        ),
++        "oneOf": [
++            {"$ref": f"#/components/schemas/{name}"}
++            for name in _THRESHOLD_COMPONENTS.values()
++        ],
++        "discriminator": {
++            "propertyName": "type",
++            "mapping": {
++                type_name: f"#/components/schemas/{name}"
++                for type_name, name in _THRESHOLD_COMPONENTS.items()
++            },
++        },
++    },
++    "JudgmentThresholdSegments": _SEGMENTS_THRESHOLD,
++    "JudgmentThresholdStability": _STABILITY_THRESHOLD,
++    "JudgmentThresholdCalibration": _CALIBRATION_THRESHOLD,
++    "JudgmentThresholdAuditBacklog": _AUDIT_BACKLOG_THRESHOLD,
++    "JudgmentThresholdFeedbackLatency": _FEEDBACK_LATENCY_THRESHOLD,
+     "Suppression": {
+         "type": "object",
+         "description": (
+diff --git a/src/nthlayer_core/catalogue.py b/src/nthlayer_core/catalogue.py
+index 80b4d38..ff97768 100644
+--- a/src/nthlayer_core/catalogue.py
++++ b/src/nthlayer_core/catalogue.py
+@@ -21,6 +21,7 @@ from typing import Any
+ from nthlayer_common.manifest import (
+     ManifestLoadError,
+     load_manifest,
++    threshold_to_v2_entry,
+ )
+ from nthlayer_common.manifest.models import ReliabilityManifest
+ 
+@@ -115,6 +116,10 @@ class ManifestCatalogue:
+         try:
+             mtime = yaml_file.stat().st_mtime  # capture before parse to avoid TOCTOU
+             manifest = load_manifest(yaml_file, suppress_deprecation_warning=True)
++            # Serialise once before caching: a manifest the emitter refuses
++            # (ValueError) is skipped here like any rejected manifest, rather
++            # than making every GET /manifests a 500.
++            manifest_to_dict(manifest)
+             self._manifests[manifest.name] = manifest
+             self._mtimes[str(yaml_file)] = mtime
+             return manifest.name
+@@ -156,30 +161,17 @@ def manifest_to_dict(m: ReliabilityManifest) -> dict[str, Any]:
+             slo_dict["description"] = slo.description
+         result["slos"].append(slo_dict)
+ 
+-    # Judgment thresholds (nthlayer-common 4.0.0, opensrm-l33e): error-magnitude
+-    # bounds live beside slos, not in them. Bounds are emitted as parsed (srm/v1 calibration targets
+-    # are translated to maximum_expected_calibration_error by nthlayer-common);
+-    # measurement carries only the fields that are set.
+-    result["judgment_thresholds"] = []
+-    for t in m.judgment_thresholds:
+-        tm = t.measurement
+-        measurement: dict[str, Any] = {}
+-        if tm.bins is not None:
+-            measurement["bins"] = tm.bins
+-        if tm.window:
+-            measurement["window"] = tm.window
+-        if tm.probe:
+-            measurement["probe"] = {
+-                "frozen_input_set": tm.probe.frozen_input_set,
+-                "frequency": tm.probe.frequency,
+-            }
+-        if tm.segment_dimension:
+-            measurement["segment_dimension"] = tm.segment_dimension
+-        if tm.segment_values:
+-            measurement["segment_values"] = list(tm.segment_values)
+-        result["judgment_thresholds"].append(
+-            {"type": t.type, "bounds": dict(t.bounds), "measurement": measurement}
+-        )
++    # Judgment thresholds: error-magnitude bounds live beside slos, not in them
++    # (opensrm-l33e). Each item is exactly the v2 spec.judgment_threshold entry,
++    # built by nthlayer-common's validated emitter rather than copied field by
++    # field here, so serialisation needs no change in core when common adds a
++    # field (opensrm-7zpz); the closed OpenAPI item schemas (paths_other.py)
++    # and docs/api/openapi.json DO need updating, and
++    # test_every_served_manifest_validates_against_openapi_manifest fails
++    # until they are. srm/v1 thresholds arrive already lifted to v2.
++    result["judgment_thresholds"] = [
++        threshold_to_v2_entry(t) for t in m.judgment_thresholds
++    ]
+ 
+     # Dependencies
+     result["dependencies"] = [
+diff --git a/tests/smoke/test_resolved_dependencies.py b/tests/smoke/test_resolved_dependencies.py
+index 8419498..6bfe4b2 100644
+--- a/tests/smoke/test_resolved_dependencies.py
++++ b/tests/smoke/test_resolved_dependencies.py
+@@ -43,7 +43,7 @@ FRONT_DOOR = "nthlayer"
+ # fails if a sibling appears in the metadata without an entry here — so adding a
+ # dependency forces someone to state its expected major rather than quietly
+ # leaving it unguarded.
+-EXPECTED_MAJORS = {"nthlayer-common": 4}
++EXPECTED_MAJORS = {"nthlayer-common": 5}
+ 
+ 
+ def _sibling_requirements() -> dict[str, Requirement]:
+diff --git a/tests/test_api_manifests.py b/tests/test_api_manifests.py
+index f527355..a9fc451 100644
+--- a/tests/test_api_manifests.py
++++ b/tests/test_api_manifests.py
+@@ -1,5 +1,6 @@
+ """Tests for manifest catalogue API endpoints."""
+ 
++import copy
+ import time
+ 
+ import pytest
+@@ -95,10 +96,21 @@ class TestGetManifests:
+         assert judgment_slos[0]["judgment_type"] == "reversal_rate"
+ 
+ 
+-# Shapes follow opensrm/spec/v2/examples/judgment-thresholds/all-five-types.yaml
+-# (decision 3c, opensrm-l33e), inlined rather than loaded from the sibling repo.
++# Threshold fixtures are inlined from the spec's own examples (core CI does not
++# check out opensrm), copied entry for entry from opensrm main @ 859424a (the
++# opensrm-7zpz merge); no entry is edited from its source. Each list names its
++# source file under opensrm/spec/v2/examples/. Against core 2.x's copy, the
++# _V2_THRESHOLDS segments entry changed with its source: it gained
++# `metric: high_confidence_failure` and `measurement.confidence_threshold`,
++# as OPENSRM-CORE-v2 §5.5.1 now requires; the other two lists are new.
++# To refresh: diff each entry against the named opensrm file at the opensrm
++# commit core targets; edit the inline copy, never load from the sibling.
++
++# judgment-thresholds/all-five-types.yaml (decision 3c, opensrm-l33e).
+ _V2_THRESHOLDS = [
+-    {"type": "segments", "segment_dimension": "customer_tier",
++    {"type": "segments", "metric": "high_confidence_failure",
++     "measurement": {"confidence_threshold": 0.9},
++     "segment_dimension": "customer_tier",
+      "segment_values": ["enterprise", "smb", "consumer"],
+      "bounds": {"maximum_variance_from_overall": 0.05}},
+     {"type": "stability",
+@@ -112,6 +124,34 @@ _V2_THRESHOLDS = [
+      "bounds": {"maximum_p50": "1h", "maximum_p90": "24h"}},
+ ]
+ 
++# judgment-thresholds/segments-two-dimensions.yaml: reversal_rate and outcomes.
++_V2_SEGMENTS_TWO_DIMENSIONS = [
++    {"type": "segments", "metric": "reversal_rate",
++     "measurement": {"source": "lineage"},
++     "segment_dimension": "customer_tier",
++     "segment_values": ["enterprise", "smb", "consumer"],
++     "bounds": {"maximum_variance_from_overall": 0.05}},
++    {"type": "segments", "metric": "outcomes",
++     "outcome_signal": {"source": "retro-consumer", "window": "1h"},
++     "measurement": {"window": "7d"},
++     "segment_dimension": "region",
++     "segment_values": ["eu", "us", "apac"],
++     "bounds": {"maximum_variance_from_overall": 0.08}},
++]
++
++# services/ai-gate.yaml judgment_threshold: reversal_rate and escalation.
++_V2_AI_GATE_THRESHOLDS = [
++    {"type": "segments", "metric": "reversal_rate",
++     "measurement": {"source": "lineage"},
++     "segment_dimension": "customer_tier",
++     "segment_values": ["enterprise", "smb", "consumer"],
++     "bounds": {"maximum_variance_from_overall": 0.05}},
++    {"type": "segments", "metric": "escalation",
++     "segment_dimension": "customer_tier",
++     "segment_values": ["enterprise", "smb", "consumer"],
++     "bounds": {"maximum_variance_from_overall": 0.10}},
++]
++
+ 
+ def _write_v2_spec(specs_dir, name, thresholds=None):
+     spec = {
+@@ -128,38 +168,87 @@ def _write_v2_spec(specs_dir, name, thresholds=None):
+     (specs_dir / f"{name}.yaml").write_text(yaml.dump(spec))
+ 
+ 
++def _with_default_window(entry):
++    """*entry* as served: a segments `measurement.window` defaults to 30d.
++
++    The default is the spec's (OPENSRM-CORE-v2 §5.5.1: "window: any metric;
++    population window, default 30d"), so the served entry states it.
++    """
++    if entry["type"] != "segments":
++        return entry
++    served = dict(entry)
++    served["measurement"] = {"window": "30d", **entry.get("measurement", {})}
++    return served
++
++
+ class TestJudgmentThresholds:
+-    async def test_all_five_types_serialised_as_declared(self, client, catalogue, specs_dir):
++    async def test_all_five_types_serialised_as_v2_entries(self, client, catalogue, specs_dir):
+         _write_v2_spec(specs_dir, "credit-decision-agent", _V2_THRESHOLDS)
+         catalogue.load()
+         resp = await client.get("/manifests/credit-decision-agent")
+-        body = resp.json()
+-        by_type = {t["type"]: t for t in body["judgment_thresholds"]}
+-        assert list(by_type) == [
+-            "segments", "stability", "calibration", "audit_backlog", "feedback_latency"
+-        ]
+-        assert by_type["segments"] == {
+-            "type": "segments",
+-            "bounds": {"maximum_variance_from_overall": 0.05},
+-            "measurement": {
+-                "segment_dimension": "customer_tier",
+-                "segment_values": ["enterprise", "smb", "consumer"],
+-            },
+-        }
+-        assert by_type["stability"]["measurement"] == {
+-            "probe": {
+-                "frozen_input_set": "s3://probes/credit-decision-2026q1.jsonl",
+-                "frequency": "daily",
+-            }
+-        }
+-        assert by_type["calibration"]["measurement"] == {"bins": 10, "window": "30d"}
+-        assert by_type["calibration"]["bounds"] == {"maximum_brier_score": 0.05}
+-        # Duration bounds stay strings as declared; unset measurement is empty.
+-        assert by_type["audit_backlog"]["bounds"] == {"maximum_age": "24h"}
+-        assert by_type["audit_backlog"]["measurement"] == {}
+-        assert by_type["feedback_latency"]["bounds"] == {
+-            "maximum_p50": "1h", "maximum_p90": "24h"
+-        }
++        assert resp.status_code == 200
++        served = resp.json()["judgment_thresholds"]
++        # Each item is the declared spec.judgment_threshold entry, in order:
++        # segment_dimension/segment_values/probe at entry level, no empty
++        # `measurement` on types that define none.
++        assert served == [_with_default_window(e) for e in _V2_THRESHOLDS]
++        assert served[0]["measurement"] == {"confidence_threshold": 0.9, "window": "30d"}
++        assert "measurement" not in served[3]
++        assert "measurement" not in served[4]
++
++    @pytest.mark.parametrize(
++        ("name", "declared"),
++        [
++            pytest.param("pricing-agent", _V2_SEGMENTS_TWO_DIMENSIONS,
++                         id="reversal_rate+outcomes"),
++            pytest.param("refund-approver", _V2_AI_GATE_THRESHOLDS,
++                         id="reversal_rate+escalation"),
++        ],
++    )
++    async def test_segments_metric_and_parameter_served(
++        self, client, catalogue, specs_dir, name, declared
++    ):
++        _write_v2_spec(specs_dir, name, declared)
++        catalogue.load()
++        served = (await client.get(f"/manifests/{name}")).json()["judgment_thresholds"]
++        assert served == [_with_default_window(e) for e in declared]
++
++    async def test_outcomes_signal_window_is_not_the_population_window(
++        self, client, catalogue, specs_dir
++    ):
++        _write_v2_spec(specs_dir, "pricing-agent", _V2_SEGMENTS_TWO_DIMENSIONS)
++        catalogue.load()
++        served = (await client.get("/manifests/pricing-agent")).json()["judgment_thresholds"]
++        outcomes = next(t for t in served if t["metric"] == "outcomes")
++        assert outcomes["outcome_signal"] == {"source": "retro-consumer", "window": "1h"}
++        assert outcomes["measurement"] == {"window": "7d"}
++
++    async def test_escalation_carries_no_parameter(self, client, catalogue, specs_dir):
++        _write_v2_spec(specs_dir, "refund-approver", _V2_AI_GATE_THRESHOLDS)
++        catalogue.load()
++        served = (await client.get("/manifests/refund-approver")).json()["judgment_thresholds"]
++        escalation = next(t for t in served if t["metric"] == "escalation")
++        assert escalation["measurement"] == {"window": "30d"}
++        assert "outcome_signal" not in escalation
++
++    async def test_served_thresholds_reload_as_the_same_manifest(
++        self, client, catalogue, specs_dir, tmp_path
++    ):
++        """A served item is a valid spec.judgment_threshold entry, not a look-alike.
++
++        Writing the served list back as a manifest's judgment_threshold must
++        load, and serve the identical list again.
++        """
++        declared = _V2_THRESHOLDS + _V2_SEGMENTS_TWO_DIMENSIONS + _V2_AI_GATE_THRESHOLDS
++        _write_v2_spec(specs_dir, "everything", declared)
++        catalogue.load()
++        first = (await client.get("/manifests/everything")).json()["judgment_thresholds"]
++        assert len(first) == len(declared)
++        _write_v2_spec(specs_dir, "everything-again", first)
++        catalogue.load()
++        resp = await client.get("/manifests/everything-again")
++        assert resp.status_code == 200
++        assert resp.json()["judgment_thresholds"] == first
+ 
+     async def test_thresholds_do_not_appear_under_slos(self, client, catalogue, specs_dir):
+         _write_v2_spec(specs_dir, "credit-decision-agent", _V2_THRESHOLDS)
+@@ -198,14 +287,25 @@ class TestJudgmentThresholds:
+         body = (await client.get("/manifests/fl-svc")).json()
+         # Expected bound is nthlayer-common's srm/v1 lift
+         # (nthlayer_common.manifest.thresholds.srm_v1_threshold): a whole-second
+-        # target becomes maximum_p50 "<n>s"; measurement is unset.
++        # target becomes maximum_p50 "<n>s". feedback_latency defines no
++        # measurement (OPENSRM-CORE-v2 §5.5), so the entry has none.
+         assert body["judgment_thresholds"] == [{
+             "type": "feedback_latency",
+             "bounds": {"maximum_p50": "3600s"},
+-            "measurement": {},
+         }]
+ 
+ 
++def _manifest_validator():
++    """Validator for the published Manifest schema, resolving its $refs.
++
++    The schema refers to sibling components (#/components/schemas/...), so it
++    is checked with the whole OpenAPI document as the root it resolves against.
++    """
++    root = {"$ref": "#/components/schemas/Manifest", "components": OPENAPI["components"]}
++    Draft202012Validator.check_schema(root)
++    return Draft202012Validator(root)
++
++
+ class TestManifestSchemaConformance:
+     async def test_every_served_manifest_validates_against_openapi_manifest(
+         self, client, catalogue, specs_dir
+@@ -214,23 +314,168 @@ class TestManifestSchemaConformance:
+ 
+         test_openapi.py only proves the dict equals the checked-in JSON, so a
+         wrong schema regenerated consistently passes there. This is the check
+-        against real output, with all five threshold types in play.
++        against real output, with every threshold type, every segments metric
++        and both srm/v1 lifts in play.
+         """
+         _write_v2_spec(specs_dir, "credit-decision-agent", _V2_THRESHOLDS)
++        _write_v2_spec(specs_dir, "pricing-agent", _V2_SEGMENTS_TWO_DIMENSIONS)
++        _write_v2_spec(specs_dir, "refund-approver", _V2_AI_GATE_THRESHOLDS)
++        _write_v1_spec(specs_dir, "cal-svc", svc_type="ai-gate",
++                       slos={"calibration": {"target": 0.05, "window": "30d"}})
++        _write_v1_spec(specs_dir, "fl-svc", svc_type="ai-gate",
++                       slos={"feedback_latency": {"target": 3600}})
+         catalogue.load()
+         manifests = (await client.get("/manifests")).json()
+-        served = next(m for m in manifests if m["name"] == "credit-decision-agent")
+-        assert {t["type"] for t in served["judgment_thresholds"]} == {
++        # 3 from the `catalogue` fixture + the 5 written above.
++        assert len(manifests) == 8
++        served = [t for m in manifests for t in m["judgment_thresholds"]]
++        assert {t["type"] for t in served} == {
+             "segments", "stability", "calibration", "audit_backlog", "feedback_latency"
+         }
+-        schema = OPENAPI["components"]["schemas"]["Manifest"]
+-        Draft202012Validator.check_schema(schema)
+-        validator = Draft202012Validator(schema)
+-        assert len(manifests) == 4
++        assert {t["metric"] for t in served if t["type"] == "segments"} == {
++            "reversal_rate", "high_confidence_failure", "outcomes", "escalation"
++        }
++        validator = _manifest_validator()
+         for m in manifests:
+             errors = [e.message for e in validator.iter_errors(m)]
+             assert not errors, (m["name"], errors)
+ 
++    # Item shapes core 3.0 (common 5.0) no longer serves. Each must be refused by
++    # the published schema, or a client validating against it would accept a
++    # stale or misspelled threshold.
++    @pytest.mark.parametrize(
++        "item",
++        [
++            pytest.param(
++                {"type": "segments", "bounds": {"maximum_variance_from_overall": 0.05},
++                 "measurement": {"segment_dimension": "customer_tier",
++                                 "segment_values": ["enterprise"]}},
++                id="2.x-segments-shape",
++            ),
++            pytest.param(
++                {"type": "stability", "bounds": {"maximum_drift": 0.02},
++                 "measurement": {"probe": {"frozen_input_set": "s3://p.jsonl",
++                                           "frequency": "daily"}}},
++                id="2.x-stability-shape",
++            ),
++            pytest.param(
++                {"type": "audit_backlog", "bounds": {"maximum_age": "24h"},
++                 "measurement": {}},
++                id="2.x-empty-measurement",
++            ),
++            pytest.param(
++                {"type": "segments", "metric": "audit_sampling",
++                 "measurement": {"window": "30d"},
++                 "segment_dimension": "customer_tier", "segment_values": ["smb"],
++                 "bounds": {"maximum_variance_from_overall": 0.05}},
++                id="segments-audit_sampling-metric",
++            ),
++            pytest.param(
++                {"type": "segments", "metric": "reversal_rate",
++                 "measurement": {"window": "30d"},
++                 "segment_dimension": "customer_tier", "segment_values": ["smb"],
++                 "bounds": {"maximum_variance_from_overall": 0.05}},
++                id="reversal_rate-without-source",
++            ),
++            pytest.param(
++                {"type": "segments", "metric": "escalation",
++                 "measurement": {"window": "30d"},
++                 "outcome_signal": {"source": "s", "window": "1h"},
++                 "segment_dimension": "customer_tier", "segment_values": ["smb"],
++                 "bounds": {"maximum_variance_from_overall": 0.05}},
++                id="outcome_signal-on-escalation",
++            ),
++            pytest.param(
++                {"type": "calibration", "measurement": {"bins": 10, "window": "30d"},
++                 "bounds": {"maximum_brier_score": 0.05}, "description": "x"},
++                id="undefined-entry-key",
++            ),
++        ],
++    )
++    async def test_schema_refuses_item_shapes_not_served(self, client, item):
++        validator = _manifest_validator()
++        served = (await client.get("/manifests/payment-api")).json()
++        # Baseline: the real served manifest is clean, so any error below is
++        # the substituted item's.
++        assert not list(validator.iter_errors(served))
++        errors = list(validator.iter_errors({**served, "judgment_thresholds": [item]}))
++        assert errors
++        assert all(e.absolute_path[0] == "judgment_thresholds" for e in errors)
++
++
++def _served(entry):
++    """A deep copy of *entry* as served, for a test to damage in one place."""
++    return copy.deepcopy(_with_default_window(entry))
++
++
++def _drop(entry, *path):
++    *parents, key = path
++    target = entry
++    for p in parents:
++        target = target[p]
++    del target[key]
++    return entry
++
++
++def _put(entry, value, *path):
++    *parents, key = path
++    target = entry
++    for p in parents:
++        target = target[p]
++    target[key] = value
++    return entry
++
++
++_HCF, _REVERSAL, _OUTCOMES, _ESCALATION = (
++    _V2_THRESHOLDS[0], _V2_SEGMENTS_TWO_DIMENSIONS[0],
++    _V2_SEGMENTS_TWO_DIMENSIONS[1], _V2_AI_GATE_THRESHOLDS[1],
++)
++
++
++class TestSegmentsSchemaSingleDefects:
++    """Each case is a served segments entry, copied from a spec example, with
++    exactly one defect the spec's JudgmentThresholdSpec forbids (or, for the
++    always-present window, core's served narrowing of it). One defect per case
++    pins one constraint of the published JudgmentThresholdSegments schema."""
++
++    @pytest.mark.parametrize(
++        "entry", [_HCF, _REVERSAL, _OUTCOMES, _ESCALATION],
++        ids=["high_confidence_failure", "reversal_rate", "outcomes", "escalation"],
++    )
++    async def test_undamaged_base_validates(self, client, entry):
++        validator = _manifest_validator()
++        served = (await client.get("/manifests/payment-api")).json()
++        manifest = {**served, "judgment_thresholds": [_served(entry)]}
++        assert not list(validator.iter_errors(manifest))
++
++    @pytest.mark.parametrize(
++        "item",
++        [
++            pytest.param(_drop(_served(_ESCALATION), "metric"), id="no-metric"),
++            pytest.param(_drop(_served(_ESCALATION), "measurement", "window"),
++                         id="no-measurement-window"),
++            pytest.param(_drop(_served(_HCF), "measurement", "confidence_threshold"),
++                         id="high_confidence_failure-without-confidence_threshold"),
++            pytest.param(_drop(_served(_OUTCOMES), "outcome_signal"),
++                         id="outcomes-without-outcome_signal"),
++            pytest.param(_put(_served(_ESCALATION), "lineage", "measurement", "source"),
++                         id="source-on-escalation"),
++            pytest.param(_put(_served(_REVERSAL), 0.9, "measurement",
++                              "confidence_threshold"),
++                         id="confidence_threshold-on-reversal_rate"),
++            pytest.param(_put(_served(_ESCALATION), "0d", "measurement", "window"),
++                         id="zero-measurement-window"),
++            pytest.param(_put(_served(_ESCALATION), [], "segment_values"),
++                         id="empty-segment_values"),
++        ],
++    )
++    async def test_schema_refuses_single_defect(self, client, item):
++        validator = _manifest_validator()
++        served = (await client.get("/manifests/payment-api")).json()
++        errors = list(validator.iter_errors({**served, "judgment_thresholds": [item]}))
++        assert errors
++        assert all(e.absolute_path[0] == "judgment_thresholds" for e in errors)
++
+ 
+ class TestRejectedManifests:
+     async def test_calibration_under_judgment_slo_is_omitted_not_fatal(
+@@ -270,6 +515,64 @@ class TestRejectedManifests:
+         assert names >= {"fraud-detect", "payment-api", "checkout-svc"}
+ 
+ 
++    async def test_4x_segments_without_metric_is_omitted_not_fatal(
++        self, client, catalogue, specs_dir
++    ):
++        # The 4.x-era segments shape: no `metric`, which OPENSRM-CORE-v2
++        # §5.5.1 now requires (spec/v2/schema.json JudgmentThresholdSpec
++        # segments `required`). Its siblings must still load and be served.
++        stale = [{"type": "segments", "segment_dimension": "customer_tier",
++                  "segment_values": ["enterprise", "smb", "consumer"],
++                  "bounds": {"maximum_variance_from_overall": 0.05}}]
++        _write_v2_spec(specs_dir, "stale-segments", stale)
++        # Guard against an unrelated failure standing in for the real rejection.
++        with pytest.raises(ManifestLoadError) as excinfo:
++            load_manifest(specs_dir / "stale-segments.yaml")
++        assert "metric" in str(excinfo.value)
++
++        _write_v2_spec(specs_dir, "good-v2", _V2_THRESHOLDS)
++        catalogue.load()
++        resp = await client.get("/manifests")
++        assert resp.status_code == 200
++        names = {m["name"] for m in resp.json()}
++        assert "stale-segments" not in names
++        assert names == {"fraud-detect", "payment-api", "checkout-svc", "good-v2"}
++        assert (await client.get("/manifests/stale-segments")).status_code == 404
++
++    async def test_manifest_the_emitter_rejects_is_omitted_not_fatal(
++        self, client, catalogue, specs_dir, monkeypatch
++    ):
++        """A manifest that loads but cannot be serialised is skipped at load.
++
++        Serialising at request time would turn one such manifest into a 500
++        for GET /manifests as a whole. threshold_to_v2_entry raises ValueError
++        for a threshold the parser could never produce; no real manifest
++        reaches that today, so the emitter is made to raise for one service.
++        """
++        import nthlayer_core.catalogue as catalogue_module
++
++        real_emitter = catalogue_module.threshold_to_v2_entry
++
++        def emitter(threshold):
++            if threshold.bounds.get("maximum_drift") == 0.02:  # stability entry
++                raise ValueError("emitter refused")
++            return real_emitter(threshold)
++
++        monkeypatch.setattr(catalogue_module, "threshold_to_v2_entry", emitter)
++        _write_v2_spec(specs_dir, "unserialisable", _V2_THRESHOLDS)
++        _write_v2_spec(specs_dir, "pricing-agent", _V2_SEGMENTS_TWO_DIMENSIONS)
++        loaded = catalogue.load()
++        assert "unserialisable" not in loaded
++        assert "pricing-agent" in loaded
++
++        resp = await client.get("/manifests")
++        assert resp.status_code == 200
++        assert {m["name"] for m in resp.json()} == {
++            "fraud-detect", "payment-api", "checkout-svc", "pricing-agent"
++        }
++        assert (await client.get("/manifests/unserialisable")).status_code == 404
++
++
+ class TestGetManifest:
+     async def test_get_existing(self, client):
+         resp = await client.get("/manifests/payment-api")
+diff --git a/tests/test_threshold_schema_parity.py b/tests/test_threshold_schema_parity.py
+new file mode 100644
+index 0000000..aa5dfc0
+--- /dev/null
++++ b/tests/test_threshold_schema_parity.py
+@@ -0,0 +1,110 @@
++"""Pin nthlayer-common's threshold closure tables to core's OpenAPI item schemas.
++
++/manifests serves each threshold as nthlayer-common's threshold_to_v2_entry
++emits it, and the OpenAPI JudgmentThreshold* components are closed. A common
++5.x minor that adds an emitted key, a segments metric or a threshold type would
++then serve items core's published schema refuses -- and fixtures alone only
++notice if someone writes a fixture using the new field. These tests compare the
++tables common enforces against the schema core publishes, in both directions,
++so such a release turns core CI red on its own.
++
++Importing the package-internal nthlayer_common.manifest.thresholds module is
++deliberate: this is a parity pin against the exact tables common's parser and
++emitter enforce, not a use of them as API [opensrm-7zpz].
++"""
++
++from __future__ import annotations
++
++import pytest
++from nthlayer_common.manifest.thresholds import (
++    SEGMENTS_METRICS,
++    SEGMENTS_SOURCES,
++    THRESHOLD_BOUNDS,
++    THRESHOLD_TYPE_FIELDS,
++)
++
++from nthlayer_core.openapi_spec import OPENAPI
++
++_REF_PREFIX = "#/components/schemas/"
++
++
++def _schemas() -> dict:
++    return OPENAPI["components"]["schemas"]
++
++
++def _item_components() -> dict[str, dict]:
++    """threshold type -> its component schema, read from JudgmentThreshold."""
++    union = _schemas()["JudgmentThreshold"]
++    by_type: dict[str, dict] = {}
++    for branch in union["oneOf"]:
++        component = _schemas()[branch["$ref"].removeprefix(_REF_PREFIX)]
++        by_type[component["properties"]["type"]["const"]] = component
++    return by_type
++
++
++def test_threshold_types_match():
++    union = _schemas()["JudgmentThreshold"]
++    assert set(_item_components()) == set(THRESHOLD_TYPE_FIELDS)
++    # The discriminator must point each type at the branch whose const it is.
++    mapping = {
++        type_name: _schemas()[ref.removeprefix(_REF_PREFIX)]["properties"]["type"]["const"]
++        for type_name, ref in union["discriminator"]["mapping"].items()
++    }
++    assert mapping == {t: t for t in THRESHOLD_TYPE_FIELDS}
++
++
++@pytest.mark.parametrize("type_name", sorted(THRESHOLD_TYPE_FIELDS))
++def test_entry_keys_match(type_name):
++    component = _item_components()[type_name]
++    assert component["additionalProperties"] is False
++    schema_keys = set(component["properties"]) - {"type", "bounds"}
++    assert schema_keys == set(THRESHOLD_TYPE_FIELDS[type_name])
++
++
++@pytest.mark.parametrize(
++    ("type_name", "key"),
++    [
++        (type_name, key)
++        for type_name, fields in sorted(THRESHOLD_TYPE_FIELDS.items())
++        for key, nested in sorted(fields.items())
++        if nested is not None
++    ],
++)
++def test_nested_object_keys_match(type_name, key):
++    nested = _item_components()[type_name]["properties"][key]
++    assert nested["additionalProperties"] is False
++    assert set(nested["properties"]) == set(THRESHOLD_TYPE_FIELDS[type_name][key])
++
++
++def test_non_object_keys_are_not_closed_objects_in_the_schema():
++    """A key common treats as a scalar/list must not be an object in the schema."""
++    for type_name, fields in THRESHOLD_TYPE_FIELDS.items():
++        for key, nested in fields.items():
++            if nested is None:
++                prop = _item_components()[type_name]["properties"][key]
++                assert prop.get("type") != "object", (type_name, key)
++
++
++def test_bounds_table_covers_every_type():
++    # Floor for the parametrisation below: an empty THRESHOLD_BOUNDS would
++    # collect zero cases and pass silently.
++    assert set(THRESHOLD_BOUNDS) == set(_item_components())
++    assert len(THRESHOLD_BOUNDS) == 5
++
++
++@pytest.mark.parametrize("type_name", sorted(THRESHOLD_BOUNDS))
++def test_bound_names_match(type_name):
++    assert THRESHOLD_BOUNDS[type_name]
++    bounds = _item_components()[type_name]["properties"]["bounds"]
++    assert bounds["additionalProperties"] is False
++    assert set(bounds["properties"]) == set(THRESHOLD_BOUNDS[type_name])
++
++
++def test_segments_metric_enum_matches():
++    segments = _item_components()["segments"]["properties"]
++    assert set(segments["metric"]["enum"]) == set(SEGMENTS_METRICS)
++
++
++def test_segments_source_enum_matches():
++    measurement = _item_components()["segments"]["properties"]["measurement"]
++    assert set(measurement["properties"]["source"]["enum"]) == set(SEGMENTS_SOURCES)
+diff --git a/uv.lock b/uv.lock
+index be730c5..2377c14 100644
+--- a/uv.lock
++++ b/uv.lock
+@@ -926,7 +926,7 @@ wheels = [
+ 
+ [[package]]
+ name = "nthlayer-common"
+-version = "4.0.0"
++version = "5.0.0"
+ source = { editable = "../nthlayer-common" }
+ dependencies = [
+     { name = "anthropic" },
+@@ -970,7 +970,7 @@ provides-extras = ["dev"]
+ 
+ [[package]]
+ name = "nthlayer-core"
+-version = "1.8.2"
++version = "2.0.0"
+ source = { editable = "." }
+ dependencies = [
+     { name = "httpx" },

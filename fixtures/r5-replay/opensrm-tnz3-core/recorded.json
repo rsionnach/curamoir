@@ -1,0 +1,120 @@
+{
+ "schema_version": 1,
+ "entry": "opensrm-tnz3-core",
+ "fidelity": "recorded",
+ "lens_order": [
+  "correctness",
+  "clarity",
+  "edge-cases",
+  "provenance",
+  "excellence"
+ ],
+ "iterations": {
+  "correctness": 1,
+  "clarity": 1,
+  "edge-cases": 1,
+  "provenance": 2
+ },
+ "rounds": [
+  {
+   "lens": "correctness",
+   "iteration": 1,
+   "recorded_iteration": 1,
+   "counts": {
+    "critical": 0,
+    "important": 0,
+    "minor": 2
+   },
+   "findings": null
+  },
+  {
+   "lens": "clarity",
+   "iteration": 1,
+   "recorded_iteration": 1,
+   "counts": {
+    "critical": 0,
+    "important": 0,
+    "minor": 5
+   },
+   "findings": null
+  },
+  {
+   "lens": "edge_cases",
+   "iteration": 1,
+   "recorded_iteration": 1,
+   "counts": {
+    "critical": 0,
+    "important": 0,
+    "minor": 2
+   },
+   "findings": null
+  },
+  {
+   "lens": "provenance",
+   "iteration": 1,
+   "recorded_iteration": 1,
+   "counts": {
+    "critical": 0,
+    "important": 2,
+    "minor": 3
+   },
+   "findings": [
+    {
+     "lens": "provenance",
+     "severity": "IMPORTANT",
+     "path": "src/nthlayer_core/_openapi/paths_other.py",
+     "start_line": 901,
+     "end_line": 940,
+     "claim": "No test validates a real /manifests response against the Manifest schema.",
+     "evidence": null,
+     "fix": null,
+     "fingerprint": "1d4922046f70d1be",
+     "verification_level": "asserted",
+     "resolves": null,
+     "regression": false,
+     "status": null,
+     "derived_from": "reviewer_transcript",
+     "extracted_by": "model",
+     "handback_sha256": "1db2fca9f0ddc7da5f7aa9e1fd15da63a5a191cd3446a7d6ebee522d04680092",
+     "fix_commit": "bdd343a117972a500051b49e28a8df27f2b0b268",
+     "reported_path": "src/nthlayer_core/_openapi/paths_other.py",
+     "path_in_tree": true
+    },
+    {
+     "lens": "provenance",
+     "severity": "IMPORTANT",
+     "path": "pyproject.toml",
+     "start_line": 20,
+     "end_line": 20,
+     "claim": "The pin ceiling is unguarded",
+     "evidence": null,
+     "fix": null,
+     "fingerprint": "0df24e4b2459f409",
+     "verification_level": "asserted",
+     "resolves": null,
+     "regression": false,
+     "status": null,
+     "derived_from": "reviewer_transcript",
+     "extracted_by": "model",
+     "handback_sha256": "1db2fca9f0ddc7da5f7aa9e1fd15da63a5a191cd3446a7d6ebee522d04680092",
+     "fix_commit": "bdd343a117972a500051b49e28a8df27f2b0b268",
+     "reported_path": "pyproject.toml",
+     "path_in_tree": true
+    }
+   ]
+  },
+  {
+   "lens": "provenance",
+   "iteration": 2,
+   "recorded_iteration": 2,
+   "counts": {
+    "critical": 0,
+    "important": 0,
+    "minor": 0
+   },
+   "findings": null
+  }
+ ],
+ "cross_repo_findings": [],
+ "escaped": []
+}

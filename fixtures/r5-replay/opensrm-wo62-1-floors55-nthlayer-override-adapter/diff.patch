@@ -1,0 +1,2704 @@
+diff --git a/.release-please-manifest.json b/.release-please-manifest.json
+index 218393f..e7cf9b3 100644
+--- a/.release-please-manifest.json
++++ b/.release-please-manifest.json
+@@ -1,3 +1,3 @@
+ {
+-  ".": "0.4.1"
++  ".": "0.2.8"
+ }
+diff --git a/AGENTS.md b/AGENTS.md
+index 0645c50..5c4bf20 100644
+--- a/AGENTS.md
++++ b/AGENTS.md
+@@ -1,7 +1,7 @@
+ # nthlayer-override-adapter — agent-facing commands
+ 
+ Standalone HTTP sidecar that accepts override events and emits
+-`nthlayer.reversal` OTel log records, plus binds each accepted override to the
++`gen_ai.override` OTel spans, plus binds each accepted override to the
+ verdict store via HTTP POST to nthlayer-core.
+ 
+ ## Stack
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index f877ee2..a675e24 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -1,112 +1,5 @@
+ # Changelog
+ 
+-## [0.4.1](https://github.com/rsionnach/nthlayer-override-adapter/compare/v0.4.0...v0.4.1) (2026-11-04)
+-
+-
+-### Bug Fixes
+-
+-* require nthlayer-common 5.12.0 ([a704c04](https://github.com/rsionnach/nthlayer-override-adapter/commit/a704c044892fa2bd7e3c7c702fb36ee195f090c2))
+-
+-## [0.4.0](https://github.com/rsionnach/nthlayer-override-adapter/compare/v0.3.2...v0.4.0) (2026-11-03)
+-
+-
+-### ⚠ BREAKING CHANGES
+-
+-* nthlayer.reversal is an OTel log record, not a span; collectors counting it with spanmetrics must use the count connector. privacy.emit_reason_on_span is now privacy.emit_reason (old key refused). Bindings report otel: failed when telemetry is not exporting. override_collector_errors_total is removed. The OTLP exporter is gRPC only. See [docs/upgrading-0.4.md](docs/upgrading-0.4.md) for the migration order.
+-
+-### Features
+-
+-* emit nthlayer.reversal as an OTel log record [opensrm-a829] ([22aa9c0](https://github.com/rsionnach/nthlayer-override-adapter/commit/22aa9c04c53e477a5804ba2a92e9fe61e920c805))
+-
+-
+-### Bug Fixes
+-
+-* require nthlayer-common 5.11.0 ([c5c87ed](https://github.com/rsionnach/nthlayer-override-adapter/commit/c5c87ed45e0e8707b89607f912d7ed0260568566))
+-
+-
+-### Documentation
+-
+-* **upgrading-0.4:** add the migration order; drop a duplicated flush line [opensrm-a829] ([19b4fb9](https://github.com/rsionnach/nthlayer-override-adapter/commit/19b4fb9a5126ebe2d413d5c2d05fa10122e82518))
+-
+-## [0.3.2](https://github.com/rsionnach/nthlayer-override-adapter/compare/v0.3.1...v0.3.2) (2026-11-02)
+-
+-
+-### Bug Fixes
+-
+-* require nthlayer-common 5.10.1 ([ce751d8](https://github.com/rsionnach/nthlayer-override-adapter/commit/ce751d853ed5b42fd4ec1d07db6a9cb3e8aad9a5))
+-* require nthlayer-common 5.10.1 ([763d2b3](https://github.com/rsionnach/nthlayer-override-adapter/commit/763d2b3af5676d8df6198adafc865b27c87aa3fb))
+-
+-## [0.3.1](https://github.com/rsionnach/nthlayer-override-adapter/compare/v0.3.0...v0.3.1) (2026-11-02)
+-
+-
+-### Bug Fixes
+-
+-* require nthlayer-common 5.10.0 ([b60f4ed](https://github.com/rsionnach/nthlayer-override-adapter/commit/b60f4ed39af31036bbe8966a00a1cf6977f9ac61))
+-* require nthlayer-common 5.10.0 ([f3eb8ee](https://github.com/rsionnach/nthlayer-override-adapter/commit/f3eb8eef969024dab733fd0c0bd1ba56e019c682))
+-
+-## [0.3.0](https://github.com/rsionnach/nthlayer-override-adapter/compare/v0.2.14...v0.3.0) (2026-11-01)
+-
+-
+-### ⚠ BREAKING CHANGES
+-
+-* the adapter's span is renamed gen_ai.override -> nthlayer.reversal, and its attributes move from gen_ai.override.* to nthlayer.reversal.*: reviewer -> actor, corrected_action -> new_value, decision_id, reason, service, original_action, confidence_at_decision and source_system keep their names under the new prefix, and nthlayer.reversal.type=human_override and nthlayer.reversal.actor_type=human are added. The free-text reason is no longer put on the span by default: set privacy.emit_reason_on_span: true to keep it (core still stores it either way; exclude_reason still drops it everywhere). Update any collector filter, spanmetrics config or trace query keyed on the old span or attribute names.
+-
+-### Bug Fixes
+-
+-* emit overrides as an nthlayer.reversal span; reason opt-in (opensrm-1dua) ([6d0dbbf](https://github.com/rsionnach/nthlayer-override-adapter/commit/6d0dbbfe48aac7038bceefb79c356c15d36fd8ad))
+-* require nthlayer-common 5.9.1 ([1d35181](https://github.com/rsionnach/nthlayer-override-adapter/commit/1d35181f2316c555b580c897d11078f831e93abb))
+-* require nthlayer-common 5.9.1 ([400508f](https://github.com/rsionnach/nthlayer-override-adapter/commit/400508fe16bb5c887dabf1722241094235a7aba4))
+-* the override span is nthlayer.reversal, with A1 attribute names (opensrm-1dua) ([a9a9125](https://github.com/rsionnach/nthlayer-override-adapter/commit/a9a91258499da26147b98c45fdc7ec40b272c71a))
+-
+-## [0.2.14](https://github.com/rsionnach/nthlayer-override-adapter/compare/v0.2.13...v0.2.14) (2026-11-01)
+-
+-
+-### Bug Fixes
+-
+-* require nthlayer-common 5.9.0 ([7b4dec7](https://github.com/rsionnach/nthlayer-override-adapter/commit/7b4dec786f69548e7718471e4da5476763db5518))
+-* require nthlayer-common 5.9.0 ([804ce40](https://github.com/rsionnach/nthlayer-override-adapter/commit/804ce4024c586d52faad76b86b9fcfa666c45389))
+-
+-## [0.2.13](https://github.com/rsionnach/nthlayer-override-adapter/compare/v0.2.12...v0.2.13) (2026-10-31)
+-
+-
+-### Bug Fixes
+-
+-* require nthlayer-common 5.8.1 ([8ebcaf6](https://github.com/rsionnach/nthlayer-override-adapter/commit/8ebcaf699e4579d400935615de43dd2b40c1601c))
+-* require nthlayer-common 5.8.1 ([8370992](https://github.com/rsionnach/nthlayer-override-adapter/commit/83709926775d78cb3ff1e017c945a1f8909948c2))
+-
+-## [0.2.12](https://github.com/rsionnach/nthlayer-override-adapter/compare/v0.2.11...v0.2.12) (2026-10-31)
+-
+-
+-### Bug Fixes
+-
+-* ship the Apache-2.0 LICENSE and declare it in package metadata (opensrm-bqfj) ([f71185b](https://github.com/rsionnach/nthlayer-override-adapter/commit/f71185bf576f69389ec6ee3bfba39f5b1b68174d))
+-* ship the Apache-2.0 LICENSE and declare it in package metadata (opensrm-bqfj) ([214d81a](https://github.com/rsionnach/nthlayer-override-adapter/commit/214d81a5a63ed3005f081673f4411b89dad371d3))
+-
+-## [0.2.11](https://github.com/rsionnach/nthlayer-override-adapter/compare/v0.2.10...v0.2.11) (2026-10-29)
+-
+-
+-### Bug Fixes
+-
+-* require nthlayer-common 5.8.0 (opensrm-wo62.4.13) ([7b13418](https://github.com/rsionnach/nthlayer-override-adapter/commit/7b13418e29e7f75e6778314517e2321e64987736))
+-* require nthlayer-common 5.8.0 (opensrm-wo62.4.13) ([7689875](https://github.com/rsionnach/nthlayer-override-adapter/commit/76898750ca21cef3db3de77848b616d20587a931))
+-
+-## [0.2.10](https://github.com/rsionnach/nthlayer-override-adapter/compare/v0.2.9...v0.2.10) (2026-10-28)
+-
+-
+-### Bug Fixes
+-
+-* require nthlayer-common 5.6.0 (opensrm-wo62.4.1) ([7378feb](https://github.com/rsionnach/nthlayer-override-adapter/commit/7378feb1a3ce0435d3496c7a52ba65e232004836))
+-* require nthlayer-common 5.6.0 (opensrm-wo62.4.1) ([389f82b](https://github.com/rsionnach/nthlayer-override-adapter/commit/389f82b923178849bd8bc6ec41096ae173a13402))
+-* require nthlayer-common 5.7.0 (opensrm-wo62.4.7) ([76b9b9c](https://github.com/rsionnach/nthlayer-override-adapter/commit/76b9b9cf8898afaaf9185e06d96130d1d53b4841))
+-* require nthlayer-common 5.7.0 (opensrm-wo62.4.7) ([d5bab43](https://github.com/rsionnach/nthlayer-override-adapter/commit/d5bab4304d9781bd0f57fa4a381260398617bf1c))
+-
+-## [0.2.9](https://github.com/rsionnach/nthlayer-override-adapter/compare/v0.2.8...v0.2.9) (2026-10-27)
+-
+-
+-### Dependencies
+-
+-* require nthlayer-common 5.5.0 (opensrm-wo62.1) ([fa78ab2](https://github.com/rsionnach/nthlayer-override-adapter/commit/fa78ab25a40d0e9d962b49292daef43b6e6cadbb))
+-
+ ## [0.2.8](https://github.com/rsionnach/nthlayer-override-adapter/compare/v0.2.7...v0.2.8) (2026-10-24)
+ 
+ 
+diff --git a/CLAUDE.md b/CLAUDE.md
+index 0d5b695..41151b5 100644
+--- a/CLAUDE.md
++++ b/CLAUDE.md
+@@ -2,9 +2,8 @@
+ 
+ Standalone HTTP sidecar. Accepts override events (canonical JSON, batch
+ JSON, or generic webhook payloads), emits each as one unparented
+-`nthlayer.reversal` OTel log record (a span before 0.4.0), and binds
+-each accepted override to the verdict store via HTTP POST to
+-nthlayer-core.
++`gen_ai.override` OTel span, and binds each accepted override to the
++verdict store via HTTP POST to nthlayer-core.
+ 
+ Implements `opensrm-jmy.7` (Wave A) and `opensrm-jmy.18` (verdict-binding).
+ 
+@@ -19,15 +18,13 @@ Python ≥3.11, `uv`-managed. Starlette + Uvicorn ASGI runtime.
+ ## Hard rules (conventions)
+ 
+ These are load-bearing — wrong-side mistakes either leak plaintext PII,
+-break the cardinality-match invariant, or silently drop events.
++break the cardinality-match invariant, or silently drop spans.
+ 
+ 1. **`apply_privacy` is the single privacy boundary (spec §7).**
+    Routes call it once to produce a masked event, then pass that same
+    masked event to both `emit_override` (OTel) and `bind_to_core`
+-   (HTTP). Never apply privacy twice. Never redact inside
+-   `emit_override`: its one filter, leaving `reason` off the event unless
+-   `emit_reason` is set (OpenSRM A1 §4.2 Opt-in), decides what goes to
+-   OTel, not what is redacted, and core is unaffected.
++   (HTTP). Never apply privacy twice. Never apply it inside
++   `emit_override`.
+ 
+ 2. **`pre_redacted` vs `plaintext_reviewer`.**
+    `OverridePrivacyConfig.pre_redacted` is the preferred flag to skip
+@@ -39,24 +36,18 @@ break the cardinality-match invariant, or silently drop events.
+    before `OverrideEvent.to_otel_attributes()` so plaintext reviewers
+    never enter the OTel pipeline.
+ 
+-4. **Unparented events.** `nthlayer.reversal` is emitted under an empty
+-   OTel `Context()` (the logs SDK would otherwise stamp the current
+-   span's trace id on it) — overrides are operator decisions, not bound
+-   to any service trace. Do **not** "fix" this to inherit a current
+-   trace context. A1 §4.0 asks an unparented event for §5 provenance,
+-   which §5 defines for decision events only; the reversal's link is
+-   `nthlayer.reversal.decision_id`.
++4. **Unparented spans.** `gen_ai.override` is emitted with an empty
++   OTel `Context()` — overrides are operator decisions, not bound to
++   any service trace. Do **not** "fix" this to inherit a current trace
++   context.
+ 
+ 5. **Cardinality-match invariant.** Response `accepted` set always
+-   equals the set of emitted `nthlayer.reversal.decision_id`
++   equals the set of emitted-span `gen_ai.override.decision_id`
+    values. Pinned by `tests/test_routes_canonical_batch.py::TestCardinalityInvariant`.
+ 
+ 6. **Fail-open on OTel export errors.** HTTP request still returns 201
+-   even if export is degraded; `emit_event` never raises and the SDK's
+-   batch processor retries/buffers. Export failures happen on the batch
+-   thread, so no per-request signal sees them: a binding's `otel` and
+-   `override_emission_total{result}` report whether telemetry is
+-   exporting at all (`TelemetryStatus.exporting`, ruling Q7). Same posture for
++   even if export is degraded; the OTel SDK retries/buffers.
++   `override_collector_errors_total` increments. Same posture for
+    `bind_to_core` failures (core unreachable, timeout, 4xx): the
+    `binding_total{result="failed"}` counter increments and the
+    `BindingResult(core="failed")` is reported back, but the HTTP 201
+@@ -93,23 +84,23 @@ break the cardinality-match invariant, or silently drop events.
+     `datetime` objects only; any other type raises `ValueError` →
+     HTTP 400, not 500.
+ 
+-13. **OTel shutdown.** nthlayer-common's `init_telemetry` installs its
+-    LoggerProvider with `shutdown_on_exit=True`, so buffered records are
+-    flushed at clean process exit (SIGTERM through uvicorn included). The
+-    adapter registers no OTel atexit hook of its own.
++13. **OTel shutdown.** atexit hook in `cli.py` calls
++    `provider.force_flush(timeout_millis=5000)` then
++    `provider.shutdown()` so in-flight spans are flushed on SIGTERM
++    or clean process exit. Do not remove.
+ 
+ 14. **`BatchResult.errors` is reserved.** Field exists on the
+     dataclass but is intentionally unpopulated; reserved for future
+     error classification. Do not populate it here without a spec
+     change.
+ 
+-15. **Telemetry off is loud, not silent.** `cli._init_telemetry()` calls
+-    nthlayer-common's `init_telemetry` with `otel.endpoint` from config,
+-    which falls back to `$OTEL_EXPORTER_OTLP_LOGS_ENDPOINT`, then
+-    `$OTEL_EXPORTER_OTLP_ENDPOINT`. When the status is not exporting (no
+-    endpoint, or the SDK is missing) the adapter logs `otel_not_exporting`
+-    at WARNING and every response binding says `otel: failed`. It runs
+-    before `build_app`, which requires the status.
++15. **OTel SDK no-op fallback.** `_init_otel()` resolves the OTLP
++    endpoint from `otel.endpoint` in config, then from
++    `$OTEL_EXPORTER_OTLP_ENDPOINT`. When neither is set the SDK is
++    not initialised — `emission.py` gets the no-op tracer and spans
++    are silently dropped. The adapter logs
++    `otel_sdk_not_initialised` at WARNING so operators know it is
++    running blind.
+ 
+ 16. **A declared dependency range must admit exactly the versions tested.**
+     Not the oldest that imports, not a future major. The floor equals the
+diff --git a/CONTRIBUTING.md b/CONTRIBUTING.md
+index 93240ab..89eb80a 100644
+--- a/CONTRIBUTING.md
++++ b/CONTRIBUTING.md
+@@ -2,7 +2,7 @@
+ 
+ Thank you for considering contributing to **nthlayer-override-adapter** — a
+ standalone HTTP sidecar that accepts override events (canonical/batch JSON or
+-webhook payloads), emits each as one unparented `nthlayer.reversal` OTel log record,
++webhook payloads), emits each as one unparented `gen_ai.override` OTel span,
+ and binds each accepted override to the verdict store via HTTP POST to
+ `nthlayer-core`. We're in active v1.5 development and welcome feedback from
+ the SRE/DevOps community.
+@@ -75,15 +75,12 @@ Commits land on `main`; `release-please` maintains the release PR and cuts
+ - **`apply_privacy` is the single privacy boundary.** The sidecar is the only
+   PII-redaction point; routes call `apply_privacy` once and pass the masked
+   event to both `emit_override` and `bind_to_core`. Never apply privacy twice,
+-  and never redact inside `emit_override`. Its one filter (leaving `reason`
+-  off the event unless `emit_reason` is set; OpenSRM A1 §4.2 Opt-in) decides
+-  what goes to OTel, not what is redacted; core is unaffected.
+-- **Unparented events.** `nthlayer.reversal` is emitted under an empty OTel
++  and never inside `emit_override`.
++- **Unparented spans.** `gen_ai.override` is emitted with an empty OTel
+   `Context()` — overrides are operator decisions, not bound to a service
+   trace. Do not "fix" this to inherit a current trace context.
+ - **Fail-open.** OTel export and core-binding errors still return HTTP 201;
+-  a binding's `otel` says whether telemetry is exporting, and the relevant
+-  counters increment. Preserve that posture.
++  the relevant counters increment. Preserve that posture.
+ 
+ (See `CLAUDE.md` for the full numbered invariant list.)
+ 
+diff --git a/LICENSE b/LICENSE
+deleted file mode 100644
+index b485d9a..0000000
+--- a/LICENSE
++++ /dev/null
+@@ -1,190 +0,0 @@
+-                                 Apache License
+-                           Version 2.0, January 2004
+-                        http://www.apache.org/licenses/
+-
+-   TERMS AND CONDITIONS FOR USE, REPRODUCTION, AND DISTRIBUTION
+-
+-   1. Definitions.
+-
+-      "License" shall mean the terms and conditions for use, reproduction,
+-      and distribution as defined by Sections 1 through 9 of this document.
+-
+-      "Licensor" shall mean the copyright owner or entity authorized by
+-      the copyright owner that is granting the License.
+-
+-      "Legal Entity" shall mean the union of the acting entity and all
+-      other entities that control, are controlled by, or are under common
+-      control with that entity. For the purposes of this definition,
+-      "control" means (i) the power, direct or indirect, to cause the
+-      direction or management of such entity, whether by contract or
+-      otherwise, or (ii) ownership of fifty percent (50%) or more of the
+-      outstanding shares, or (iii) beneficial ownership of such entity.
+-
+-      "You" (or "Your") shall mean an individual or Legal Entity
+-      exercising permissions granted by this License.
+-
+-      "Source" form shall mean the preferred form for making modifications,
+-      including but not limited to software source code, documentation
+-      source, and configuration files.
+-
+-      "Object" form shall mean any form resulting from mechanical
+-      transformation or translation of a Source form, including but
+-      not limited to compiled object code, generated documentation,
+-      and conversions to other media types.
+-
+-      "Work" shall mean the work of authorship, whether in Source or
+-      Object form, made available under the License, as indicated by a
+-      copyright notice that is included in or attached to the work
+-      (an example is provided in the Appendix below).
+-
+-      "Derivative Works" shall mean any work, whether in Source or Object
+-      form, that is based on (or derived from) the Work and for which the
+-      editorial revisions, annotations, elaborations, or other modifications
+-      represent, as a whole, an original work of authorship. For the purposes
+-      of this License, Derivative Works shall not include works that remain
+-      separable from, or merely link (or bind by name) to the interfaces of,
+-      the Work and Derivative Works thereof.
+-
+-      "Contribution" shall mean any work of authorship, including
+-      the original version of the Work and any modifications or additions
+-      to that Work or Derivative Works thereof, that is intentionally
+-      submitted to the Licensor for inclusion in the Work by the copyright owner
+-      or by an individual or Legal Entity authorized to submit on behalf of
+-      the copyright owner. For the purposes of this definition, "submitted"
+-      means any form of electronic, verbal, or written communication sent
+-      to the Licensor or its representatives, including but not limited to
+-      communication on electronic mailing lists, source code control systems,
+-      and issue tracking systems that are managed by, or on behalf of, the
+-      Licensor for the purpose of discussing and improving the Work, but
+-      excluding communication that is conspicuously marked or otherwise
+-      designated in writing by the copyright owner as "Not a Contribution."
+-
+-      "Contributor" shall mean Licensor and any individual or Legal Entity
+-      on behalf of whom a Contribution has been received by Licensor and
+-      subsequently incorporated within the Work.
+-
+-   2. Grant of Copyright License. Subject to the terms and conditions of
+-      this License, each Contributor hereby grants to You a perpetual,
+-      worldwide, non-exclusive, no-charge, royalty-free, irrevocable
+-      copyright license to reproduce, prepare Derivative Works of,
+-      publicly display, publicly perform, sublicense, and distribute the
+-      Work and such Derivative Works in Source or Object form.
+-
+-   3. Grant of Patent License. Subject to the terms and conditions of
+-      this License, each Contributor hereby grants to You a perpetual,
+-      worldwide, non-exclusive, no-charge, royalty-free, irrevocable
+-      (except as stated in this section) patent license to make, have made,
+-      use, offer to sell, sell, import, and otherwise transfer the Work,
+-      where such license applies only to those patent claims licensable
+-      by such Contributor that are necessarily infringed by their
+-      Contribution(s) alone or by combination of their Contribution(s)
+-      with the Work to which such Contribution(s) was submitted. If You
+-      institute patent litigation against any entity (including a
+-      cross-claim or counterclaim in a lawsuit) alleging that the Work
+-      or a Contribution incorporated within the Work constitutes direct
+-      or contributory patent infringement, then any patent licenses
+-      granted to You under this License for that Work shall terminate
+-      as of the date such litigation is filed.
+-
+-   4. Redistribution. You may reproduce and distribute copies of the
+-      Work or Derivative Works thereof in any medium, with or without
+-      modifications, and in Source or Object form, provided that You
+-      meet the following conditions:
+-
+-      (a) You must give any other recipients of the Work or
+-          Derivative Works a copy of this License; and
+-
+-      (b) You must cause any modified files to carry prominent notices
+-          stating that You changed the files; and
+-
+-      (c) You must retain, in the Source form of any Derivative Works
+-          that You distribute, all copyright, patent, trademark, and
+-          attribution notices from the Source form of the Work,
+-          excluding those notices that do not pertain to any part of
+-          the Derivative Works; and
+-
+-      (d) If the Work includes a "NOTICE" text file as part of its
+-          distribution, then any Derivative Works that You distribute must
+-          include a readable copy of the attribution notices contained
+-          within such NOTICE file, excluding those notices that do not
+-          pertain to any part of the Derivative Works, in at least one
+-          of the following places: within a NOTICE text file distributed
+-          as part of the Derivative Works; within the Source form or
+-          documentation, if provided along with the Derivative Works; or,
+-          within a display generated by the Derivative Works, if and
+-          wherever such third-party notices normally appear. The contents
+-          of the NOTICE file are for informational purposes only and
+-          do not modify the License. You may add Your own attribution
+-          notices within Derivative Works that You distribute, alongside
+-          or as an addendum to the NOTICE text from the Work, provided
+-          that such additional attribution notices cannot be construed
+-          as modifying the License.
+-
+-      You may add Your own copyright statement to Your modifications and
+-      may provide additional or different license terms and conditions
+-      for use, reproduction, or distribution of Your modifications, or
+-      for any such Derivative Works as a whole, provided Your use,
+-      reproduction, and distribution of the Work otherwise complies with
+-      the conditions stated in this License.
+-
+-   5. Submission of Contributions. Unless You explicitly state otherwise,
+-      any Contribution intentionally submitted for inclusion in the Work
+-      by You to the Licensor shall be under the terms and conditions of
+-      this License, without any additional terms or conditions.
+-      Notwithstanding the above, nothing herein shall supersede or modify
+-      the terms of any separate license agreement you may have executed
+-      with Licensor regarding such Contributions.
+-
+-   6. Trademarks. This License does not grant permission to use the trade
+-      names, trademarks, service marks, or product names of the Licensor,
+-      except as required for reasonable and customary use in describing the
+-      origin of the Work and reproducing the content of the NOTICE file.
+-
+-   7. Disclaimer of Warranty. Unless required by applicable law or
+-      agreed to in writing, Licensor provides the Work (and each
+-      Contributor provides its Contributions) on an "AS IS" BASIS,
+-      WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+-      implied, including, without limitation, any warranties or conditions
+-      of TITLE, NON-INFRINGEMENT, MERCHANTABILITY, or FITNESS FOR A
+-      PARTICULAR PURPOSE. You are solely responsible for determining the
+-      appropriateness of using or redistributing the Work and assume any
+-      risks associated with Your exercise of permissions under this License.
+-
+-   8. Limitation of Liability. In no event and under no legal theory,
+-      whether in tort (including negligence), contract, or otherwise,
+-      unless required by applicable law (such as deliberate and grossly
+-      negligent acts) or agreed to in writing, shall any Contributor be
+-      liable to You for damages, including any direct, indirect, special,
+-      incidental, or consequential damages of any character arising as a
+-      result of this License or out of the use or inability to use the
+-      Work (including but not limited to damages for loss of goodwill,
+-      work stoppage, computer failure or malfunction, or any and all
+-      other commercial damages or losses), even if such Contributor
+-      has been advised of the possibility of such damages.
+-
+-   9. Accepting Warranty or Additional Liability. While redistributing
+-      the Work or Derivative Works thereof, You may choose to offer,
+-      and charge a fee for, acceptance of support, warranty, indemnity,
+-      or other liability obligations and/or rights consistent with this
+-      License. However, in accepting such obligations, You may act only
+-      on Your own behalf and on Your sole responsibility, not on behalf
+-      of any other Contributor, and only if You agree to indemnify,
+-      defend, and hold each Contributor harmless for any liability
+-      incurred by, or claims asserted against, such Contributor by reason
+-      of your accepting any such warranty or additional liability.
+-
+-   END OF TERMS AND CONDITIONS
+-
+-   Copyright 2026 NthLayer Contributors
+-
+-   Licensed under the Apache License, Version 2.0 (the "License");
+-   you may not use this file except in compliance with the License.
+-   You may obtain a copy of the License at
+-
+-       http://www.apache.org/licenses/LICENSE-2.0
+-
+-   Unless required by applicable law or agreed to in writing, software
+-   distributed under the License is distributed on an "AS IS" BASIS,
+-   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+-   See the License for the specific language governing permissions and
+-   limitations under the License.
+diff --git a/README.md b/README.md
+index 9c7a34c..5377ded 100644
+--- a/README.md
++++ b/README.md
+@@ -1,10 +1,10 @@
+ # nthlayer-override-adapter
+ 
+-Standalone HTTP sidecar that accepts human-override events and emits them as `nthlayer.reversal` OTel log records (OpenSRM Addendum A1 §4.0, §4.2; a span before 0.4.0, see [docs/upgrading-0.4.md](docs/upgrading-0.4.md); formerly `gen_ai.override`). Part of the [NthLayer](https://github.com/rsionnach/nthlayer) ecosystem; implements [`opensrm-jmy.7`](https://github.com/rsionnach/opensrm) — § 4 of `NTHLAYER_MISSING_CAPABILITIES_SPEC.md`.
++Standalone HTTP sidecar that accepts human-override events and emits them as `gen_ai.override` OTel spans. Part of the [NthLayer](https://github.com/rsionnach/nthlayer) ecosystem; implements [`opensrm-jmy.7`](https://github.com/rsionnach/opensrm) — § 4 of `NTHLAYER_MISSING_CAPABILITIES_SPEC.md`.
+ 
+ ## Why
+ 
+-`nthlayer-measure` computes judgment SLOs from override metrics consumed via OTel. Operators reviewing AI decisions live in heterogeneous tools (Slack, Jira, internal review UIs, email). The override-adapter is the translation layer: HTTP in, canonical OTel `nthlayer.reversal` log records out.
++`nthlayer-measure` computes judgment SLOs from override metrics consumed via OTel. Operators reviewing AI decisions live in heterogeneous tools (Slack, Jira, internal review UIs, email). The override-adapter is the translation layer: HTTP in, canonical OTel `gen_ai.override` events out.
+ 
+ ## Endpoints
+ 
+diff --git a/docs/architecture.md b/docs/architecture.md
+index 3ad5fa7..1a7b1c7 100644
+--- a/docs/architecture.md
++++ b/docs/architecture.md
+@@ -24,9 +24,9 @@ src/nthlayer_override_adapter/
+                   #     YAML batch.max_size; ConfigError on non-int/≤0)
+   metrics.py      # Prometheus counters and a histogram:
+                   #   - requests_total{endpoint, status}
+-                  #   - emission_total{result} (emitted | failed:
+-                  #     failed = telemetry not exporting)
++                  #   - emission_total{result}
+                   #   - validation_errors_total{reason}
++                  #   - collector_errors_total
+                   #   - emit_duration_seconds (histogram)
+                   #   - binding_total{result, reason}
+                   #     (nthlayer_override_binding_total tracks core
+@@ -46,21 +46,18 @@ src/nthlayer_override_adapter/
+                   #     pre_redacted (preferred). Routes call once and
+                   #     pass the masked event to both emit_override and
+                   #     bind_to_core.
+-                  # emit_override(event, *, exporting, emit_reason=False)
+-                  #     -> bool — expects pre-masked event; emits one
+-                  #     nthlayer.reversal log record via common's
+-                  #     emit_event (Timestamp = event.timestamp) under
+-                  #     an empty otel_context.Context(), so unparented;
+-                  #     returns `exporting` (never raises)
++                  # emit_override(event) -> bool
++                  #     — expects pre-masked event; opens unparented
++                  #     gen_ai.override span via empty
++                  #     otel_context.Context(); True on success, False
++                  #     on fail-open (logged + counted, never raises)
+                   # bind_to_core(client, event, timeout_seconds)
+                   #     -> BindingResult (async; wraps
+                   #     CoreAPIClient.apply_override in
+                   #     asyncio.wait_for; maps HTTP status via
+                   #     _STATUS_TO_REASON lookup dict; increments
+                   #     binding_total)
+-  app.py          # build_app(config, *, telemetry) — Starlette
+-                  #     factory; telemetry.exporting sets each
+-                  #     binding's otel ok|failed (ruling Q7); wires
++  app.py          # build_app(config) — Starlette factory; wires
+                   #     /healthz + /metrics + canonical + dynamic
+                   #     webhook routes; sets app.state.core_client =
+                   #     CoreAPIClient(base_url=config.core.url) and
+@@ -70,12 +67,12 @@ src/nthlayer_override_adapter/
+                   #     [--host <h>] [--port <p>]
+                   # argparse-driven; SystemExit(2) on config-not-found
+                   # or invalid YAML; --config falls back to
+-                  # $NTHLAYER_OVERRIDE_ADAPTER_CONFIG env. load_app
+-                  # calls _init_telemetry(cfg.otel_endpoint) (common's
+-                  # init_telemetry; WARNING otel_not_exporting when
+-                  # off) BEFORE build_app, which needs the status.
+-                  # common's provider flushes at exit. Logs resolved
+-                  # config_path so env-var users see the actual path.
++                  # $NTHLAYER_OVERRIDE_ADAPTER_CONFIG env. Calls
++                  # _init_otel(cfg.otel_endpoint) after build_app() to
++                  # initialise the OTel SDK (Wave A). atexit hook:
++                  # force_flush(5000ms) + shutdown TracerProvider on
++                  # SIGTERM/exit. Logs resolved config_path so env-var
++                  # users see the actual path.
+   routes/
+     canonical.py  # POST /api/v1/overrides + /api/v1/overrides/batch
+                   # Both call apply_privacy → emit_override →
+@@ -84,7 +81,7 @@ src/nthlayer_override_adapter/
+                   # when absent). Last-in-array-wins on dup
+                   # decision_id. Two-pass _process_batch uses frozen
+                   # _Winner(index, event) dataclass to compute winners,
+-                  # then emits exactly one event per unique accepted
++                  # then emits exactly one span per unique accepted
+                   # decision_id. 413 on batch_too_large. Batch response
+                   # includes bindings key (per winner) when core_client
+                   # present. _event_from_payload validates timestamp
+@@ -100,15 +97,13 @@ src/nthlayer_override_adapter/
+ 
+ ## Runtime + transport dependencies
+ 
+-- `nthlayer-common[otel]>=5.11.0,<6.0.0` — overrides foundation
+-  (`OverrideEvent`, `OverridePrivacyConfig`, `map_webhook_to_override`,
+-  `hash_reviewer`), `metrics_content_type` / `render_metrics`, and
+-  telemetry (`init_telemetry`, `emit_event`); the `otel` extra brings the
+-  OTel logs SDK and OTLP gRPC log exporter.
++- `nthlayer-common>=1.5.0,<2.0.0` — overrides foundation (`OverrideEvent`,
++  `OverridePrivacyConfig`, `map_webhook_to_override`, `hash_reviewer`),
++  `metrics_content_type` / `render_metrics`.
+ - `starlette>=0.40`, `uvicorn>=0.30` — ASGI stack; mirrors
+   nthlayer-core / nthlayer-workers/respond.
+-- `opentelemetry-api>=1.28` — the empty context the event is emitted
+-  under.
++- `opentelemetry-api>=1.28`, `opentelemetry-sdk>=1.28`,
++  `opentelemetry-exporter-otlp>=1.28` — span emission + OTLP export.
+ - `pyyaml>=6.0` — adapter config loading.
+ - `structlog>=24.1.0` — logging.
+ - `prometheus-client>=0.21` — `/metrics`.
+diff --git a/docs/upgrading-0.4.md b/docs/upgrading-0.4.md
+deleted file mode 100644
+index d13aeea..0000000
+--- a/docs/upgrading-0.4.md
++++ /dev/null
+@@ -1,184 +0,0 @@
+-# Upgrading to nthlayer-override-adapter 0.4
+-
+-0.4.0 emits each override as an OpenTelemetry **log record** instead of a
+-span (opensrm-a829, part of opensrm-quqo). OpenSRM Addendum A1 §4.0 defines
+-`nthlayer.reversal` as a log-based event; until now the adapter was the one
+-emitter that sent it as a span. It is a breaking release because anything
+-that read the span stops matching. That includes a collector's spanmetrics
+-connector, a trace query, and a tail-sampling rule.
+-
+-## What stays the same
+-
+-- The event name, `nthlayer.reversal`, and every attribute
+-  (`nthlayer.reversal.decision_id`, `.type`, `.actor_type`, `.actor`,
+-  `.new_value`, `.service`, and the rest) keep their names and values.
+-- The event is still unparented: it never joins a request's trace.
+-- The HTTP API, the request and response shapes, the privacy behaviour and
+-  core binding are unchanged.
+-
+-## Migration order
+-
+-The order matters. Done the other way round, overrides are lost while every
+-response still says `otel: ok`, because export failures happen after the
+-response is sent.
+-
+-1. **Collector first.** Add the count connector and a `logs` pipeline on the
+-   OTLP receiver (below), next to the existing spanmetrics configuration, and
+-   reload. A 0.4 adapter sending logs to a receiver with no logs pipeline
+-   loses every record.
+-2. **Repoint dashboards, alerts and recording rules** from your spanmetrics
+-   series for the `nthlayer.reversal` span to `nthlayer_reversals_total`. The
+-   old series stops at the cutover, so a `rate()` across it shows a gap.
+-3. **Deploy 0.4 with its config in the same rollout.** Rename
+-   `privacy.emit_reason_on_span` to `privacy.emit_reason`, and give
+-   `otel.endpoint` an `http://` scheme if the collector is plaintext. The two
+-   versions do not share a config: 0.3 ignores `emit_reason`, and 0.4 refuses
+-   `emit_reason_on_span`.
+-4. **Remove spanmetrics** for `nthlayer.reversal` once nothing reads it.
+-
+-## Breaking changes
+-
+-### The event is a log record
+-
+-Each accepted override is one OTLP log record:
+-
+-| field | value |
+-|---|---|
+-| `EventName` | `nthlayer.reversal` |
+-| attributes | the `nthlayer.reversal.*` keys above |
+-| body | none |
+-| `SeverityNumber` | 9 (INFO) |
+-| `Timestamp` | when the override happened (the event's `timestamp`), not when the adapter received it |
+-
+-A collector pipeline that counted the span with the **spanmetrics**
+-connector must count the log record instead. The **count** connector does
+-this. The configuration below is an illustration, not a tested artefact: it
+-has not been run through `otelcol validate`, so check it against your
+-Collector's version.
+-
+-```yaml
+-receivers:
+-  otlp:
+-    protocols:
+-      grpc:
+-        endpoint: 0.0.0.0:4317
+-
+-connectors:
+-  count:
+-    logs:
+-      nthlayer.reversals:
+-        description: Human reversals of NthLayer decisions (nthlayer.reversal).
+-        conditions:
+-          - 'event_name == "nthlayer.reversal"'
+-        attributes:
+-          - key: nthlayer.reversal.service
+-          - key: nthlayer.reversal.type
+-
+-exporters:
+-  prometheus:
+-    endpoint: 0.0.0.0:8889
+-
+-service:
+-  pipelines:
+-    logs:
+-      receivers: [otlp]
+-      exporters: [count]
+-    metrics:
+-      receivers: [count]
+-      exporters: [prometheus]
+-```
+-
+-With its default name translation, the Prometheus exporter publishes
+-`nthlayer.reversals` as `nthlayer_reversals_total`, labelled by `nthlayer_reversal_service` and
+-`nthlayer_reversal_type`. The `event_name` path in the condition needs a
+-Collector whose OTTL log context exposes the record's EventName. On an older
+-Collector, filter on another attribute every reversal carries instead, for
+-example `attributes["nthlayer.reversal.type"] == "human_override"`.
+-
+-Keep the counter's labels to low-cardinality attributes. `.decision_id` and
+-`.actor` are per-override identifiers, and A1 §4.0 bars identifiers from
+-low-cardinality uses.
+-
+-Not covered here: nthlayer-workers' measure module still queries
+-`gen_ai_overrides_total{service=...}` for the `reversal_rate` judgment SLO.
+-Aligning that query with this series is tracked separately (opensrm-zo0o).
+-Until it lands, rename the metric and label in your collector, or record a
+-Prometheus rule, if measure must read it.
+-
+-### `privacy.emit_reason_on_span` is now `privacy.emit_reason`
+-
+-```yaml
+-privacy:
+-  emit_reason: true   # was: emit_reason_on_span: true
+-```
+-
+-It means what it did before: the override's free-text `reason` goes on the
+-OTel event only when this is set (A1 §4.2: Opt-in). Core still stores the
+-reason either way, unless `exclude_reason` is set. The old key is now a
+-config error, so the adapter refuses to start until you rename it. Silently
+-ignoring it would drop your opt-in.
+-
+-### Telemetry is set up by nthlayer-common, over gRPC
+-
+-The adapter no longer builds its own TracerProvider. It calls
+-nthlayer-common's `init_telemetry`, which installs a LoggerProvider with an
+-OTLP **gRPC** log exporter.
+-
+-- The endpoint is `otel.endpoint` in the config, then
+-  `$OTEL_EXPORTER_OTLP_LOGS_ENDPOINT`, then `$OTEL_EXPORTER_OTLP_ENDPOINT`.
+-  Point it at the collector's gRPC port (4317). `OTEL_EXPORTER_OTLP_PROTOCOL`
+-  is not read.
+-- For a plaintext collector, give the endpoint an `http://` scheme. 0.3
+-  always connected without TLS; 0.4 follows the OTLP exporter's own rules, so
+-  a bare `host:4317` can try TLS.
+-- `OTEL_SERVICE_NAME` still overrides `service.name`
+-  (default `nthlayer-override-adapter`).
+-
+-### `otel` in responses reports whether telemetry is exporting
+-
+-Each binding in a response carries `otel: ok | failed`. In 0.3, `ok` meant
+-"a span was started". With no endpoint configured the span was silently
+-dropped, but the response still said `ok`. In 0.4 the value comes from what
+-telemetry setup reported at startup:
+-
+-- `ok`: an exporting provider is installed, either the adapter's or one
+-  already set by `opentelemetry-instrument`.
+-- `failed`: there is no endpoint, the OTel SDK is missing, or
+-  `OTEL_SDK_DISABLED=true`. The record is dropped. The adapter also logs
+-  `otel_not_exporting` at WARNING at startup.
+-
+-Export errors happen later, on the exporter's background thread, so no
+-per-request field can report them.
+-
+-### Buffering and shutdown
+-
+-Records go through the SDK's batch processor. Its queue holds 2048 records by
+-default (`OTEL_BLRP_MAX_QUEUE_SIZE`), and records beyond that are dropped
+-while the response still says `otel: ok`. One batch request emits one record
+-per accepted override, up to `batch.max_size` (default 1000). If you raise
+-`max_size`, or send large batches faster than the collector accepts them,
+-raise the queue size to match.
+-
+-Buffered records are flushed at exit. With the collector unreachable, the
+-flush waits up to `OTEL_EXPORTER_OTLP_TIMEOUT` (10s by default). 0.3 capped
+-its own flush at 5s. Container runtimes usually allow 10s between SIGTERM and
+-SIGKILL, so lower the timeout or lengthen the stop grace period if you need
+-the flush to finish.
+-
+-### Metrics
+-
+-- `override_emission_total{result}` now counts `failed` when telemetry is
+-  not exporting, matching the response field. Before, it counted `failed`
+-  only when starting the span raised, which happened only on a programming
+-  error.
+-- `override_collector_errors_total` is removed. It counted exceptions from
+-  starting a span. The log pipeline never raises at emit time, so the
+-  counter could only ever read zero.
+-
+-### Dependencies
+-
+-`opentelemetry-sdk` and `opentelemetry-exporter-otlp` are no longer direct
+-dependencies. The SDK and the OTLP gRPC log exporter come from
+-`nthlayer-common[otel]`, and `opentelemetry-api` stays a direct dependency.
+-Pin them yourself if you relied on the HTTP exporter that
+-`opentelemetry-exporter-otlp` pulled in.
+diff --git a/override-adapter-config.yaml.example b/override-adapter-config.yaml.example
+index e80f1aa..1cc378a 100644
+--- a/override-adapter-config.yaml.example
++++ b/override-adapter-config.yaml.example
+@@ -3,9 +3,8 @@
+ #
+ # Each entry under `adapters:` registers a POST endpoint at `webhook_path`
+ # that runs `field_mapping` over the inbound payload to produce a canonical
+-# override event, emitted as an nthlayer.reversal OTel log record. `defaults` supplies
+-# values for any field the mapping cannot resolve from the payload (e.g.
+-# source_system, service).
++# gen_ai.override event. `defaults` supplies values for any field the
++# mapping cannot resolve from the payload (e.g. source_system, service).
+ 
+ adapters:
+   - source: jira
+@@ -28,14 +27,9 @@ privacy:
+   # Reviewer hashed by default (SHA-256). Opt in to plaintext only if
+   # downstream consumers genuinely need the raw identifier.
+   plaintext_reviewer: false
+-  # `reason` text is stored in core by default. Set true to drop it
+-  # everywhere: from core and from the OTel event.
++  # `reason` text is stored by default. Set true to drop it from
++  # emitted spans entirely.
+   exclude_reason: false
+-  # `reason` is free text, so it stays off the nthlayer.reversal event
+-  # unless opted in (OpenSRM Addendum A1 §4.2: Opt-in). Core still stores
+-  # it either way, unless exclude_reason is set. (Was emit_reason_on_span
+-  # before 0.4.0; the old key is now a config error.)
+-  emit_reason: false
+ 
+ # Cap on the size of a /api/v1/overrides/batch payload. Requests above
+ # this size return HTTP 413. Default is 1000 when omitted.
+@@ -44,8 +38,6 @@ batch:
+ 
+ otel:
+   exporter: otlp
+-  # OTLP gRPC endpoint for the collector (port 4317; the exporter is gRPC
+-  # only). Use an http:// URL for a plaintext collector. Falls back to
+-  # $OTEL_EXPORTER_OTLP_LOGS_ENDPOINT, then $OTEL_EXPORTER_OTLP_ENDPOINT,
+-  # when this key is absent.
++  # OTLP gRPC endpoint for the collector. Falls back to the standard
++  # $OTEL_EXPORTER_OTLP_ENDPOINT env var when this key is absent.
+   endpoint: "http://localhost:4317"
+diff --git a/pyproject.toml b/pyproject.toml
+index 3e77bb1..71f8001 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -4,10 +4,9 @@ build-backend = "setuptools.build_meta"
+ 
+ [project]
+ name = "nthlayer-override-adapter"
+-version = "0.4.1"
+-description = "NthLayer override-event sidecar — HTTP → nthlayer.reversal OTel log-record bridge"
++version = "0.2.8"
++description = "NthLayer override-event sidecar — HTTP → gen_ai.override OTel span bridge"
+ readme = "README.md"
+-license = {text = "Apache-2.0"}
+ requires-python = ">=3.11"
+ dependencies = [
+     # Floor is the version this repo is built and tested against, NOT the
+@@ -15,18 +14,15 @@ dependencies = [
+     # tests/test_dependency_declarations.py and
+     # tests/smoke/test_resolved_dependencies.py; see CLAUDE.md hard rule 16
+     # for why both are needed [opensrm-p3bm].
+-    # WHY THE FLOOR (opensrm-wo62.1): the version this repo is now built and tested
++    # WHY 5.5.0 (opensrm-wo62.1): the version this repo is now built and tested
+     # against (rule 16: the floor is the installed sibling). Bump it on
+     # every nthlayer-common minor release: the floor guard fails until you do.
+-    # [otel] (opensrm-a829): the OTel logs SDK and OTLP gRPC log exporter
+-    # that init_telemetry installs for the nthlayer.reversal log record. It
+-    # replaces the adapter's own opentelemetry-sdk / -exporter-otlp
+-    # dependencies, which served the span pipeline removed in 0.4.0.
+-    "nthlayer-common[otel]>=5.12.0,<6.0.0",
++    "nthlayer-common>=5.5.0,<6.0.0",
+     "starlette>=0.40",
+     "uvicorn>=0.30",
+-    # emission.py emits under an empty OTel context, so the event is unparented.
+     "opentelemetry-api>=1.28",
++    "opentelemetry-sdk>=1.28",
++    "opentelemetry-exporter-otlp>=1.28",
+     "pyyaml>=6.0",
+     "structlog>=24.1.0",
+     "prometheus-client>=0.21",
+diff --git a/release-please-config.json b/release-please-config.json
+index 1b877af..4b7dba2 100644
+--- a/release-please-config.json
++++ b/release-please-config.json
+@@ -1,6 +1,5 @@
+ {
+   "release-type": "python",
+-  "bump-minor-pre-major": true,
+   "packages": {
+     ".": {
+       "package-name": "nthlayer-override-adapter",
+diff --git a/src/nthlayer_override_adapter/__init__.py b/src/nthlayer_override_adapter/__init__.py
+index 2d939b5..3ca25c2 100644
+--- a/src/nthlayer_override_adapter/__init__.py
++++ b/src/nthlayer_override_adapter/__init__.py
+@@ -1,3 +1,3 @@
+-"""Override-event sidecar — HTTP → nthlayer.reversal OTel log-record bridge."""
++"""Override-event sidecar — HTTP → gen_ai.override OTel span bridge."""
+ 
+-__version__ = "0.4.1"
++__version__ = "0.2.8"
+diff --git a/src/nthlayer_override_adapter/app.py b/src/nthlayer_override_adapter/app.py
+index 2930459..0c4d8cb 100644
+--- a/src/nthlayer_override_adapter/app.py
++++ b/src/nthlayer_override_adapter/app.py
+@@ -1,11 +1,8 @@
+ """Starlette app factory — wires canonical + webhook routes + health + metrics."""
+ from __future__ import annotations
+ 
+-import os
+-
+ from nthlayer_common.api_client import CoreAPIClient
+ from nthlayer_common.metrics import metrics_content_type, render_metrics
+-from nthlayer_common.telemetry import TelemetryStatus
+ from starlette.applications import Starlette
+ from starlette.requests import Request
+ from starlette.responses import JSONResponse, Response
+@@ -16,37 +13,16 @@ from nthlayer_override_adapter.routes.canonical import register_canonical_routes
+ from nthlayer_override_adapter.routes.webhook import register_webhook_routes
+ 
+ 
+-def telemetry_exporting(status: TelemetryStatus) -> bool:
+-    """Whether ``nthlayer.reversal`` records leave the process.
+-
+-    ``status.exporting``, except under ``OTEL_SDK_DISABLED=true``: the SDK
+-    then drops every record, but nthlayer-common 5.11 still reports
+-    INSTALLED (opensrm-q3np). Until common reports that itself, the adapter
+-    must not claim ``otel: ok`` for records nobody exports.
+-    """
+-    disabled = os.environ.get("OTEL_SDK_DISABLED", "").strip().lower() == "true"
+-    return status.exporting and not disabled
+-
+-
+-def build_app(config: AdapterConfig, *, telemetry: TelemetryStatus) -> Starlette:
+-    """Construct the Starlette app from a loaded ``AdapterConfig``.
+-
+-    ``telemetry`` is what ``init_telemetry`` returned at startup;
+-    ``telemetry_exporting(telemetry)`` decides each response's ``otel``
+-    binding and the ``override_emission_total`` result (ruling Q7). Required, so no caller
+-    can report ``otel: ok`` without having initialised telemetry.
+-    """
+-    exporting = telemetry_exporting(telemetry)
++def build_app(config: AdapterConfig) -> Starlette:
++    """Construct the Starlette app from a loaded ``AdapterConfig``."""
+     app = Starlette()
+     app.routes.append(Route("/healthz", _healthz, methods=["GET"]))
+     app.routes.append(Route("/metrics", _metrics, methods=["GET"]))
+     register_canonical_routes(
+         app, privacy=config.privacy, max_batch_size=config.max_batch_size,
+-        exporting=exporting, emit_reason=config.emit_reason,
+     )
+     register_webhook_routes(
+         app, adapters=config.adapters, privacy=config.privacy,
+-        exporting=exporting, emit_reason=config.emit_reason,
+     )
+     app.state.adapter_config = config
+     app.state.core_client = CoreAPIClient(base_url=config.core.url)
+diff --git a/src/nthlayer_override_adapter/cli.py b/src/nthlayer_override_adapter/cli.py
+index 8c40ae3..960e188 100644
+--- a/src/nthlayer_override_adapter/cli.py
++++ b/src/nthlayer_override_adapter/cli.py
+@@ -9,17 +9,18 @@ import sys
+ 
+ import structlog
+ import uvicorn
+-from nthlayer_common.telemetry import TelemetryStatus, init_telemetry
++from opentelemetry import trace
++from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
++from opentelemetry.sdk.resources import Resource
++from opentelemetry.sdk.trace import TracerProvider
++from opentelemetry.sdk.trace.export import BatchSpanProcessor
+ from starlette.applications import Starlette
+ 
+-from nthlayer_override_adapter.app import build_app, telemetry_exporting
++from nthlayer_override_adapter.app import build_app
+ from nthlayer_override_adapter.config import AdapterConfig, ConfigError, load_config
+ 
+ logger = structlog.get_logger(__name__)
+ 
+-# The OTel service.name, unless OTEL_SERVICE_NAME overrides it.
+-TELEMETRY_SERVICE_NAME = "nthlayer-override-adapter"
+-
+ 
+ def build_parser() -> argparse.ArgumentParser:
+     parser = argparse.ArgumentParser(prog="nthlayer-override-adapter")
+@@ -38,16 +39,14 @@ def build_parser() -> argparse.ArgumentParser:
+ 
+ 
+ def load_app(config_path: str | None) -> tuple[Starlette, AdapterConfig]:
+-    """Load config from path (or env), initialise telemetry, build the app.
++    """Load config from path (or env) and build the Starlette app.
+ 
+     Exits via ``SystemExit`` on config-not-found / config-invalid so
+     the process fails loudly at startup rather than serving with an
+     incomplete adapter set.
+ 
+-    Telemetry is initialised here, before the app is built, because the app
+-    needs its status: whether events export decides each response's ``otel``
+-    binding (ruling Q7). The config is returned too, for callers that log or
+-    inspect what was loaded.
++    Returns both the app and the resolved config so the caller can
++    initialise OTel before serving.
+     """
+     resolved = config_path or os.environ.get("NTHLAYER_OVERRIDE_ADAPTER_CONFIG")
+     if resolved is None:
+@@ -60,31 +59,54 @@ def load_app(config_path: str | None) -> tuple[Starlette, AdapterConfig]:
+     except ConfigError as exc:
+         sys.stderr.write(f"error: {exc}\n")
+         raise SystemExit(2) from exc
+-    return build_app(cfg, telemetry=_init_telemetry(cfg.otel_endpoint)), cfg
++    return build_app(cfg), cfg
+ 
+ 
+-def _init_telemetry(otel_endpoint: str | None) -> TelemetryStatus:
+-    """Install nthlayer-common's OTLP log exporter for ``nthlayer.reversal``.
++def _init_otel(otel_endpoint: str | None) -> None:
++    """Initialise the OTel SDK so emitted spans reach the configured collector.
+ 
+-    The endpoint is ``otel.endpoint`` from the config, else
+-    ``$OTEL_EXPORTER_OTLP_LOGS_ENDPOINT``, else ``$OTEL_EXPORTER_OTLP_ENDPOINT``.
+-    The provider flushes at exit (nthlayer-common registers the hook). When
+-    events will not export, log loudly so operators know the adapter is
+-    running blind: every response will then say ``otel: failed``.
++    Resolves the OTLP endpoint from the explicit ``otel_endpoint`` config
++    value first, falling back to ``$OTEL_EXPORTER_OTLP_ENDPOINT``. When
++    neither is set, the SDK is not initialised — ``trace.get_tracer()``
++    in emission.py returns the no-op tracer and spans are silently dropped.
++    Log loudly so operators know the adapter is running blind.
+     """
+-    status = init_telemetry(TELEMETRY_SERVICE_NAME, endpoint=otel_endpoint)
+-    if telemetry_exporting(status):
+-        logger.info("otel_initialised", status=status.value)
+-    else:
++    endpoint = otel_endpoint or os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT")
++    if not endpoint:
+         logger.warning(
+-            "otel_not_exporting",
+-            status=status.value,
+-            sdk_disabled=os.environ.get("OTEL_SDK_DISABLED"),
++            "otel_sdk_not_initialised",
++            reason="no_endpoint_configured",
+             hint="set otel.endpoint in the adapter config or "
+-                 "OTEL_EXPORTER_OTLP_ENDPOINT to a collector's OTLP gRPC "
+-                 "port (4317) to export nthlayer.reversal events",
++                 "OTEL_EXPORTER_OTLP_ENDPOINT env var to export spans",
+         )
+-    return status
++        return
++
++    resource = Resource.create(
++        {
++            "service.name": os.environ.get(
++                "OTEL_SERVICE_NAME", "nthlayer-override-adapter",
++            ),
++        },
++    )
++    provider = TracerProvider(resource=resource)
++    exporter = OTLPSpanExporter(endpoint=endpoint, insecure=True)
++    provider.add_span_processor(BatchSpanProcessor(exporter))
++    trace.set_tracer_provider(provider)
++
++    def _shutdown_otel() -> None:
++        try:
++            provider.force_flush(timeout_millis=5000)
++            provider.shutdown()
++        except Exception as exc:  # noqa: BLE001 — shutdown should never crash
++            logger.warning("otel_sdk_shutdown_failed", error=str(exc))
++
++    atexit.register(_shutdown_otel)
++    logger.info(
++        "otel_sdk_initialised",
++        endpoint=endpoint,
++        service_name=resource.attributes.get("service.name"),
++    )
++    logger.info("otel_sdk_shutdown_hook_registered")
+ 
+ 
+ def main() -> int:
+@@ -92,8 +114,10 @@ def main() -> int:
+     if args.command == "serve":
+         config_path = args.config or os.environ.get("NTHLAYER_OVERRIDE_ADAPTER_CONFIG")
+         app, cfg = load_app(args.config)
++        # Initialise OTel SDK with the resolved endpoint from config.
++        _init_otel(cfg.otel_endpoint)
+ 
+-        # Register atexit hook for CoreAPIClient shutdown.
++        # Register atexit hook for CoreAPIClient shutdown alongside OTel teardown.
+         def _shutdown_core_client() -> None:
+             client = getattr(app.state, "core_client", None)
+             if client is None:
+diff --git a/src/nthlayer_override_adapter/config.py b/src/nthlayer_override_adapter/config.py
+index 124217c..0485da5 100644
+--- a/src/nthlayer_override_adapter/config.py
++++ b/src/nthlayer_override_adapter/config.py
+@@ -45,12 +45,6 @@ class AdapterConfig:
+     core: CoreConfig
+     otel_endpoint: str | None = None
+     max_batch_size: int = 1000
+-    # Put the override's free-text reason on the nthlayer.reversal event
+-    # (OpenSRM Addendum A1 §4.2: Opt-in). Off by default; core still stores
+-    # it. YAML: privacy.emit_reason. Lives here, not on
+-    # OverridePrivacyConfig: that type is nthlayer-common's and governs what
+-    # core stores; this flag governs the OTel event only.
+-    emit_reason: bool = False
+ 
+ 
+ def load_config(path: str | Path) -> AdapterConfig:
+@@ -98,13 +92,6 @@ def load_config(path: str | Path) -> AdapterConfig:
+             f"'otel' must be a mapping, got {type(otel_raw).__name__}"
+         )
+     otel_endpoint = otel_raw.get("endpoint")
+-    # A number or list here would otherwise reach init_telemetry and crash
+-    # startup with a traceback instead of a config error.
+-    if otel_endpoint is not None and not isinstance(otel_endpoint, str):
+-        raise ConfigError(
+-            "otel.endpoint must be a string URL, got "
+-            f"{type(otel_endpoint).__name__} {otel_endpoint!r}"
+-        )
+     batch_raw = raw.get("batch") or {}
+     if not isinstance(batch_raw, dict):
+         raise ConfigError(
+@@ -120,31 +107,12 @@ def load_config(path: str | Path) -> AdapterConfig:
+             f"batch.max_size must be positive, got {max_batch_size}"
+         )
+ 
+-    # _parse_privacy has already rejected a non-mapping privacy section.
+-    privacy_raw = raw.get("privacy") or {}
+-    # Renamed in 0.4.0 with the move from span to log record (ruling Q8).
+-    # Refused rather than ignored: ignoring it would silently drop an
+-    # operator's opt-in.
+-    if "emit_reason_on_span" in privacy_raw:
+-        raise ConfigError(
+-            "privacy.emit_reason_on_span was renamed privacy.emit_reason in 0.4.0 "
+-            "(the event is no longer a span); rename the key"
+-        )
+-    emit_reason = privacy_raw.get("emit_reason", False)
+-    # Strict: bool("false") is True, which would put free text on the event.
+-    if not isinstance(emit_reason, bool):
+-        raise ConfigError(
+-            "privacy.emit_reason must be true or false, got "
+-            f"{type(emit_reason).__name__} {emit_reason!r}"
+-        )
+-
+     return AdapterConfig(
+         adapters=adapters,
+         privacy=privacy,
+         core=core_cfg,
+         otel_endpoint=otel_endpoint,
+         max_batch_size=max_batch_size,
+-        emit_reason=emit_reason,
+     )
+ 
+ 
+diff --git a/src/nthlayer_override_adapter/emission.py b/src/nthlayer_override_adapter/emission.py
+index 2616566..54da722 100644
+--- a/src/nthlayer_override_adapter/emission.py
++++ b/src/nthlayer_override_adapter/emission.py
+@@ -1,33 +1,20 @@
+-"""OTel emission for override events — ``nthlayer.reversal`` log records.
+-
+-Each override is one OpenTelemetry log record (OpenSRM Addendum A1 §4.0,
+-opensrm-a829 / opensrm-quqo), emitted through nthlayer-common's
+-``emit_event``: ``event_name`` ``nthlayer.reversal``, A1 §4.2's
+-``nthlayer.reversal.*`` attributes, no body, severity INFO, and a Timestamp
+-of when the override happened (``OverrideEvent.timestamp``; ruling Q2).
+-Until 0.4.0 it was an unparented span; collectors that counted it with the
+-spanmetrics connector count the log record with the count connector
+-instead (docs/upgrading-0.4.md).
++"""OTel emission for override events — unparented gen_ai.override spans.
+ 
+ Privacy is applied ONCE at the route level (spec § 7): the sidecar is
+ the single privacy boundary. Routes call ``apply_privacy`` to produce
+ a masked copy of the event, then pass the masked event to both
+-``emit_override`` (OTel) and ``bind_to_core`` (HTTP POST to core). This
+-ensures the OTel pipeline and core storage always receive the same
+-redacted payload.
+-
+-Redaction (hashing, ``exclude_reason``) happens only in ``apply_privacy``.
+-``emit_override`` expects a pre-masked event and applies one OTel-only
+-filter: it leaves ``reason`` off the record unless ``emit_reason`` is set.
+-That filter decides what goes to OTel, not what is redacted; core is
+-unaffected.
+-
+-The record is never parented to a trace: an override is an operator
+-decision not bound to any service trace, so it is emitted under an empty
+-context. Do not "fix" this to inherit the request's trace context. A1 §4.0
+-then requires §5's provenance attributes, but §5 (P1) defines them for
+-``nthlayer.decision`` events only; a reversal's link to its decision is
+-``nthlayer.reversal.decision_id``, which it always carries.
++``emit_override`` (OTel span) and ``bind_to_core`` (HTTP POST to
++core). This ensures the OTel pipeline and core storage always receive
++the same redacted payload.
++
++``emit_override`` expects a pre-masked event and does NOT apply any
++further privacy transformation.
++
++Rationale for unparented spans: overrides are operator decisions not
++bound to any service trace. Treating each as a standalone span
++preserves the semantic that 'an override is its own thing'; collectors
++route span → metric via spanmetricsconnector following standard OTel
++patterns. Do not "fix" this to inherit a trace context.
+ """
+ from __future__ import annotations
+ 
+@@ -37,16 +24,16 @@ from typing import Any
+ 
+ import structlog
+ from nthlayer_common.overrides import (
+-    REVERSAL_EVENT_NAME,
+     OverrideEvent,
+     OverridePrivacyConfig,
+     hash_reviewer,
+ )
+-from nthlayer_common.telemetry import emit_event
+ from opentelemetry import context as otel_context
++from opentelemetry import trace
+ 
+ from nthlayer_override_adapter.metrics import (
+     binding_total,
++    collector_errors_total,
+     emission_total,
+     emit_duration_seconds,
+ )
+@@ -54,6 +41,9 @@ from nthlayer_override_adapter.response import BindingResult
+ 
+ logger = structlog.get_logger(__name__)
+ 
++_SPAN_NAME = "gen_ai.override"
++_TRACER_NAME = "nthlayer-override-adapter"
++
+ 
+ def apply_privacy(
+     event: OverrideEvent, privacy: OverridePrivacyConfig,
+@@ -85,47 +75,42 @@ def apply_privacy(
+     )
+ 
+ 
+-def emit_override(
+-    event: OverrideEvent, *, exporting: bool, emit_reason: bool = False,
+-) -> bool:
+-    """Emit one ``nthlayer.reversal`` log record for this override.
+-
+-    ``reason`` is free text, and A1 §4.2 makes it Opt-in: it is left off the
+-    record unless ``emit_reason`` is set (config ``privacy.emit_reason``;
+-    ruling R3). This governs OTel only; core still receives the reason
+-    through ``bind_to_core``. ``exclude_reason`` removes it from both, upstream.
++def emit_override(event: OverrideEvent) -> bool:
++    """Emit one unparented ``gen_ai.override`` span for this override.
+ 
+     Expects a pre-masked event — callers must call ``apply_privacy`` upstream
+     and pass the masked result here. This function emits the event's reviewer
+-    string as-is; it does NOT redact (see ``emit_reason`` above).
++    string as-is; it does NOT apply any privacy transformation.
+ 
+-    ``exporting`` is the ``TelemetryStatus.exporting`` init_telemetry
+-    returned at startup. Emitting never raises (``emit_event`` is fail-open),
+-    and an export failure surfaces later, on the batch thread, so the only
+-    honest per-request signal is whether the record can leave the process at
+-    all (ruling Q7).
++    Exporter failures are logged + counted but do not raise — fail-open
++    posture matches the rest of the ecosystem (caller still treats the HTTP
++    request as accepted).
+ 
+     Returns:
+-        ``exporting``, unchanged; it becomes ``BindingResult.otel``
+-        (``ok`` if True; spec § 5.3, § 10). True when the record was
+-        handed to an exporting provider; False when telemetry is off (no
+-        endpoint, or the SDK is missing) and the record is dropped.
++        True if the span was emitted successfully, False if the internal
++        fail-open caught an exporter exception. Callers use this to populate
++        ``BindingResult.otel`` honestly (spec § 5.3, § 10).
+     """
+     started = time.perf_counter()
+-    attributes = event.to_otel_attributes()
+-    if not emit_reason:
+-        attributes.pop(f"{REVERSAL_EVENT_NAME}.reason", None)
+-    # Emit under an empty context: the logs SDK stamps a record with the
+-    # current span's trace and span ids, and an override must not be
+-    # parented to whatever request trace an instrumented server is in.
+-    token = otel_context.attach(otel_context.Context())
++    tracer = trace.get_tracer(_TRACER_NAME)
++    unparented_context = otel_context.Context()
+     try:
+-        emit_event(REVERSAL_EVENT_NAME, attributes, timestamp=event.timestamp)
++        with tracer.start_as_current_span(_SPAN_NAME, context=unparented_context) as span:
++            for key, value in event.to_otel_attributes().items():
++                span.set_attribute(key, value)
++        emission_total.labels(result="emitted").inc()
++        return True
++    except Exception as exc:  # noqa: BLE001 — fail-open is intentional
++        emission_total.labels(result="failed").inc()
++        collector_errors_total.inc()
++        logger.warning(
++            "override_emission_failed",
++            decision_id=event.decision_id,
++            error=str(exc),
++        )
++        return False
+     finally:
+-        otel_context.detach(token)
+-    emission_total.labels(result="emitted" if exporting else "failed").inc()
+-    emit_duration_seconds.observe(time.perf_counter() - started)
+-    return exporting
++        emit_duration_seconds.observe(time.perf_counter() - started)
+ 
+ 
+ _STATUS_TO_REASON: dict[int, str] = {
+diff --git a/src/nthlayer_override_adapter/metrics.py b/src/nthlayer_override_adapter/metrics.py
+index 81acf1e..660dc85 100644
+--- a/src/nthlayer_override_adapter/metrics.py
++++ b/src/nthlayer_override_adapter/metrics.py
+@@ -16,8 +16,7 @@ requests_total = Counter(
+ 
+ emission_total = Counter(
+     "override_emission_total",
+-    "Override events emitted as OTel log records; result=failed when "
+-    "telemetry is not exporting (no endpoint, or the SDK is missing).",
++    "Override events emitted to OTel collector.",
+     ["result"],
+ )
+ 
+@@ -27,9 +26,14 @@ validation_errors_total = Counter(
+     ["reason"],
+ )
+ 
++collector_errors_total = Counter(
++    "override_collector_errors_total",
++    "OTel exporter failures observed by the adapter.",
++)
++
+ emit_duration_seconds = Histogram(
+     "override_emit_duration_seconds",
+-    "Time to build and emit one override's OTel log record, seconds.",
++    "Time from HTTP receipt to OTel span emitted, seconds.",
+     buckets=(0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0),
+ )
+ 
+diff --git a/src/nthlayer_override_adapter/routes/canonical.py b/src/nthlayer_override_adapter/routes/canonical.py
+index 2ad4a95..9f3bc62 100644
+--- a/src/nthlayer_override_adapter/routes/canonical.py
++++ b/src/nthlayer_override_adapter/routes/canonical.py
+@@ -36,12 +36,7 @@ class _Winner:
+ 
+ 
+ def register_canonical_routes(
+-    app: Starlette,
+-    *,
+-    privacy: OverridePrivacyConfig,
+-    exporting: bool,
+-    max_batch_size: int = 1000,
+-    emit_reason: bool = False,
++    app: Starlette, *, privacy: OverridePrivacyConfig, max_batch_size: int = 1000,
+ ) -> None:
+     """Mount /api/v1/overrides and /api/v1/overrides/batch on the app."""
+ 
+@@ -66,7 +61,7 @@ def register_canonical_routes(
+         # identical redacted data. Core trusts pre_redacted=True and stores
+         # the reviewer string as-is, so plaintext must never reach core.
+         masked = apply_privacy(event, privacy)
+-        otel_ok = emit_override(masked, exporting=exporting, emit_reason=emit_reason)
++        otel_ok = emit_override(masked)
+         requests_total.labels(endpoint="canonical", status="accepted").inc()
+ 
+         # C4 (opensrm-jmy.18): bind to core after OTel emission.
+@@ -130,7 +125,7 @@ def register_canonical_routes(
+ 
+         winners, result = _process_batch(entries)
+ 
+-        # C5 (opensrm-jmy.18): emit-pass — one log record per winner, then bind to core.
++        # C5 (opensrm-jmy.18): emit-pass — one span per winner, then bind to core.
+         # core_client and adapter_config are set on app.state by the app factory (C7)
+         # or by test fixtures. When core_client is absent, skip binding (backward-compat).
+         core_client = getattr(request.app.state, "core_client", None)
+@@ -150,7 +145,7 @@ def register_canonical_routes(
+             # Spec § 7: apply privacy once per winner; pass masked event to
+             # both emit_override (OTel) and bind_to_core (HTTP POST to core).
+             masked = apply_privacy(winner.event, privacy)
+-            otel_ok = emit_override(masked, exporting=exporting, emit_reason=emit_reason)
++            otel_ok = emit_override(masked)
+             result.accepted.append(decision_id)
+             if core_client is not None:
+                 core_binding = await bind_to_core(
+@@ -182,7 +177,7 @@ def _process_batch(
+     """Walk entries in array order. Last-in-array wins on duplicate decision_id.
+ 
+     Dedup-pass only: resolves the winning entry per decision_id and populates
+-    rejected/duplicates in BatchResult, but does NOT emit events or append to
++    rejected/duplicates in BatchResult, but does NOT emit spans or append to
+     accepted. The caller (async post_batch) owns the emit-pass so it can
+     await bind_to_core per winner.
+ 
+diff --git a/src/nthlayer_override_adapter/routes/webhook.py b/src/nthlayer_override_adapter/routes/webhook.py
+index 6e784bc..565c469 100644
+--- a/src/nthlayer_override_adapter/routes/webhook.py
++++ b/src/nthlayer_override_adapter/routes/webhook.py
+@@ -36,29 +36,19 @@ def register_webhook_routes(
+     *,
+     adapters: list[WebhookAdapter],
+     privacy: OverridePrivacyConfig,
+-    exporting: bool,
+-    emit_reason: bool = False,
+ ) -> None:
+     """Mount one POST {webhook_path} route per configured adapter."""
+     for adapter in adapters:
+         app.routes.append(
+             Route(
+                 adapter.webhook_path,
+-                _make_handler(
+-                    adapter, privacy=privacy, exporting=exporting, emit_reason=emit_reason,
+-                ),
++                _make_handler(adapter, privacy=privacy),
+                 methods=["POST"],
+             )
+         )
+ 
+ 
+-def _make_handler(
+-    adapter: WebhookAdapter,
+-    *,
+-    privacy: OverridePrivacyConfig,
+-    exporting: bool,
+-    emit_reason: bool = False,
+-):
++def _make_handler(adapter: WebhookAdapter, *, privacy: OverridePrivacyConfig):
+     async def handle(request: Request) -> JSONResponse:
+         try:
+             payload = await request.json()
+@@ -87,7 +77,7 @@ def _make_handler(
+         # The masked event is passed to both emit_override (OTel) and
+         # bind_to_core (HTTP POST) so both sides receive identical redacted data.
+         masked = apply_privacy(event, privacy)
+-        otel_ok = emit_override(masked, exporting=exporting, emit_reason=emit_reason)
++        otel_ok = emit_override(masked)
+         requests_total.labels(endpoint="webhook", status="accepted").inc()
+ 
+         binding = None
+diff --git a/tests/conftest.py b/tests/conftest.py
+index c900109..6b42b45 100644
+--- a/tests/conftest.py
++++ b/tests/conftest.py
+@@ -1,29 +1,53 @@
+-from collections.abc import Callable, Iterator
++from collections.abc import Iterator
+ 
+ import pytest
+ from nthlayer_common.overrides import OverridePrivacyConfig
+-from nthlayer_common.telemetry import CapturedEvent, EventCapture, TelemetryStatus, capture_events
++from opentelemetry import trace
++from opentelemetry.sdk.trace import TracerProvider
++from opentelemetry.sdk.trace.export import SimpleSpanProcessor
++from opentelemetry.sdk.trace.export.in_memory_span_exporter import (
++    InMemorySpanExporter,
++)
+ 
+ from nthlayer_override_adapter.config import AdapterConfig, CoreConfig, WebhookAdapter
+ 
+-REVERSAL = "nthlayer.reversal"
++# Module-level exporter and provider, set once.
++_exporter: InMemorySpanExporter | None = None
++_provider: TracerProvider | None = None
++
++
++def _init_otel() -> InMemorySpanExporter:
++    """Initialize OTel SDK with in-memory exporter, once per session."""
++    global _exporter, _provider
++    if _exporter is None:
++        _exporter = InMemorySpanExporter()
++        _provider = TracerProvider()
++        _provider.add_span_processor(SimpleSpanProcessor(_exporter))
++        trace.set_tracer_provider(_provider)
++    return _exporter
+ 
+ 
+ @pytest.fixture(autouse=True)
+-def event_capture() -> Iterator[EventCapture]:
+-    """Capture every emit_event for the duration of each test (ruling Q5).
++def _reset_exporter_before_each_test() -> Iterator[None]:
++    """Clear the in-memory exporter's span buffer before each test.
+ 
+-    Autouse, so emit_event never reaches the global provider, and each test
+-    sees only its own records: a fresh capture per test.
++    Called automatically before every test. Ensures each test sees only
++    its own spans.
+     """
+-    with capture_events() as cap:
+-        yield cap
++    _init_otel()
++    if _exporter is not None:
++        _exporter.clear()
++    yield
+ 
+ 
+ @pytest.fixture
+-def reversals(event_capture: EventCapture) -> Callable[[], list[CapturedEvent]]:
+-    """Zero-arg callable: the ``nthlayer.reversal`` records emitted so far."""
+-    return lambda: event_capture.named(REVERSAL)
++def span_exporter() -> InMemorySpanExporter:
++    """In-memory exporter for assertion in the current test.
++
++    Wired to a shared TracerProvider. Each test's spans are isolated
++    via the autouse _reset_exporter_before_each_test fixture.
++    """
++    return _init_otel()
+ 
+ 
+ @pytest.fixture
+@@ -59,7 +83,6 @@ def app_with_fake_core(adapter_config: AdapterConfig):
+     """Returns a factory that builds the adapter app with a stubbed CoreAPIClient.
+ 
+     Usage: app = app_with_fake_core(fake_status=200)
+-    (``telemetry`` defaults to INSTALLED, the normal deployed case.)
+ 
+     Builds the app via build_app, then injects a fake core_client and
+     adapter_config onto app.state so the canonical single handler can call
+@@ -71,11 +94,8 @@ def app_with_fake_core(adapter_config: AdapterConfig):
+ 
+     from nthlayer_override_adapter.app import build_app
+ 
+-    def _factory(
+-        fake_status: int = 200,
+-        telemetry: TelemetryStatus = TelemetryStatus.INSTALLED,
+-    ):
+-        app = build_app(adapter_config, telemetry=telemetry)
++    def _factory(fake_status: int = 200):
++        app = build_app(adapter_config)
+ 
+         fake_client = MagicMock()
+ 
+diff --git a/tests/smoke/test_imports.py b/tests/smoke/test_imports.py
+index d3a4cda..2501824 100644
+--- a/tests/smoke/test_imports.py
++++ b/tests/smoke/test_imports.py
+@@ -19,11 +19,3 @@ def test_all_submodules_import() -> None:
+             assert getattr(mod, name) is not None, (
+                 f"{info.name}.{name} declared in __all__ but unresolved"
+             )
+-
+-
+-def test_the_log_export_stack_is_installed() -> None:
+-    """What nthlayer-common's init_telemetry imports to export the
+-    nthlayer.reversal record. Run in the release container, where deps come
+-    from the built wheel, this fails if the [otel] extra stops reaching it."""
+-    importlib.import_module("opentelemetry.sdk._logs")
+-    importlib.import_module("opentelemetry.exporter.otlp.proto.grpc._log_exporter")
+diff --git a/tests/test_app.py b/tests/test_app.py
+index 2b4e572..3eb44db 100644
+--- a/tests/test_app.py
++++ b/tests/test_app.py
+@@ -1,6 +1,5 @@
+ import pytest
+ from nthlayer_common.overrides import OverridePrivacyConfig
+-from nthlayer_common.telemetry import TelemetryStatus
+ from starlette.testclient import TestClient
+ 
+ from nthlayer_override_adapter.app import build_app
+@@ -28,8 +27,8 @@ def adapter_config() -> AdapterConfig:
+ 
+ 
+ @pytest.fixture
+-def client(adapter_config) -> TestClient:
+-    return TestClient(build_app(adapter_config, telemetry=TelemetryStatus.INSTALLED))
++def client(span_exporter, adapter_config) -> TestClient:
++    return TestClient(build_app(adapter_config))
+ 
+ 
+ class TestHealthAndMetrics:
+@@ -68,7 +67,9 @@ class TestBuildAppCoreClientLifecycle:
+         """build_app instantiates CoreAPIClient and attaches it to app.state."""
+         from nthlayer_common.api_client import CoreAPIClient
+ 
+-        app = build_app(adapter_config, telemetry=TelemetryStatus.INSTALLED)
++        from nthlayer_override_adapter.app import build_app
++
++        app = build_app(adapter_config)
+         assert app.state.core_client is not None
+         assert isinstance(app.state.core_client, CoreAPIClient)
+         # adapter_config must also be reachable from state for handlers
+@@ -78,105 +79,12 @@ class TestBuildAppCoreClientLifecycle:
+         self, adapter_config
+     ) -> None:
+         """CoreAPIClient.base_url reflects adapter_config.core.url."""
+-        app = build_app(adapter_config, telemetry=TelemetryStatus.INSTALLED)
++        from nthlayer_override_adapter.app import build_app
++
++        app = build_app(adapter_config)
+         client = app.state.core_client
+         # CoreAPIClient stores base_url directly on the dataclass field;
+         # __post_init__ strips a trailing slash, so compare without one.
+         expected = adapter_config.core.url.rstrip("/")
+         actual = getattr(client, "base_url", None)
+         assert actual == expected
+-
+-
+-class TestTelemetryDecidesOtelBinding:
+-    """build_app's telemetry status reaches every route (ruling Q7).
+-
+-    telemetry.exporting is threaded build_app -> each route -> emit_override;
+-    a route that dropped it would leave every unit test green, so these drive
+-    the real app's endpoints.
+-    """
+-
+-    _ENTRY = {
+-        "decision_id": "vrd-001", "service": "fraud-detect",
+-        "corrected_action": "escalate", "reviewer": "analyst-047",
+-    }
+-    ENDPOINTS = [
+-        ("/api/v1/overrides", _ENTRY),
+-        ("/api/v1/overrides/batch", {"overrides": [_ENTRY]}),
+-        ("/webhook/jira", {"issue": {"id": "vrd-001", "action": "escalate", "who": "a"}}),
+-    ]
+-
+-    @pytest.mark.parametrize(
+-        ("status", "otel"),
+-        [
+-            (TelemetryStatus.INSTALLED, "ok"),
+-            (TelemetryStatus.EXTERNAL_PROVIDER, "ok"),
+-            (TelemetryStatus.NO_ENDPOINT, "failed"),
+-            (TelemetryStatus.SDK_MISSING, "failed"),
+-        ],
+-        ids=lambda v: v.value if isinstance(v, TelemetryStatus) else v,
+-    )
+-    @pytest.mark.parametrize(("path", "body"), ENDPOINTS, ids=[p for p, _ in ENDPOINTS])
+-    def test_binding_otel_follows_telemetry_status(
+-        self, adapter_config, reversals, status, otel, path, body,
+-    ) -> None:
+-        from unittest.mock import MagicMock
+-
+-        from nthlayer_common.api_client import APIResult
+-
+-        app = build_app(adapter_config, telemetry=status)
+-        fake_core = MagicMock()
+-
+-        async def _apply(verdict_id, payload):
+-            return APIResult(ok=True, status_code=200, data={"id": verdict_id},
+-                             error=None, detail=None)
+-
+-        fake_core.apply_override = _apply
+-        app.state.core_client = fake_core
+-
+-        resp = TestClient(app).post(path, json=body)
+-        assert resp.status_code == 201, resp.text
+-        assert resp.json()["bindings"]["vrd-001"] == {"otel": otel, "core": "ok"}
+-        assert len(reversals()) == 1
+-
+-
+-class TestSdkDisabledIsNotExporting:
+-    """OTEL_SDK_DISABLED=true makes the SDK drop every record while common
+-    5.11 still reports INSTALLED (opensrm-q3np). The OTel spec defines the
+-    variable as case-insensitive "true"; anything else leaves the SDK on."""
+-
+-    @pytest.mark.parametrize(
+-        ("value", "exporting"),
+-        [
+-            ("true", False), ("TRUE", False), (" true ", False),
+-            ("false", True), ("", True), (None, True),
+-        ],
+-        ids=["true", "upper", "padded", "false", "empty", "unset"],
+-    )
+-    def test_telemetry_exporting(self, monkeypatch, value, exporting) -> None:
+-        from nthlayer_override_adapter.app import telemetry_exporting
+-
+-        if value is None:
+-            monkeypatch.delenv("OTEL_SDK_DISABLED", raising=False)
+-        else:
+-            monkeypatch.setenv("OTEL_SDK_DISABLED", value)
+-        assert telemetry_exporting(TelemetryStatus.INSTALLED) is exporting
+-        assert telemetry_exporting(TelemetryStatus.NO_ENDPOINT) is False
+-
+-    def test_responses_say_failed_under_sdk_disabled(self, monkeypatch, adapter_config) -> None:
+-        from unittest.mock import MagicMock
+-
+-        from nthlayer_common.api_client import APIResult
+-
+-        monkeypatch.setenv("OTEL_SDK_DISABLED", "true")
+-        app = build_app(adapter_config, telemetry=TelemetryStatus.INSTALLED)
+-        fake_core = MagicMock()
+-
+-        async def _apply(verdict_id, payload):
+-            return APIResult(ok=True, status_code=200, data={"id": verdict_id},
+-                             error=None, detail=None)
+-
+-        fake_core.apply_override = _apply
+-        app.state.core_client = fake_core
+-        entry = TestTelemetryDecidesOtelBinding._ENTRY
+-        resp = TestClient(app).post("/api/v1/overrides", json=entry)
+-        assert resp.json()["bindings"]["vrd-001"] == {"otel": "failed", "core": "ok"}
+diff --git a/tests/test_cli.py b/tests/test_cli.py
+index 53f67c8..2f5eb2b 100644
+--- a/tests/test_cli.py
++++ b/tests/test_cli.py
+@@ -2,14 +2,8 @@ from pathlib import Path
+ from unittest import mock
+ 
+ import pytest
+-from nthlayer_common.telemetry import TelemetryStatus
+-from starlette.testclient import TestClient
+ 
+-from nthlayer_override_adapter import cli
+-from nthlayer_override_adapter.cli import _init_telemetry, build_parser, load_app
+-
+-# Patched at the use site: cli imports init_telemetry by name.
+-_INIT = "nthlayer_override_adapter.cli.init_telemetry"
++from nthlayer_override_adapter.cli import _init_otel, build_parser, load_app
+ 
+ 
+ def _write_minimal_config(tmp_path: Path) -> Path:
+@@ -40,10 +34,7 @@ class TestArgParse:
+ class TestLoadApp:
+     def test_load_app_from_explicit_config(self, tmp_path: Path) -> None:
+         cfg = _write_minimal_config(tmp_path)
+-        # Patched so the test never installs a real global LoggerProvider,
+-        # whatever OTEL_EXPORTER_OTLP_ENDPOINT the environment carries.
+-        with mock.patch(_INIT, return_value=TelemetryStatus.NO_ENDPOINT):
+-            app, config = load_app(str(cfg))
++        app, config = load_app(str(cfg))
+         assert app is not None
+         assert config is not None
+         paths = {r.path for r in app.routes if hasattr(r, "path")}
+@@ -55,60 +46,24 @@ class TestLoadApp:
+             load_app(str(tmp_path / "absent.yaml"))
+ 
+ 
+-class TestInitTelemetry:
+-    @pytest.mark.parametrize("endpoint", ["http://collector:4317", None])
+-    @pytest.mark.parametrize("status", list(TelemetryStatus), ids=lambda s: s.value)
+-    def test_passes_endpoint_and_service_name_and_returns_status(
+-        self, endpoint: str | None, status: TelemetryStatus,
+-    ) -> None:
+-        with mock.patch(_INIT, return_value=status) as init:
+-            assert _init_telemetry(endpoint) is status
+-        init.assert_called_once_with("nthlayer-override-adapter", endpoint=endpoint)
+-        assert cli.TELEMETRY_SERVICE_NAME == "nthlayer-override-adapter"
+-
+-
+-class TestLoadAppUsesTelemetryStatus:
+-    """load_app initialises telemetry from the config and builds the app
+-    with the status it returned (ruling Q7)."""
+-
+-    _BODY = {
+-        "decision_id": "dec-1", "service": "s",
+-        "corrected_action": "approve", "reviewer": "h",
+-    }
+-
+-    def _post(self, app) -> dict:
+-        from nthlayer_common.api_client import APIResult
+-
+-        async def _apply(verdict_id, payload):
+-            return APIResult(ok=True, status_code=200, data={"id": verdict_id},
+-                             error=None, detail=None)
+-
+-        fake_core = mock.MagicMock()
+-        fake_core.apply_override = _apply
+-        app.state.core_client = fake_core
+-        resp = TestClient(app).post("/api/v1/overrides", json=self._BODY)
+-        assert resp.status_code == 201, resp.text
+-        return resp.json()["bindings"]["dec-1"]
+-
+-    def test_config_otel_endpoint_reaches_init_telemetry(self, tmp_path: Path) -> None:
+-        p = tmp_path / "cfg.yaml"
+-        p.write_text(
+-            "adapters: []\ncore:\n  url: http://core:8000\n"
+-            "otel:\n  endpoint: http://collector:4317\n"
+-        )
+-        with mock.patch(_INIT, return_value=TelemetryStatus.NO_ENDPOINT) as init:
+-            _, cfg = load_app(str(p))
+-        assert cfg.otel_endpoint == "http://collector:4317"
+-        init.assert_called_once_with(cli.TELEMETRY_SERVICE_NAME, endpoint="http://collector:4317")
+-
+-    @pytest.mark.parametrize(
+-        ("status", "otel"),
+-        [(TelemetryStatus.NO_ENDPOINT, "failed"), (TelemetryStatus.INSTALLED, "ok")],
+-        ids=["no-endpoint", "installed"],
+-    )
+-    def test_app_reports_the_status_init_returned(
+-        self, tmp_path: Path, status: TelemetryStatus, otel: str,
+-    ) -> None:
+-        with mock.patch(_INIT, return_value=status):
+-            app, _ = load_app(str(_write_minimal_config(tmp_path)))
+-        assert self._post(app) == {"otel": otel, "core": "ok"}
++class TestOtelShutdown:
++    def test_atexit_hook_registered_when_endpoint_set(self) -> None:
++        with mock.patch("nthlayer_override_adapter.cli.atexit.register") as mock_register:
++            with mock.patch("nthlayer_override_adapter.cli.OTLPSpanExporter"):
++                with mock.patch("nthlayer_override_adapter.cli.trace.set_tracer_provider"):
++                    _init_otel("http://localhost:4317")
++
++            # Verify atexit.register was called with our shutdown handler.
++            # TracerProvider may also register internal handlers, so check for ours.
++            assert mock_register.called
++            assert mock_register.call_count >= 1
++            # Our shutdown function should be the last registered handler
++            # or at least one of them.
++            calls = mock_register.call_args_list
++            registered_callables = [call[0][0] for call in calls]
++            # Find our _shutdown_otel function (it has "_shutdown_otel" in qualname).
++            shutdown_fns = [
++                fn for fn in registered_callables
++                if callable(fn) and getattr(fn, "__qualname__", "").endswith("_shutdown_otel")
++            ]
++            assert len(shutdown_fns) >= 1, "Expected _shutdown_otel to be registered"
+diff --git a/tests/test_config.py b/tests/test_config.py
+index 6adcaf9..1073eac 100644
+--- a/tests/test_config.py
++++ b/tests/test_config.py
+@@ -19,62 +19,6 @@ class TestLoadMinimal:
+         cfg = load_config(target)
+         assert cfg.privacy.plaintext_reviewer is False
+         assert cfg.privacy.exclude_reason is False
+-        # A1 §4.2 reason is Opt-in on the event (opensrm-1dua, ruling R3).
+-        assert cfg.emit_reason is False
+-
+-    def test_emit_reason_defaults_off_when_constructed_directly(self) -> None:
+-        from nthlayer_override_adapter.config import AdapterConfig, CoreConfig
+-
+-        cfg = AdapterConfig(
+-            adapters=[], privacy=OverridePrivacyConfig(), core=CoreConfig(url="http://core")
+-        )
+-        assert cfg.emit_reason is False
+-
+-    def test_example_config_loads_with_reason_off(self) -> None:
+-        example = Path(__file__).parent.parent / "override-adapter-config.yaml.example"
+-        assert load_config(example).emit_reason is False
+-
+-    @pytest.mark.parametrize(("value", "expected"), [("true", True), ("false", False)])
+-    def test_emit_reason_explicit(self, tmp_path: Path, value: str, expected: bool) -> None:
+-        target = tmp_path / "cfg.yaml"
+-        target.write_text(
+-            "adapters: []\ncore:\n  url: http://core:8000\n"
+-            f"privacy:\n  emit_reason: {value}\n"
+-        )
+-        assert load_config(target).emit_reason is expected
+-
+-    def test_emit_reason_default_when_privacy_present_without_it(self, tmp_path: Path) -> None:
+-        target = tmp_path / "cfg.yaml"
+-        target.write_text(
+-            "adapters: []\ncore:\n  url: http://core:8000\n"
+-            "privacy:\n  plaintext_reviewer: false\n"
+-        )
+-        assert load_config(target).emit_reason is False
+-
+-    @pytest.mark.parametrize("value", ['"false"', "1", "yes please"])
+-    def test_emit_reason_must_be_a_boolean(self, tmp_path: Path, value: str) -> None:
+-        # A quoted "false" would be truthy under bool(); refuse it rather than
+-        # put free text on the event the operator meant to keep off.
+-        target = tmp_path / "cfg.yaml"
+-        target.write_text(
+-            "adapters: []\ncore:\n  url: http://core:8000\n"
+-            f"privacy:\n  emit_reason: {value}\n"
+-        )
+-        with pytest.raises(ConfigError, match=r"privacy\.emit_reason must be"):
+-            load_config(target)
+-
+-    @pytest.mark.parametrize("value", ["true", "false", '"yes"', "null"])
+-    def test_old_emit_reason_on_span_key_is_refused(self, tmp_path: Path, value: str) -> None:
+-        # Renamed in 0.4.0 (ruling Q8). Ignoring the old key would silently
+-        # drop an operator's opt-in, so any value of it is an error that
+-        # names the new key.
+-        target = tmp_path / "cfg.yaml"
+-        target.write_text(
+-            "adapters: []\ncore:\n  url: http://core:8000\n"
+-            f"privacy:\n  emit_reason_on_span: {value}\n"
+-        )
+-        with pytest.raises(ConfigError, match=r"renamed privacy\.emit_reason\b"):
+-            load_config(target)
+ 
+     def test_otel_endpoint_optional(self, tmp_path: Path) -> None:
+         target = tmp_path / "cfg.yaml"
+@@ -283,25 +227,3 @@ class TestBatchMaxSize:
+         )
+         with pytest.raises(ConfigError, match="must be an integer"):
+             load_config(target)
+-
+-
+-class TestOtelEndpointType:
+-    @pytest.mark.parametrize("value", ["4317", "[a, b]", "{host: x}", "true"])
+-    def test_non_string_endpoint_is_a_config_error(self, tmp_path: Path, value: str) -> None:
+-        """A number or list would otherwise crash startup inside init_telemetry
+-        with a traceback instead of the usual config error and exit 2."""
+-        target = tmp_path / "cfg.yaml"
+-        target.write_text(
+-            f"adapters: []\ncore:\n  url: http://core:8000\notel:\n  endpoint: {value}\n"
+-        )
+-        with pytest.raises(ConfigError, match="otel.endpoint must be a string"):
+-            load_config(target)
+-
+-    def test_string_and_absent_endpoints_load(self, tmp_path: Path) -> None:
+-        target = tmp_path / "cfg.yaml"
+-        target.write_text(
+-            "adapters: []\ncore:\n  url: http://core:8000\notel:\n  endpoint: http://c:4317\n"
+-        )
+-        assert load_config(target).otel_endpoint == "http://c:4317"
+-        target.write_text("adapters: []\ncore:\n  url: http://core:8000\n")
+-        assert load_config(target).otel_endpoint is None
+diff --git a/tests/test_dependency_declarations.py b/tests/test_dependency_declarations.py
+index f0d3513..0c6bf63 100644
+--- a/tests/test_dependency_declarations.py
++++ b/tests/test_dependency_declarations.py
+@@ -287,11 +287,3 @@ def test_uv_lock_records_this_projects_version():
+         f"uv.lock records {project['name']} {entries[0].get('version')}, pyproject says "
+         f"{project['version']}: run `uv lock` (and check release-please-config.json extra-files)"
+     )
+-
+-
+-def test_common_is_declared_with_the_otel_extra():
+-    """nthlayer-common's ``otel`` extra carries the OTel logs SDK and OTLP
+-    gRPC log exporter, which the adapter no longer declares itself. Without
+-    it the wheel installs, starts, and reports ``otel: failed`` for every
+-    override because init_telemetry finds no SDK (opensrm-a829)."""
+-    assert "otel" in _siblings()["nthlayer-common"].extras
+diff --git a/tests/test_emission.py b/tests/test_emission.py
+index 4711fc9..ba4042f 100644
+--- a/tests/test_emission.py
++++ b/tests/test_emission.py
+@@ -6,9 +6,6 @@ from nthlayer_common.overrides import (
+     OverridePrivacyConfig,
+     hash_reviewer,
+ )
+-from opentelemetry._logs import SeverityNumber
+-from opentelemetry.sdk.trace import TracerProvider
+-from prometheus_client import REGISTRY
+ 
+ from nthlayer_override_adapter.emission import apply_privacy, emit_override
+ 
+@@ -28,155 +25,67 @@ def _make_event(**overrides: object) -> OverrideEvent:
+     return OverrideEvent(**base)
+ 
+ 
+-def _emit(event: OverrideEvent, **kwargs: object) -> bool:
+-    """emit_override as the deployed app calls it: telemetry exporting."""
+-    kwargs.setdefault("exporting", True)
+-    return emit_override(event, **kwargs)
+-
+-
+ class TestEmissionShape:
+-    def test_emits_one_log_record_named_nthlayer_reversal(self, reversals, event_capture) -> None:
++    def test_emits_one_span_named_gen_ai_override(self, span_exporter) -> None:
++        privacy = OverridePrivacyConfig()
++        emit_override(apply_privacy(_make_event(), privacy))
++        spans = span_exporter.get_finished_spans()
++        assert len(spans) == 1
++        assert spans[0].name == "gen_ai.override"
++
++    def test_span_carries_required_attributes(self, span_exporter) -> None:
+         privacy = OverridePrivacyConfig()
+-        _emit(apply_privacy(_make_event(), privacy))
+-        # Exactly one record overall, and it is the reversal.
+-        assert [e.name for e in event_capture.events] == ["nthlayer.reversal"]
+-        assert len(reversals()) == 1
+-
+-    def test_severity_is_info(self, reversals) -> None:
+-        _emit(apply_privacy(_make_event(), OverridePrivacyConfig()))
+-        (event,) = reversals()
+-        assert event.severity_number == SeverityNumber.INFO.value == 9
+-
+-    def test_timestamp_is_the_overrides_own_time(self, reversals) -> None:
+-        # A time clearly not "now", with sub-second precision, so a record
+-        # stamped at emission (or truncated to seconds) cannot match.
+-        when = datetime(2026, 1, 2, 3, 4, 5, 678000, tzinfo=UTC)
+-        _emit(apply_privacy(_make_event(timestamp=when), OverridePrivacyConfig()))
+-        (event,) = reversals()
+-        # 2026-01-02T03:04:05.678Z in unix nanoseconds, computed independently.
+-        assert event.timestamp == 1_767_323_045_678_000_000
+-
+-    def test_record_carries_required_attributes(self, reversals) -> None:
++        emit_override(apply_privacy(_make_event(), privacy))
++        attrs = span_exporter.get_finished_spans()[0].attributes
++        assert attrs["gen_ai.override.decision_id"] == "vrd-001"
++        assert attrs["gen_ai.override.service"] == "fraud-detect"
++        assert attrs["gen_ai.override.corrected_action"] == "escalate"
++
++    def test_span_is_unparented(self, span_exporter) -> None:
+         privacy = OverridePrivacyConfig()
+-        _emit(apply_privacy(_make_event(), privacy))
+-        attrs = reversals()[0].attributes
+-        # OpenSRM Addendum A1 §4.2's attributes.
+-        assert attrs["nthlayer.reversal.decision_id"] == "vrd-001"
+-        assert attrs["nthlayer.reversal.new_value"] == "escalate"
+-        # A1 §4.2: an override is a human's reversal.
+-        assert attrs["nthlayer.reversal.type"] == "human_override"
+-        assert attrs["nthlayer.reversal.actor_type"] == "human"
+-        assert not [k for k in attrs if k.startswith("gen_ai.")]
+-
+-    def test_record_carries_the_service_extension(self, reversals) -> None:
+-        """Not an A1 §4.2 attribute: an implementation extension under the
+-        same prefix (opensrm-1dua ruling R2), which the count connector in
+-        docs/upgrading-0.4.md labels by."""
+-        _emit(apply_privacy(_make_event(), OverridePrivacyConfig()))
+-        assert reversals()[0].attributes["nthlayer.reversal.service"] == "fraud-detect"
+-
+-    def test_record_is_unparented_inside_an_active_span(self, event_capture) -> None:
+-        # A private provider, never set globally: the global TracerProvider
+-        # can be set only once per process, and this test must not change
+-        # what any other test sees. Its tracer still makes the span current
+-        # in the OTel context, which is what the logs SDK stamps a record from.
+-        tracer = TracerProvider().get_tracer("test-unparented")
+-        with tracer.start_as_current_span("request") as span:
+-            assert span.get_span_context().trace_id != 0  # the span is real
+-            _emit(apply_privacy(_make_event(), OverridePrivacyConfig()))
+-        # Private read: CapturedEvent does not expose the record's trace
+-        # context, so read the SDK record through the capture's exporter.
+-        # Exposing trace_id/span_id on CapturedEvent is a nthlayer-common change.
+-        (data,) = event_capture._exporter.get_finished_logs()
+-        assert data.log_record.trace_id == 0
+-        assert data.log_record.span_id == 0
+-
+-
+-class TestReturnValueAndMetric:
+-    """emit_override returns ``exporting`` and counts it (ruling Q7)."""
+-
+-    @staticmethod
+-    def _count(result: str) -> float:
+-        return REGISTRY.get_sample_value(
+-            "override_emission_total", {"result": result},
+-        ) or 0.0
+-
+-    @pytest.mark.parametrize(
+-        ("exporting", "counted", "not_counted"),
+-        [(True, "emitted", "failed"), (False, "failed", "emitted")],
+-        ids=["exporting", "not-exporting"],
+-    )
+-    def test_returns_exporting_and_counts_result(
+-        self, reversals, exporting: bool, counted: str, not_counted: str,
+-    ) -> None:
+-        before = {r: self._count(r) for r in ("emitted", "failed")}
+-        result = emit_override(
+-            apply_privacy(_make_event(), OverridePrivacyConfig()), exporting=exporting,
+-        )
+-        assert result is exporting
+-        assert self._count(counted) == before[counted] + 1
+-        assert self._count(not_counted) == before[not_counted]
+-        # The record is handed to the logs API either way; whether it leaves
+-        # the process is the provider's business, not emit_override's.
+-        assert len(reversals()) == 1
++        emit_override(apply_privacy(_make_event(), privacy))
++        span = span_exporter.get_finished_spans()[0]
++        assert span.parent is None
+ 
+ 
+ class TestPrivacy:
+-    def test_reviewer_hashed_by_default(self, reversals) -> None:
++    def test_reviewer_hashed_by_default(self, span_exporter) -> None:
+         privacy = OverridePrivacyConfig()
+-        _emit(apply_privacy(_make_event(reviewer="analyst-047"), privacy))
+-        attrs = reversals()[0].attributes
+-        assert attrs["nthlayer.reversal.actor"] == hash_reviewer("analyst-047")
++        emit_override(apply_privacy(_make_event(reviewer="analyst-047"), privacy))
++        attrs = span_exporter.get_finished_spans()[0].attributes
++        assert attrs["gen_ai.override.reviewer"] == hash_reviewer("analyst-047")
+ 
+-    def test_reviewer_plaintext_when_opted_in(self, reversals) -> None:
++    def test_reviewer_plaintext_when_opted_in(self, span_exporter) -> None:
+         privacy = OverridePrivacyConfig(plaintext_reviewer=True)
+-        _emit(apply_privacy(_make_event(reviewer="analyst-047"), privacy))
+-        attrs = reversals()[0].attributes
+-        assert attrs["nthlayer.reversal.actor"] == "analyst-047"
++        emit_override(apply_privacy(_make_event(reviewer="analyst-047"), privacy))
++        attrs = span_exporter.get_finished_spans()[0].attributes
++        assert attrs["gen_ai.override.reviewer"] == "analyst-047"
+ 
+-    def test_reviewer_plaintext_when_pre_redacted(self, reversals) -> None:
++    def test_reviewer_plaintext_when_pre_redacted(self, span_exporter) -> None:
+         """pre_redacted=True (preferred per spec § 7) also suppresses hashing."""
+         privacy = OverridePrivacyConfig(pre_redacted=True)
+-        _emit(apply_privacy(_make_event(reviewer="analyst-047"), privacy))
+-        attrs = reversals()[0].attributes
+-        assert attrs["nthlayer.reversal.actor"] == "analyst-047"
+-
+-
+-class TestReasonIsOptIn:
+-    """A1 §4.2 marks reason Opt-in: off the record unless enabled (ruling R3)."""
+-
+-    def test_reason_not_on_record_by_default(self, reversals) -> None:
+-        privacy = OverridePrivacyConfig()
+-        _emit(apply_privacy(_make_event(reason="model regression"), privacy))
+-        attrs = reversals()[0].attributes
+-        assert "nthlayer.reversal.reason" not in attrs
+-
+-    def test_reason_on_record_when_opted_in(self, reversals) -> None:
+-        _emit(
+-            apply_privacy(_make_event(reason="model regression"), OverridePrivacyConfig()),
+-            emit_reason=True,
+-        )
+-        attrs = reversals()[0].attributes
+-        assert attrs["nthlayer.reversal.reason"] == "model regression"
++        emit_override(apply_privacy(_make_event(reviewer="analyst-047"), privacy))
++        attrs = span_exporter.get_finished_spans()[0].attributes
++        assert attrs["gen_ai.override.reviewer"] == "analyst-047"
+ 
+-    def test_exclude_reason_wins_over_opt_in(self, reversals) -> None:
++    def test_reason_dropped_when_excluded(self, span_exporter) -> None:
+         privacy = OverridePrivacyConfig(exclude_reason=True)
+-        _emit(apply_privacy(_make_event(reason="sensitive"), privacy), emit_reason=True)
+-        attrs = reversals()[0].attributes
+-        assert "nthlayer.reversal.reason" not in attrs
++        emit_override(apply_privacy(_make_event(reason="sensitive"), privacy))
++        attrs = span_exporter.get_finished_spans()[0].attributes
++        assert "gen_ai.override.reason" not in attrs
+ 
+ 
+ class TestOptionalFields:
+-    def test_none_fields_dropped(self, reversals) -> None:
++    def test_none_fields_dropped(self, span_exporter) -> None:
+         privacy = OverridePrivacyConfig()
+-        _emit(apply_privacy(
++        emit_override(apply_privacy(
+             _make_event(reason=None, original_action=None, source_system=None),
+             privacy,
+-        ), emit_reason=True)
+-        attrs = reversals()[0].attributes
+-        assert "nthlayer.reversal.reason" not in attrs
+-        assert "nthlayer.reversal.original_action" not in attrs
+-        assert "nthlayer.reversal.source_system" not in attrs
++        ))
++        attrs = span_exporter.get_finished_spans()[0].attributes
++        assert "gen_ai.override.reason" not in attrs
++        assert "gen_ai.override.original_action" not in attrs
++        assert "gen_ai.override.source_system" not in attrs
+ 
+ 
+ class TestBindToCore:
+diff --git a/tests/test_metrics.py b/tests/test_metrics.py
+index ac63dac..df355b9 100644
+--- a/tests/test_metrics.py
++++ b/tests/test_metrics.py
+@@ -1,4 +1,5 @@
+ from nthlayer_override_adapter.metrics import (
++    collector_errors_total,
+     emission_total,
+     emit_duration_seconds,
+     requests_total,
+@@ -17,6 +18,9 @@ class TestCounters:
+     def test_validation_errors_has_reason_label(self) -> None:
+         validation_errors_total.labels(reason="missing_field").inc()
+ 
++    def test_collector_errors_unlabelled(self) -> None:
++        collector_errors_total.inc()
++
+     def test_emit_duration_is_histogram(self) -> None:
+         emit_duration_seconds.observe(0.001)
+ 
+@@ -33,14 +37,3 @@ def test_binding_total_counter_exists_with_bounded_labels():
+     samples = list(binding_total.collect())
+     metric_names = {s.name for s in samples}
+     assert any("nthlayer_override_binding" in n for n in metric_names)
+-
+-
+-def test_collector_errors_total_removed():
+-    """opensrm-a829: emission no longer observes exporter failures, so the
+-    counter that claimed to count them is gone rather than stuck at zero."""
+-    from prometheus_client import REGISTRY
+-
+-    import nthlayer_override_adapter.metrics as metrics_mod
+-
+-    assert not hasattr(metrics_mod, "collector_errors_total")
+-    assert REGISTRY.get_sample_value("override_collector_errors_total") is None
+diff --git a/tests/test_reason_opt_in_routes.py b/tests/test_reason_opt_in_routes.py
+deleted file mode 100644
+index 2a76217..0000000
+--- a/tests/test_reason_opt_in_routes.py
++++ /dev/null
+@@ -1,82 +0,0 @@
+-"""privacy.emit_reason through the real app, per endpoint (opensrm-1dua R3).
+-
+-OpenSRM Addendum A1 §4.2 makes nthlayer.reversal.reason Opt-in. The flag is
+-threaded config -> build_app -> each route -> emit_override, so a dropped
+-kwarg anywhere on that path would leave every unit test green; these drive
+-the endpoints themselves. Core receives the reason whatever the flag says.
+-"""
+-
+-from __future__ import annotations
+-
+-import dataclasses
+-from typing import Any
+-from unittest.mock import MagicMock
+-
+-import pytest
+-from nthlayer_common.api_client import APIResult
+-from nthlayer_common.telemetry import TelemetryStatus
+-from starlette.testclient import TestClient
+-
+-from nthlayer_override_adapter.app import build_app
+-from nthlayer_override_adapter.config import AdapterConfig
+-
+-REASON = "Model regression — escalate to senior analyst"
+-REASON_KEY = "nthlayer.reversal.reason"
+-
+-_ENTRY: dict[str, object] = {
+-    "decision_id": "vrd-001",
+-    "service": "fraud-detect",
+-    "corrected_action": "escalate",
+-    "reviewer": "analyst-047",
+-    "reason": REASON,
+-    "timestamp": "2026-05-15T12:00:00Z",
+-}
+-_JIRA: dict[str, object] = {
+-    "issue": {
+-        "customfield_10042": "vrd-001",
+-        "resolution": {"name": "escalate", "description": REASON},
+-        "assignee": {"emailAddress": "analyst-047@example.com"},
+-        "updated": "2026-05-15T12:00:00Z",
+-    },
+-}
+-# (endpoint, request body)
+-ENDPOINTS = [
+-    ("/webhook/jira", _JIRA),
+-    ("/api/v1/overrides", _ENTRY),
+-    ("/api/v1/overrides/batch", {"overrides": [_ENTRY]}),
+-]
+-
+-
+-def _client(config: AdapterConfig, core_payloads: list[dict[str, Any]]) -> TestClient:
+-    app = build_app(config, telemetry=TelemetryStatus.INSTALLED)
+-    fake_core = MagicMock()
+-
+-    async def _apply(verdict_id: str, payload: dict[str, Any]) -> APIResult:
+-        core_payloads.append(payload)
+-        return APIResult(ok=True, status_code=200, data={"id": verdict_id}, error=None, detail=None)
+-
+-    fake_core.apply_override = _apply
+-    app.state.core_client = fake_core
+-    return TestClient(app)
+-
+-
+-@pytest.mark.parametrize("emit_reason", [False, True], ids=["default-off", "opted-in"])
+-@pytest.mark.parametrize(("path", "body"), ENDPOINTS, ids=[p for p, _ in ENDPOINTS])
+-def test_reason_on_record_only_when_opted_in_and_always_sent_to_core(
+-    adapter_config: AdapterConfig,
+-    reversals,
+-    path: str,
+-    body: dict[str, object],
+-    emit_reason: bool,
+-) -> None:
+-    config = dataclasses.replace(adapter_config, emit_reason=emit_reason)
+-    core_payloads: list[dict[str, Any]] = []
+-
+-    resp = _client(config, core_payloads).post(path, json=body)
+-
+-    assert resp.status_code == 201, resp.text
+-    (event,) = reversals()
+-    assert (REASON_KEY in event.attributes) is emit_reason
+-    if emit_reason:
+-        assert event.attributes[REASON_KEY] == REASON
+-    assert [p.get("reason") for p in core_payloads] == [REASON]
+diff --git a/tests/test_routes_canonical_batch.py b/tests/test_routes_canonical_batch.py
+index e059500..ba5d4bd 100644
+--- a/tests/test_routes_canonical_batch.py
++++ b/tests/test_routes_canonical_batch.py
+@@ -1,6 +1,5 @@
+ import pytest
+ from nthlayer_common.overrides import OverridePrivacyConfig
+-from nthlayer_common.telemetry import TelemetryStatus
+ from starlette.applications import Starlette
+ from starlette.testclient import TestClient
+ 
+@@ -8,11 +7,9 @@ from nthlayer_override_adapter.routes.canonical import register_canonical_routes
+ 
+ 
+ @pytest.fixture
+-def client() -> TestClient:
++def client(span_exporter) -> TestClient:
+     app = Starlette()
+-    register_canonical_routes(
+-        app, privacy=OverridePrivacyConfig(), max_batch_size=1000, exporting=True,
+-    )
++    register_canonical_routes(app, privacy=OverridePrivacyConfig(), max_batch_size=1000)
+     return TestClient(app)
+ 
+ 
+@@ -29,7 +26,7 @@ def _entry(decision_id: str, **overrides: object) -> dict[str, object]:
+ 
+ 
+ class TestBatchHappyPath:
+-    def test_scenario_3_one_hundred_overrides_all_accepted(self, client, reversals) -> None:
++    def test_scenario_3_one_hundred_overrides_all_accepted(self, client, span_exporter) -> None:
+         body = {"overrides": [_entry(f"dec-{i:04d}") for i in range(100)]}
+         resp = client.post("/api/v1/overrides/batch", json=body)
+ 
+@@ -41,11 +38,11 @@ class TestBatchHappyPath:
+         assert data["rejected"] == []
+         assert data["duplicates"] == []
+         assert data["errors"] == []
+-        assert len(reversals()) == 100
++        assert len(span_exporter.get_finished_spans()) == 100
+ 
+ 
+ class TestBatchDuplicates:
+-    def test_scenario_4_last_in_array_wins(self, client, reversals) -> None:
++    def test_scenario_4_last_in_array_wins(self, client, span_exporter) -> None:
+         # dec-002 appears at indices 1, 3, and 5 — last wins (idx 5).
+         body = {
+             "overrides": [
+@@ -64,17 +61,17 @@ class TestBatchDuplicates:
+         assert data["duplicates"] == [
+             {"decision_id": "dec-002", "applied_at_index": 5, "discarded_indices": [1, 3]}
+         ]
+-        # Cardinality: 4 unique accepted decision_ids → 4 records, NOT 6.
+-        events = reversals()
+-        assert len(events) == 4
+-        # The dec-002 record carries the LAST corrected_action ("escalate").
+-        dec_002 = [e for e in events if e.attributes["nthlayer.reversal.decision_id"] == "dec-002"]
++        # Cardinality: 4 unique accepted decision_ids → 4 spans, NOT 6.
++        spans = span_exporter.get_finished_spans()
++        assert len(spans) == 4
++        # The dec-002 span carries the LAST corrected_action ("escalate").
++        dec_002 = [s for s in spans if s.attributes["gen_ai.override.decision_id"] == "dec-002"]
+         assert len(dec_002) == 1
+-        assert dec_002[0].attributes["nthlayer.reversal.new_value"] == "escalate"
++        assert dec_002[0].attributes["gen_ai.override.corrected_action"] == "escalate"
+ 
+ 
+ class TestBatchRejected:
+-    def test_invalid_entry_recorded_other_entries_accepted(self, client, reversals) -> None:
++    def test_invalid_entry_recorded_other_entries_accepted(self, client, span_exporter) -> None:
+         bad = _entry("dec-002")
+         del bad["reviewer"]
+         body = {"overrides": [_entry("dec-001"), bad, _entry("dec-003")]}
+@@ -89,13 +86,11 @@ class TestBatchRejected:
+         assert len(data["rejected"]) == 1
+         assert data["rejected"][0]["index"] == 1
+         assert "reviewer" in data["rejected"][0]["reason"]
+-        assert [e.attributes["nthlayer.reversal.decision_id"] for e in reversals()] == [
+-            "dec-001", "dec-003",
+-        ]
++        assert len(span_exporter.get_finished_spans()) == 2
+ 
+ 
+ class TestCardinalityInvariant:
+-    def test_response_counts_match_emission_cardinality(self, client, reversals) -> None:
++    def test_response_counts_match_emission_cardinality(self, client, span_exporter) -> None:
+         body = {
+             "overrides": [
+                 _entry("dec-a"),                          # 0 — accepted
+@@ -107,12 +102,14 @@ class TestCardinalityInvariant:
+         resp = client.post("/api/v1/overrides/batch", json=body)
+         data = resp.json()
+ 
+-        events = reversals()
+-        emitted_ids = {e.attributes["nthlayer.reversal.decision_id"] for e in events}
++        emitted_ids = {
++            s.attributes["gen_ai.override.decision_id"]
++            for s in span_exporter.get_finished_spans()
++        }
+ 
+         # Response claims about cardinality:
+-        assert set(data["accepted"]) == emitted_ids == {"dec-a", "dec-b", "dec-c"}
+-        assert len(events) == len(data["accepted"])
++        assert set(data["accepted"]) == emitted_ids
++        assert len(span_exporter.get_finished_spans()) == len(data["accepted"])
+ 
+ 
+ class TestBatchMalformed:
+@@ -126,11 +123,9 @@ class TestBatchMalformed:
+ 
+ 
+ class TestBatchSizeCap:
+-    def test_413_above_cap(self, reversals) -> None:
++    def test_413_above_cap(self, span_exporter) -> None:
+         app = Starlette()
+-        register_canonical_routes(
+-            app, privacy=OverridePrivacyConfig(), max_batch_size=3, exporting=True,
+-        )
++        register_canonical_routes(app, privacy=OverridePrivacyConfig(), max_batch_size=3)
+         client = TestClient(app)
+ 
+         # Post 4 valid entries, cap is 3.
+@@ -142,14 +137,12 @@ class TestBatchSizeCap:
+         assert "batch exceeds" in data["detail"]
+         assert "4 entries" in data["detail"]
+         assert "limit 3" in data["detail"]
+-        # No records should be emitted.
+-        assert reversals() == []
++        # No spans should be emitted.
++        assert len(span_exporter.get_finished_spans()) == 0
+ 
+-    def test_status_rejected_when_all_entries_invalid(self, reversals) -> None:
++    def test_status_rejected_when_all_entries_invalid(self, span_exporter) -> None:
+         app = Starlette()
+-        register_canonical_routes(
+-            app, privacy=OverridePrivacyConfig(), max_batch_size=1000, exporting=True,
+-        )
++        register_canonical_routes(app, privacy=OverridePrivacyConfig(), max_batch_size=1000)
+         client = TestClient(app)
+ 
+         # Post 2 entries, each missing 'reviewer' (invalid).
+@@ -175,7 +168,6 @@ class TestBatchSizeCap:
+         data = resp.json()
+         assert data["accepted"] == []
+         assert len(data["rejected"]) == 2
+-        assert reversals() == []
+ 
+ 
+ class TestBatchEmptyOverrides:
+@@ -218,7 +210,6 @@ class TestBatchBindings:
+         # Cardinality invariant: bindings.keys() == set(accepted)
+         assert set(data["bindings"].keys()) == set(data["accepted"])
+         for entry in data["bindings"].values():
+-            assert entry["otel"] == "ok"
+             assert entry["core"] == "ok"
+             assert "reason" not in entry  # core==ok → no reason
+ 
+@@ -272,34 +263,3 @@ class TestBatchBindings:
+         for entry in data["bindings"].values():
+             assert entry["core"] == "failed"
+             assert entry["reason"] == "verdict_not_found"
+-
+-    def test_batch_otel_not_exporting_per_id(self, app_with_fake_core, reversals):
+-        """Telemetry off (ruling Q7): every id says otel failed; core unaffected."""
+-        from starlette.testclient import TestClient
+-        client = TestClient(
+-            app_with_fake_core(fake_status=200, telemetry=TelemetryStatus.NO_ENDPOINT),
+-        )
+-        body = {
+-            "overrides": [
+-                {
+-                    "decision_id": "dec-a", "service": "s",
+-                    "corrected_action": "approve", "reviewer": "h",
+-                },
+-                {
+-                    "decision_id": "dec-b", "service": "s",
+-                    "corrected_action": "approve", "reviewer": "h",
+-                },
+-            ]
+-        }
+-        resp = client.post("/api/v1/overrides/batch", json=body)
+-        assert resp.status_code == 201
+-        data = resp.json()
+-        assert set(data["bindings"].keys()) == {"dec-a", "dec-b"}
+-        for entry in data["bindings"].values():
+-            assert entry["otel"] == "failed"
+-            assert entry["core"] == "ok"
+-            assert "reason" not in entry
+-        # Cardinality holds on log records even when they will not export.
+-        assert {e.attributes["nthlayer.reversal.decision_id"] for e in reversals()} == {
+-            "dec-a", "dec-b",
+-        }
+diff --git a/tests/test_routes_canonical_single.py b/tests/test_routes_canonical_single.py
+index 30827a4..2705d25 100644
+--- a/tests/test_routes_canonical_single.py
++++ b/tests/test_routes_canonical_single.py
+@@ -1,6 +1,7 @@
++from unittest.mock import MagicMock
++
+ import pytest
+ from nthlayer_common.overrides import OverridePrivacyConfig
+-from nthlayer_common.telemetry import TelemetryStatus
+ from starlette.applications import Starlette
+ from starlette.testclient import TestClient
+ 
+@@ -8,11 +9,9 @@ from nthlayer_override_adapter.routes.canonical import register_canonical_routes
+ 
+ 
+ @pytest.fixture
+-def client() -> TestClient:
++def client(span_exporter) -> TestClient:
+     app = Starlette()
+-    register_canonical_routes(
+-        app, privacy=OverridePrivacyConfig(), max_batch_size=1000, exporting=True,
+-    )
++    register_canonical_routes(app, privacy=OverridePrivacyConfig(), max_batch_size=1000)
+     return TestClient(app)
+ 
+ 
+@@ -32,24 +31,20 @@ def _valid_body(**overrides: object) -> dict[str, object]:
+ 
+ 
+ class TestSingleOverride:
+-    def test_happy_path_201(self, client, reversals) -> None:
++    def test_happy_path_201(self, client, span_exporter) -> None:
+         resp = client.post("/api/v1/overrides", json=_valid_body())
+         assert resp.status_code == 201
+         data = resp.json()
+-        # No core_client on app.state → bindings key absent; otel emission
+-        # confirmed by the log record.
++        # No core_client on app.state → bindings key absent; otel emission confirmed by span.
+         assert data["accepted"] == ["vrd-001"]
+         assert data["rejected"] == []
+         assert "bindings" not in data
+-        (event,) = reversals()
+-        assert event.attributes["nthlayer.reversal.decision_id"] == "vrd-001"
++        assert len(span_exporter.get_finished_spans()) == 1
+ 
+-    def test_cardinality_one_response_one_record(self, client, reversals) -> None:
++    def test_cardinality_one_response_one_span(self, client, span_exporter) -> None:
+         client.post("/api/v1/overrides", json=_valid_body(decision_id="dec-a"))
+         client.post("/api/v1/overrides", json=_valid_body(decision_id="dec-b"))
+-        assert [e.attributes["nthlayer.reversal.decision_id"] for e in reversals()] == [
+-            "dec-a", "dec-b",
+-        ]
++        assert len(span_exporter.get_finished_spans()) == 2
+ 
+     def test_missing_required_field_400(self, client) -> None:
+         body = _valid_body()
+@@ -149,15 +144,22 @@ class TestCanonicalSingleBindings:
+         assert data["bindings"]["dec-missing"]["core"] == "failed"
+         assert data["bindings"]["dec-missing"]["reason"] == "verdict_not_found"
+ 
+-    def test_otel_not_exporting_still_reports_to_core(
+-        self, app_with_fake_core, reversals,
++    def test_otel_failure_still_reports_to_core(
++        self, app_with_fake_core, monkeypatch
+     ) -> None:
+-        """Spec § 10 OTel-fails-core-still-runs: when telemetry is not
+-        exporting (no endpoint configured), the response envelope shows
+-        {"otel": "failed", "core": "ok"}. The HTTP 201 is unchanged —
+-        fail-open posture is preserved (ruling Q7).
++        """Spec § 10 OTel-fails-core-still-runs: when the OTel exporter raises,
++        the response envelope must show {"otel": "failed", "core": "ok"}.
++        The HTTP 201 is unchanged — fail-open posture is preserved.
+         """
+-        app = app_with_fake_core(fake_status=200, telemetry=TelemetryStatus.NO_ENDPOINT)
++        import nthlayer_override_adapter.emission as emission_mod
++
++        # Make the tracer's start_as_current_span raise to exercise the
++        # fail-open except block and force emit_override to return False.
++        bad_tracer = MagicMock()
++        bad_tracer.start_as_current_span.side_effect = RuntimeError("exporter_down")
++        monkeypatch.setattr(emission_mod.trace, "get_tracer", lambda _name: bad_tracer)
++
++        app = app_with_fake_core(fake_status=200)
+         client = TestClient(app)
+         body = {
+             "decision_id": "dec-otel-fail",
+@@ -171,4 +173,3 @@ class TestCanonicalSingleBindings:
+         assert data["accepted"] == ["dec-otel-fail"]
+         assert data["bindings"]["dec-otel-fail"]["otel"] == "failed"
+         assert data["bindings"]["dec-otel-fail"]["core"] == "ok"
+-        assert "reason" not in data["bindings"]["dec-otel-fail"]
+diff --git a/tests/test_routes_webhook.py b/tests/test_routes_webhook.py
+index 04adf69..a74ecc4 100644
+--- a/tests/test_routes_webhook.py
++++ b/tests/test_routes_webhook.py
+@@ -1,6 +1,5 @@
+ import pytest
+ from nthlayer_common.overrides import OverridePrivacyConfig
+-from nthlayer_common.telemetry import TelemetryStatus
+ from starlette.applications import Starlette
+ from starlette.testclient import TestClient
+ 
+@@ -25,11 +24,9 @@ def jira_adapter() -> WebhookAdapter:
+ 
+ 
+ @pytest.fixture
+-def client(jira_adapter) -> TestClient:
++def client(span_exporter, jira_adapter) -> TestClient:
+     app = Starlette()
+-    register_webhook_routes(
+-        app, adapters=[jira_adapter], privacy=OverridePrivacyConfig(), exporting=True,
+-    )
++    register_webhook_routes(app, adapters=[jira_adapter], privacy=OverridePrivacyConfig())
+     return TestClient(app)
+ 
+ 
+@@ -47,18 +44,18 @@ JIRA_PAYLOAD: dict[str, object] = {
+ 
+ 
+ class TestJiraWebhook:
+-    def test_jira_shaped_payload_produces_log_record(self, client, reversals) -> None:
++    def test_jira_shaped_payload_produces_span(self, client, span_exporter) -> None:
+         resp = client.post("/webhook/jira", json=JIRA_PAYLOAD)
+         assert resp.status_code == 201
+         body = resp.json()
+         assert body["accepted"] == ["vrd-001"]
+         assert body["rejected"] == []
+-        events = reversals()
+-        assert len(events) == 1
+-        attrs = events[0].attributes
+-        assert attrs["nthlayer.reversal.decision_id"] == "vrd-001"
+-        assert attrs["nthlayer.reversal.service"] == "fraud-detect"
+-        assert attrs["nthlayer.reversal.new_value"] == "escalate"
++        spans = span_exporter.get_finished_spans()
++        assert len(spans) == 1
++        attrs = spans[0].attributes
++        assert attrs["gen_ai.override.decision_id"] == "vrd-001"
++        assert attrs["gen_ai.override.service"] == "fraud-detect"
++        assert attrs["gen_ai.override.corrected_action"] == "escalate"
+ 
+     def test_missing_required_path_400(self, client) -> None:
+         bad = {"issue": {"customfield_10042": "vrd-002"}}  # no reviewer / corrected_action
+@@ -71,11 +68,9 @@ class TestJiraWebhook:
+ 
+ 
+ class TestEmptyAdaptersList:
+-    def test_no_routes_registered(self) -> None:
++    def test_no_routes_registered(self, span_exporter) -> None:
+         app = Starlette()
+-        register_webhook_routes(
+-            app, adapters=[], privacy=OverridePrivacyConfig(), exporting=True,
+-        )
++        register_webhook_routes(app, adapters=[], privacy=OverridePrivacyConfig())
+         client = TestClient(app)
+         resp = client.post("/webhook/jira", json={})
+         assert resp.status_code == 404
+@@ -105,7 +100,6 @@ class TestWebhookBindings:
+         assert "bindings" in data
+         assert len(data["bindings"]) == 1
+         for entry in data["bindings"].values():
+-            assert entry["otel"] == "ok"
+             assert entry["core"] == "ok"
+             assert "reason" not in entry
+ 
+@@ -120,14 +114,3 @@ class TestWebhookBindings:
+         for entry in data["bindings"].values():
+             assert entry["core"] == "failed"
+             assert entry["reason"] == "verdict_not_found"
+-
+-    def test_webhook_otel_not_exporting(self, app_with_fake_core, reversals) -> None:
+-        """Telemetry off (ruling Q7): binding says otel failed; core unaffected."""
+-        client = TestClient(
+-            app_with_fake_core(fake_status=200, telemetry=TelemetryStatus.NO_ENDPOINT),
+-        )
+-        resp = client.post("/webhook/jira", json=self.PAYLOAD)
+-        assert resp.status_code == 201
+-        data = resp.json()
+-        assert data["bindings"] == {"vrd-001": {"otel": "failed", "core": "ok"}}
+-        assert len(reversals()) == 1
+diff --git a/uv.lock b/uv.lock
+index 2c638e3..a78610b 100644
+--- a/uv.lock
++++ b/uv.lock
+@@ -913,7 +913,7 @@ wheels = [
+ 
+ [[package]]
+ name = "nthlayer-common"
+-version = "5.12.0"
++version = "5.5.0"
+ source = { editable = "../nthlayer-common" }
+ dependencies = [
+     { name = "anthropic" },
+@@ -932,12 +932,6 @@ dependencies = [
+     { name = "tenacity" },
+ ]
+ 
+-[package.optional-dependencies]
+-otel = [
+-    { name = "opentelemetry-exporter-otlp-proto-grpc" },
+-    { name = "opentelemetry-sdk" },
+-]
+-
+ [package.metadata]
+ requires-dist = [
+     { name = "anthropic", specifier = ">=0.40" },
+@@ -947,10 +941,7 @@ requires-dist = [
+     { name = "instructor", specifier = ">=1.5" },
+     { name = "jsonschema", marker = "extra == 'dev'", specifier = ">=4.21" },
+     { name = "openai", specifier = ">=1.50" },
+-    { name = "opentelemetry-api", specifier = ">=1.38,<2" },
+-    { name = "opentelemetry-exporter-otlp-proto-grpc", marker = "extra == 'otel'", specifier = ">=1.38,<2" },
+-    { name = "opentelemetry-sdk", marker = "extra == 'dev'", specifier = ">=1.38,<2" },
+-    { name = "opentelemetry-sdk", marker = "extra == 'otel'", specifier = ">=1.38,<2" },
++    { name = "opentelemetry-api", specifier = ">=1.28" },
+     { name = "pagerduty", specifier = ">=6.0.0,<8.0.0" },
+     { name = "prometheus-client", specifier = ">=0.21" },
+     { name = "pydantic", specifier = ">=2.7.0,<3.0.0" },
+@@ -962,15 +953,17 @@ requires-dist = [
+     { name = "structlog", specifier = ">=24.1.0" },
+     { name = "tenacity", specifier = ">=8.2.3,<10.0.0" },
+ ]
+-provides-extras = ["otel", "dev"]
++provides-extras = ["dev"]
+ 
+ [[package]]
+ name = "nthlayer-override-adapter"
+-version = "0.4.1"
++version = "0.2.8"
+ source = { editable = "." }
+ dependencies = [
+-    { name = "nthlayer-common", extra = ["otel"] },
++    { name = "nthlayer-common" },
+     { name = "opentelemetry-api" },
++    { name = "opentelemetry-exporter-otlp" },
++    { name = "opentelemetry-sdk" },
+     { name = "prometheus-client" },
+     { name = "pyyaml" },
+     { name = "starlette" },
+@@ -990,8 +983,10 @@ dev = [
+ [package.metadata]
+ requires-dist = [
+     { name = "httpx", marker = "extra == 'dev'", specifier = ">=0.27" },
+-    { name = "nthlayer-common", extras = ["otel"], editable = "../nthlayer-common" },
++    { name = "nthlayer-common", editable = "../nthlayer-common" },
+     { name = "opentelemetry-api", specifier = ">=1.28" },
++    { name = "opentelemetry-exporter-otlp", specifier = ">=1.28" },
++    { name = "opentelemetry-sdk", specifier = ">=1.28" },
+     { name = "packaging", marker = "extra == 'dev'", specifier = ">=22" },
+     { name = "prometheus-client", specifier = ">=0.21" },
+     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.2" },
+@@ -1036,6 +1031,19 @@ wheels = [
+     { url = "https://files.pythonhosted.org/packages/29/59/3e7118ed140f76b0982ba4321bdaed1997a0473f9720de2d10788a577033/opentelemetry_api-1.41.1-py3-none-any.whl", hash = "sha256:a22df900e75c76dc08440710e51f52f1aa6b451b429298896023e60db5b3139f", size = 69007, upload-time = "2026-04-24T13:15:15.662Z" },
+ ]
+ 
++[[package]]
++name = "opentelemetry-exporter-otlp"
++version = "1.41.1"
++source = { registry = "https://pypi.org/simple" }
++dependencies = [
++    { name = "opentelemetry-exporter-otlp-proto-grpc" },
++    { name = "opentelemetry-exporter-otlp-proto-http" },
++]
++sdist = { url = "https://files.pythonhosted.org/packages/42/84/d55baf8e1a222f40282956083e67de9fa92d5fa451108df4839505fa2a24/opentelemetry_exporter_otlp-1.41.1.tar.gz", hash = "sha256:299a2f0541ca175df186f5ac58fd5db177ba1e9b72b0826049062f750d55b47f", size = 6152, upload-time = "2026-04-24T13:15:40.006Z" }
++wheels = [
++    { url = "https://files.pythonhosted.org/packages/6d/d5/ea4aa7dfc458fd537bd9519ea0e7226eef2a6212dfe952694984167daaba/opentelemetry_exporter_otlp-1.41.1-py3-none-any.whl", hash = "sha256:db276c5a80c02b063994e80950d00ca1bfddcf6520f608335b7dc2db0c0eb9c6", size = 7025, upload-time = "2026-04-24T13:15:17.839Z" },
++]
++
+ [[package]]
+ name = "opentelemetry-exporter-otlp-proto-common"
+ version = "1.41.1"
+@@ -1066,6 +1074,24 @@ wheels = [
+     { url = "https://files.pythonhosted.org/packages/ac/f2/c54f33c92443d087703e57e52e55f22f111373a5c4c4aa349ea60efe512e/opentelemetry_exporter_otlp_proto_grpc-1.41.1-py3-none-any.whl", hash = "sha256:537926dcef951136992479af1d9cd88f25e33d56c530e9f020ed57774dca2f94", size = 20297, upload-time = "2026-04-24T13:15:20.212Z" },
+ ]
+ 
++[[package]]
++name = "opentelemetry-exporter-otlp-proto-http"
++version = "1.41.1"
++source = { registry = "https://pypi.org/simple" }
++dependencies = [
++    { name = "googleapis-common-protos" },
++    { name = "opentelemetry-api" },
++    { name = "opentelemetry-exporter-otlp-proto-common" },
++    { name = "opentelemetry-proto" },
++    { name = "opentelemetry-sdk" },
++    { name = "requests" },
++    { name = "typing-extensions" },
++]
++sdist = { url = "https://files.pythonhosted.org/packages/33/5b/9d3c7f70cca10136ba82a81e738dee626c8e7fc61c6887ea9a58bf34c606/opentelemetry_exporter_otlp_proto_http-1.41.1.tar.gz", hash = "sha256:4747a9604c8550ab38c6fd6180e2fcb80de3267060bef2c306bad3cb443302bc", size = 24139, upload-time = "2026-04-24T13:15:42.977Z" }
++wheels = [
++    { url = "https://files.pythonhosted.org/packages/ba/4d/ef07ff2fc630849f2080ae0ae73a61f67257905b7ac79066640bfa0c5739/opentelemetry_exporter_otlp_proto_http-1.41.1-py3-none-any.whl", hash = "sha256:1a21e8f49c7a946d935551e90947d6c3eb39236723c6624401da0f33d68edcb4", size = 22673, upload-time = "2026-04-24T13:15:21.313Z" },
++]
++
+ [[package]]
+ name = "opentelemetry-proto"
+ version = "1.41.1"

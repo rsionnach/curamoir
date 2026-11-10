@@ -1,0 +1,1284 @@
+diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
+index 77674df..c0c492a 100644
+--- a/.github/workflows/ci.yml
++++ b/.github/workflows/ci.yml
+@@ -77,3 +77,11 @@ jobs:
+       # timestamp, so the script's own normalisation is exercised only here.
+       - name: r5-baseline tests (Python 3.9, as the shim runs)
+         run: uv run --no-project --python 3.9 --with pytest pytest -q test/test_r5_baseline.py
++
++      # r5_corpus's tests (opensrm-6kqs.2): synthetic git repos, archive
++      # records and private-archive files built in tmp_path; no network. On
++      # 3.9 too, since it imports r5_baseline and runs under the same shim.
++      - name: r5-corpus tests
++        run: uv run --no-project --with pytest pytest -q test/test_r5_corpus.py
++      - name: r5-corpus tests (Python 3.9, as the shim runs)
++        run: uv run --no-project --python 3.9 --with pytest pytest -q test/test_r5_corpus.py
+diff --git a/CLAUDE.md b/CLAUDE.md
+index 22c2d92..717f1c6 100644
+--- a/CLAUDE.md
++++ b/CLAUDE.md
+@@ -168,6 +168,16 @@ examples, generator-specific scripts.
+     Python and on 3.9 (as the shim runs), over synthetic fixtures, one per
+     archive pattern (opensrm-6kqs.8). The
+     workspace root's `.claude/bin/r5-baseline.sh` is a shim.
++  - `r5_corpus.py` — the replay corpus (R5 Gate v2 Phase A.2,
++    opensrm-6kqs.2): one entry per archived gate record and repo
++    (`meta.json`, `brief.md`, `diff.patch`, `recorded.json`), with a
++    per-entry fidelity (recorded / derived / clean / counts_only), and with
++    `--bundles` one synthetic git bundle per repo, published as release
++    assets under the `r5-replay-corpus-v1` tag, never committed. Reads
++    reviewer reports and their extractions from the private archive
++    `.claude/r5-handbacks/`; only findings and briefs leave it. Standard
++    library and git only. Tests: `test/test_r5_corpus.py`, on the runner's
++    Python and on 3.9.
+   - `meta-resolve-check.sh` — fails when `pip install nthlayer` would
+     hold a tier below its newest in-range release, or a tier's newest
+     release is outside its range [opensrm-z1kq].
+@@ -178,7 +188,8 @@ examples, generator-specific scripts.
+   - `ci.yml` — `bash -n` across `demo/`, `test/` and `scripts/` *.sh
+     (opensrm-0buj); `ruff check` over the same three directories
+     (opensrm-u5dw.1); the `test_eco_doctor.sh` regression suite
+-    (opensrm-8hn3); and `test/test_r5_baseline.py` (opensrm-6kqs.1).
++    (opensrm-8hn3); `test/test_r5_baseline.py` (opensrm-6kqs.1); and
++    `test/test_r5_corpus.py` (opensrm-6kqs.2).
+   - `meta-resolve.yml` — `scripts/meta-resolve-check.sh`, nightly and on
+     PRs (opensrm-z1kq).
+   - `error-budget-seam.yml` — `test/test_error_budget_seam.py` against
+diff --git a/scripts/r5_baseline.py b/scripts/r5_baseline.py
+index bf876b8..720ecd7 100644
+--- a/scripts/r5_baseline.py
++++ b/scripts/r5_baseline.py
+@@ -40,10 +40,24 @@ there. The sequential gate runs passes one after another, so the critical path
+ is the sum over every pass, advisory excellence included. ``steps_source`` says
+ which derivation each pass used.
+ 
+-Each ``--json`` record lists the known-data keys it used (``table_hits``). A
+-known-data entry that falls within a record here (same bead, inside its audit
+-trail's time span) but matches none of its events is refused (exit 2), since a
+-mistyped key would miscount silently.
++A known-data entry that falls within a record here (same bead, inside its
++audit trail's time span) but matches none of its events is refused (exit 2),
++since a mistyped key would miscount silently.
++
++``--json`` prints one object, ``schema_version`` 1 (JSON_SCHEMA_VERSION), read
++by the replay corpus (scripts/r5_corpus.py, opensrm-6kqs.2):
++
++- ``records``: one row per archive, by file name, each with ``counted`` (false
++  for a dry run or a gate with no lens reviewed: listed, never totalled),
++  ``table_hits`` (the BLOCKED_DISPATCHES and PASSLESS_EVENTS keys it used) and
++  ``ts_span`` (its audit trail's first and last timestamps, as ISO 8601 in UTC,
++  ``+00:00``; null with no timestamped event).
++- ``beads``: per bead, its counted records and ``sequential_steps``. A bead
++  gated at several checkpoints, or in several repos one gate at a time, has
++  one record each, run one after another, so its steps are their sum.
++- ``totals``: per lens over the counted records, as the table.
++- ``summary``: the table's data (report()): header counts, schema versions by
++  value, table rows and per-gate step statistics.
+ 
+ Like ``eco_doctor.py`` this depends on nothing in the ecosystem: the standard
+ library only.
+@@ -51,9 +65,10 @@ library only.
+ Usage:
+     python3 scripts/r5_baseline.py [--archive-dir DIR] [--json | --markdown]
+ 
+-Exit codes: 0 report printed · 2 usage error, no countable records, a record it
+-cannot count without guessing, or a known-data entry that matches nothing. One such record fails the whole report: a
+-baseline quietly missing a gate would look as plausible as a correct one.
++Exit codes: 0 report printed · 2 any one of these: a usage error, no countable
++record, a record it cannot count without guessing, or a known-data entry that
++matches nothing. One fails the whole report: a baseline quietly missing a gate
++would look as plausible as a correct one.
+ """
+ 
+ from __future__ import annotations
+@@ -66,6 +81,9 @@ import sys
+ from collections import Counter
+ from pathlib import Path
+ 
++# The --json contract version; raised when a field changes meaning or goes.
++JSON_SCHEMA_VERSION = 1
++
+ SEVERITIES = ("critical", "important", "minor")
+ # Blocking lenses in roster order, then the advisory one. A lens a record names
+ # that is not here (none today) sorts after these, by name.
+@@ -178,7 +196,11 @@ def _scan_events(record: dict) -> dict:
+                 scan["table_hits"].append(key)
+         if lens is None:
+             if kind in COUNTING_EVENTS:
+-                raise RecordError(f"{kind} at {event.get('ts')} has no pass")
++                raise RecordError(
++                    f"{kind} at {event.get('ts')} has no pass: if its pass is known,"
++                    " add it to PASSLESS_EVENTS in scripts/r5_baseline.py, keyed"
++                    " (bead, event, ts)"
++                )
+             continue
+         if lens not in scan["seen"]:
+             scan["seen"].append(lens)
+@@ -263,7 +285,10 @@ def analyse_record(record: dict) -> dict:
+     if not isinstance(record, dict):
+         raise RecordError("not a JSON object")
+     if "rounds" in record:
+-        raise RecordError("has rounds[] (round record): not yet read by this script")
++        raise RecordError(
++            "has rounds[] (round record): not yet read by this script; teach"
++            " analyse_record the Phase A.4 shape (opensrm-6kqs.4) first"
++        )
+     if "audit_trail" not in record and "completed_passes" not in record:
+         raise RecordError("has neither audit_trail nor completed_passes")
+     for key in ("audit_trail", "completed_passes"):
+@@ -360,7 +385,7 @@ def load_records(archive_dir: Path) -> list[tuple[str, dict]]:
+         try:
+             with path.open(encoding="utf-8") as handle:
+                 out.append((path.name, json.load(handle)))
+-        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
++        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+             raise RecordError(f"{path.name}: unreadable ({exc})") from exc
+     return out
+ 
+@@ -436,8 +461,7 @@ def report(all_rows: list[dict]) -> dict:
+     return {
+         "records": len(rows),
+         "beads": len({r["bead"] for r in rows}),
+-        "v1": sum(r["version"] == 1 for r in rows),
+-        "v2": sum(r["version"] != 1 for r in rows),
++        "versions": schema_versions(rows),
+         "excluded_dry_runs": sum(r["dry_run"] for r in all_rows),
+         "excluded_unreviewed": sum(not r["dry_run"] and not r["lenses"] for r in all_rows),
+         "table": table,
+@@ -445,11 +469,45 @@ def report(all_rows: list[dict]) -> dict:
+     }
+ 
+ 
++def schema_versions(rows: list[dict]) -> dict[str, int]:
++    """Records per schema version, by value, in version order. Keys are strings
++    so the mapping survives JSON unchanged."""
++    counts = Counter(str(r["version"]) for r in rows)
++    return {v: counts[v] for v in sorted(counts, key=lambda v: (len(v), v))}
++
++
++def bead_steps(rows: list[dict]) -> dict[str, dict]:
++    """Each bead's counted records and their summed sequential steps: a bead
++    gated at several checkpoints, or repo by repo, ran those gates in turn."""
++    out: dict[str, dict] = {}
++    for row in baseline_rows(rows):
++        bead = out.setdefault(row["bead"], {"records": [], "sequential_steps": 0})
++        bead["records"].append(row.get("file"))
++        bead["sequential_steps"] += row["sequential_steps"]
++    return dict(sorted(out.items()))
++
++
++def json_report(all_rows: list[dict]) -> dict:
++    """The --json object (JSON_SCHEMA_VERSION; see the module docstring)."""
++    counted = {id(r) for r in baseline_rows(all_rows)}
++    return {
++        "schema_version": JSON_SCHEMA_VERSION,
++        "records": [dict(r, counted=id(r) in counted) for r in all_rows],
++        "beads": bead_steps(all_rows),
++        "totals": totals(baseline_rows(all_rows)),
++        "summary": report(all_rows),
++    }
++
++
+ def render_markdown(all_rows: list[dict]) -> str:
+     r = report(all_rows)
++    # "20 schema v1, 66 v2", as the gate description publishes it.
++    versions = ", ".join(
++        f"{n} {'schema ' if i == 0 else ''}v{v}" for i, (v, n) in enumerate(r["versions"].items())
++    )
+     lines = [
+         f"{r['records']} archived gate records, {r['beads']} beads"
+-        f" ({r['v1']} schema v1, {r['v2']} v2);"
++        f" ({versions});"
+         f" excluded: {r['excluded_dry_runs']} dry run(s),"
+         f" {r['excluded_unreviewed']} with no lens reviewed.",
+         "",
+@@ -494,15 +552,17 @@ def main(argv: list[str] | None = None) -> int:
+             return 2
+     unmatched = unmatched_table_entries(rows)
+     for key in unmatched:
++        table = "BLOCKED_DISPATCHES" if key in BLOCKED_DISPATCHES else "PASSLESS_EVENTS"
+         print(f"r5-baseline: known-data entry {key} matches no event in its bead's"
+-              " record: a mistyped key would miscount silently", file=sys.stderr)
++              f" record: correct it in {table} in scripts/r5_baseline.py (a mistyped"
++              " key would miscount silently)", file=sys.stderr)
+     if unmatched:
+         return 2
+     if not baseline_rows(rows):
+         print(f"r5-baseline: no live, reviewed gate in {args.archive_dir}", file=sys.stderr)
+         return 2
+     if args.json:
+-        json.dump({"records": rows, "totals": totals(baseline_rows(rows))}, sys.stdout, indent=1)
++        json.dump(json_report(rows), sys.stdout, indent=1)
+         print()
+     else:
+         print(render_markdown(rows))
+diff --git a/scripts/r5_corpus.py b/scripts/r5_corpus.py
+new file mode 100644
+index 0000000..23d9041
+--- /dev/null
++++ b/scripts/r5_corpus.py
+@@ -0,0 +1,605 @@
++#!/usr/bin/env python3
++"""The replay corpus of the sequential R5 gate, built from its archived records.
++
++R5 Gate v2 Phase A.2 (opensrm-6kqs.2; nthlayer/docs/superpowers/specs/
++2026-11-03-r5-gate-v2-nthlayer-spec.md section 3 item 2, section 6). cúramóir's
++batched gate is replayed against this corpus to show it catches what the
++sequential gate caught.
++
++One entry per archived gate record and repo (rulings on opensrm-6kqs.2,
++2026-11-09): ``<out>/opensrm-<stem>/``, or ``opensrm-<stem>--<repo>/`` when the
++record gated several repos. Each holds the light files:
++
++- ``meta.json``: bead, record, repo, base and head (full SHAs) and their trees,
++  the roster, ``sequential_steps`` (r5_baseline), ``escape``, ``fidelity``,
++  ``brief_source``, per-lens severity counts per iteration, and the synthetic
++  bundle commits that carry base's and head's trees.
++- ``brief.md``: what the reviewers were given, by source (BRIEF_SOURCES).
++- ``diff.patch``: ``git diff base head``.
++- ``recorded.json``: the gate's rounds per lens, with findings in the section 6
++  schema where they are known, and the escaped finding for the two escapes.
++
++The heavy part, one git bundle per repo, is written to ``--bundles``: each
++entry's base and head trees as two synthetic commits (tree SHAs exact, commit
++SHAs synthetic and deterministic), published as release assets under
++BUNDLE_TAG, never in a plugin repo. meta.json carries the asset's name, URL
++and sha256.
++
++Fidelity, per entry (FIDELITIES), never an exclusion:
++
++- ``recorded``: the reviewer's own findings, extracted from its report (the
++  private archive below) and accepted only if every blocking iteration's
++  extraction passes check_extraction and its CRITICAL and IMPORTANT counts
++  equal the archive's.
++- ``derived``: path and range from the lens's fix-commit hunks, claim from
++  its severity bullet, one-to-one only.
++- ``clean``: no CRITICAL or IMPORTANT finding in any blocking lens.
++- ``counts_only``: counts, lens order, iterations and steps; nothing finer.
++  An entry split from a multi-repo record is counts_only (or clean): a finding
++  cannot be given to one of its repos without guessing.
++
++Inputs: the archives (``--archive-dir``, the workspace's ``.claude/``), the
++member repos (``--workspace``), and the private archive (``--private-dir``,
++``.claude/r5-handbacks/``): reviewer reports, their extractions and briefs,
++taken from session transcripts. Only findings and briefs leave it; the
++conversation around them never does. Without it every entry is derived, clean
++or counts_only.
++
++Standard library only (and git), like r5_baseline.py, which it imports.
++
++Usage:
++    python3 scripts/r5_corpus.py --out DIR [--bundles DIR] [--archive-dir DIR]
++        [--workspace DIR] [--private-dir DIR] [--no-bd]
++
++Exit codes: 0 corpus written · 2 any one of these: a usage error, a record
++r5_baseline refuses, or a known-escape entry that matches no record.
++"""
++
++from __future__ import annotations
++
++import argparse
++import difflib
++import hashlib
++import json
++import os
++import re
++import shutil
++import subprocess
++import sys
++import tempfile
++from collections import Counter
++from pathlib import Path
++
++sys.path.insert(0, str(Path(__file__).resolve().parent))
++import r5_baseline  # noqa: E402  (a sibling script, not a package)
++
++SCHEMA_VERSION = 1
++FIDELITIES = ("recorded", "derived", "clean", "counts_only")
++BRIEF_SOURCES = ("reviewer_brief", "bead_description", "repo_plan", "none")
++BLOCKING = ("correctness", "clarity", "edge-cases", "provenance")
++BUNDLE_TAG = "r5-replay-corpus-v1"
++BUNDLE_URL = "https://github.com/rsionnach/nthlayer/releases/download/{tag}/{name}"
++
++# Synthetic commits are fixed in identity and time, so the same trees give the
++# same commit SHAs on every run.
++SYNTHETIC_ENV = {
++    "GIT_AUTHOR_NAME": "r5-corpus", "GIT_AUTHOR_EMAIL": "r5-corpus@invalid",
++    "GIT_COMMITTER_NAME": "r5-corpus", "GIT_COMMITTER_EMAIL": "r5-corpus@invalid",
++    "GIT_AUTHOR_DATE": "2000-01-01T00:00:00+0000", "GIT_COMMITTER_DATE": "2000-01-01T00:00:00+0000",
++}
++
++# The two beads whose gates missed a finding found later (spec section 6). The
++# missed finding is known data, keyed (bead, repo), its text taken from
++# docs/r5-gate.md and its location from the gated tree named here. A key that
++# matches no entry is refused (exit 2), since a mistyped one would drop an
++# escape silently.
++KNOWN_ESCAPES = {
++    ("opensrm-oh27", "nthlayer-workers"): {
++        "lens": "provenance", "severity": "CRITICAL",
++        "path": "src/nthlayer_workers/learn/retrospective.py", "start_line": 321, "end_line": 326,
++        "at_commit": "6605897",
++        "claim": "The predicate tests spec.slos as a list, but v1 writes a mapping and v2 has no"
++                 " such key, so the branch never fires for a real manifest; every fixture uses"
++                 " the same unreal shape.",
++    },
++    ("opensrm-ih0v", "nthlayer-common"): {
++        "lens": "provenance", "severity": "CRITICAL",
++        "path": "tests/test_manifest_v2_archetypes.py", "start_line": 50, "end_line": 53,
++        "at_commit": "28d7add",
++        "claim": "The module-level skipif skips the whole module when the layout-relative spec"
++                 " path misses, so under one worktree layout the suite stays green while it"
++                 " tests nothing.",
++    },
++}
++
++DEFAULT_WORKSPACE = Path(__file__).resolve().parents[2]
++SEVERITY_WORDS = ("CRITICAL", "IMPORTANT", "MINOR")
++
++
++class CorpusError(ValueError):
++    """An input this script cannot turn into a corpus entry without guessing."""
++
++
++def git(repo: Path, *args: str, env: dict | None = None, check: bool = True) -> str:
++    result = subprocess.run(
++        ["git", "-C", str(repo), *args], capture_output=True, text=True,
++        env={**os.environ, **(env or {})},
++    )
++    if check and result.returncode != 0:
++        raise CorpusError(f"git {' '.join(args)} in {repo}: {result.stderr.strip()}")
++    return result.stdout if result.returncode == 0 else ""
++
++
++def resolve(repo: Path, rev: str) -> str | None:
++    """A full commit SHA, or None if the repo does not hold it (a squash-merged
++    branch's commits can be garbage-collected)."""
++    out = git(repo, "rev-parse", "--verify", "--quiet", f"{rev}^{{commit}}", check=False)
++    return out.strip() or None
++
++
++# --- the section 6 finding --------------------------------------------------
++
++_LINE_REFS = re.compile(r"(?::~?\d+(?:\s*[-–]\s*\d+)?|\blines?\s+~?\d+(?:\s*[-–]\s*\d+)?|\bL\d+)", re.I)
++_SHA = re.compile(r"\b(?=[0-9a-f]*\d)(?=[0-9a-f]*[a-f])[0-9a-f]{7,40}\b")
++
++
++def normalise_claim(claim: str) -> str:
++    """Section 6: lower-cased, whitespace-collapsed, line numbers and SHAs removed."""
++    text = _SHA.sub("", _LINE_REFS.sub("", claim.lower()))
++    return " ".join(text.split())
++
++
++def fingerprint(lens: str, path: str | None, claim: str) -> str:
++    raw = f"{lens}|{path or ''}|{normalise_claim(claim)}"
++    return hashlib.sha256(raw.encode()).hexdigest()[:16]
++
++
++def schema_lens(lens: str) -> str:
++    return lens.replace("-", "_")
++
++
++def finding(lens: str, severity: str, path: str | None, start: int | None, end: int | None,
++            claim: str, **provenance: object) -> dict:
++    """One finding in the section 6 schema, plus where it came from. Every
++    archived finding is ``asserted``: no evidence was recorded with it."""
++    return {
++        "lens": schema_lens(lens), "severity": severity, "path": path,
++        "start_line": start, "end_line": end if end is not None else start,
++        "claim": claim, "evidence": None, "fix": None,
++        "fingerprint": fingerprint(schema_lens(lens), path, claim),
++        "verification_level": "asserted", "resolves": None, "regression": False, "status": None,
++        **provenance,
++    }
++
++
++# --- accepting a model extraction (ruling 3) ---------------------------------
++
++_MARKUP = str.maketrans("", "", "*`\"'“”‘’")
++_REPORT_REFS = re.compile(r"(?::~?|(?<=\d)/|\(~?|\bL|\blines?\s+~?)(\d+)(?:\s*[-–]\s*L?(\d+))?", re.I)
++
++
++def _norm_text(text: str) -> str:
++    return " ".join(text.translate(_MARKUP).lower().split())
++
++
++def report_line_refs(report: str) -> set[int]:
++    """Every number the report writes as a line reference."""
++    refs: set[int] = set()
++    for first, last in _REPORT_REFS.findall(report):
++        refs.add(int(first))
++        if last:
++            refs.add(int(last))
++    return refs
++
++
++def check_extraction(report: str, findings: list) -> list[str]:
++    """Why an extraction is not the report's own record, or [] if it is.
++
++    The claim is a near-verbatim quote (at least 90% of it one contiguous span
++    of the report, markup and quote marks aside); the path appears in the
++    report; a line is one the report gives as a reference, and only with a
++    path; the severity is the report's own word."""
++    if not isinstance(findings, list):
++        return ["not a list"]
++    errors, refs, text = [], report_line_refs(report), _norm_text(report)
++    for i, f in enumerate(findings):
++        if not isinstance(f, dict):
++            errors.append(f"{i}: not an object")
++            continue
++        sev, claim, path = f.get("severity"), f.get("claim") or "", f.get("path")
++        if sev not in SEVERITY_WORDS or not re.search(rf"\b{sev}\b", report, re.I):
++            errors.append(f"{i}: severity {sev!r} is not the report's word")
++        quote = _norm_text(claim)
++        match = difflib.SequenceMatcher(None, text, quote, autojunk=False).find_longest_match(
++            0, len(text), 0, len(quote))
++        if not quote or match.size < 0.9 * len(quote):
++            errors.append(f"{i}: claim is not a near-verbatim quote")
++        if path is not None and (not isinstance(path, str) or path not in report):
++            errors.append(f"{i}: path {path!r} is not in the report")
++        for key in ("start_line", "end_line"):
++            value = f.get(key)
++            if value is not None and (path is None or value not in refs):
++                errors.append(f"{i}: {key}={value!r} is not a line reference the report gives")
++        if isinstance(f.get("start_line"), int) and isinstance(f.get("end_line"), int) \
++                and f["end_line"] < f["start_line"]:
++            errors.append(f"{i}: end_line before start_line")
++    return errors
++
++
++def blocking_counts(findings: list) -> tuple[int, int]:
++    sev = Counter(f.get("severity") for f in findings)
++    return sev["CRITICAL"], sev["IMPORTANT"]
++
++
++# --- the private archive ----------------------------------------------------
++
++class Private:
++    """The reviewer reports, extractions and briefs kept outside every repo."""
++
++    def __init__(self, root: Path | None):
++        self.root = root
++        self.pairings: dict[tuple[str, str, str], dict] = {}
++        self.briefs: dict[str, dict] = {}
++        if root is None or not (root / "index.json").is_file():
++            return
++        index = json.loads((root / "index.json").read_text(encoding="utf-8"))
++        for p in index.get("pairings", []):
++            self.pairings[(p["record"], p["lens"], p["findings_received_ts"])] = p
++        brief_index = root / "briefs" / "index.json"
++        if brief_index.is_file():
++            self.briefs = json.loads(brief_index.read_text(encoding="utf-8"))
++
++    def recorded(self, record: str, lens: str, ts: str, counts: Counter) -> tuple[list, dict] | None:
++        """The accepted extraction for one review, with its provenance, or None."""
++        pairing = self.pairings.get((record, lens, ts))
++        if pairing is None or self.root is None:
++            return None
++        short = pairing["sha256"][:16]
++        report_path = self.root / pairing["file"]
++        extraction = self.root / "extractions" / f"{short}.json"
++        if not report_path.is_file() or not extraction.is_file():
++            return None
++        report = report_path.read_text(encoding="utf-8")
++        if hashlib.sha256(report.encode()).hexdigest() != pairing["sha256"]:
++            raise CorpusError(f"{report_path}: content does not match its index sha256")
++        try:
++            found = json.loads(extraction.read_text(encoding="utf-8"))
++        except json.JSONDecodeError:
++            return None
++        if check_extraction(report, found):
++            return None
++        if blocking_counts(found) != (counts["critical"], counts["important"]):
++            return None
++        return found, {"derived_from": "reviewer_transcript", "extracted_by": "model",
++                       "handback_sha256": pairing["sha256"]}
++
++    def brief(self, stem: str) -> str | None:
++        if self.root is None or stem not in self.briefs:
++            return None
++        path = self.root / "briefs" / f"{stem}.md"
++        return path.read_text(encoding="utf-8") if path.is_file() else None
++
++
++# --- the archived record ----------------------------------------------------
++
++def reviews(record: dict) -> list[dict]:
++    """Every blocking-lens review in dispatch order, with the commit that
++    followed it (the lens's fix for that iteration, if one was made)."""
++    out: list[dict] = []
++    iteration: Counter = Counter()
++    pending: dict | None = None
++    for event in record.get("audit_trail") or []:
++        kind, lens = event.get("event"), event.get("pass")
++        if kind == "findings_received" and lens in BLOCKING:
++            iteration[lens] += 1
++            pending = {"lens": lens, "iteration": iteration[lens], "ts": event.get("ts"),
++                       "counts": r5_baseline._counts(event.get("counts")), "fix_commit": None,
++                       "fix_repo": None}
++            out.append(pending)
++        elif kind == "commit_made" and pending is not None and pending["fix_commit"] is None:
++            if isinstance(event.get("sha"), str):
++                pending["fix_commit"], pending["fix_repo"] = event["sha"], event.get("repo")
++            pending = None
++        elif kind == "pass_started":
++            pending = None  # a commit after the next pass starts is not this fix
++    return out
++
++
++def is_blocking(review: dict) -> bool:
++    return review["counts"]["critical"] + review["counts"]["important"] > 0
++
++
++_BULLET = re.compile(r"^\s*(?:[-*]\s*)?(CRITICAL|IMPORTANT)(?:\s+\d+)?\s*(?:[:—-]|\()\s*(.*)$")
++
++
++def severity_bullets(message: str) -> list[tuple[str, str]]:
++    """Each CRITICAL or IMPORTANT bullet of a commit message with its wrapped
++    continuation lines, up to a blank line or the next bullet."""
++    out: list[tuple[str, list[str]]] = []
++    for line in message.splitlines():
++        m = _BULLET.match(line)
++        if m:
++            out.append((m.group(1), [m.group(2).strip()]))
++        elif not line.strip() or re.match(r"^\s*[-*]\s", line):
++            out.append(("", []))  # a blank line or another bullet ends it
++        elif out:
++            out[-1][1].append(line.strip())
++    return [(sev, " ".join(parts).strip()) for sev, parts in out if sev]
++
++
++def derive_from_commit(repo: Path, review: dict) -> list[dict] | None:
++    """The review's blocking findings from its fix commit, one-to-one, or None.
++
++    One severity bullet per counted CRITICAL and IMPORTANT, each given a path:
++    the changed file its text names, else the only file the commit changed.
++    Its range is that file's changed lines on the new side."""
++    sha = review["fix_commit"]
++    if not sha or resolve(repo, sha) is None:
++        return None
++    bullets = severity_bullets(git(repo, "log", "-1", "--format=%B", sha))
++    want = (review["counts"]["critical"], review["counts"]["important"])
++    got = Counter(sev for sev, _ in bullets)
++    if (got["CRITICAL"], got["IMPORTANT"]) != want:
++        return None
++    changed = [p for p in git(repo, "show", "--format=", "--name-only", sha).split("\n") if p]
++    out = []
++    for sev, text in bullets:
++        named = [p for p in changed if p in text or Path(p).name in text]
++        path = named[0] if len(named) == 1 else (changed[0] if len(changed) == 1 else None)
++        if path is None or not text:
++            return None
++        span = changed_span(repo, sha, path)
++        out.append(finding(review["lens"], sev, path, *(span or (None, None)), text,
++                           derived_from="fix_commit", fix_commit=resolve(repo, sha), bullet=text))
++    return out
++
++
++_HUNK = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@")
++
++
++def changed_span(repo: Path, sha: str, path: str) -> tuple[int, int] | None:
++    """First and last new-side line the commit changed in ``path``."""
++    lines = []
++    for line in git(repo, "show", "--format=", "-U0", sha, "--", path).splitlines():
++        if m := _HUNK.match(line):
++            start, length = int(m.group(1)), int(m.group(2) or 1)
++            if length:
++                lines += [start, start + length - 1]
++    return (min(lines), max(lines)) if lines else None
++
++
++# --- entries ----------------------------------------------------------------
++
++def entry_name(stem: str, repo: str, repos: int) -> str:
++    return f"opensrm-{stem}" + (f"--{repo}" if repos > 1 else "")
++
++
++def build_entry(name: str, stem: str, file: str, record: dict, row: dict, bead_steps: int,
++                repo_name: str, rng: dict, multi: bool, workspace: Path,
++                private: Private, use_bd: bool) -> dict:
++    """The light files of one entry, as data, plus the trees its bundle needs."""
++    repo = workspace / repo_name
++    base, head = (resolve(repo, rng.get("base") or ""), resolve(repo, rng.get("head") or "")) \
++        if repo.is_dir() else (None, None)
++    revs = reviews(record)
++    rounds, fidelity = [], "clean"
++    if any(is_blocking(r) for r in revs):
++        fidelity = "counts_only"
++        if not multi:
++            fidelity = classify(file, revs, private, repo, rounds)
++    if not rounds:
++        rounds = [_round(r, None) for r in revs]
++    bead = record.get("target_bead")
++    escape = KNOWN_ESCAPES.get((bead, repo_name))
++    brief, brief_source = choose_brief(stem, bead, repo, private, use_bd)
++    meta = {
++        "schema_version": SCHEMA_VERSION, "entry": name, "bead": bead, "record": file,
++        "repo": repo_name, "base": base, "head": head,
++        "base_tree": git(repo, "rev-parse", f"{base}^{{tree}}").strip() if base else None,
++        "tree_sha": git(repo, "rev-parse", f"{head}^{{tree}}").strip() if head else None,
++        "unavailable": None if base and head else "base or head is not in the local repo",
++        "roster": {"record_version": record.get("version", 1), "passes": record.get("passes")},
++        "lens_order": row["lens_order"], "sequential_steps": row["sequential_steps"],
++        "bead_sequential_steps": bead_steps, "escape": escape is not None,
++        "fidelity": fidelity, "brief_source": brief_source,
++        "counts": {lens: [dict(r["counts"]) for r in revs if r["lens"] == lens]
++                   for lens in dict.fromkeys(r["lens"] for r in revs)},
++        "bundle": None,
++    }
++    recorded = {
++        "schema_version": SCHEMA_VERSION, "entry": name, "fidelity": fidelity,
++        "lens_order": row["lens_order"],
++        "iterations": {lens: len(v) for lens, v in meta["counts"].items()},
++        "rounds": rounds,
++        "escaped": [finding(escape["lens"], escape["severity"], escape["path"], escape["start_line"],
++                            escape["end_line"], escape["claim"], derived_from="known_escape",
++                            at_commit=escape["at_commit"])] if escape else [],
++    }
++    diff = git(repo, "diff", base, head) if base and head else ""
++    return {"meta": meta, "recorded": recorded, "brief": brief, "diff": diff}
++
++
++def _round(review: dict, findings: list | None) -> dict:
++    return {"lens": schema_lens(review["lens"]), "iteration": review["iteration"],
++            "counts": dict(review["counts"]), "findings": findings}
++
++
++def classify(file: str, revs: list[dict], private: Private, repo: Path, rounds: list) -> str:
++    """recorded, derived or counts_only, filling ``rounds`` for the first two."""
++    recorded = []
++    for r in revs:
++        got = private.recorded(file, r["lens"], r["ts"], r["counts"]) if is_blocking(r) else None
++        if is_blocking(r) and got is None:
++            recorded = None
++            break
++        if got is None:
++            recorded.append(_round(r, None))
++            continue
++        found, prov = got
++        fix = resolve(repo, r["fix_commit"]) if r["fix_commit"] and repo.is_dir() else None
++        recorded.append(_round(r, [
++            finding(r["lens"], f["severity"], f.get("path"), f.get("start_line"), f.get("end_line"),
++                    f["claim"], **prov, fix_commit=fix) for f in found]))
++    if recorded is not None:
++        rounds += recorded
++        return "recorded"
++    derived = []
++    for r in revs:
++        found = derive_from_commit(repo, r) if is_blocking(r) and repo.is_dir() else None
++        if is_blocking(r) and found is None:
++            return "counts_only"
++        derived.append(_round(r, found))
++    rounds += derived
++    return "derived"
++
++
++def choose_brief(stem: str, bead: str | None, repo: Path, private: Private,
++                 use_bd: bool) -> tuple[str, str]:
++    """What the reviewers were given, by BRIEF_SOURCES order."""
++    text = private.brief(stem)
++    if text:
++        return text, "reviewer_brief"
++    if use_bd and bead:
++        desc = bead_description(bead, repo.parent / "opensrm")
++        if desc:
++            return desc, "bead_description"
++    if bead and repo.is_dir():
++        plans = sorted(p for p in (repo / "docs" / "superpowers" / "plans").glob("*.md")
++                       if bead in p.read_text(encoding="utf-8", errors="replace"))
++        if plans:
++            return plans[0].read_text(encoding="utf-8"), "repo_plan"
++    return "", "none"
++
++
++def bead_description(bead: str, beads_repo: Path) -> str | None:
++    if shutil.which("bd") is None or not beads_repo.is_dir():
++        return None
++    result = subprocess.run(["bd", "show", bead, "--json"], cwd=beads_repo,
++                            capture_output=True, text=True)
++    if result.returncode != 0:
++        return None
++    try:
++        data = json.loads(result.stdout)
++    except json.JSONDecodeError:
++        return None
++    item = data[0] if isinstance(data, list) and data else data
++    if not isinstance(item, dict):
++        return None
++    parts = [f"# {item.get('id', bead)}: {item.get('title', '')}", item.get("description") or ""]
++    if item.get("acceptance_criteria"):
++        parts += ["## Acceptance", item["acceptance_criteria"]]
++    return "\n\n".join(p for p in parts if p).strip() + "\n"
++
++
++# --- bundles ----------------------------------------------------------------
++
++def write_bundles(entries: list[dict], workspace: Path, out: Path) -> None:
++    """One bundle per repo: each entry's base and head trees as a synthetic
++    two-commit history under refs/r5/<entry>/{base,head}. Fills each meta's
++    ``bundle``."""
++    out.mkdir(parents=True, exist_ok=True)
++    by_repo: dict[str, list[dict]] = {}
++    for e in entries:
++        if e["meta"]["base_tree"] and e["meta"]["tree_sha"]:
++            by_repo.setdefault(e["meta"]["repo"], []).append(e)
++    for repo_name, group in sorted(by_repo.items()):
++        source = (workspace / repo_name).resolve()
++        objects = git(source, "rev-parse", "--path-format=absolute", "--git-common-dir").strip()
++        with tempfile.TemporaryDirectory() as tmp:
++            scratch = Path(tmp)
++            git(scratch, "init", "-q", "--bare")
++            (scratch / "objects" / "info").mkdir(parents=True, exist_ok=True)
++            (scratch / "objects" / "info" / "alternates").write_text(f"{objects}/objects\n")
++            for e in group:
++                meta = e["meta"]
++                base_commit = git(scratch, "commit-tree", meta["base_tree"], "-m",
++                                  f"{meta['entry']} base {meta['base']}", env=SYNTHETIC_ENV).strip()
++                head_commit = git(scratch, "commit-tree", meta["tree_sha"], "-p", base_commit, "-m",
++                                  f"{meta['entry']} head {meta['head']}", env=SYNTHETIC_ENV).strip()
++                git(scratch, "update-ref", f"refs/r5/{meta['entry']}/base", base_commit)
++                git(scratch, "update-ref", f"refs/r5/{meta['entry']}/head", head_commit)
++                meta["bundle"] = {"asset": f"{repo_name}.bundle", "base_commit": base_commit,
++                                  "head_commit": head_commit}
++            target = out / f"{repo_name}.bundle"
++            git(scratch, "bundle", "create", "-q", str(target.resolve()), "--all")
++        digest = hashlib.sha256(target.read_bytes()).hexdigest()
++        for e in group:
++            e["meta"]["bundle"].update(
++                sha256=digest, url=BUNDLE_URL.format(tag=BUNDLE_TAG, name=f"{repo_name}.bundle"))
++
++
++# --- the corpus -------------------------------------------------------------
++
++def build(archive_dir: Path, workspace: Path, private: Private, use_bd: bool) -> list[dict]:
++    records = r5_baseline.load_records(archive_dir)
++    rows = {name: dict(r5_baseline.analyse_record(data), file=name) for name, data in records}
++    beads = r5_baseline.bead_steps(list(rows.values()))
++    counted = {r["file"] for r in r5_baseline.baseline_rows(list(rows.values()))}
++    entries = []
++    for name, record in records:
++        if name not in counted:
++            continue
++        stem = name.removeprefix("r5-state-").removesuffix("-completed.json")
++        ranges = record.get("diff_range")
++        if not isinstance(ranges, dict) or not ranges:
++            raise CorpusError(f"{name}: no diff_range")
++        bead_total = beads[record.get("target_bead")]["sequential_steps"]
++        for repo_name, rng in ranges.items():
++            entries.append(build_entry(entry_name(stem, repo_name, len(ranges)), stem, name, record,
++                                       rows[name], bead_total, repo_name, rng, len(ranges) > 1,
++                                       workspace, private, use_bd))
++    found = {(e["meta"]["bead"], e["meta"]["repo"]) for e in entries}
++    missing = sorted(set(KNOWN_ESCAPES) - found)
++    if missing:
++        raise CorpusError(f"KNOWN_ESCAPES entries {missing} match no corpus entry")
++    return entries
++
++
++def write_entries(entries: list[dict], out: Path) -> None:
++    for e in entries:
++        target = out / e["meta"]["entry"]
++        target.mkdir(parents=True, exist_ok=True)
++        (target / "meta.json").write_text(json.dumps(e["meta"], indent=1) + "\n")
++        (target / "recorded.json").write_text(json.dumps(e["recorded"], indent=1) + "\n")
++        (target / "brief.md").write_text(e["brief"])
++        (target / "diff.patch").write_text(e["diff"])
++
++
++def summary(entries: list[dict]) -> dict:
++    by_fidelity = Counter(e["meta"]["fidelity"] for e in entries)
++    return {
++        "entries": len(entries),
++        "beads": len({e["meta"]["bead"] for e in entries}),
++        "fidelity": {f: by_fidelity[f] for f in FIDELITIES},
++        "unavailable": sorted(e["meta"]["entry"] for e in entries if e["meta"]["unavailable"]),
++        "reviewer_briefs": sorted(e["meta"]["entry"] for e in entries
++                                  if e["meta"]["brief_source"] == "reviewer_brief"),
++    }
++
++
++def main(argv: list[str] | None = None) -> int:
++    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
++    parser.add_argument("--out", type=Path, required=True)
++    parser.add_argument("--bundles", type=Path)
++    parser.add_argument("--archive-dir", type=Path, default=r5_baseline.DEFAULT_ARCHIVE_DIR)
++    parser.add_argument("--workspace", type=Path, default=DEFAULT_WORKSPACE)
++    parser.add_argument("--private-dir", type=Path)
++    parser.add_argument("--no-bd", action="store_true", help="skip bead descriptions as a brief source")
++    args = parser.parse_args(argv)
++    private_dir = args.private_dir or args.archive_dir / "r5-handbacks"
++    try:
++        entries = build(args.archive_dir, args.workspace,
++                        Private(private_dir if private_dir.is_dir() else None), not args.no_bd)
++        if args.bundles:
++            write_bundles(entries, args.workspace, args.bundles)
++    except (CorpusError, r5_baseline.RecordError) as exc:
++        print(f"r5-corpus: {exc}", file=sys.stderr)
++        return 2
++    write_entries(entries, args.out)
++    json.dump(summary(entries), sys.stdout, indent=1)
++    print()
++    return 0
++
++
++if __name__ == "__main__":
++    sys.exit(main())
+diff --git a/test/test_r5_baseline.py b/test/test_r5_baseline.py
+index 66c3b0d..8bfdcf5 100644
+--- a/test/test_r5_baseline.py
++++ b/test/test_r5_baseline.py
+@@ -147,13 +147,77 @@ def test_an_advisory_event_never_double_counts_a_lens_with_findings_received():
+     assert lens["reviews"] == 1
+ 
+ 
+-def test_json_mode_reports_every_record(tmp_path, capsys):
++def _json_out(capsys) -> dict:
+     assert r5_baseline.main(["--archive-dir", str(FIXTURES), "--json"]) == 0
+-    out = json.loads(capsys.readouterr().out)
++    return json.loads(capsys.readouterr().out)
++
++
++def test_json_mode_reports_every_record(capsys):
++    out = _json_out(capsys)
++    assert out["schema_version"] == 1
+     assert len(out["records"]) == 13
+     assert "fx-dry-run-with-other-bucket" not in {r["bead"] for r in r5_baseline.baseline_rows(out["records"])}
+ 
+ 
++def test_json_marks_the_records_the_totals_leave_out(capsys):
++    # The two excluded fixtures (a dry run; a gate abandoned before any
++    # review) are listed but not counted; the other eleven are.
++    out = _json_out(capsys)
++    uncounted = sorted(r["file"] for r in out["records"] if not r["counted"])
++    assert uncounted == [
++        "r5-state-fx-abandoned-unreviewed-completed.json",
++        "r5-state-fx-dry-run-with-other-bucket-completed.json",
++    ]
++    assert sum(r["counted"] for r in out["records"]) == 11
++
++
++def test_a_bead_with_two_records_sums_their_steps(capsys):
++    # fx-checkpointed-bead is gated twice. By hand from the fixtures:
++    #   fx-passless-fix-events: correctness 3 reviews + 2 fixes = 5; clarity
++    #   2 + 1 = 3; edge-cases 3 + 3 (fix_dispatched) = 6; provenance 2 + 1 = 3;
++    #   excellence 1; scoped(correctness+edge) 1 + 1 = 2; scoped re-check 1.
++    #   Total 21.
++    #   fx-re-run-passes: 19 (test_step_stats_use_a_true_median).
++    out = _json_out(capsys)
++    bead = out["beads"]["fx-checkpointed-bead"]
++    assert sorted(bead["records"]) == [
++        "r5-state-fx-passless-fix-events-completed.json",
++        "r5-state-fx-re-run-passes-completed.json",
++    ]
++    assert bead["sequential_steps"] == 40
++    # Uncounted records give their bead no entry.
++    assert "fx-dry-run-with-other-bucket" not in out["beads"]
++    assert "fx-abandoned-unreviewed" not in out["beads"]
++    assert len(out["beads"]) == 10
++
++
++def test_json_carries_the_table_summary(capsys):
++    out = _json_out(capsys)
++    rows = [_row(p.name.removeprefix("r5-state-").removesuffix("-completed.json"))
++            for p in sorted(FIXTURES.glob("*.json"))]
++    assert out["summary"] == json.loads(json.dumps(r5_baseline.report(rows)))
++
++
++def test_schema_versions_are_counted_by_value():
++    # Counted fixtures: 2 of version 1 (the other two v1 files are the
++    # excluded ones), 9 of version 2; read off the files' "version" fields.
++    rows = [_row(p.name.removeprefix("r5-state-").removesuffix("-completed.json"))
++            for p in sorted(FIXTURES.glob("*.json"))]
++    assert r5_baseline.report(rows)["versions"] == {"1": 2, "2": 9}
++    # A third version is its own bucket, not folded into v2.
++    rows[0] = dict(rows[0], version=3)
++    assert r5_baseline.schema_versions(rows)["3"] == 1
++
++
++def test_an_archive_that_cannot_be_opened_is_refused(tmp_path):
++    # A directory where a record should be: open() raises IsADirectoryError,
++    # an OSError, which is a refusal (exit 2), not a traceback.
++    (tmp_path / "r5-state-probe-completed.json").mkdir()
++    with pytest.raises(r5_baseline.RecordError):
++        r5_baseline.load_records(tmp_path)
++    assert r5_baseline.main(["--archive-dir", str(tmp_path)]) == 2
++
++
+ @pytest.mark.parametrize("make", ["missing", "empty"])
+ def test_no_records_is_a_usage_error(tmp_path, make):
+     target = tmp_path / "archive"
+diff --git a/test/test_r5_corpus.py b/test/test_r5_corpus.py
+new file mode 100644
+index 0000000..61b0cdb
+--- /dev/null
++++ b/test/test_r5_corpus.py
+@@ -0,0 +1,368 @@
++"""Tests for scripts/r5_corpus.py (opensrm-6kqs.2).
++
++Every input is synthetic and built here: a small git repo, archive records in
++the v2 audit-trail shape r5_baseline reads (findings_received with counts,
++commit_made with sha and repo, pass_started), and a private archive in the
++shape the extraction step writes (index.json pairings keyed by record, lens and
++findings_received ts; the report; its extraction). Expected values are read off
++these inputs, never off the script's output.
++
++Run: uv run --no-project --with pytest pytest -q test/test_r5_corpus.py
++"""
++
++from __future__ import annotations
++
++import hashlib
++import importlib.util
++import json
++import subprocess
++import sys
++from pathlib import Path
++
++import pytest
++
++HERE = Path(__file__).resolve().parent
++sys.path.insert(0, str(HERE.parent / "scripts"))
++_spec = importlib.util.spec_from_file_location("r5_corpus", HERE.parent / "scripts" / "r5_corpus.py")
++assert _spec and _spec.loader
++r5_corpus = importlib.util.module_from_spec(_spec)
++_spec.loader.exec_module(r5_corpus)
++
++ENV = {"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t", "GIT_COMMITTER_NAME": "t",
++       "GIT_COMMITTER_EMAIL": "t@t"}
++
++
++def run(repo: Path, *args: str) -> str:
++    import os
++    return subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True,
++                          text=True, env={**os.environ, **ENV}).stdout.strip()
++
++
++def commit(repo: Path, files: dict[str, str], message: str) -> str:
++    for name, text in files.items():
++        (repo / name).write_text(text)
++    run(repo, "add", "-A")
++    run(repo, "commit", "-q", "-m", message)
++    return run(repo, "rev-parse", "HEAD")
++
++
++@pytest.fixture
++def workspace(tmp_path):
++    """A workspace with one member repo, "demo": base, head, then a fix."""
++    ws = tmp_path / "ws"
++    repo = ws / "demo"
++    repo.mkdir(parents=True)
++    run(repo, "init", "-q")
++    base = commit(repo, {"app.py": "a = 1\nb = 2\n", "other.py": "x = 0\n"}, "base")
++    head = commit(repo, {"app.py": "a = 1\nb = 3\n"}, "feat: change b")
++    fix = commit(repo, {"app.py": "a = 1\nb = 3\nc = 4\n"},
++                 "r5(correctness): 1 finding\n\n- IMPORTANT: app.py drops c on the\n  write path\n")
++    (ws / ".claude").mkdir()
++    return {"ws": ws, "repo": repo, "base": base, "head": head, "fix": fix}
++
++
++def record(bead: str, ranges: dict, reviews: list[tuple[str, dict, str | None]]) -> dict:
++    """A v2 archive record: each review is (lens, counts, fix sha or None)."""
++    trail, ts = [], 0
++
++    def event(**kw):
++        nonlocal ts
++        ts += 1
++        trail.append({"ts": f"2000-01-01T00:00:{ts:02d}Z", **kw})
++        return trail[-1]["ts"]
++
++    stamps, started = [], set()
++    for lens, counts, fix in reviews:
++        if lens not in started:
++            started.add(lens)
++            event(event="pass_started", **{"pass": lens})
++        event(event="reviewer_dispatched", **{"pass": lens})
++        stamps.append(event(event="findings_received", counts=counts, **{"pass": lens}))
++        if fix:
++            event(event="commit_made", sha=fix, repo=next(iter(ranges)))
++    return {"version": 2, "target_bead": bead, "dry_run": False, "passes": sorted(started),
++            "diff_range": ranges, "audit_trail": trail, "completed_passes": [], "_stamps": stamps}
++
++
++def write_record(ws: Path, stem: str, rec: dict) -> list[str]:
++    stamps = rec.pop("_stamps")
++    (ws / ".claude" / f"r5-state-{stem}-completed.json").write_text(json.dumps(rec))
++    return stamps
++
++
++REPORT = """## Correctness review
++
++### IMPORTANT
++1. `app.py:2` drops c on the write path, so a saved record loses its third field.
++
++### MINOR
++2. `other.py` has an unused name.
++"""
++
++EXTRACTION = [
++    {"severity": "IMPORTANT", "path": "app.py", "start_line": 2, "end_line": 2,
++     "claim": "drops c on the write path, so a saved record loses its third field."},
++    {"severity": "MINOR", "path": "other.py", "start_line": None, "end_line": None,
++     "claim": "has an unused name."},
++]
++
++
++def private_archive(root: Path, record_file: str, lens: str, ts: str,
++                    report: str = REPORT, extraction=None) -> Path:
++    sha = hashlib.sha256(report.encode()).hexdigest()
++    (root / "bead").mkdir(parents=True, exist_ok=True)
++    (root / "extractions").mkdir(exist_ok=True)
++    (root / "bead" / f"{sha[:16]}.md").write_text(report)
++    (root / "extractions" / f"{sha[:16]}.json").write_text(json.dumps(EXTRACTION if extraction is None else extraction))
++    (root / "index.json").write_text(json.dumps({"pairings": [{
++        "record": record_file, "lens": lens, "findings_received_ts": ts, "sha256": sha,
++        "file": f"bead/{sha[:16]}.md"}]}))
++    return root
++
++
++def build(ws: Path, private: Path | None = None) -> dict[str, dict]:
++    entries = r5_corpus.build(ws / ".claude", ws, r5_corpus.Private(private), use_bd=False)
++    return {e["meta"]["entry"]: e for e in entries}
++
++
++@pytest.fixture(autouse=True)
++def _no_known_escapes(monkeypatch):
++    monkeypatch.setattr(r5_corpus, "KNOWN_ESCAPES", {})
++
++
++# --- the section 6 finding --------------------------------------------------
++
++def test_normalised_claim_drops_line_numbers_shas_case_and_spacing():
++    assert r5_corpus.normalise_claim("At app.py:12-14 the  Guard\nFAILS since 3f2a9c1") == \
++        "at app.py the guard fails since"
++    assert r5_corpus.normalise_claim("Line 7 and L9 differ") == "and differ"
++
++
++def test_a_fingerprint_survives_moved_lines_but_not_another_claim():
++    a = r5_corpus.fingerprint("correctness", "app.py", "app.py:2 drops c")
++    assert a == r5_corpus.fingerprint("correctness", "app.py", "app.py:40 DROPS  c")
++    assert a != r5_corpus.fingerprint("correctness", "app.py", "app.py:2 drops d")
++    assert a != r5_corpus.fingerprint("clarity", "app.py", "app.py:2 drops c")
++    assert len(a) == 16 and int(a, 16) >= 0
++
++
++def test_a_finding_carries_the_section_6_fields():
++    f = r5_corpus.finding("edge-cases", "IMPORTANT", "a.py", 3, None, "a claim")
++    assert set(f) >= {"lens", "severity", "path", "start_line", "end_line", "claim", "evidence",
++                      "fix", "fingerprint", "verification_level", "resolves", "regression", "status"}
++    assert (f["lens"], f["end_line"], f["verification_level"]) == ("edge_cases", 3, "asserted")
++
++
++# --- accepting an extraction ------------------------------------------------
++
++def test_a_faithful_extraction_is_accepted():
++    assert r5_corpus.check_extraction(REPORT, EXTRACTION) == []
++
++
++@pytest.mark.parametrize("bad, why", [
++    ({"claim": "drops c, and the guard is wrong too, as other.py shows"}, "claim"),
++    ({"path": "elsewhere.py"}, "path"),
++    ({"start_line": 3, "end_line": 3}, "start_line"),
++    ({"path": None}, "start_line"),  # a range needs a path
++    ({"severity": "CRITICAL"}, "severity"),
++    ({"start_line": 2, "end_line": 1}, "end_line"),
++])
++def test_an_extraction_that_is_not_the_report_s_own_is_refused(bad, why):
++    errors = r5_corpus.check_extraction(REPORT, [dict(EXTRACTION[0], **bad)])
++    assert errors, bad
++    assert any(why in e for e in errors)
++
++
++@pytest.mark.parametrize("ref, n", [
++    ("scorecard.md:~22", 22), ("Line 35: too long", 35), ("in worker.py (~322-335)", 335),
++    ("orchestrator.py:196/226", 226), ("lines 768-774", 774), ("x.py:L12", 12),
++])
++def test_the_line_reference_forms_reports_use(ref, n):
++    assert n in r5_corpus.report_line_refs(ref)
++
++
++# --- fidelity ---------------------------------------------------------------
++
++def test_a_record_whose_extraction_passes_is_recorded(workspace, tmp_path):
++    ws = workspace["ws"]
++    rec = record("opensrm-aaa", {"demo": {"base": workspace["base"][:7], "head": workspace["head"][:7]}},
++                 [("correctness", {"critical": 0, "important": 1, "minor": 1}, workspace["fix"]),
++                  ("correctness", {"critical": 0, "important": 0, "minor": 0}, None)])
++    stamps = write_record(ws, "aaa", rec)
++    private = private_archive(tmp_path / "p", "r5-state-aaa-completed.json", "correctness", stamps[0])
++    e = build(ws, private)["opensrm-aaa"]
++    assert e["meta"]["fidelity"] == "recorded"
++    first, second = e["recorded"]["rounds"]
++    assert [f["severity"] for f in first["findings"]] == ["IMPORTANT", "MINOR"]
++    assert first["findings"][0]["fix_commit"] == workspace["fix"]
++    assert first["findings"][0]["derived_from"] == "reviewer_transcript"
++    assert second["findings"] is None  # a clean re-review: nothing was extracted
++    assert e["recorded"]["iterations"] == {"correctness": 2}
++    assert e["meta"]["tree_sha"] == run(workspace["repo"], "rev-parse", workspace["head"] + "^{tree}")
++    assert e["meta"]["base"] == workspace["base"]  # the archive's short SHA, resolved
++
++
++def test_an_extraction_whose_counts_differ_from_the_archive_is_not_recorded(workspace, tmp_path):
++    ws = workspace["ws"]
++    # The archive counts 2 IMPORTANT; the report (and its extraction) has 1.
++    rec = record("opensrm-bbb", {"demo": {"base": workspace["base"], "head": workspace["head"]}},
++                 [("correctness", {"critical": 0, "important": 2, "minor": 0}, None)])
++    stamps = write_record(ws, "bbb", rec)
++    private = private_archive(tmp_path / "p", "r5-state-bbb-completed.json", "correctness", stamps[0])
++    assert build(ws, private)["opensrm-bbb"]["meta"]["fidelity"] == "counts_only"
++
++
++def test_an_extraction_failing_its_checks_is_not_recorded(workspace, tmp_path):
++    ws = workspace["ws"]
++    rec = record("opensrm-ccc", {"demo": {"base": workspace["base"], "head": workspace["head"]}},
++                 [("correctness", {"critical": 0, "important": 1, "minor": 0}, None)])
++    stamps = write_record(ws, "ccc", rec)
++    stitched = [dict(EXTRACTION[0], claim="drops c and other.py has an unused name")]
++    private = private_archive(tmp_path / "p", "r5-state-ccc-completed.json", "correctness", stamps[0],
++                              extraction=stitched)
++    assert build(ws, private)["opensrm-ccc"]["meta"]["fidelity"] == "counts_only"
++
++
++def test_a_report_altered_after_indexing_is_refused(workspace, tmp_path):
++    ws = workspace["ws"]
++    rec = record("opensrm-ddd", {"demo": {"base": workspace["base"], "head": workspace["head"]}},
++                 [("correctness", {"critical": 0, "important": 1, "minor": 1}, None)])
++    stamps = write_record(ws, "ddd", rec)
++    private = private_archive(tmp_path / "p", "r5-state-ddd-completed.json", "correctness", stamps[0])
++    report = next((private / "bead").glob("*.md"))
++    report.write_text(REPORT + "\nedited\n")
++    with pytest.raises(r5_corpus.CorpusError):
++        build(ws, private)
++
++
++def test_a_fix_commit_with_one_bullet_and_one_file_is_derived(workspace):
++    ws = workspace["ws"]
++    rec = record("opensrm-eee", {"demo": {"base": workspace["base"], "head": workspace["head"]}},
++                 [("correctness", {"critical": 0, "important": 1, "minor": 0}, workspace["fix"])])
++    write_record(ws, "eee", rec)
++    e = build(ws)["opensrm-eee"]
++    assert e["meta"]["fidelity"] == "derived"
++    (f,) = e["recorded"]["rounds"][0]["findings"]
++    # The fix added line 3 of app.py; the bullet wraps onto a second line.
++    assert (f["path"], f["start_line"], f["end_line"]) == ("app.py", 3, 3)
++    assert f["claim"] == "app.py drops c on the write path"
++    assert (f["derived_from"], f["fix_commit"]) == ("fix_commit", workspace["fix"])
++
++
++def test_a_bullet_naming_no_file_of_a_multi_file_fix_is_not_derived(workspace):
++    # The fix touches app.py and other.py; the bullet names neither, so its
++    # path would be a guess.
++    ws, repo = workspace["ws"], workspace["repo"]
++    fix = commit(repo, {"app.py": "a = 9\n", "other.py": "x = 9\n"},
++                 "r5(correctness): 1 finding\n\n- IMPORTANT: the write path drops a field\n")
++    rec = record("opensrm-eef", {"demo": {"base": workspace["base"], "head": workspace["head"]}},
++                 [("correctness", {"critical": 0, "important": 1, "minor": 0}, fix)])
++    write_record(ws, "eef", rec)
++    assert build(ws)["opensrm-eef"]["meta"]["fidelity"] == "counts_only"
++
++
++def test_bullets_that_do_not_match_the_counts_are_not_derived(workspace):
++    ws = workspace["ws"]
++    rec = record("opensrm-fff", {"demo": {"base": workspace["base"], "head": workspace["head"]}},
++                 [("correctness", {"critical": 1, "important": 1, "minor": 0}, workspace["fix"])])
++    write_record(ws, "fff", rec)
++    assert build(ws)["opensrm-fff"]["meta"]["fidelity"] == "counts_only"
++
++
++def test_a_record_with_no_blocking_finding_is_clean(workspace):
++    ws = workspace["ws"]
++    rec = record("opensrm-ggg", {"demo": {"base": workspace["base"], "head": workspace["head"]}},
++                 [("correctness", {"critical": 0, "important": 0, "minor": 3}, None)])
++    write_record(ws, "ggg", rec)
++    assert build(ws)["opensrm-ggg"]["meta"]["fidelity"] == "clean"
++
++
++def test_a_multi_repo_record_splits_into_counts_only_entries(workspace):
++    ws = workspace["ws"]
++    rng = {"base": workspace["base"], "head": workspace["head"]}
++    rec = record("opensrm-hhh", {"demo": rng, "missing": rng},
++                 [("correctness", {"critical": 0, "important": 1, "minor": 0}, workspace["fix"])])
++    write_record(ws, "hhh", rec)
++    entries = build(ws)
++    assert set(entries) == {"opensrm-hhh--demo", "opensrm-hhh--missing"}
++    # Derivable on its own (as opensrm-eee), but not attributable to one repo.
++    assert {e["meta"]["fidelity"] for e in entries.values()} == {"counts_only"}
++    assert entries["opensrm-hhh--missing"]["meta"]["unavailable"]
++
++
++# --- escapes, briefs, bundles ----------------------------------------------
++
++def test_a_known_escape_is_flagged_with_its_missed_finding(workspace, monkeypatch):
++    ws = workspace["ws"]
++    rec = record("opensrm-iii", {"demo": {"base": workspace["base"], "head": workspace["head"]}},
++                 [("correctness", {"critical": 0, "important": 0, "minor": 0}, None)])
++    write_record(ws, "iii", rec)
++    monkeypatch.setattr(r5_corpus, "KNOWN_ESCAPES", {("opensrm-iii", "demo"): {
++        "lens": "provenance", "severity": "CRITICAL", "path": "app.py", "start_line": 1,
++        "end_line": 2, "at_commit": workspace["head"][:7], "claim": "the test never runs"}})
++    e = build(ws)["opensrm-iii"]
++    assert e["meta"]["escape"] is True
++    (missed,) = e["recorded"]["escaped"]
++    assert (missed["lens"], missed["path"], missed["derived_from"]) == ("provenance", "app.py", "known_escape")
++
++
++def test_a_known_escape_matching_no_entry_is_refused(workspace, monkeypatch):
++    ws = workspace["ws"]
++    write_record(ws, "jjj", record("opensrm-jjj", {"demo": {"base": workspace["base"], "head": workspace["head"]}},
++                                   [("correctness", {"critical": 0, "important": 0, "minor": 0}, None)]))
++    monkeypatch.setattr(r5_corpus, "KNOWN_ESCAPES", {("opensrm-typo", "demo"): {}})
++    with pytest.raises(r5_corpus.CorpusError):
++        build(ws)
++    assert r5_corpus.main(["--out", str(ws / "out"), "--archive-dir", str(ws / ".claude"),
++                           "--workspace", str(ws), "--no-bd"]) == 2
++
++
++def test_the_brief_prefers_the_reviewer_s_own(workspace, tmp_path):
++    ws = workspace["ws"]
++    rec = record("opensrm-kkk", {"demo": {"base": workspace["base"], "head": workspace["head"]}},
++                 [("correctness", {"critical": 0, "important": 0, "minor": 0}, None)])
++    write_record(ws, "kkk", rec)
++    assert build(ws)["opensrm-kkk"]["meta"]["brief_source"] == "none"
++    private = tmp_path / "p"
++    (private / "briefs").mkdir(parents=True)
++    (private / "index.json").write_text(json.dumps({"pairings": []}))
++    (private / "briefs" / "kkk.md").write_text("Review the diff for correctness.\n")
++    (private / "briefs" / "index.json").write_text(json.dumps({"kkk": {"sha256": "x"}}))
++    e = build(ws, private)["opensrm-kkk"]
++    assert (e["meta"]["brief_source"], e["brief"]) == ("reviewer_brief", "Review the diff for correctness.\n")
++
++
++def test_a_bundle_carries_each_entry_s_exact_trees_and_is_reproducible(workspace, tmp_path):
++    ws = workspace["ws"]
++    write_record(ws, "lll", record("opensrm-lll", {"demo": {"base": workspace["base"], "head": workspace["head"]}},
++                                   [("correctness", {"critical": 0, "important": 0, "minor": 0}, None)]))
++    entries = list(build(ws).values())
++    r5_corpus.write_bundles(entries, ws, tmp_path / "b1")
++    meta = entries[0]["meta"]
++    bundle = tmp_path / "b1" / "demo.bundle"
++    assert meta["bundle"]["sha256"] == hashlib.sha256(bundle.read_bytes()).hexdigest()
++    clone = tmp_path / "clone"
++    run(tmp_path, "init", "-q", str(clone))
++    run(clone, "fetch", "-q", str(bundle), "refs/r5/*:refs/r5/*")
++    assert run(clone, "rev-parse", "refs/r5/opensrm-lll/head^{tree}") == meta["tree_sha"]
++    assert run(clone, "rev-parse", "refs/r5/opensrm-lll/base^{tree}") == meta["base_tree"]
++    assert run(clone, "rev-parse", "refs/r5/opensrm-lll/head^") == meta["bundle"]["base_commit"]
++    # The diff the replay sees is the diff the gate saw.
++    assert run(clone, "diff", "refs/r5/opensrm-lll/base", "refs/r5/opensrm-lll/head") == \
++        run(workspace["repo"], "diff", workspace["base"], workspace["head"])
++    again = list(build(ws).values())
++    r5_corpus.write_bundles(again, ws, tmp_path / "b2")
++    assert again[0]["meta"]["bundle"]["head_commit"] == meta["bundle"]["head_commit"]
++
++
++def test_main_writes_the_light_files_and_a_summary(workspace, capsys):
++    ws = workspace["ws"]
++    write_record(ws, "mmm", record("opensrm-mmm", {"demo": {"base": workspace["base"], "head": workspace["head"]}},
++                                   [("correctness", {"critical": 0, "important": 0, "minor": 1}, None)]))
++    out = ws / "out"
++    assert r5_corpus.main(["--out", str(out), "--archive-dir", str(ws / ".claude"),
++                           "--workspace", str(ws), "--no-bd"]) == 0
++    summary = json.loads(capsys.readouterr().out)
++    assert (summary["entries"], summary["fidelity"]["clean"]) == (1, 1)
++    assert sorted(p.name for p in (out / "opensrm-mmm").iterdir()) == \
++        ["brief.md", "diff.patch", "meta.json", "recorded.json"]

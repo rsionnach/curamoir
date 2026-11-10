@@ -1,0 +1,174 @@
+{
+ "schema_version": 1,
+ "entry": "opensrm-iiay",
+ "fidelity": "recorded",
+ "lens_order": [
+  "correctness",
+  "clarity",
+  "edge-cases",
+  "provenance",
+  "excellence"
+ ],
+ "iterations": {
+  "correctness": 1,
+  "clarity": 1,
+  "edge-cases": 2,
+  "provenance": 2
+ },
+ "rounds": [
+  {
+   "lens": "correctness",
+   "iteration": 1,
+   "recorded_iteration": 1,
+   "counts": {
+    "critical": 0,
+    "important": 0,
+    "minor": 1
+   },
+   "findings": null
+  },
+  {
+   "lens": "clarity",
+   "iteration": 1,
+   "recorded_iteration": 1,
+   "counts": {
+    "critical": 0,
+    "important": 0,
+    "minor": 4
+   },
+   "findings": null
+  },
+  {
+   "lens": "edge_cases",
+   "iteration": 1,
+   "recorded_iteration": 1,
+   "counts": {
+    "critical": 0,
+    "important": 1,
+    "minor": 2
+   },
+   "findings": [
+    {
+     "lens": "edge_cases",
+     "severity": "IMPORTANT",
+     "path": "src/nthlayer_generate/logging.py",
+     "start_line": null,
+     "end_line": null,
+     "claim": "A stderr stream that is already closed raises ValueError from isatty() instead",
+     "evidence": null,
+     "fix": null,
+     "fingerprint": "eb72ba5d46f1af57",
+     "verification_level": "asserted",
+     "resolves": null,
+     "regression": false,
+     "status": null,
+     "derived_from": "reviewer_transcript",
+     "extracted_by": "model",
+     "handback_sha256": "44acf4f3b32b96ee460adfb31dd59661ce1190a6119ef629cdb39578f0964272",
+     "fix_commit": "00b0cc5799506a956a9d10627e6a55a70dbd9dd2",
+     "reported_path": "<workspace>/nthlayer-generate-iiay/src/nthlayer_generate/logging.py",
+     "path_in_tree": true
+    }
+   ]
+  },
+  {
+   "lens": "edge_cases",
+   "iteration": 2,
+   "recorded_iteration": 2,
+   "counts": {
+    "critical": 0,
+    "important": 0,
+    "minor": 0
+   },
+   "findings": null
+  },
+  {
+   "lens": "provenance",
+   "iteration": 1,
+   "recorded_iteration": 1,
+   "counts": {
+    "critical": 3,
+    "important": 0,
+    "minor": 2
+   },
+   "findings": [
+    {
+     "lens": "provenance",
+     "severity": "CRITICAL",
+     "path": "src/nthlayer_generate/logging.py",
+     "start_line": 43,
+     "end_line": 43,
+     "claim": "The %-argument formatter is untested, and removing it breaks real output",
+     "evidence": null,
+     "fix": null,
+     "fingerprint": "bee1f20ad66f2c9d",
+     "verification_level": "asserted",
+     "resolves": null,
+     "regression": false,
+     "status": null,
+     "derived_from": "reviewer_transcript",
+     "extracted_by": "model",
+     "handback_sha256": "ab541b2282a518a5e993fc42e7b436484706927a6520d7715926b18cbdc20b4b",
+     "fix_commit": "39476ea73dbd2f9406bbca08f44d24cafa7062b9",
+     "reported_path": "logging.py",
+     "path_in_tree": true
+    },
+    {
+     "lens": "provenance",
+     "severity": "CRITICAL",
+     "path": "src/nthlayer_generate/logging.py",
+     "start_line": 54,
+     "end_line": 54,
+     "claim": "Nothing tests that tracebacks carry no local variables",
+     "evidence": null,
+     "fix": null,
+     "fingerprint": "64cade2b7fce2e3d",
+     "verification_level": "asserted",
+     "resolves": null,
+     "regression": false,
+     "status": null,
+     "derived_from": "reviewer_transcript",
+     "extracted_by": "model",
+     "handback_sha256": "ab541b2282a518a5e993fc42e7b436484706927a6520d7715926b18cbdc20b4b",
+     "fix_commit": "39476ea73dbd2f9406bbca08f44d24cafa7062b9",
+     "reported_path": "logging.py",
+     "path_in_tree": true
+    },
+    {
+     "lens": "provenance",
+     "severity": "CRITICAL",
+     "path": "src/nthlayer_generate/demo.py",
+     "start_line": 885,
+     "end_line": 885,
+     "claim": "The default WARNING level is untested",
+     "evidence": null,
+     "fix": null,
+     "fingerprint": "130bd586d94df44f",
+     "verification_level": "asserted",
+     "resolves": null,
+     "regression": false,
+     "status": null,
+     "derived_from": "reviewer_transcript",
+     "extracted_by": "model",
+     "handback_sha256": "ab541b2282a518a5e993fc42e7b436484706927a6520d7715926b18cbdc20b4b",
+     "fix_commit": "39476ea73dbd2f9406bbca08f44d24cafa7062b9",
+     "reported_path": "demo.py",
+     "path_in_tree": true
+    }
+   ]
+  },
+  {
+   "lens": "provenance",
+   "iteration": 2,
+   "recorded_iteration": 2,
+   "counts": {
+    "critical": 0,
+    "important": 0,
+    "minor": 2
+   },
+   "findings": null
+  }
+ ],
+ "cross_repo_findings": [],
+ "escaped": []
+}

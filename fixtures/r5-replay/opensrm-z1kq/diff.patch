@@ -1,0 +1,105 @@
+diff --git a/.github/dependabot.yml b/.github/dependabot.yml
+index 80ec139..3d9cab4 100644
+--- a/.github/dependabot.yml
++++ b/.github/dependabot.yml
+@@ -9,6 +9,9 @@ updates:
+   # repo root has no Python source.
+   - package-ecosystem: uv
+     directory: /meta-package
++    # The tiers are compatible ranges (opensrm-z1kq): only touch one when a
++    # release falls outside it, i.e. a new major, which needs review.
++    versioning-strategy: increase-if-necessary
+     schedule:
+       interval: weekly
+       day: monday
+diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
+index c2a8619..648a034 100644
+--- a/.github/workflows/ci.yml
++++ b/.github/workflows/ci.yml
+@@ -64,3 +64,8 @@ jobs:
+       # dedicated workflows (demo-paths, demo-start-lock) exist for tests that do.
+       - name: eco-doctor regression test
+         run: bash test/test_eco_doctor.sh
++
++      # opensrm-z1kq: the meta-package's tier ranges must co-install (each
++      # tier also constrains nthlayer-common). Resolves against PyPI.
++      - name: meta-package dependencies resolve
++        run: uv pip compile --python 3.11 meta-package/pyproject.toml
+diff --git a/CLAUDE.md b/CLAUDE.md
+index 07861c4..5f785f3 100644
+--- a/CLAUDE.md
++++ b/CLAUDE.md
+@@ -284,12 +284,13 @@ repo (each has its own CLAUDE.md describing its conventions).
+   dev. For production, install individual tiers.
+ - **Content:** dependency-only (`packages = []`); no Python modules,
+   no console scripts.
+-- **Pinning:** each release pins all four sub-packages at explicit
+-  versions; they are not guaranteed to match. `nthlayer-generate`
+-  follows its own versioning baseline (currently `==1.1.0`);
+-  `nthlayer-core`, `nthlayer-workers`, and `nthlayer-bench` are
+-  aligned (currently `==1.6.0`). `nthlayer-common` is a transitive
+-  dep.
++- **Pinning:** compatible ranges, one per tier: floor = the release
++  current when the range was last set, ceiling = the next major
++  (opensrm-z1kq, ruling 2026-11-02). Patch and minor releases flow to
++  `pip install nthlayer` without a meta release; a new major of any
++  tier needs one. `nthlayer-common` is a transitive dep. `ci.yml`
++  checks the four ranges co-resolve. (Exact pins, the earlier policy,
++  left 1.0.2 installing core/workers/bench 1.6.0.)
+ - **Tag namespace:** `meta-v*` (e.g. `meta-v1.0.0`). Separate from
+   legacy `v0.1.0a*` and from sub-package tags.
+ - **First release:** `meta-v1.0.0` — published;
+diff --git a/meta-package/README.md b/meta-package/README.md
+index 2a7af19..3f68a54 100644
+--- a/meta-package/README.md
++++ b/meta-package/README.md
+@@ -10,10 +10,12 @@
+ ## Installation
+ 
+ ```bash
+-pip install nthlayer==1.0.0
++pip install nthlayer
+ ```
+ 
+-This installs all four sub-packages pinned to their matching `1.0.0` releases.
++This installs all four sub-packages at the newest releases within each one's
++current major version (core 4.x, workers 4.x, bench 1.x, generate 4.x). A new
++major of any tier needs a new meta-package release.
+ 
+ ## When to install the meta-package vs. individual components
+ 
+@@ -33,7 +35,7 @@ The meta-package is a friendly entry point for **evaluators, demos, and local de
+ Sub-packages provide their own console scripts:
+ 
+ - `nthlayer` / `nthlayer-generate` — compile manifests (from `nthlayer-generate`; the two names are aliases)
+-- `nthlayer-core serve` — start the Tier 1 HTTP API server (from `nthlayer-core` >= 4.0.0; earlier releases named this script `nthlayer`; this meta-package currently pins an older core, pin update pending bead opensrm-lt91)
++- `nthlayer-core serve` — start the Tier 1 HTTP API server (from `nthlayer-core` >= 4.0.0; earlier releases named this script `nthlayer`)
+ - `nthlayer-workers serve` — start the worker runtime (from `nthlayer-workers`)
+ - `nthlayer-learn` — verdict-learning CLI (from `nthlayer-workers`)
+ - `nthlayer-bench` — launch the operator TUI (from `nthlayer-bench`)
+diff --git a/meta-package/pyproject.toml b/meta-package/pyproject.toml
+index 25891c3..e1ca5e3 100644
+--- a/meta-package/pyproject.toml
++++ b/meta-package/pyproject.toml
+@@ -31,11 +31,17 @@ classifiers = [
+     "Topic :: System :: Monitoring",
+     "Topic :: System :: Systems Administration",
+ ]
++# Compatible ranges, not exact pins (opensrm-z1kq, ruling 2026-11-02): each
++# tier's floor is the release current when the range was last set, and its
++# ceiling the next major. Patch and minor releases reach `pip install nthlayer`
++# without a meta release; a major needs one, deliberately, since it can break
++# the other tiers. Exact pins went stale for majors at a time (1.0.2 still
++# installed core/workers/bench 1.6.0). CI checks the four ranges co-resolve.
+ dependencies = [
+-    "nthlayer-core==1.6.0",
+-    "nthlayer-workers==1.6.0",
+-    "nthlayer-bench==1.6.0",
+-    "nthlayer-generate==1.1.0",
++    "nthlayer-core>=4.0.10,<5",
++    "nthlayer-workers>=4.0.2,<5",
++    "nthlayer-bench>=1.7.17,<2",
++    "nthlayer-generate>=4.0.10,<5",
+ ]
+ 
+ [project.urls]

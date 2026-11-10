@@ -1,0 +1,2613 @@
+diff --git a/pyproject.toml b/pyproject.toml
+index 3d43c6c..4fb349d 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -23,6 +23,7 @@ dependencies = [
+     # `slack_signing_secret` set need this at runtime, not just for
+     # tests; declared as a top-level production dep.
+     "python-multipart>=0.0.18",
++    "ruamel.yaml>=0.18",
+ ]
+ 
+ [project.scripts]
+diff --git a/src/nthlayer_workers/learn/_apply.py b/src/nthlayer_workers/learn/_apply.py
+new file mode 100644
+index 0000000..fd1df80
+--- /dev/null
++++ b/src/nthlayer_workers/learn/_apply.py
+@@ -0,0 +1,235 @@
++"""Apply orchestration for the Learn → Spec workflow (jmy.6 § 4 / § 5).
++
++Reads target manifests via ruamel.yaml round-trip, classifies each
++recommendation against current manifest state, deep-merges accepted
++ones in memory, then writes all modified manifests atomically in a
++final phase (alphabetical by path).
++
++Resolution strategy: filename-convention first ('<specs-dir>/<svc>.yaml'
++or '.yml'), recursive walk fallback finding manifests by metadata.name.
++Hidden directories excluded from the walk.
++"""
++from __future__ import annotations
++
++from dataclasses import dataclass, field
++from io import StringIO
++from pathlib import Path
++from typing import Any, Iterable
++
++import yaml as pyyaml  # lightweight read for the discovery walk only
++
++from nthlayer_workers.learn.recommendations import (
++    OutcomeKind, Recommendation, SpecRecommendation,
++)
++from nthlayer_workers.learn._yaml import (
++    apply_at_path, classify_outcome, get_yaml_round_trip, resolve_path,
++)
++
++
++def resolve_manifest_path(service: str, specs_dir: Path) -> Path | None:
++    """Find the manifest file for a service in specs_dir.
++
++    Strategy (per jmy.6 design § 4 Option B):
++    1. Try <specs-dir>/<service>.yaml then <specs-dir>/<service>.yml
++    2. If neither exists, recursive walk excluding hidden dirs;
++       parse each .yaml/.yml and match metadata.name.
++
++    Returns None if no manifest matches. Run is expected to handle
++    None as manifest_not_found per jmy.6 § 7 Category B.
++    """
++    specs_dir = Path(specs_dir)
++
++    # Convention attempt
++    for ext in (".yaml", ".yml"):
++        candidate = specs_dir / f"{service}{ext}"
++        if candidate.is_file():
++            return candidate
++
++    # Walk fallback
++    for path in _walk_yaml_files(specs_dir):
++        try:
++            text = path.read_text()
++            data = pyyaml.safe_load(text)
++        except (OSError, pyyaml.YAMLError):
++            continue
++        if not isinstance(data, dict):
++            continue
++        metadata = data.get("metadata") or {}
++        if isinstance(metadata, dict) and metadata.get("name") == service:
++            return path
++
++    return None
++
++
++@dataclass
++class RecOutcome:
++    """One recommendation's outcome from apply_recommendations."""
++
++    id: str
++    service: str
++    field: str | None
++    outcome: OutcomeKind
++    detail: str = ""  # human-readable detail for skipped recs
++
++
++@dataclass
++class ApplyResult:
++    """Result of an apply_recommendations call."""
++
++    applied: list[RecOutcome] = field(default_factory=list)
++    skipped: list[RecOutcome] = field(default_factory=list)
++    modified_files: list[Path] = field(default_factory=list)
++
++    @property
++    def exit_code(self) -> int:
++        """Per jmy.6 design § 7 deterministic rule.
++
++        Empty plan → 0
++        All applied and each outcome is APPLY_CLEAN or ALREADY_APPLIED → 0
++        Any APPLY_CLEAN + any skipped → 1 (partial)
++        Zero APPLY_CLEAN + any skipped → 2 (complete failure)
++        """
++        # Empty plan → 0
++        if not self.applied and not self.skipped:
++            return 0
++        any_clean = any(
++            r.outcome == OutcomeKind.APPLY_CLEAN for r in self.applied
++        )
++        all_clean_or_idempotent = all(
++            r.outcome in (OutcomeKind.APPLY_CLEAN, OutcomeKind.ALREADY_APPLIED)
++            for r in self.applied
++        ) and not self.skipped
++        if all_clean_or_idempotent:
++            return 0
++        if any_clean and self.skipped:
++            return 1  # partial
++        return 2  # complete failure
++
++
++def apply_recommendations(
++    plan: SpecRecommendation,
++    specs_dir: Path,
++    *,
++    force: bool = False,
++) -> ApplyResult:
++    """Apply the plan's recommendations to manifests in specs_dir.
++
++    Two-phase: classify all recs first (in-memory), then write all
++    modified manifests atomically in alphabetical-by-path order.
++
++    --force normalises DRIFT_DETECTED into APPLY_CLEAN (recorded with
++    detail string so callers know the override occurred).
++    """
++    specs_dir = Path(specs_dir)
++    result = ApplyResult()
++    yaml = get_yaml_round_trip()
++
++    # Build {file_path: parsed_doc} cache so each unique manifest is
++    # read+parsed once even if multiple recs target it.
++    doc_cache: dict[Path, Any] = {}
++    modified_paths: set[Path] = set()
++
++    for rec in plan.recommendations:
++        # Resolve manifest
++        manifest_path = resolve_manifest_path(rec.service, specs_dir)
++        if manifest_path is None:
++            result.skipped.append(RecOutcome(
++                id=rec.id,
++                service=rec.service,
++                field=rec.field,
++                outcome=OutcomeKind.MANIFEST_NOT_FOUND,
++                detail=f"no manifest for service {rec.service!r} in {specs_dir}",
++            ))
++            continue
++
++        # Read + parse (cached)
++        if manifest_path not in doc_cache:
++            doc_cache[manifest_path] = yaml.load(manifest_path.read_text())
++        doc = doc_cache[manifest_path]
++
++        # Classify
++        manifest_value = resolve_path(doc, rec.field or "")
++        outcome = classify_outcome(manifest_value, rec)
++
++        if outcome == OutcomeKind.APPLY_CLEAN:
++            apply_at_path(doc, rec.field, rec.proposed_value)
++            modified_paths.add(manifest_path)
++            result.applied.append(RecOutcome(
++                id=rec.id,
++                service=rec.service,
++                field=rec.field,
++                outcome=outcome,
++            ))
++        elif outcome == OutcomeKind.ALREADY_APPLIED:
++            result.applied.append(RecOutcome(
++                id=rec.id,
++                service=rec.service,
++                field=rec.field,
++                outcome=outcome,
++            ))
++        elif outcome == OutcomeKind.DRIFT_DETECTED and force:
++            apply_at_path(doc, rec.field, rec.proposed_value)
++            modified_paths.add(manifest_path)
++            result.applied.append(RecOutcome(
++                id=rec.id,
++                service=rec.service,
++                field=rec.field,
++                outcome=OutcomeKind.APPLY_CLEAN,  # --force normalises to clean
++                detail="applied via --force despite drift",
++            ))
++        else:
++            result.skipped.append(RecOutcome(
++                id=rec.id,
++                service=rec.service,
++                field=rec.field,
++                outcome=outcome,
++            ))
++
++    # Write phase: alphabetical-by-path, atomic per-file
++    for path in sorted(modified_paths):
++        buf = StringIO()
++        yaml.dump(doc_cache[path], buf)
++        path.write_text(buf.getvalue())
++        result.modified_files.append(path)
++
++    return result
++
++
++def format_summary(result: ApplyResult) -> str:
++    """Build the end-of-run summary string per jmy.6 design § 6.2."""
++    lines: list[str] = []
++
++    lines.append(f"Applied: {len(result.applied)} recommendation"
++                 f"{'s' if len(result.applied) != 1 else ''}")
++    for r in result.applied:
++        lines.append(f"  {r.id}  {r.service:<14} {r.field}")
++
++    if result.skipped:
++        lines.append("")
++        lines.append(f"Skipped: {len(result.skipped)} recommendation"
++                     f"{'s' if len(result.skipped) != 1 else ''}")
++        for r in result.skipped:
++            lines.append(f"  {r.id}  {r.service:<14} {r.outcome.value}")
++            if r.detail:
++                for detail_line in r.detail.splitlines():
++                    lines.append(f"    {detail_line}")
++            if r.outcome == OutcomeKind.DRIFT_DETECTED:
++                lines.append("")
++                lines.append(f"    Re-run with --force to apply {r.id} anyway.")
++
++    lines.append("")
++    lines.append(f"Exit code: {result.exit_code}")
++
++    return "\n".join(lines)
++
++
++def _walk_yaml_files(root: Path) -> Iterable[Path]:
++    """Yield .yaml/.yml files under root, excluding hidden directories."""
++    for path in root.rglob("*"):
++        if path.is_dir():
++            continue
++        # Exclude any path with a hidden directory component
++        if any(part.startswith(".") for part in path.relative_to(root).parts[:-1]):
++            continue
++        if path.suffix in (".yaml", ".yml"):
++            yield path
+diff --git a/src/nthlayer_workers/learn/_gh.py b/src/nthlayer_workers/learn/_gh.py
+new file mode 100644
+index 0000000..cde5e03
+--- /dev/null
++++ b/src/nthlayer_workers/learn/_gh.py
+@@ -0,0 +1,154 @@
++"""GitHub + git integration via gh CLI for the Learn → Spec workflow (jmy.6).
++
++All subprocess calls go through this module so tests can monkeypatch
++at a single boundary. Pluggable hosting is filed as a v2 follow-up;
++this file is named with leading underscore signalling it's internal
++and replaceable.
++"""
++from __future__ import annotations
++
++import re
++import subprocess
++from dataclasses import dataclass
++from pathlib import Path
++
++
++_PR_URL_RE = re.compile(r"https://[^\s]+/pull/(\d+)")
++
++
++class PreflightError(RuntimeError):
++    """Raised when a pre-flight check fails.
++
++    Carries a reason code in the message (gh_not_installed,
++    gh_not_authenticated, not_a_git_repo, no_remote, branch_exists)
++    so CLI can format an actionable error.
++    """
++
++
++@dataclass(frozen=True)
++class PRResult:
++    """Outcome of create_pr_via_gh."""
++    url: str | None
++    number: int | None
++    error: str | None
++
++    @property
++    def ok(self) -> bool:
++        return self.url is not None and self.error is None
++
++
++def check_gh_installed() -> None:
++    """Verify gh CLI is on PATH. Raises PreflightError(gh_not_installed)."""
++    try:
++        result = subprocess.run(
++            ["gh", "--version"], capture_output=True, text=True, check=False,
++        )
++    except FileNotFoundError as exc:
++        raise PreflightError(
++            "gh_not_installed: gh CLI not found on PATH. "
++            "Install via 'brew install gh' or see https://cli.github.com"
++        ) from exc
++    if result.returncode != 0:
++        raise PreflightError(
++            f"gh_not_installed: gh --version exited {result.returncode}"
++        )
++
++
++def check_gh_auth() -> None:
++    """Verify gh is authenticated. Raises PreflightError(gh_not_authenticated)."""
++    result = subprocess.run(
++        ["gh", "auth", "status"], capture_output=True, text=True, check=False,
++    )
++    if result.returncode != 0:
++        raise PreflightError(
++            "gh_not_authenticated: gh CLI not logged in. Run 'gh auth login'."
++        )
++
++
++def check_git_repo(specs_dir: Path) -> None:
++    """Verify specs_dir is inside a git repo."""
++    result = subprocess.run(
++        ["git", "rev-parse", "--git-dir"],
++        cwd=specs_dir, capture_output=True, text=True, check=False,
++    )
++    if result.returncode != 0:
++        raise PreflightError(
++            f"not_a_git_repo: {specs_dir} is not inside a git repository"
++        )
++
++
++def check_remote(specs_dir: Path) -> None:
++    """Verify the repo has an 'origin' remote."""
++    result = subprocess.run(
++        ["git", "remote", "get-url", "origin"],
++        cwd=specs_dir, capture_output=True, text=True, check=False,
++    )
++    if result.returncode != 0:
++        raise PreflightError(
++            "no_remote: 'origin' remote not configured. "
++            "Add via 'git remote add origin <url>'."
++        )
++
++
++def check_branch_available(specs_dir: Path, branch: str) -> None:
++    """Verify the branch name is not already in use (local OR remote)."""
++    # Local
++    local = subprocess.run(
++        ["git", "show-ref", "--verify", f"refs/heads/{branch}"],
++        cwd=specs_dir, capture_output=True, text=True, check=False,
++    )
++    if local.returncode == 0:
++        raise PreflightError(
++            f"branch_exists: branch {branch!r} already exists locally. "
++            f"Delete with 'git branch -D {branch}' or rename."
++        )
++
++    # Remote
++    remote = subprocess.run(
++        ["git", "ls-remote", "--heads", "origin", branch],
++        cwd=specs_dir, capture_output=True, text=True, check=False,
++    )
++    if remote.returncode == 0 and remote.stdout.strip():
++        raise PreflightError(
++            f"branch_exists: branch {branch!r} already exists on origin. "
++            f"Delete with 'git push origin --delete {branch}'."
++        )
++
++
++def create_pr_via_gh(
++    *,
++    title: str,
++    body: str,
++    branch: str,
++    cwd: Path,
++    base: str = "main",
++    draft: bool = False,
++) -> PRResult:
++    """Create a PR via gh pr create. Returns PRResult on success or failure.
++
++    Does not raise on non-zero exit; PRResult.ok distinguishes
++    success/failure so the CLI can format an appropriate error.
++    """
++    args = [
++        "gh", "pr", "create",
++        "--title", title,
++        "--body", body,
++        "--head", branch,
++        "--base", base,
++    ]
++    if draft:
++        args.append("--draft")
++
++    result = subprocess.run(
++        args, cwd=cwd, capture_output=True, text=True, check=False,
++    )
++
++    if result.returncode != 0:
++        # Carry gh's stderr through verbatim for the operator-recovery message
++        return PRResult(url=None, number=None, error=result.stderr.strip())
++
++    # gh outputs the PR URL to stdout on success
++    url = result.stdout.strip()
++    match = _PR_URL_RE.search(url)
++    pr_number = int(match.group(1)) if match else None
++    return PRResult(url=url, number=pr_number, error=None)
+diff --git a/src/nthlayer_workers/learn/_preview.py b/src/nthlayer_workers/learn/_preview.py
+new file mode 100644
+index 0000000..709ebed
+--- /dev/null
++++ b/src/nthlayer_workers/learn/_preview.py
+@@ -0,0 +1,86 @@
++"""Preview generation for the Learn → Spec workflow (jmy.6 § 6.1).
++
++Pure functions. Given a recommendation + the manifest's current value
++at the target path, produce a unified-diff-style preview string.
++Operators see this in plan.yaml's `preview` field when --output is
++called with --specs-dir.
++
++When manifest's current value matches the recommendation's proposed
++value, preview is empty (caller suppresses the field).
++"""
++from __future__ import annotations
++
++from typing import Any
++
++from nthlayer_workers.learn.recommendations import Recommendation
++
++
++def build_preview(
++    *,
++    manifest_path: str,
++    rec: Recommendation,
++    manifest_current_value: Any,
++) -> str:
++    """Generate the per-recommendation preview field string.
++
++    Empty string when manifest already matches the proposed value (no
++    diff to show). Caller is responsible for omitting the field from
++    plan.yaml when this returns empty.
++
++    Drift marker is appended when manifest_current_value differs from
++    rec.current_value — operators need to know the recommendation may
++    no longer apply cleanly.
++    """
++    from nthlayer_workers.learn._yaml import normalize_scalar
++
++    # Suppress preview if manifest is already at proposed state
++    if normalize_scalar(manifest_current_value) == normalize_scalar(rec.proposed_value):
++        return ""
++
++    lines = [
++        f"# File: {manifest_path}",
++        f"# Path: {rec.field}",
++    ]
++
++    # Drift marker for operator visibility
++    if rec.current_value is not None and \
++       normalize_scalar(manifest_current_value) != normalize_scalar(rec.current_value):
++        lines.append(
++            f"# WARN: manifest drifted from recommendation's expected value "
++            f"(current={manifest_current_value!r}, expected={rec.current_value!r})"
++        )
++
++    # Render the diff. Path leaf is the last dotted segment; indent matches
++    # YAML 4-space-for-sequence-element style.
++    leaf = rec.field.rsplit(".", 1)[-1] if rec.field else "(root)"
++
++    if rec.current_value is None:
++        # Adding new — show the proposed value as a new block
++        lines.append(f"+   {leaf}:")
++        for sub_line in _render_block(rec.proposed_value, indent=6):
++            lines.append("+ " + sub_line)
++    else:
++        # Modifying existing
++        lines.append(f"-   {leaf}: {_render_inline(rec.current_value)}")
++        lines.append(f"+   {leaf}: {_render_inline(rec.proposed_value)}")
++
++    return "\n".join(lines) + "\n"
++
++
++def _render_inline(value: Any) -> str:
++    """Render a scalar inline (matches YAML output for the common case)."""
++    if isinstance(value, str):
++        return value
++    if isinstance(value, bool):
++        return "true" if value else "false"
++    return str(value)
++
++
++def _render_block(value: Any, *, indent: int) -> list[str]:
++    """Render a dict/list value as multi-line YAML-ish block."""
++    pad = " " * indent
++    if isinstance(value, dict):
++        return [f"{pad}{k}: {_render_inline(v)}" for k, v in value.items()]
++    if isinstance(value, list):
++        return [f"{pad}- {_render_inline(v)}" for v in value]
++    return [f"{pad}{_render_inline(value)}"]
+diff --git a/src/nthlayer_workers/learn/_yaml.py b/src/nthlayer_workers/learn/_yaml.py
+new file mode 100644
+index 0000000..0a1ce66
+--- /dev/null
++++ b/src/nthlayer_workers/learn/_yaml.py
+@@ -0,0 +1,191 @@
++"""Internal YAML helpers for the Learn → Spec workflow (jmy.6).
++
++ruamel.yaml round-trip mode is used for the read+write path so
++operator-authored comments survive deep-merge writes. Pure-function
++helpers — no I/O — to enable focused unit-test coverage.
++"""
++from __future__ import annotations
++
++from typing import Any
++
++from ruamel.yaml import YAML
++from ruamel.yaml.comments import CommentedMap
++
++from nthlayer_workers.learn.recommendations import OutcomeKind, Recommendation
++
++
++# Singleton sentinel for "path doesn't resolve in this document".
++# Using a singleton object (not None) lets callers distinguish absent
++# from a real None-valued leaf.
++PATH_MISSING = object()
++
++
++def get_yaml_round_trip() -> YAML:
++    """Factory for a YAML() configured for comment-preserving round-trip.
++
++    Configuration:
++    - typ="rt": round-trip mode preserves comments, key order, and
++      anchor/alias structure
++    - preserve_quotes=True: literal scalar quoting survives writes
++    - indent(mapping=2, sequence=4, offset=2): matches operator-authored
++      OpenSRM v2 manifest style
++    """
++    yaml = YAML(typ="rt")
++    yaml.preserve_quotes = True
++    yaml.indent(mapping=2, sequence=4, offset=2)
++    return yaml
++
++
++def resolve_path(doc: Any, dotted_path: str) -> Any:
++    """Descend dotted_path through doc; return value or PATH_MISSING sentinel.
++
++    Empty dotted_path returns the doc unchanged (root reference).
++    Returns PATH_MISSING when any intermediate key is absent or the
++    traversal would index into a non-mapping value.
++    """
++    if not dotted_path:
++        return doc
++
++    current = doc
++    for key in dotted_path.split("."):
++        if not isinstance(current, dict):
++            return PATH_MISSING
++        if key not in current:
++            return PATH_MISSING
++        current = current[key]
++    return current
++
++
++def apply_at_path(doc: Any, dotted_path: str, value: Any) -> None:
++    """Write value at dotted_path; create missing intermediates as needed.
++
++    Modifies doc in place. Comments on sibling keys and intermediate
++    mappings are preserved (ruamel.yaml CommentedMap holds comments
++    on the parent node, not on the keys themselves).
++
++    Missing intermediate keys are created as CommentedMap instances
++    so subsequent operations against those keys round-trip cleanly.
++
++    Raises TypeError if a non-leaf path segment is already bound to
++    a non-mapping value (we won't silently overwrite scalars with
++    mappings — that's a structural change the engine doesn't produce).
++    """
++    if not dotted_path:
++        raise ValueError("apply_at_path requires a non-empty dotted_path")
++
++    keys = dotted_path.split(".")
++    current = doc
++    for key in keys[:-1]:
++        if key not in current:
++            current[key] = CommentedMap()
++        if not isinstance(current[key], dict):
++            raise TypeError(
++                f"cannot descend into non-mapping at {key!r} "
++                f"(found {type(current[key]).__name__})"
++            )
++        current = current[key]
++
++    current[keys[-1]] = value
++
++
++class _BoolScalar:
++    """Opaque wrapper that keeps bool values distinct from numeric floats.
++
++    Python's bool subclasses int, so True == 1 and False == 0 at the
++    language level.  Wrapping in this sentinel lets callers assert that
++    normalize_scalar(True) != normalize_scalar(1) without fighting the
++    type hierarchy.
++    """
++
++    __slots__ = ("value",)
++
++    def __init__(self, value: bool) -> None:
++        self.value = value
++
++    def __eq__(self, other: object) -> bool:
++        return isinstance(other, _BoolScalar) and self.value == other.value
++
++    def __repr__(self) -> str:  # pragma: no cover
++        return f"_BoolScalar({self.value!r})"
++
++    def __hash__(self) -> int:
++        return hash((self.__class__, self.value))
++
++
++def normalize_scalar(value: Any) -> Any:
++    """Normalise scalars for type-tolerant equality comparison (jmy.6 § 6.1).
++
++    int(98) / float(98.0) / str("98") / str("98.0") all normalise to the
++    same float IFF they round-trip cleanly. Used by classify_outcome to
++    decide already_applied vs drift_detected against operator-authored
++    manifests where YAML quoting is the operator's stylistic choice.
++
++    Non-numeric scalars and non-scalar values pass through unchanged so
++    equality comparison can do its own structural check. Booleans are
++    NOT coerced to numeric (bool subclasses int in Python; we keep the
++    distinction by wrapping them in _BoolScalar).
++    """
++    # Booleans first — bool is a subclass of int, so isinstance(True, int) is True.
++    # Wrap in _BoolScalar so normalize_scalar(True) != normalize_scalar(1).
++    if isinstance(value, bool):
++        return _BoolScalar(value)
++
++    if isinstance(value, (int, float)):
++        return float(value)
++
++    if isinstance(value, str):
++        try:
++            return float(value)
++        except ValueError:
++            return value
++
++    return value
++
++
++def classify_outcome(manifest_value: Any, rec: Recommendation) -> OutcomeKind:
++    """Two-table state machine from jmy.6 design § 5.
++
++    For recommendations WITH current_value (modifying existing):
++      manifest path missing       → target_path_missing
++      manifest path = proposed    → already_applied
++      manifest path = current     → apply_clean
++      manifest path = other       → drift_detected
++
++    For recommendations WITHOUT current_value (adding new):
++      manifest path missing       → apply_clean (create)
++      manifest path = proposed    → already_applied
++      manifest path = other       → drift_detected
++
++    Type-tolerant scalar comparison via normalize_scalar; structural
++    (dict/list) comparison is exact.
++    """
++    proposed_norm = _normalize_for_compare(rec.proposed_value)
++
++    if rec.current_value is None:
++        # Adding-new table
++        if manifest_value is PATH_MISSING:
++            return OutcomeKind.APPLY_CLEAN
++        if _normalize_for_compare(manifest_value) == proposed_norm:
++            return OutcomeKind.ALREADY_APPLIED
++        return OutcomeKind.DRIFT_DETECTED
++
++    # Modifying-existing table
++    if manifest_value is PATH_MISSING:
++        return OutcomeKind.TARGET_PATH_MISSING
++
++    current_norm = _normalize_for_compare(rec.current_value)
++    manifest_norm = _normalize_for_compare(manifest_value)
++
++    if manifest_norm == proposed_norm:
++        return OutcomeKind.ALREADY_APPLIED
++    if manifest_norm == current_norm:
++        return OutcomeKind.APPLY_CLEAN
++    return OutcomeKind.DRIFT_DETECTED
++
++
++def _normalize_for_compare(value: Any) -> Any:
++    """Normalise scalars; pass non-scalars through. For dict/list, the
++    caller's == does structural comparison."""
++    if isinstance(value, (dict, list)):
++        return value
++    return normalize_scalar(value)
+diff --git a/src/nthlayer_workers/learn/cli.py b/src/nthlayer_workers/learn/cli.py
+index affcb4d..968a39f 100644
+--- a/src/nthlayer_workers/learn/cli.py
++++ b/src/nthlayer_workers/learn/cli.py
+@@ -127,6 +127,240 @@ def _cmd_retrospective(args: argparse.Namespace) -> None:
+         store.close()
+ 
+ 
++def _add_recommendations_subcommand(subparsers) -> None:
++    """Add the recommendations subcommand (jmy.6)."""
++    p = subparsers.add_parser(
++        "recommendations",
++        help="Inspect / apply Learn → Spec recommendations from a retrospective",
++    )
++
++    # Input source (mutually exclusive, one required)
++    input_group = p.add_mutually_exclusive_group(required=True)
++    input_group.add_argument("--incident", help="Incident ID; fetches retrospective from core")
++    input_group.add_argument("--from", dest="from_path",
++                              help="Read a saved plan.yaml as input")
++
++    # Outputs (orthogonal, optional)
++    p.add_argument("--output", help="Write plan to this file before any apply")
++    p.add_argument("--apply-to", dest="apply_to",
++                    help="Apply plan to manifests in this specs directory")
++    p.add_argument("--pr", action="store_true",
++                    help="Create a GitHub PR with the manifest changes (requires --apply-to)")
++
++    # Modifiers
++    p.add_argument("--force", action="store_true",
++                    help="Override drift_detected skips (drift-only; per jmy.6 § 7)")
++    p.add_argument("--base", default="main",
++                    help="Base branch for --pr (default: main)")
++    p.add_argument("--draft", action="store_true",
++                    help="Create the PR as a draft")
++    p.add_argument("--specs-dir",
++                    help="For --output: include preview field per recommendation")
++
++    p.set_defaults(func=_cmd_recommendations)
++
++
++def _cmd_recommendations(args: argparse.Namespace) -> None:
++    """Dispatch the recommendations subcommand (jmy.6)."""
++    import sys
++    from pathlib import Path
++    from nthlayer_workers.learn.recommendations import parse_plan_file
++    from nthlayer_workers.learn._apply import apply_recommendations, format_summary
++
++    # Validation: --pr requires --apply-to
++    if args.pr and not args.apply_to:
++        raise SystemExit("error: --pr requires --apply-to")
++
++    # Resolve input source
++    if args.from_path:
++        plan = parse_plan_file(Path(args.from_path))
++    else:
++        # --incident: fetch retrospective from core (out of scope for unit tests;
++        # real implementation requires CoreAPIClient.get_retrospective_for_incident —
++        # integration test G1 exercises this path explicitly).
++        plan = _build_plan_from_incident(args.incident)
++
++    # --output: write plan to file BEFORE --apply-to runs (per design § 4)
++    if args.output:
++        Path(args.output).write_text(plan.to_yaml())
++
++    # --apply-to: apply plan to specs directory
++    apply_result = None
++    if args.apply_to:
++        apply_result = apply_recommendations(
++            plan, Path(args.apply_to), force=args.force,
++        )
++        print(format_summary(apply_result), file=sys.stderr)
++
++    # --pr: create GitHub PR with manifest changes (full implementation in F3)
++    if args.pr:
++        _run_pr_path(plan, args, apply_result)
++
++    # Exit code: from apply if --apply-to was used, else 0
++    if apply_result is not None and apply_result.exit_code != 0:
++        raise SystemExit(apply_result.exit_code)
++
++
++def _build_plan_from_incident(incident_id: str):
++    """Stub: fetch retrospective from core and call analyze_incident.
++
++    Full implementation requires CoreAPIClient.get_retrospective_for_incident
++    (which may need adding to the client). Out of scope for the unit-test
++    surface; integration test G1 exercises this path explicitly per the
++    design's audited two-step framing.
++    """
++    raise NotImplementedError(
++        "fetching from --incident requires CoreAPIClient integration; "
++        "use --from <plan.yaml> for now (or run via integration test G1)"
++    )
++
++
++def _run_pr_path(plan, args, apply_result) -> None:
++    """Drive the --pr workflow: pre-flight + branch + commit + push + PR."""
++    import subprocess
++    from pathlib import Path
++    from nthlayer_workers.learn._gh import (
++        PreflightError,
++        check_gh_installed, check_gh_auth, check_git_repo,
++        check_remote, check_branch_available, create_pr_via_gh,
++    )
++
++    if apply_result is None or not apply_result.modified_files:
++        # Nothing was changed; no PR to open
++        return
++
++    specs_dir = Path(args.apply_to)
++    branch = f"learn/recommendations/{plan.incident}"
++
++    # Pre-flight (gh-first, branch-last)
++    try:
++        check_gh_installed()
++        check_gh_auth()
++        check_git_repo(specs_dir)
++        check_remote(specs_dir)
++        check_branch_available(specs_dir, branch)
++    except PreflightError as exc:
++        raise SystemExit(f"Error: {exc}\n\nExit code: 2") from exc
++
++    # Create branch
++    _run_git(specs_dir, ["checkout", "-b", branch])
++
++    # Stage only files actually modified by recommendations
++    for path in apply_result.modified_files:
++        _run_git(specs_dir, ["add", str(path.relative_to(specs_dir))])
++
++    # Commit
++    commit_message = _build_commit_message(plan, apply_result, args)
++    _run_git(specs_dir, ["commit", "-m", commit_message])
++
++    # Push
++    push = subprocess.run(
++        ["git", "push", "-u", "origin", branch],
++        cwd=specs_dir, capture_output=True, text=True, check=False,
++    )
++    if push.returncode != 0:
++        raise SystemExit(
++            f"Error: Push to origin failed\n\n"
++            f"  git push failed: {push.stderr.strip()}\n\n"
++            f"  Your manifest changes are committed on branch\n"
++            f"  {branch} (local only).\n\n"
++            f"  Options:\n"
++            f"    Retry:   git push -u origin {branch}\n"
++            f"    Discard: git branch -D {branch}\n\n"
++            f"  Exit code: 1"
++        )
++
++    # Create PR
++    title = f"Apply NthLayer recommendations from {plan.incident}"
++    body = _build_pr_body(plan, apply_result, args)
++    pr = create_pr_via_gh(
++        title=title, body=body, branch=branch, cwd=specs_dir,
++        base=args.base, draft=args.draft,
++    )
++
++    if not pr.ok:
++        raise SystemExit(
++            f"Error: PR creation failed\n\n"
++            f"  gh pr create failed: {pr.error}\n\n"
++            f"  Your manifest changes are committed on branch\n"
++            f"  {branch}.\n\n"
++            f"  Options:\n"
++            f"    Retry:   gh pr create --base {args.base} --head {branch}\n"
++            f"    Discard: git branch -D {branch}\n\n"
++            f"  Exit code: 1"
++        )
++
++    print(f"PR created: {pr.url}")
++    raise SystemExit(0)
++
++
++def _run_git(cwd, args: list[str]) -> None:
++    """Run a git command in cwd; raise SystemExit on non-zero returncode."""
++    import subprocess
++    result = subprocess.run(
++        ["git", *args], cwd=cwd, capture_output=True, text=True, check=False,
++    )
++    if result.returncode != 0:
++        raise SystemExit(f"git {args[0]} failed: {result.stderr.strip()}")
++
++
++def _build_commit_message(plan, apply_result, args) -> str:
++    """Build the structured commit message per jmy.6 design § 6.3."""
++    lines = [f"Apply NthLayer recommendations from {plan.incident}", ""]
++    for r in apply_result.applied:
++        rec = next((x for x in plan.recommendations if x.id == r.id), None)
++        if rec is None:
++            continue
++        change = _format_change(rec)
++        lines.append(f"- {r.id}  {rec.type:<15}  {r.service:<14} {r.field}  {change}")
++    lines.append("")
++    if args.from_path:
++        lines.append(f"Plan: {args.from_path}")
++    lines.append("Generated by: nthlayer-workers")
++    lines.append("Tool: NthLayer learn module")
++    return "\n".join(lines)
++
++
++def _format_change(rec) -> str:
++    """Format the change notation for a recommendation."""
++    if rec.current_value is None:
++        return "(none) → (added)"
++    return f"{rec.current_value} → {rec.proposed_value}"
++
++
++def _build_pr_body(plan, apply_result, args) -> str:
++    """Build the PR body per jmy.6 design § 6.4."""
++    lines = ["## Changes", "", "| ID | Type | Service | Field | Change |", "|---|---|---|---|---|"]
++    for r in apply_result.applied:
++        rec = next((x for x in plan.recommendations if x.id == r.id), None)
++        if rec is None:
++            continue
++        lines.append(
++            f"| `{r.id}` | `{rec.type}` | `{r.service}` | `{r.field}` | {_format_change(rec)} |"
++        )
++    if apply_result.skipped:
++        lines.append("")
++        lines.append("## Skipped")
++        lines.append("")
++        lines.append("| ID | Reason | Next step |")
++        lines.append("|---|---|---|")
++        for r in apply_result.skipped:
++            next_step = "Investigate" if r.outcome.value == "drift_detected" else "Verify"
++            lines.append(f"| `{r.id}` | `{r.outcome.value}` | {next_step} |")
++    lines.extend([
++        "", "---", "",
++        "## Context",
++        "",
++        f"**Incident:** `{plan.incident}`",
++        f"**Plan generated:** {plan.generated_at.isoformat()}",
++        "",
++        "---",
++        "",
++        "Generated by NthLayer learn module. Human review and merge required.",
++    ])
++    return "\n".join(lines)
++
++
+ def main(argv: list[str] | None = None) -> None:
+     parser = argparse.ArgumentParser(prog="nthlayer-learn", description="Query verdict stores")
+     sub = parser.add_subparsers(dest="command")
+@@ -154,6 +388,9 @@ def main(argv: list[str] | None = None) -> None:
+     retro.add_argument("--db", default="verdicts.db", help="Path to SQLite store")
+     retro.add_argument("--decision-store", default=None, help="Path to decision record SQLite DB for content-addressed records")
+ 
++    # recommendations
++    _add_recommendations_subcommand(sub)
++
+     args = parser.parse_args(argv)
+ 
+     if args.command == "accuracy":
+@@ -162,3 +399,5 @@ def main(argv: list[str] | None = None) -> None:
+         _cmd_list(args)
+     elif args.command == "retrospective":
+         _cmd_retrospective(args)
++    elif args.command == "recommendations":
++        _cmd_recommendations(args)
+diff --git a/src/nthlayer_workers/learn/recommendations.py b/src/nthlayer_workers/learn/recommendations.py
+index f0c2c91..4f89fae 100644
+--- a/src/nthlayer_workers/learn/recommendations.py
++++ b/src/nthlayer_workers/learn/recommendations.py
+@@ -35,12 +35,42 @@ engine here are the building blocks those follow-ups attach to.
+ from __future__ import annotations
+ 
+ import dataclasses
++import hashlib
+ from dataclasses import asdict, dataclass
+ from datetime import datetime, timezone
++from enum import StrEnum
+ from typing import Any
+ 
++
++def compute_rec_id(incident_id: str, rec_type: str, field: str) -> str:
++    """Deterministic rec id from (incident, type, field).
++
++    Format: rec-<12-char-lowercase-sha256-hex>. Stable across tool versions.
++    Algorithm pinned in jmy.6 design § 6.1 so future contributors don't
++    accidentally change the hash basis.
++    """
++    payload = f"{incident_id}|{rec_type}|{field}".encode("utf-8")
++    return "rec-" + hashlib.sha256(payload).hexdigest()[:12]
++
+ import yaml
+ 
++
++class OutcomeKind(StrEnum):
++    """Per-recommendation outcome from --apply-to evaluation (jmy.6 § 5).
++
++    Lives in recommendations.py (not _yaml.py) because outcomes are part
++    of the recommendation lifecycle — operator-visible in summaries,
++    PR body, error messages. _yaml.py's classify_outcome implements the
++    state machine that produces these.
++    """
++
++    APPLY_CLEAN = "apply_clean"
++    ALREADY_APPLIED = "already_applied"
++    DRIFT_DETECTED = "drift_detected"
++    TARGET_PATH_MISSING = "target_path_missing"
++    MANIFEST_NOT_FOUND = "manifest_not_found"
++
++
+ # Severity threshold for the tighten_slo heuristic. The retrospective
+ # already classifies whether an SLO judgment SLO was breached during
+ # the incident; a heuristic 80% gap (current_value vs target as a
+@@ -59,11 +89,13 @@ _TIGHTEN_SLO_BLEND = 0.5
+ class Recommendation:
+     """One proposed spec change in a SpecRecommendation document.
+ 
+-    All fields except ``service``, ``type``, ``rationale``, and
++    All fields except ``id``, ``service``, ``type``, ``rationale``, and
+     ``proposed_value`` are optional and only populated when the engine
+-    has the inputs.
++    has the inputs. ``id`` is a deterministic rec-<12-char-sha256-hex>
++    computed via compute_rec_id(incident_id, type, field).
+     """
+ 
++    id: str
+     service: str
+     type: str  # "tighten_slo" | "add_deploy_gate" | etc.
+     rationale: str
+@@ -118,8 +150,8 @@ class SpecRecommendation:
+             d = {k: v for k, v in d.items() if v not in (None, [], "")}
+             recs.append(d)
+         return {
+-            "apiVersion": "opensrm.io/v1",
+-            "kind": "SpecRecommendation",
++            "apiVersion": "nthlayer.io/learn/v1",
++            "kind": "RecommendationPlan",
+             "metadata": {
+                 "incident": self.incident,
+                 "generated_by": self.generated_by,
+@@ -165,9 +197,9 @@ def analyze_incident(
+     evaluations = retrospective_data.get("evaluations") or []
+     root_causes = incident_custom.get("root_causes") or []
+ 
+-    for rec in _tighten_slo_recommendations(evaluations):
++    for rec in _tighten_slo_recommendations(evaluations, incident_id):
+         recs.append(rec)
+-    for rec in _add_deploy_gate_recommendations(evaluations, root_causes):
++    for rec in _add_deploy_gate_recommendations(evaluations, root_causes, incident_id):
+         recs.append(rec)
+ 
+     overall_confidence = (
+@@ -185,6 +217,7 @@ def analyze_incident(
+ 
+ def _tighten_slo_recommendations(
+     evaluations: list[dict[str, Any]],
++    incident_id: str,
+ ) -> list[Recommendation]:
+     """Produce ``tighten_slo`` recommendations from breached judgment SLOs."""
+     out: list[Recommendation] = []
+@@ -211,10 +244,12 @@ def _tighten_slo_recommendations(
+         if gap_fraction < _TIGHTEN_SLO_GAP_FRACTION:
+             continue
+         proposed = float(current) + (float(target) - float(current)) * _TIGHTEN_SLO_BLEND
++        field_path = f"spec.slos.{slo_name}.target"
+         out.append(Recommendation(
++            id=compute_rec_id(incident_id, "tighten_slo", field_path),
+             service=service,
+             type="tighten_slo",
+-            field=f"spec.slos.{slo_name}.target",
++            field=field_path,
+             current_value=target,
+             proposed_value=round(proposed, 2),
+             rationale=(
+@@ -234,9 +269,87 @@ def _tighten_slo_recommendations(
+     return out
+ 
+ 
++SUPPORTED_API_VERSIONS = frozenset({"nthlayer.io/learn/v1"})
++
++
++class PlanFileUnknownVersionError(ValueError):
++    """Plan file's apiVersion is not one we recognise."""
++
++
++class PlanFileInvalidError(ValueError):
++    """Plan file is malformed or missing required keys."""
++
++
++def parse_plan_file(path) -> SpecRecommendation:
++    """Read a plan.yaml file and deserialise to SpecRecommendation.
++
++    Validates apiVersion is in SUPPORTED_API_VERSIONS and required
++    structural keys are present. Raises PlanFileUnknownVersionError
++    or PlanFileInvalidError on bad input. The underlying yaml.YAMLError
++    propagates on malformed YAML (handled at a higher layer as
++    manifest_parse_error).
++    """
++    from pathlib import Path
++
++    text = Path(path).read_text()
++    data = yaml.safe_load(text)
++
++    if not isinstance(data, dict):
++        raise PlanFileInvalidError(
++            f"plan file root must be a mapping, got {type(data).__name__}"
++        )
++
++    api_version = data.get("apiVersion")
++    if api_version not in SUPPORTED_API_VERSIONS:
++        raise PlanFileUnknownVersionError(
++            f"plan file apiVersion {api_version!r} is not supported; "
++            f"expected one of {sorted(SUPPORTED_API_VERSIONS)} "
++            f"(e.g. nthlayer.io/learn/v1)"
++        )
++
++    if "recommendations" not in data:
++        raise PlanFileInvalidError("plan file missing required 'recommendations' key")
++
++    if not isinstance(data["recommendations"], list):
++        raise PlanFileInvalidError(
++            f"plan file recommendations must be a list, "
++            f"got {type(data['recommendations']).__name__}"
++        )
++
++    metadata = data.get("metadata", {})
++    if not isinstance(metadata, dict):
++        raise PlanFileInvalidError("plan file metadata must be a mapping")
++
++    generated_at_str = metadata.get("generated_at")
++    if not isinstance(generated_at_str, str):
++        raise PlanFileInvalidError("plan file metadata.generated_at must be an ISO 8601 string")
++
++    recs: list[Recommendation] = []
++    for r in data["recommendations"]:
++        if not isinstance(r, dict):
++            raise PlanFileInvalidError("each recommendation must be a mapping")
++        try:
++            recs.append(Recommendation(**r))
++        except TypeError as exc:
++            raise PlanFileInvalidError(f"recommendation invalid: {exc}") from exc
++
++    try:
++        return SpecRecommendation(
++            incident=metadata.get("incident", ""),
++            generated_by=metadata.get("generated_by", "nthlayer-learn"),
++            generated_at=datetime.fromisoformat(generated_at_str),
++            confidence=metadata.get("confidence", 0.0),
++            recommendations=recs,
++            requires_human_review=metadata.get("requires_human_review", True),
++        )
++    except (TypeError, ValueError) as exc:
++        raise PlanFileInvalidError(f"plan metadata invalid: {exc}") from exc
++
++
+ def _add_deploy_gate_recommendations(
+     evaluations: list[dict[str, Any]],
+     root_causes: list[dict[str, Any]],
++    incident_id: str,
+ ) -> list[Recommendation]:
+     """Produce ``add_deploy_gate`` recommendations from change-shaped root causes.
+ 
+@@ -295,10 +408,12 @@ def _add_deploy_gate_recommendations(
+             evidence = [{"root_cause_type": rc.get("type")}]
+             confidence = 0.4
+ 
++        gate_field = "spec.deployment.gates.judgment"
+         out.append(Recommendation(
++            id=compute_rec_id(incident_id, "add_deploy_gate", gate_field),
+             service=service,
+             type="add_deploy_gate",
+-            field="spec.deployment.gates.judgment",
++            field=gate_field,
+             current_value=None,
+             proposed_value={
+                 "enabled": True,
+diff --git a/tests/learn/test_apply.py b/tests/learn/test_apply.py
+new file mode 100644
+index 0000000..feae20f
+--- /dev/null
++++ b/tests/learn/test_apply.py
+@@ -0,0 +1,335 @@
++"""Unit tests for nthlayer_workers.learn._apply (jmy.6)."""
++from __future__ import annotations
++
++import pytest
++from pathlib import Path
++
++
++class TestResolveManifestPath:
++    """resolve_manifest_path: filename-convention + walk fallback."""
++
++    def test_filename_convention(self, tmp_path):
++        from nthlayer_workers.learn._apply import resolve_manifest_path
++
++        (tmp_path / "fraud-detect.yaml").write_text(
++            "metadata:\n  name: fraud-detect\nspec:\n  slos: {}\n"
++        )
++
++        result = resolve_manifest_path("fraud-detect", tmp_path)
++        assert result == tmp_path / "fraud-detect.yaml"
++
++    def test_filename_convention_yml_extension(self, tmp_path):
++        from nthlayer_workers.learn._apply import resolve_manifest_path
++
++        (tmp_path / "fraud-detect.yml").write_text(
++            "metadata:\n  name: fraud-detect\nspec:\n  slos: {}\n"
++        )
++
++        result = resolve_manifest_path("fraud-detect", tmp_path)
++        assert result == tmp_path / "fraud-detect.yml"
++
++    def test_walk_fallback_finds_by_metadata_name(self, tmp_path):
++        from nthlayer_workers.learn._apply import resolve_manifest_path
++
++        # File doesn't match service name; metadata.name does
++        nested = tmp_path / "payments" / "billing-srv.yaml"
++        nested.parent.mkdir(parents=True)
++        nested.write_text(
++            "metadata:\n  name: fraud-detect\nspec:\n  slos: {}\n"
++        )
++
++        result = resolve_manifest_path("fraud-detect", tmp_path)
++        assert result == nested
++
++    def test_hidden_dirs_excluded(self, tmp_path):
++        from nthlayer_workers.learn._apply import resolve_manifest_path
++
++        # Hidden dir; should be excluded from walk
++        hidden = tmp_path / ".cache" / "fraud-detect.yaml"
++        hidden.parent.mkdir()
++        hidden.write_text(
++            "metadata:\n  name: fraud-detect\nspec:\n  slos: {}\n"
++        )
++
++        result = resolve_manifest_path("fraud-detect", tmp_path)
++        assert result is None  # not found (hidden excluded)
++
++    def test_not_found_returns_none(self, tmp_path):
++        from nthlayer_workers.learn._apply import resolve_manifest_path
++
++        result = resolve_manifest_path("nonexistent-service", tmp_path)
++        assert result is None
++
++
++class TestApplyHappyPath:
++    """apply_recommendations orchestration: happy path."""
++
++    def test_single_rec_applied(self, tmp_path):
++        from nthlayer_workers.learn._apply import apply_recommendations
++        from nthlayer_workers.learn.recommendations import (
++            Recommendation, SpecRecommendation, OutcomeKind,
++        )
++        from datetime import datetime, timezone
++
++        # Seed manifest
++        (tmp_path / "fraud-detect.yaml").write_text(
++            "metadata:\n  name: fraud-detect\n"
++            "spec:\n  slos:\n    judgment:\n      target: 95.0\n"
++        )
++        plan = SpecRecommendation(
++            incident="inc-test",
++            generated_by="nthlayer-learn",
++            generated_at=datetime(2026, 5, 26, tzinfo=timezone.utc),
++            confidence=0.7,
++            recommendations=[
++                Recommendation(
++                    id="rec-deadbeef0123",
++                    service="fraud-detect",
++                    type="tighten_slo",
++                    rationale="test",
++                    field="spec.slos.judgment.target",
++                    current_value=95.0,
++                    proposed_value=98.5,
++                ),
++            ],
++        )
++
++        result = apply_recommendations(plan, tmp_path)
++
++        assert len(result.applied) == 1
++        assert result.applied[0].id == "rec-deadbeef0123"
++        assert result.applied[0].outcome == OutcomeKind.APPLY_CLEAN
++        assert len(result.skipped) == 0
++        # Manifest file modified on disk
++        assert "target: 98.5" in (tmp_path / "fraud-detect.yaml").read_text()
++        assert "target: 95.0" not in (tmp_path / "fraud-detect.yaml").read_text()
++
++    def test_skipped_when_manifest_missing(self, tmp_path):
++        from nthlayer_workers.learn._apply import apply_recommendations
++        from nthlayer_workers.learn.recommendations import (
++            Recommendation, SpecRecommendation, OutcomeKind,
++        )
++        from datetime import datetime, timezone
++
++        # No manifest seeded
++        plan = SpecRecommendation(
++            incident="inc-test",
++            generated_by="nthlayer-learn",
++            generated_at=datetime(2026, 5, 26, tzinfo=timezone.utc),
++            confidence=0.7,
++            recommendations=[
++                Recommendation(
++                    id="rec-deadbeef0124",
++                    service="unknown-service",
++                    type="tighten_slo",
++                    rationale="test",
++                    field="spec.slos.judgment.target",
++                    current_value=95.0,
++                    proposed_value=98.5,
++                ),
++            ],
++        )
++
++        result = apply_recommendations(plan, tmp_path)
++        assert len(result.applied) == 0
++        assert len(result.skipped) == 1
++        assert result.skipped[0].outcome == OutcomeKind.MANIFEST_NOT_FOUND
++
++
++class TestApplyAtomicity:
++    """Atomic write phase: alphabetical order, failure isolation."""
++
++    def test_alphabetical_write_order(self, tmp_path):
++        """Files are written in alphabetical order, not encounter order."""
++        from nthlayer_workers.learn._apply import apply_recommendations
++        from nthlayer_workers.learn.recommendations import (
++            Recommendation, SpecRecommendation,
++        )
++        from datetime import datetime, timezone
++
++        # Seed two manifests
++        (tmp_path / "z-service.yaml").write_text(
++            "metadata:\n  name: z-service\n"
++            "spec:\n  slos:\n    judgment:\n      target: 95.0\n"
++        )
++        (tmp_path / "a-service.yaml").write_text(
++            "metadata:\n  name: a-service\n"
++            "spec:\n  slos:\n    judgment:\n      target: 95.0\n"
++        )
++
++        # Recommend changes; z-service first in plan, a-service second
++        plan = SpecRecommendation(
++            incident="inc-test",
++            generated_by="nthlayer-learn",
++            generated_at=datetime(2026, 5, 26, tzinfo=timezone.utc),
++            confidence=0.7,
++            recommendations=[
++                Recommendation(
++                    id="rec-z000",
++                    service="z-service",
++                    type="tighten_slo",
++                    rationale="test",
++                    field="spec.slos.judgment.target",
++                    current_value=95.0,
++                    proposed_value=98.5,
++                ),
++                Recommendation(
++                    id="rec-a000",
++                    service="a-service",
++                    type="tighten_slo",
++                    rationale="test",
++                    field="spec.slos.judgment.target",
++                    current_value=95.0,
++                    proposed_value=98.5,
++                ),
++            ],
++        )
++
++        result = apply_recommendations(plan, tmp_path)
++
++        # Both applied
++        assert len(result.applied) == 2
++        # modified_files in alphabetical order
++        names = [p.name for p in result.modified_files]
++        assert names == ["a-service.yaml", "z-service.yaml"]
++
++    def test_filename_based_failure_injection_isolates_failure(
++        self, tmp_path, monkeypatch,
++    ):
++        """Filename-based failure injection per jmy.6 design § 8."""
++        from nthlayer_workers.learn._apply import apply_recommendations
++        from nthlayer_workers.learn.recommendations import (
++            Recommendation, SpecRecommendation,
++        )
++        from datetime import datetime, timezone
++
++        # Seed two manifests
++        (tmp_path / "a-service.yaml").write_text(
++            "metadata:\n  name: a-service\n"
++            "spec:\n  slos:\n    judgment:\n      target: 95.0\n"
++        )
++        (tmp_path / "b-service.yaml").write_text(
++            "metadata:\n  name: b-service\n"
++            "spec:\n  slos:\n    judgment:\n      target: 95.0\n"
++        )
++
++        # Capture original write_text before monkeypatching
++        original_write_text = Path.write_text
++
++        def selective_fail(self, content, **kwargs):
++            if self.name == "b-service.yaml":
++                raise OSError("simulated write failure on b-service.yaml")
++            return original_write_text(self, content, **kwargs)
++
++        monkeypatch.setattr(Path, "write_text", selective_fail)
++
++        plan = SpecRecommendation(
++            incident="inc-test",
++            generated_by="nthlayer-learn",
++            generated_at=datetime(2026, 5, 26, tzinfo=timezone.utc),
++            confidence=0.7,
++            recommendations=[
++                Recommendation(
++                    id="rec-a000",
++                    service="a-service",
++                    type="tighten_slo",
++                    rationale="test",
++                    field="spec.slos.judgment.target",
++                    current_value=95.0,
++                    proposed_value=98.5,
++                ),
++                Recommendation(
++                    id="rec-b000",
++                    service="b-service",
++                    type="tighten_slo",
++                    rationale="test",
++                    field="spec.slos.judgment.target",
++                    current_value=95.0,
++                    proposed_value=98.5,
++                ),
++            ],
++        )
++
++        with pytest.raises(OSError, match="b-service.yaml"):
++            apply_recommendations(plan, tmp_path)
++
++        # a-service.yaml was modified before the write failure
++        assert "target: 98.5" in (tmp_path / "a-service.yaml").read_text()
++        # b-service.yaml original content retained
++        assert "target: 95.0" in (tmp_path / "b-service.yaml").read_text()
++
++
++class TestSummaryBuilder:
++    """End-of-run summary string format per jmy.6 § 6.2."""
++
++    def test_summary_applied_section(self):
++        from nthlayer_workers.learn._apply import (
++            ApplyResult, RecOutcome, format_summary,
++        )
++        from nthlayer_workers.learn.recommendations import OutcomeKind
++
++        result = ApplyResult(
++            applied=[
++                RecOutcome(
++                    id="rec-a3f8b2e1c9d4",
++                    service="fraud-detect",
++                    field="spec.slos.judgment.target",
++                    outcome=OutcomeKind.APPLY_CLEAN,
++                ),
++            ],
++        )
++        summary = format_summary(result)
++
++        assert "Applied: 1" in summary
++        assert "rec-a3f8b2e1c9d4" in summary
++        assert "fraud-detect" in summary
++        assert "spec.slos.judgment.target" in summary
++
++    def test_summary_skipped_section_with_drift_detail(self):
++        from nthlayer_workers.learn._apply import (
++            ApplyResult, RecOutcome, format_summary,
++        )
++        from nthlayer_workers.learn.recommendations import OutcomeKind
++
++        result = ApplyResult(
++            applied=[],
++            skipped=[
++                RecOutcome(
++                    id="rec-d5e8f2b6c9a1",
++                    service="notification",
++                    field="spec.slos.availability.target",
++                    outcome=OutcomeKind.DRIFT_DETECTED,
++                    detail="manifest current: 98.0\nrecommendation expected: 95.0\nproposed value: 99.0",
++                ),
++            ],
++        )
++        summary = format_summary(result)
++
++        assert "Skipped: 1" in summary
++        assert "drift_detected" in summary
++        assert "Re-run with --force" in summary or "--force rec-d5e8f2b6c9a1" in summary
++
++    def test_summary_exit_code_line(self):
++        from nthlayer_workers.learn._apply import (
++            ApplyResult, RecOutcome, format_summary,
++        )
++        from nthlayer_workers.learn.recommendations import OutcomeKind
++
++        result = ApplyResult(
++            applied=[
++                RecOutcome(id="rec-1", service="s", field="f", outcome=OutcomeKind.APPLY_CLEAN),
++            ],
++            skipped=[
++                RecOutcome(id="rec-2", service="s", field="f", outcome=OutcomeKind.DRIFT_DETECTED),
++            ],
++        )
++        summary = format_summary(result)
++        # exit_code == 1 (partial)
++        assert "Exit code: 1" in summary
++
++    def test_empty_plan_summary(self):
++        from nthlayer_workers.learn._apply import ApplyResult, format_summary
++
++        summary = format_summary(ApplyResult())
++        assert "Applied: 0" in summary
++        assert "Exit code: 0" in summary
+diff --git a/tests/learn/test_cli_recommendations.py b/tests/learn/test_cli_recommendations.py
+new file mode 100644
+index 0000000..d7210af
+--- /dev/null
++++ b/tests/learn/test_cli_recommendations.py
+@@ -0,0 +1,215 @@
++"""Unit tests for the recommendations CLI subcommand (jmy.6)."""
++from __future__ import annotations
++
++import pytest
++
++
++class TestArgValidation:
++    """invalid_args edge cases per jmy.6 § 7."""
++
++    def test_incident_and_from_mutually_exclusive(self, capsys):
++        from nthlayer_workers.learn.cli import main
++
++        with pytest.raises(SystemExit) as exc:
++            main(["recommendations", "--incident", "inc-x", "--from", "plan.yaml"])
++        assert exc.value.code != 0
++
++    def test_pr_requires_apply_to(self, capsys, tmp_path):
++        from nthlayer_workers.learn.cli import main
++
++        with pytest.raises(SystemExit) as exc:
++            main(["recommendations", "--incident", "inc-x", "--pr"])
++        assert exc.value.code != 0
++
++    def test_neither_incident_nor_from_required(self, capsys):
++        from nthlayer_workers.learn.cli import main
++
++        with pytest.raises(SystemExit) as exc:
++            main(["recommendations"])
++        assert exc.value.code != 0
++
++
++class TestOutputFlag:
++    """--output writes plan.yaml from --from input."""
++
++    def test_from_then_output_round_trip(self, tmp_path, capsys):
++        from nthlayer_workers.learn.cli import main
++        from nthlayer_workers.learn.recommendations import (
++            SpecRecommendation, Recommendation,
++        )
++        from datetime import datetime, timezone
++
++        # Build a plan file
++        plan = SpecRecommendation(
++            incident="inc-test",
++            generated_by="nthlayer-learn",
++            generated_at=datetime(2026, 5, 26, tzinfo=timezone.utc),
++            confidence=0.7,
++            recommendations=[
++                Recommendation(
++                    id="rec-deadbeef0123",
++                    service="fraud-detect",
++                    type="tighten_slo",
++                    rationale="test",
++                    field="spec.slos.judgment.target",
++                    current_value=95.0,
++                    proposed_value=98.5,
++                ),
++            ],
++        )
++        plan_in = tmp_path / "in.yaml"
++        plan_in.write_text(plan.to_yaml())
++
++        plan_out = tmp_path / "out.yaml"
++        main(["recommendations", "--from", str(plan_in), "--output", str(plan_out)])
++
++        # Output file written + parses back to same plan
++        from nthlayer_workers.learn.recommendations import parse_plan_file
++        round_tripped = parse_plan_file(plan_out)
++        assert round_tripped.incident == "inc-test"
++        assert len(round_tripped.recommendations) == 1
++
++
++class TestApplyToFlag:
++    """--apply-to applies the plan to specs in the target directory."""
++
++    def test_from_then_apply_to(self, tmp_path):
++        from nthlayer_workers.learn.cli import main
++        from nthlayer_workers.learn.recommendations import (
++            SpecRecommendation, Recommendation,
++        )
++        from datetime import datetime, timezone
++
++        # Seed manifest + plan
++        specs_dir = tmp_path / "specs"
++        specs_dir.mkdir()
++        (specs_dir / "fraud-detect.yaml").write_text(
++            "metadata:\n  name: fraud-detect\n"
++            "spec:\n  slos:\n    judgment:\n      target: 95.0\n"
++        )
++
++        plan = SpecRecommendation(
++            incident="inc-test",
++            generated_by="nthlayer-learn",
++            generated_at=datetime(2026, 5, 26, tzinfo=timezone.utc),
++            confidence=0.7,
++            recommendations=[
++                Recommendation(
++                    id="rec-deadbeef0123",
++                    service="fraud-detect",
++                    type="tighten_slo",
++                    rationale="test",
++                    field="spec.slos.judgment.target",
++                    current_value=95.0,
++                    proposed_value=98.5,
++                ),
++            ],
++        )
++        plan_in = tmp_path / "in.yaml"
++        plan_in.write_text(plan.to_yaml())
++
++        # Run the CLI
++        main([
++            "recommendations",
++            "--from", str(plan_in),
++            "--apply-to", str(specs_dir),
++        ])
++
++        # Manifest modified
++        assert "target: 98.5" in (specs_dir / "fraud-detect.yaml").read_text()
++
++
++class TestPrPath:
++    """--pr drives pre-flight + branch + commit + push + gh pr create."""
++
++    def test_pr_path_happy(self, tmp_path, monkeypatch, capsys):
++        """End-to-end --pr with all git/gh subprocess calls stubbed."""
++        from nthlayer_workers.learn.cli import main
++        from nthlayer_workers.learn.recommendations import (
++            SpecRecommendation, Recommendation,
++        )
++        from datetime import datetime, timezone
++        import subprocess
++
++        # Seed manifest + plan
++        specs_dir = tmp_path / "specs"
++        specs_dir.mkdir()
++        (specs_dir / "fraud-detect.yaml").write_text(
++            "metadata:\n  name: fraud-detect\n"
++            "spec:\n  slos:\n    judgment:\n      target: 95.0\n"
++        )
++
++        plan = SpecRecommendation(
++            incident="inc-test",
++            generated_by="nthlayer-learn",
++            generated_at=datetime(2026, 5, 26, tzinfo=timezone.utc),
++            confidence=0.7,
++            recommendations=[
++                Recommendation(
++                    id="rec-deadbeef0123",
++                    service="fraud-detect",
++                    type="tighten_slo",
++                    rationale="test",
++                    field="spec.slos.judgment.target",
++                    current_value=95.0,
++                    proposed_value=98.5,
++                ),
++            ],
++        )
++        plan_in = tmp_path / "in.yaml"
++        plan_in.write_text(plan.to_yaml())
++
++        # Stub every subprocess.run invocation (gh + git)
++        captured: list = []
++        def fake_run(args, **kwargs):
++            captured.append(list(args))
++            # gh --version: success
++            if args[:2] == ["gh", "--version"]:
++                return subprocess.CompletedProcess(args=args, returncode=0, stdout="gh 2.x", stderr="")
++            # gh auth status: success
++            if args[:3] == ["gh", "auth", "status"]:
++                return subprocess.CompletedProcess(args=args, returncode=0, stdout="logged in", stderr="")
++            # git rev-parse --git-dir: success (simulate repo)
++            if "rev-parse" in args:
++                return subprocess.CompletedProcess(args=args, returncode=0, stdout=".git", stderr="")
++            # git remote get-url origin: success
++            if "remote" in args and "get-url" in args:
++                return subprocess.CompletedProcess(args=args, returncode=0, stdout="git@github.com:org/repo.git", stderr="")
++            # branch checks: not exists
++            if "show-ref" in args:
++                return subprocess.CompletedProcess(args=args, returncode=1, stdout="", stderr="")
++            if "ls-remote" in args:
++                return subprocess.CompletedProcess(args=args, returncode=0, stdout="", stderr="")
++            # All git commands (checkout, add, commit, push) succeed
++            if args[0] == "git":
++                return subprocess.CompletedProcess(args=args, returncode=0, stdout="", stderr="")
++            # gh pr create: success
++            if args[:3] == ["gh", "pr", "create"]:
++                return subprocess.CompletedProcess(
++                    args=args, returncode=0,
++                    stdout="https://github.com/org/repo/pull/99\n",
++                    stderr="",
++                )
++            return subprocess.CompletedProcess(args=args, returncode=0, stdout="", stderr="")
++
++        monkeypatch.setattr(subprocess, "run", fake_run)
++
++        # Run the CLI with --pr
++        with pytest.raises(SystemExit) as exc:
++            main([
++                "recommendations",
++                "--from", str(plan_in),
++                "--apply-to", str(specs_dir),
++                "--pr",
++            ])
++        assert exc.value.code == 0
++
++        # Verify gh pr create was called
++        gh_pr_create_called = any(
++            list(c[:3]) == ["gh", "pr", "create"] for c in captured
++        )
++        assert gh_pr_create_called
++
++        # stdout contains PR URL
++        captured_out = capsys.readouterr()
++        assert "https://github.com/org/repo/pull/99" in captured_out.out
+diff --git a/tests/learn/test_gh.py b/tests/learn/test_gh.py
+new file mode 100644
+index 0000000..c134b6f
+--- /dev/null
++++ b/tests/learn/test_gh.py
+@@ -0,0 +1,188 @@
++"""Unit tests for nthlayer_workers.learn._gh (jmy.6)."""
++from __future__ import annotations
++
++import subprocess
++import pytest
++
++
++class TestPreflightChecks:
++    """gh + git pre-flight checks per jmy.6 design § 7 Category A."""
++
++    def test_check_gh_installed_raises_when_missing(self, monkeypatch):
++        from nthlayer_workers.learn._gh import check_gh_installed, PreflightError
++
++        def fake_run(*args, **kwargs):
++            raise FileNotFoundError("no such file")
++        monkeypatch.setattr(subprocess, "run", fake_run)
++
++        with pytest.raises(PreflightError, match="gh_not_installed"):
++            check_gh_installed()
++
++    def test_check_gh_installed_passes_when_present(self, monkeypatch):
++        from nthlayer_workers.learn._gh import check_gh_installed
++
++        result = subprocess.CompletedProcess(
++            args=["gh", "--version"], returncode=0, stdout="gh version 2.x\n", stderr="",
++        )
++        monkeypatch.setattr(subprocess, "run", lambda *a, **kw: result)
++
++        check_gh_installed()  # no raise
++
++    def test_check_gh_auth_raises_on_not_authenticated(self, monkeypatch):
++        from nthlayer_workers.learn._gh import check_gh_auth, PreflightError
++
++        result = subprocess.CompletedProcess(
++            args=["gh", "auth", "status"], returncode=1, stdout="", stderr="not logged in",
++        )
++        monkeypatch.setattr(subprocess, "run", lambda *a, **kw: result)
++
++        with pytest.raises(PreflightError, match="gh_not_authenticated"):
++            check_gh_auth()
++
++    def test_check_git_repo_raises_outside_repo(self, monkeypatch, tmp_path):
++        from nthlayer_workers.learn._gh import check_git_repo, PreflightError
++
++        result = subprocess.CompletedProcess(
++            args=["git", "rev-parse", "--git-dir"], returncode=128, stdout="", stderr="fatal",
++        )
++        monkeypatch.setattr(subprocess, "run", lambda *a, **kw: result)
++
++        with pytest.raises(PreflightError, match="not_a_git_repo"):
++            check_git_repo(tmp_path)
++
++    def test_check_remote_raises_when_no_origin(self, monkeypatch, tmp_path):
++        from nthlayer_workers.learn._gh import check_remote, PreflightError
++
++        result = subprocess.CompletedProcess(
++            args=["git", "remote", "get-url", "origin"], returncode=128, stdout="", stderr="",
++        )
++        monkeypatch.setattr(subprocess, "run", lambda *a, **kw: result)
++
++        with pytest.raises(PreflightError, match="no_remote"):
++            check_remote(tmp_path)
++
++    def test_check_branch_available_raises_when_local_exists(self, monkeypatch, tmp_path):
++        from nthlayer_workers.learn._gh import check_branch_available, PreflightError
++
++        def fake_run(args, **kwargs):
++            if "show-ref" in args:
++                # Local branch exists
++                return subprocess.CompletedProcess(args=args, returncode=0, stdout="ref\n", stderr="")
++            # Remote check (won't be reached if local check raises)
++            return subprocess.CompletedProcess(args=args, returncode=0, stdout="", stderr="")
++
++        monkeypatch.setattr(subprocess, "run", fake_run)
++
++        with pytest.raises(PreflightError, match="branch_exists"):
++            check_branch_available(tmp_path, "learn/recommendations/inc-test")
++
++    def test_check_branch_available_raises_when_remote_exists(self, monkeypatch, tmp_path):
++        from nthlayer_workers.learn._gh import check_branch_available, PreflightError
++
++        def fake_run(args, **kwargs):
++            if "show-ref" in args:
++                # Local doesn't exist
++                return subprocess.CompletedProcess(args=args, returncode=1, stdout="", stderr="")
++            if "ls-remote" in args:
++                # Remote branch exists
++                return subprocess.CompletedProcess(
++                    args=args, returncode=0,
++                    stdout="abc123\trefs/heads/learn/recommendations/inc-test\n",
++                    stderr="",
++                )
++            return subprocess.CompletedProcess(args=args, returncode=0, stdout="", stderr="")
++
++        monkeypatch.setattr(subprocess, "run", fake_run)
++
++        with pytest.raises(PreflightError, match="branch_exists"):
++            check_branch_available(tmp_path, "learn/recommendations/inc-test")
++
++
++class TestCreatePr:
++    """create_pr_via_gh: shell out to gh pr create, parse PRResult."""
++
++    def test_happy_path_returns_pr_url(self, monkeypatch, tmp_path):
++        from nthlayer_workers.learn._gh import create_pr_via_gh
++        import subprocess
++
++        result = subprocess.CompletedProcess(
++            args=["gh", "pr", "create"],
++            returncode=0,
++            stdout="https://github.com/org/repo/pull/42\n",
++            stderr="",
++        )
++        captured = {}
++
++        def fake_run(args, **kwargs):
++            captured["args"] = args
++            return result
++
++        monkeypatch.setattr(subprocess, "run", fake_run)
++
++        pr = create_pr_via_gh(
++            title="Apply NthLayer recommendations from inc-test",
++            body="## Changes\n...",
++            branch="learn/recommendations/inc-test",
++            cwd=tmp_path,
++        )
++
++        assert pr.ok
++        assert pr.url == "https://github.com/org/repo/pull/42"
++        assert pr.number == 42
++        # Args include the expected flags
++        assert "--title" in captured["args"]
++        assert "--body" in captured["args"]
++        assert "--head" in captured["args"]
++        assert "--base" in captured["args"]
++
++    def test_base_and_draft_kwargs_flow_to_argv(self, monkeypatch, tmp_path):
++        from nthlayer_workers.learn._gh import create_pr_via_gh
++        import subprocess
++
++        result = subprocess.CompletedProcess(
++            args=["gh", "pr", "create"],
++            returncode=0,
++            stdout="https://github.com/org/repo/pull/99\n",
++            stderr="",
++        )
++        captured = {}
++
++        def fake_run(args, **kw):
++            captured.setdefault("args", args)
++            return result
++
++        monkeypatch.setattr(subprocess, "run", fake_run)
++
++        create_pr_via_gh(
++            title="t", body="b",
++            branch="learn/recommendations/x",
++            cwd=tmp_path,
++            base="develop",
++            draft=True,
++        )
++
++        assert "develop" in captured["args"]
++        assert "--draft" in captured["args"]
++
++    def test_failure_returns_pr_result_with_error(self, monkeypatch, tmp_path):
++        from nthlayer_workers.learn._gh import create_pr_via_gh
++        import subprocess
++
++        result = subprocess.CompletedProcess(
++            args=["gh", "pr", "create"],
++            returncode=1,
++            stdout="",
++            stderr="GraphQL: pull request requires a base branch\n",
++        )
++        monkeypatch.setattr(subprocess, "run", lambda args, **kw: result)
++
++        pr = create_pr_via_gh(
++            title="t", body="b",
++            branch="learn/recommendations/x",
++            cwd=tmp_path,
++        )
++
++        assert not pr.ok
++        assert pr.url is None
++        assert pr.number is None
++        assert "GraphQL" in pr.error
+diff --git a/tests/learn/test_preview.py b/tests/learn/test_preview.py
+new file mode 100644
+index 0000000..0424722
+--- /dev/null
++++ b/tests/learn/test_preview.py
+@@ -0,0 +1,139 @@
++"""Unit tests for nthlayer_workers.learn._preview (jmy.6)."""
++from __future__ import annotations
++
++import pytest
++
++
++class TestBuildPreviewScalar:
++    """build_preview for scalar-valued recommendations (tighten_slo)."""
++
++    def test_scalar_change_preview_shape(self):
++        from nthlayer_workers.learn._preview import build_preview
++        from nthlayer_workers.learn.recommendations import Recommendation
++
++        rec = Recommendation(
++            id="rec-deadbeef0123",
++            service="fraud-detect",
++            type="tighten_slo",
++            rationale="test",
++            field="spec.slos.judgment.target",
++            current_value=95.0,
++            proposed_value=98.5,
++        )
++        # Manifest's current value (read by _apply before calling build_preview)
++        preview = build_preview(
++            manifest_path="specs/fraud-detect.yaml",
++            rec=rec,
++            manifest_current_value=95.0,
++        )
++
++        # Heading lines pinned per jmy.6 design § 6.1
++        assert "# File: specs/fraud-detect.yaml" in preview
++        assert "# Path: spec.slos.judgment.target" in preview
++        # Unified-diff style
++        assert "-   target: 95.0" in preview
++        assert "+   target: 98.5" in preview
++
++    def test_scalar_already_applied_returns_empty(self):
++        """When manifest already has proposed value, preview is empty."""
++        from nthlayer_workers.learn._preview import build_preview
++        from nthlayer_workers.learn.recommendations import Recommendation
++
++        rec = Recommendation(
++            id="rec-deadbeef0123",
++            service="fraud-detect",
++            type="tighten_slo",
++            rationale="test",
++            field="spec.slos.judgment.target",
++            current_value=95.0,
++            proposed_value=98.5,
++        )
++        preview = build_preview(
++            manifest_path="specs/fraud-detect.yaml",
++            rec=rec,
++            manifest_current_value=98.5,  # already matches proposed
++        )
++        # Empty preview (no diff to show); caller suppresses the field
++        assert preview == ""
++
++
++class TestBuildPreviewStructural:
++    """build_preview for dict-valued recommendations (add_deploy_gate)."""
++
++    def test_add_deploy_gate_preview_shape(self):
++        from nthlayer_workers.learn._preview import build_preview
++        from nthlayer_workers.learn.recommendations import Recommendation
++        from nthlayer_workers.learn._yaml import PATH_MISSING
++
++        rec = Recommendation(
++            id="rec-deadbeef0124",
++            service="fraud-detect",
++            type="add_deploy_gate",
++            rationale="test",
++            field="spec.deployment.gates.judgment",
++            current_value=None,
++            proposed_value={"enabled": True, "block_on": ["reversal_rate"]},
++        )
++        preview = build_preview(
++            manifest_path="specs/fraud-detect.yaml",
++            rec=rec,
++            manifest_current_value=PATH_MISSING,
++        )
++
++        assert "# File: specs/fraud-detect.yaml" in preview
++        assert "# Path: spec.deployment.gates.judgment" in preview
++        # New-block style with + prefix
++        assert "+   judgment:" in preview
++        # Sub-keys present
++        assert "enabled: true" in preview
++        assert "block_on:" in preview or "reversal_rate" in preview
++
++
++class TestBuildPreviewDrift:
++    """Drift marker when manifest's current value differs from rec's."""
++
++    def test_drift_marker_appended_for_scalar(self):
++        from nthlayer_workers.learn._preview import build_preview
++        from nthlayer_workers.learn.recommendations import Recommendation
++
++        rec = Recommendation(
++            id="rec-deadbeef0125",
++            service="fraud-detect",
++            type="tighten_slo",
++            rationale="test",
++            field="spec.slos.judgment.target",
++            current_value=95.0,
++            proposed_value=98.5,
++        )
++        # Manifest has 97.0 — drift from recommendation's expected 95.0
++        preview = build_preview(
++            manifest_path="specs/fraud-detect.yaml",
++            rec=rec,
++            manifest_current_value=97.0,
++        )
++
++        assert "# WARN: manifest drifted" in preview
++        assert "current=97.0" in preview
++        assert "expected=95.0" in preview
++
++    def test_no_drift_marker_when_values_match(self):
++        from nthlayer_workers.learn._preview import build_preview
++        from nthlayer_workers.learn.recommendations import Recommendation
++
++        rec = Recommendation(
++            id="rec-deadbeef0126",
++            service="fraud-detect",
++            type="tighten_slo",
++            rationale="test",
++            field="spec.slos.judgment.target",
++            current_value=95.0,
++            proposed_value=98.5,
++        )
++        # Manifest matches rec's expected current_value — no drift
++        preview = build_preview(
++            manifest_path="specs/fraud-detect.yaml",
++            rec=rec,
++            manifest_current_value=95.0,
++        )
++
++        assert "# WARN" not in preview
+diff --git a/tests/learn/test_recommendations.py b/tests/learn/test_recommendations.py
+index 0af8e53..a34877b 100644
+--- a/tests/learn/test_recommendations.py
++++ b/tests/learn/test_recommendations.py
+@@ -58,6 +58,7 @@ class TestSpecRecommendationModel:
+             confidence=0.8,
+             recommendations=[
+                 Recommendation(
++                    id="rec-test00000001",
+                     service="svc-a", type="tighten_slo",
+                     field="spec.slos.availability.target",
+                     current_value=99.9, proposed_value=99.95,
+@@ -66,8 +67,8 @@ class TestSpecRecommendationModel:
+             ],
+         )
+         out = yaml.safe_load(s.to_yaml())
+-        assert out["apiVersion"] == "opensrm.io/v1"
+-        assert out["kind"] == "SpecRecommendation"
++        assert out["apiVersion"] == "nthlayer.io/learn/v1"
++        assert out["kind"] == "RecommendationPlan"
+         assert out["metadata"]["incident"] == "INC-X"
+         assert out["metadata"]["confidence"] == 0.8
+         assert out["metadata"]["requires_human_review"] is True
+@@ -82,6 +83,7 @@ class TestSpecRecommendationModel:
+             confidence=0.5,
+             recommendations=[
+                 Recommendation(
++                    id="rec-test00000002",
+                     service="svc", type="tighten_slo",
+                     rationale="x", proposed_value=99.95,
+                     # field, current_value, financial_impact, evidence omitted
+@@ -281,3 +283,190 @@ class TestAnalyzeIncidentAggregate:
+         for orig, lit in zip(result.recommendations, loaded["recommendations"]):
+             assert orig.type == lit["type"]
+             assert orig.service == lit["service"]
++
++
++# ---------------------------------------------------------------------------
++# jmy.6: deterministic rec-<12-char-sha256-hex> id
++# ---------------------------------------------------------------------------
++
++
++class TestRecommendationId:
++    """jmy.6: deterministic rec-<12-char-sha256-hex> id."""
++
++    def test_compute_id_is_deterministic(self):
++        from nthlayer_workers.learn.recommendations import compute_rec_id
++
++        id1 = compute_rec_id("inc-2026-05-21-001", "tighten_slo", "spec.slos.judgment.target")
++        id2 = compute_rec_id("inc-2026-05-21-001", "tighten_slo", "spec.slos.judgment.target")
++        assert id1 == id2
++
++    def test_compute_id_format(self):
++        from nthlayer_workers.learn.recommendations import compute_rec_id
++
++        rec_id = compute_rec_id("inc-2026-05-21-001", "tighten_slo", "spec.slos.judgment.target")
++        assert rec_id.startswith("rec-")
++        assert len(rec_id) == 16  # "rec-" + 12 hex chars
++        hex_part = rec_id[4:]
++        assert all(c in "0123456789abcdef" for c in hex_part)
++
++    def test_compute_id_changes_per_input(self):
++        from nthlayer_workers.learn.recommendations import compute_rec_id
++
++        base = compute_rec_id("inc-A", "tighten_slo", "spec.slos.judgment.target")
++        diff_incident = compute_rec_id("inc-B", "tighten_slo", "spec.slos.judgment.target")
++        diff_type = compute_rec_id("inc-A", "add_deploy_gate", "spec.slos.judgment.target")
++        diff_field = compute_rec_id("inc-A", "tighten_slo", "spec.slos.availability.target")
++
++        assert base != diff_incident
++        assert base != diff_type
++        assert base != diff_field
++
++    def test_recommendation_has_id_field(self):
++        from nthlayer_workers.learn.recommendations import Recommendation
++
++        rec = Recommendation(
++            id="rec-deadbeef0123",
++            service="fraud-detect",
++            type="tighten_slo",
++            rationale="test",
++            proposed_value=98.5,
++        )
++        assert rec.id == "rec-deadbeef0123"
++
++
++# ---------------------------------------------------------------------------
++# jmy.6: apiVersion + kind rename for the plan-file artefact
++# ---------------------------------------------------------------------------
++
++
++class TestPlanArtefactRename:
++    """jmy.6: apiVersion + kind rename for the plan-file artefact."""
++
++    def test_to_yaml_emits_new_api_version(self):
++        from nthlayer_workers.learn.recommendations import SpecRecommendation, Recommendation
++        from datetime import datetime, timezone
++
++        sr = SpecRecommendation(
++            incident="inc-test",
++            generated_by="nthlayer-learn",
++            generated_at=datetime(2026, 5, 26, tzinfo=timezone.utc),
++            confidence=0.7,
++            recommendations=[
++                Recommendation(
++                    id="rec-deadbeef0123",
++                    service="fraud-detect",
++                    type="tighten_slo",
++                    rationale="test",
++                    proposed_value=98.5,
++                ),
++            ],
++        )
++
++        yaml_text = sr.to_yaml()
++        assert "apiVersion: nthlayer.io/learn/v1" in yaml_text
++        assert "kind: RecommendationPlan" in yaml_text
++        # Old strings absent
++        assert "opensrm.io/v1" not in yaml_text
++        assert "SpecRecommendation" not in yaml_text
++
++
++# ---------------------------------------------------------------------------
++# jmy.6: OutcomeKind enum
++# ---------------------------------------------------------------------------
++
++
++class TestOutcomeKind:
++    """jmy.6: OutcomeKind enum lives in recommendations.py (operator-visible)."""
++
++    def test_outcome_kind_values(self):
++        from nthlayer_workers.learn.recommendations import OutcomeKind
++
++        assert OutcomeKind.APPLY_CLEAN.value == "apply_clean"
++        assert OutcomeKind.ALREADY_APPLIED.value == "already_applied"
++        assert OutcomeKind.DRIFT_DETECTED.value == "drift_detected"
++        assert OutcomeKind.TARGET_PATH_MISSING.value == "target_path_missing"
++        assert OutcomeKind.MANIFEST_NOT_FOUND.value == "manifest_not_found"
++
++    def test_outcome_kind_is_string_enum(self):
++        """StrEnum gives wire-safe string serialisation for free."""
++        from nthlayer_workers.learn.recommendations import OutcomeKind
++
++        assert OutcomeKind.APPLY_CLEAN == "apply_clean"
++        assert str(OutcomeKind.DRIFT_DETECTED) == "drift_detected"
++
++
++# ---------------------------------------------------------------------------
++# jmy.6: --from <plan.yaml> validation
++# ---------------------------------------------------------------------------
++
++
++class TestParsePlanFile:
++    """jmy.6: --from <plan.yaml> validation."""
++
++    def test_parse_plan_file_happy_path(self, tmp_path):
++        from nthlayer_workers.learn.recommendations import (
++            SpecRecommendation, parse_plan_file,
++        )
++        from datetime import datetime, timezone
++
++        original = SpecRecommendation(
++            incident="inc-test",
++            generated_by="nthlayer-learn",
++            generated_at=datetime(2026, 5, 26, tzinfo=timezone.utc),
++            confidence=0.7,
++            recommendations=[],
++        )
++        plan_path = tmp_path / "plan.yaml"
++        plan_path.write_text(original.to_yaml())
++
++        loaded = parse_plan_file(plan_path)
++        assert loaded.incident == "inc-test"
++        assert loaded.confidence == 0.7
++        assert loaded.requires_human_review is True
++
++    def test_parse_plan_file_unknown_api_version_raises(self, tmp_path):
++        from nthlayer_workers.learn.recommendations import (
++            parse_plan_file, PlanFileUnknownVersionError,
++        )
++
++        plan_path = tmp_path / "plan.yaml"
++        plan_path.write_text(
++            "apiVersion: opensrm.io/v999\n"
++            "kind: RecommendationPlan\n"
++            "metadata: {incident: x, generated_by: y, generated_at: '2026-01-01T00:00:00+00:00', confidence: 0.5, requires_human_review: true}\n"
++            "recommendations: []\n"
++        )
++
++        with pytest.raises(PlanFileUnknownVersionError, match="nthlayer.io/learn/v1"):
++            parse_plan_file(plan_path)
++
++    def test_parse_plan_file_missing_recommendations_key_raises(self, tmp_path):
++        from nthlayer_workers.learn.recommendations import (
++            parse_plan_file, PlanFileInvalidError,
++        )
++
++        plan_path = tmp_path / "plan.yaml"
++        plan_path.write_text(
++            "apiVersion: nthlayer.io/learn/v1\n"
++            "kind: RecommendationPlan\n"
++            "metadata: {incident: x, generated_by: y, generated_at: '2026-01-01T00:00:00+00:00', confidence: 0.5, requires_human_review: true}\n"
++        )
++
++        with pytest.raises(PlanFileInvalidError, match="recommendations"):
++            parse_plan_file(plan_path)
++
++    def test_parse_plan_file_non_list_recommendations_raises(self, tmp_path):
++        from nthlayer_workers.learn.recommendations import (
++            parse_plan_file, PlanFileInvalidError,
++        )
++
++        plan_path = tmp_path / "plan.yaml"
++        plan_path.write_text(
++            "apiVersion: nthlayer.io/learn/v1\n"
++            "kind: RecommendationPlan\n"
++            "metadata: {incident: x, generated_by: y, generated_at: '2026-01-01T00:00:00+00:00', confidence: 0.5, requires_human_review: true}\n"
++            "recommendations: not_a_list\n"
++        )
++
++        with pytest.raises(PlanFileInvalidError, match="recommendations must be a list"):
++            parse_plan_file(plan_path)
+diff --git a/tests/learn/test_yaml.py b/tests/learn/test_yaml.py
+new file mode 100644
+index 0000000..fb698b1
+--- /dev/null
++++ b/tests/learn/test_yaml.py
+@@ -0,0 +1,275 @@
++"""Unit tests for nthlayer_workers.learn._yaml (jmy.6)."""
++from __future__ import annotations
++
++import pytest
++from ruamel.yaml import YAML
++
++
++@pytest.fixture
++def parsed_manifest():
++    """Sample manifest parsed via ruamel.yaml (preserves comments)."""
++    yaml = YAML(typ="rt")  # round-trip mode
++    text = (
++        "metadata:\n"
++        "  name: fraud-detect\n"
++        "spec:\n"
++        "  slos:\n"
++        "    judgment:\n"
++        "      target: 95.0  # current SLO target\n"
++        "      window: 30d\n"
++    )
++    return yaml.load(text)
++
++
++class TestResolvePath:
++    """resolve_path traverses dotted paths through CommentedMap."""
++
++    def test_resolve_path_happy(self, parsed_manifest):
++        from nthlayer_workers.learn._yaml import resolve_path
++
++        assert resolve_path(parsed_manifest, "spec.slos.judgment.target") == 95.0
++
++    def test_resolve_path_missing_leaf(self, parsed_manifest):
++        from nthlayer_workers.learn._yaml import resolve_path, PATH_MISSING
++
++        result = resolve_path(parsed_manifest, "spec.slos.judgment.nonexistent")
++        assert result is PATH_MISSING
++
++    def test_resolve_path_missing_intermediate(self, parsed_manifest):
++        from nthlayer_workers.learn._yaml import resolve_path, PATH_MISSING
++
++        result = resolve_path(parsed_manifest, "spec.deployment.gates.judgment")
++        assert result is PATH_MISSING
++
++    def test_resolve_path_empty_path_returns_root(self, parsed_manifest):
++        from nthlayer_workers.learn._yaml import resolve_path
++
++        result = resolve_path(parsed_manifest, "")
++        assert "metadata" in result
++        assert "spec" in result
++
++
++class TestApplyAtPath:
++    """apply_at_path writes in-place; comments survive round-trip."""
++
++    def test_apply_at_existing_leaf(self):
++        from nthlayer_workers.learn._yaml import apply_at_path, get_yaml_round_trip
++        from io import StringIO
++
++        yaml = get_yaml_round_trip()
++        text = (
++            "spec:\n"
++            "  slos:\n"
++            "    judgment:\n"
++            "      target: 95.0  # current SLO target\n"
++        )
++        doc = yaml.load(text)
++
++        apply_at_path(doc, "spec.slos.judgment.target", 98.5)
++
++        buf = StringIO()
++        yaml.dump(doc, buf)
++        output = buf.getvalue()
++
++        # New value present
++        assert "target: 98.5" in output
++        # Old value gone
++        assert "target: 95.0" not in output
++        # Comment preserved
++        assert "# current SLO target" in output
++
++    def test_apply_at_missing_intermediate_creates(self):
++        from nthlayer_workers.learn._yaml import apply_at_path, get_yaml_round_trip
++        from io import StringIO
++
++        yaml = get_yaml_round_trip()
++        text = "spec:\n  slos:\n    reversal_rate:\n      target: 98.5\n"
++        doc = yaml.load(text)
++
++        # Path doesn't exist; apply creates intermediates
++        apply_at_path(doc, "spec.deployment.gates.judgment", {
++            "enabled": True,
++            "block_on": ["reversal_rate"],
++        })
++
++        buf = StringIO()
++        yaml.dump(doc, buf)
++        output = buf.getvalue()
++
++        assert "deployment:" in output
++        assert "gates:" in output
++        assert "judgment:" in output
++        assert "enabled: true" in output
++
++    def test_apply_at_path_preserves_sibling_comments(self):
++        from nthlayer_workers.learn._yaml import apply_at_path, get_yaml_round_trip
++        from io import StringIO
++
++        yaml = get_yaml_round_trip()
++        text = (
++            "spec:\n"
++            "  slos:\n"
++            "    # SLO for the judgment pipeline\n"
++            "    judgment:\n"
++            "      target: 95.0\n"
++            "      window: 30d  # rolling window\n"
++        )
++        doc = yaml.load(text)
++
++        apply_at_path(doc, "spec.slos.judgment.target", 98.5)
++
++        buf = StringIO()
++        yaml.dump(doc, buf)
++        output = buf.getvalue()
++
++        assert "# SLO for the judgment pipeline" in output
++        assert "# rolling window" in output
++
++
++class TestNormalizeScalar:
++    """normalize_scalar enables int/float/numeric-string equivalence."""
++
++    def test_int_float_str_numeric_equivalence(self):
++        from nthlayer_workers.learn._yaml import normalize_scalar
++
++        n_int = normalize_scalar(98)
++        n_float = normalize_scalar(98.0)
++        n_str_int = normalize_scalar("98")
++        n_str_float = normalize_scalar("98.0")
++
++        assert n_int == n_float == n_str_int == n_str_float
++
++    def test_different_numbers_not_equivalent(self):
++        from nthlayer_workers.learn._yaml import normalize_scalar
++
++        assert normalize_scalar(98) != normalize_scalar(99)
++        assert normalize_scalar(98.5) != normalize_scalar(98.6)
++
++    def test_non_numeric_string_returns_as_is(self):
++        from nthlayer_workers.learn._yaml import normalize_scalar
++
++        assert normalize_scalar("hello") == "hello"
++        assert normalize_scalar("30d") == "30d"
++        assert normalize_scalar(30) != normalize_scalar("30d")
++
++    def test_bool_not_treated_as_numeric(self):
++        """bool subclasses int in Python; we explicitly do NOT coerce."""
++        from nthlayer_workers.learn._yaml import normalize_scalar
++
++        assert normalize_scalar(True) != normalize_scalar(1)
++        assert normalize_scalar(False) != normalize_scalar(0)
++
++    def test_non_scalar_passes_through(self):
++        from nthlayer_workers.learn._yaml import normalize_scalar
++
++        assert normalize_scalar({"a": 1}) == {"a": 1}
++        assert normalize_scalar([1, 2]) == [1, 2]
++
++
++class TestClassifyOutcome:
++    """Two-table state machine per jmy.6 design § 5 + § 7."""
++
++    @pytest.fixture
++    def rec_with_current(self):
++        """Recommendation modifying existing state (e.g. tighten_slo)."""
++        from nthlayer_workers.learn.recommendations import Recommendation
++        return Recommendation(
++            id="rec-deadbeef0123",
++            service="fraud-detect",
++            type="tighten_slo",
++            rationale="test",
++            field="spec.slos.judgment.target",
++            current_value=95.0,
++            proposed_value=98.5,
++        )
++
++    @pytest.fixture
++    def rec_without_current(self):
++        """Recommendation adding new state (e.g. add_deploy_gate)."""
++        from nthlayer_workers.learn.recommendations import Recommendation
++        return Recommendation(
++            id="rec-deadbeef0124",
++            service="fraud-detect",
++            type="add_deploy_gate",
++            rationale="test",
++            field="spec.deployment.gates.judgment",
++            current_value=None,
++            proposed_value={"enabled": True, "block_on": ["reversal_rate"]},
++        )
++
++    # 4 cells for "modifying existing" (current_value present)
++
++    def test_with_current_path_missing_target_path_missing(self, rec_with_current):
++        from nthlayer_workers.learn._yaml import classify_outcome, PATH_MISSING
++        from nthlayer_workers.learn.recommendations import OutcomeKind
++
++        result = classify_outcome(PATH_MISSING, rec_with_current)
++        assert result == OutcomeKind.TARGET_PATH_MISSING
++
++    def test_with_current_path_eq_proposed_already_applied(self, rec_with_current):
++        from nthlayer_workers.learn._yaml import classify_outcome
++        from nthlayer_workers.learn.recommendations import OutcomeKind
++
++        result = classify_outcome(98.5, rec_with_current)
++        assert result == OutcomeKind.ALREADY_APPLIED
++
++    def test_with_current_path_eq_current_apply_clean(self, rec_with_current):
++        from nthlayer_workers.learn._yaml import classify_outcome
++        from nthlayer_workers.learn.recommendations import OutcomeKind
++
++        result = classify_outcome(95.0, rec_with_current)
++        assert result == OutcomeKind.APPLY_CLEAN
++
++    def test_with_current_path_eq_other_drift_detected(self, rec_with_current):
++        from nthlayer_workers.learn._yaml import classify_outcome
++        from nthlayer_workers.learn.recommendations import OutcomeKind
++
++        result = classify_outcome(97.0, rec_with_current)
++        assert result == OutcomeKind.DRIFT_DETECTED
++
++    # 3 cells for "adding new" (current_value None)
++
++    def test_without_current_path_missing_apply_clean(self, rec_without_current):
++        from nthlayer_workers.learn._yaml import classify_outcome, PATH_MISSING
++        from nthlayer_workers.learn.recommendations import OutcomeKind
++
++        result = classify_outcome(PATH_MISSING, rec_without_current)
++        assert result == OutcomeKind.APPLY_CLEAN
++
++    def test_without_current_path_eq_proposed_already_applied(self, rec_without_current):
++        from nthlayer_workers.learn._yaml import classify_outcome
++        from nthlayer_workers.learn.recommendations import OutcomeKind
++
++        result = classify_outcome(
++            {"enabled": True, "block_on": ["reversal_rate"]},
++            rec_without_current,
++        )
++        assert result == OutcomeKind.ALREADY_APPLIED
++
++    def test_without_current_path_other_drift_detected(self, rec_without_current):
++        from nthlayer_workers.learn._yaml import classify_outcome
++        from nthlayer_workers.learn.recommendations import OutcomeKind
++
++        result = classify_outcome(
++            {"enabled": False, "block_on": []},
++            rec_without_current,
++        )
++        assert result == OutcomeKind.DRIFT_DETECTED
++
++    # Normalisation interactions
++
++    def test_normalisation_int_vs_float_drift(self, rec_with_current):
++        """Manifest has 98 (int); proposed is 98.5 (float). Different values → drift."""
++        from nthlayer_workers.learn._yaml import classify_outcome
++        from nthlayer_workers.learn.recommendations import OutcomeKind
++
++        result = classify_outcome(98, rec_with_current)
++        assert result == OutcomeKind.DRIFT_DETECTED
++
++    def test_normalisation_numeric_string_eq_proposed(self, rec_with_current):
++        """Manifest has '98.5' (string); proposed is 98.5 (float). Equivalent → already_applied."""
++        from nthlayer_workers.learn._yaml import classify_outcome
++        from nthlayer_workers.learn.recommendations import OutcomeKind
++
++        result = classify_outcome("98.5", rec_with_current)
++        assert result == OutcomeKind.ALREADY_APPLIED
+diff --git a/uv.lock b/uv.lock
+index ef5d2ab..f9a2043 100644
+--- a/uv.lock
++++ b/uv.lock
+@@ -896,6 +896,7 @@ dependencies = [
+     { name = "numpy" },
+     { name = "python-multipart" },
+     { name = "pyyaml" },
++    { name = "ruamel-yaml" },
+     { name = "scipy" },
+     { name = "starlette" },
+     { name = "structlog" },
+@@ -920,6 +921,7 @@ requires-dist = [
+     { name = "python-multipart", specifier = ">=0.0.18" },
+     { name = "pyyaml", specifier = ">=6.0" },
+     { name = "respx", marker = "extra == 'dev'", specifier = ">=0.21" },
++    { name = "ruamel-yaml", specifier = ">=0.18" },
+     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.8" },
+     { name = "scipy", specifier = ">=1.11" },
+     { name = "starlette", specifier = ">=0.40" },
+@@ -1436,6 +1438,15 @@ wheels = [
+     { url = "https://files.pythonhosted.org/packages/b3/76/6d163cfac87b632216f71879e6b2cf17163f773ff59c00b5ff4900a80fa3/rich-14.3.4-py3-none-any.whl", hash = "sha256:07e7adb4690f68864777b1450859253bed81a99a31ac321ac1817b2313558952", size = 310480, upload-time = "2026-04-11T02:57:47.484Z" },
+ ]
+ 
++[[package]]
++name = "ruamel-yaml"
++version = "0.19.1"
++source = { registry = "https://pypi.org/simple" }
++sdist = { url = "https://files.pythonhosted.org/packages/c7/3b/ebda527b56beb90cb7652cb1c7e4f91f48649fbcd8d2eb2fb6e77cd3329b/ruamel_yaml-0.19.1.tar.gz", hash = "sha256:53eb66cd27849eff968ebf8f0bf61f46cdac2da1d1f3576dd4ccee9b25c31993", size = 142709, upload-time = "2026-01-02T16:50:31.84Z" }
++wheels = [
++    { url = "https://files.pythonhosted.org/packages/b8/0c/51f6841f1d84f404f92463fc2b1ba0da357ca1e3db6b7fbda26956c3b82a/ruamel_yaml-0.19.1-py3-none-any.whl", hash = "sha256:27592957fedf6e0b62f281e96effd28043345e0e66001f97683aa9a40c667c93", size = 118102, upload-time = "2026-01-02T16:50:29.201Z" },
++]
++
+ [[package]]
+ name = "ruff"
+ version = "0.15.11"

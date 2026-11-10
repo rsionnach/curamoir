@@ -1,0 +1,40 @@
+diff --git a/pyproject.toml b/pyproject.toml
+index 9681e5e..95e2ce1 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -48,13 +48,15 @@ dependencies = [
+     # is_valid_service_type from nthlayer_common.manifest.models, which landed
+     # in 2.0.0 (opensrm-ih0v). The >=0.1.5 floor before it claimed a
+     # compatibility that no longer existed.
+-    # WHY 5.3.1 (opensrm-dww5): 5.3.1's opensrm/v1 rejection names a command that
+-    # runs in a co-install (`nthlayer-generate migrate-manifest`), not the bare
+-    # `nthlayer` that another package may own; the opensrm_v1 conversion it
+-    # points at landed in 5.3.0 (opensrm-pnmv). Rule 10: the floor is the
+-    # installed sibling, so bump it on every nthlayer-common minor release; the
+-    # floor guard fails until you do.
+-    "nthlayer-common>=5.3.1,<6.0.0",
++    # WHY 5.4.0 (opensrm-wo62.1): 5.4.0 adds ReliabilityManifest.authored_type.
++    # Rule 10: the floor is the installed sibling, so bump it on every
++    # nthlayer-common minor release; the floor guard fails until you do.
++    # History: 5.3.1 (opensrm-dww5) was the floor because its opensrm/v1
++    # rejection names a command that runs in a co-install
++    # (`nthlayer-generate migrate-manifest`), not the bare `nthlayer` that
++    # another package may own; the opensrm_v1 conversion it points at landed in
++    # 5.3.0 (opensrm-pnmv).
++    "nthlayer-common>=5.4.0,<6.0.0",
+     "grafana-foundation-sdk>=0.0.11",
+     "pydantic>=2.7.0,<3.0.0",
+     "pydantic-settings>=2.2.1,<3.0.0",
+diff --git a/uv.lock b/uv.lock
+index 3fc7da2..03a11d8 100644
+--- a/uv.lock
++++ b/uv.lock
+@@ -1374,7 +1374,7 @@ wheels = [
+ 
+ [[package]]
+ name = "nthlayer-common"
+-version = "5.3.1"
++version = "5.4.0"
+ source = { editable = "../nthlayer-common" }
+ dependencies = [
+     { name = "anthropic" },

@@ -1,0 +1,88 @@
+diff --git a/pyproject.toml b/pyproject.toml
+index 9c16cb1..fdee9f7 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -48,7 +48,10 @@ dependencies = [
+     # is_valid_service_type from nthlayer_common.manifest.models, which landed
+     # in 2.0.0 (opensrm-ih0v). The >=0.1.5 floor before it claimed a
+     # compatibility that no longer existed.
+-    "nthlayer-common>=5.0.0,<6.0.0",
++    # WHY 5.2.0 (opensrm-g35i): the version this repo is now built and tested
++    # against (rule 10: the floor is the installed sibling). Bump it on
++    # every nthlayer-common minor release: the floor guard fails until you do.
++    "nthlayer-common>=5.2.0,<6.0.0",
+     "grafana-foundation-sdk>=0.0.11",
+     "pydantic>=2.7.0,<3.0.0",
+     "pydantic-settings>=2.2.1,<3.0.0",
+diff --git a/release-please-config.json b/release-please-config.json
+index 26953ad..4fc5145 100644
+--- a/release-please-config.json
++++ b/release-please-config.json
+@@ -9,7 +9,13 @@
+       "include-component-in-tag": false,
+       "draft": false,
+       "prerelease": false,
+-      "extra-files": []
++      "extra-files": [
++        {
++          "type": "toml",
++          "path": "uv.lock",
++          "jsonpath": "$.package[?(@.name.value==='nthlayer-generate')].version"
++        }
++      ]
+     }
+   },
+   "changelog-sections": [
+diff --git a/tests/test_dependency_declarations.py b/tests/test_dependency_declarations.py
+index 55e2632..0f330c7 100644
+--- a/tests/test_dependency_declarations.py
++++ b/tests/test_dependency_declarations.py
+@@ -272,3 +272,26 @@ def test_declared_ceiling_is_exactly_the_next_major(name):
+         f"is {installed}, so the ceiling must be '<{expected}'. A wider ceiling "
+         f"publishes a major nothing here has run."
+     )
++
++
++def test_uv_lock_records_this_projects_version():
++    """uv.lock's own [[package]] entry must carry pyproject's version.
++
++    release-please bumps pyproject.toml; a toml extra-files updater in
++    release-please-config.json bumps this entry in the same release PR. That
++    updater only WARNS when its jsonpath matches nothing (a renamed package, a
++    lock-format change), so without this test the lock would silently go stale
++    again and every `uv sync` after a release would dirty it [opensrm-g35i].
++    Release PRs run CI, so a skipped bump fails here, on the release PR.
++    """
++    root = Path(__file__).resolve().parents[1]
++    project = tomllib.loads((root / "pyproject.toml").read_text())["project"]
++    lock = tomllib.loads((root / "uv.lock").read_text())
++    entries = [p for p in lock.get("package", []) if p.get("name") == project["name"]]
++    assert len(entries) == 1, (
++        f"uv.lock has {len(entries)} [[package]] entries named {project['name']!r}"
++    )
++    assert entries[0].get("version") == project["version"], (
++        f"uv.lock records {project['name']} {entries[0].get('version')}, pyproject says "
++        f"{project['version']}: run `uv lock` (and check release-please-config.json extra-files)"
++    )
+diff --git a/uv.lock b/uv.lock
+index 894974a..e1af566 100644
+--- a/uv.lock
++++ b/uv.lock
+@@ -1374,7 +1374,7 @@ wheels = [
+ 
+ [[package]]
+ name = "nthlayer-common"
+-version = "5.0.0"
++version = "5.2.0"
+ source = { editable = "../nthlayer-common" }
+ dependencies = [
+     { name = "anthropic" },
+@@ -1418,7 +1418,7 @@ provides-extras = ["dev"]
+ 
+ [[package]]
+ name = "nthlayer-generate"
+-version = "2.0.5"
++version = "2.0.6"
+ source = { editable = "." }
+ dependencies = [
+     { name = "cachetools" },

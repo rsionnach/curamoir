@@ -1,0 +1,366 @@
+diff --git a/.release-please-manifest.json b/.release-please-manifest.json
+index cb46325..8db3d49 100644
+--- a/.release-please-manifest.json
++++ b/.release-please-manifest.json
+@@ -1 +1 @@
+-{".":"4.0.12"}
++{".":"4.0.1"}
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index 6d50964..5b98d8a 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -6,94 +6,6 @@ across the ecosystem under the v1.5 epic plan; we did not reconstruct phase-by-p
+ git history because that history did not exist as commits at the time the work
+ was being done. This narrative is the honest substitute.
+ 
+-## [4.0.12](https://github.com/rsionnach/nthlayer-core/compare/v4.0.11...v4.0.12) (2026-11-04)
+-
+-
+-### Bug Fixes
+-
+-* require nthlayer-common 5.12.0 ([c1de963](https://github.com/rsionnach/nthlayer-core/commit/c1de963f47fa4744a52b64fbcc8135f14aa1f469))
+-
+-## [4.0.11](https://github.com/rsionnach/nthlayer-core/compare/v4.0.10...v4.0.11) (2026-11-02)
+-
+-
+-### Bug Fixes
+-
+-* require nthlayer-common 5.11.0 ([da65414](https://github.com/rsionnach/nthlayer-core/commit/da65414b286cf78ecc9666405fa5ee3ceef1c822))
+-* require nthlayer-common 5.11.0 ([f9da8d5](https://github.com/rsionnach/nthlayer-core/commit/f9da8d5d1d08463e86bef60c61d0896dc20ca7b5))
+-
+-## [4.0.10](https://github.com/rsionnach/nthlayer-core/compare/v4.0.9...v4.0.10) (2026-11-02)
+-
+-
+-### Bug Fixes
+-
+-* require nthlayer-common 5.10.1 ([035dbba](https://github.com/rsionnach/nthlayer-core/commit/035dbba13017df514e7ab12435a8a85699aeabf8))
+-* require nthlayer-common 5.10.1 ([8b3b618](https://github.com/rsionnach/nthlayer-core/commit/8b3b61819653398f32b7843412aefe78f8e5ea73))
+-
+-## [4.0.9](https://github.com/rsionnach/nthlayer-core/compare/v4.0.8...v4.0.9) (2026-11-02)
+-
+-
+-### Bug Fixes
+-
+-* require nthlayer-common 5.10.0 ([a345c66](https://github.com/rsionnach/nthlayer-core/commit/a345c66f13af9dcd7d93dc01f9444d63ff57cfe4))
+-* require nthlayer-common 5.10.0 ([b31bfe3](https://github.com/rsionnach/nthlayer-core/commit/b31bfe3ac689f53d7b14b96d12d5db5065a020d0))
+-
+-## [4.0.8](https://github.com/rsionnach/nthlayer-core/compare/v4.0.7...v4.0.8) (2026-11-01)
+-
+-
+-### Bug Fixes
+-
+-* require nthlayer-common 5.9.1 ([db1fc4e](https://github.com/rsionnach/nthlayer-core/commit/db1fc4edc7065cc289f52ac3c45698b25fc585e7))
+-* require nthlayer-common 5.9.1 ([8923a09](https://github.com/rsionnach/nthlayer-core/commit/8923a09c99dc40dde31719096ff9907f1fa00705))
+-
+-## [4.0.7](https://github.com/rsionnach/nthlayer-core/compare/v4.0.6...v4.0.7) (2026-11-01)
+-
+-
+-### Bug Fixes
+-
+-* require nthlayer-common 5.9.0 ([8f92f6c](https://github.com/rsionnach/nthlayer-core/commit/8f92f6c8376bb8c0f836f49e7cd1ad8ab2b5c698))
+-* require nthlayer-common 5.9.0 ([ea5e917](https://github.com/rsionnach/nthlayer-core/commit/ea5e917576464812f343df719b819db813c158a0))
+-
+-## [4.0.6](https://github.com/rsionnach/nthlayer-core/compare/v4.0.5...v4.0.6) (2026-10-31)
+-
+-
+-### Bug Fixes
+-
+-* require nthlayer-common 5.8.1 ([05b16a2](https://github.com/rsionnach/nthlayer-core/commit/05b16a2afb4b821f4f4c1ee3c81d733905defc49))
+-* require nthlayer-common 5.8.1 ([04850a5](https://github.com/rsionnach/nthlayer-core/commit/04850a5065babd18bb2bc3fadaa336e35380ace7))
+-
+-## [4.0.5](https://github.com/rsionnach/nthlayer-core/compare/v4.0.4...v4.0.5) (2026-10-31)
+-
+-
+-### Bug Fixes
+-
+-* ship the Apache-2.0 LICENSE and declare it in package metadata (opensrm-bqfj) ([c900f92](https://github.com/rsionnach/nthlayer-core/commit/c900f9219d935a82c5330687b2d76552241d4112))
+-* ship the Apache-2.0 LICENSE and declare it in package metadata (opensrm-bqfj) ([6a6c677](https://github.com/rsionnach/nthlayer-core/commit/6a6c67747acd41e82fe734b7b41113cb3fce6b7f))
+-
+-## [4.0.4](https://github.com/rsionnach/nthlayer-core/compare/v4.0.3...v4.0.4) (2026-10-29)
+-
+-
+-### Bug Fixes
+-
+-* require nthlayer-common 5.8.0 (opensrm-wo62.4.13) ([668437b](https://github.com/rsionnach/nthlayer-core/commit/668437b6a2d048548639d2663e84ceae821a6c4e))
+-* require nthlayer-common 5.8.0 (opensrm-wo62.4.13) ([af7da36](https://github.com/rsionnach/nthlayer-core/commit/af7da36114e3fb4f002ab8bc40c3502f4cb09cd6))
+-
+-## [4.0.3](https://github.com/rsionnach/nthlayer-core/compare/v4.0.2...v4.0.3) (2026-10-28)
+-
+-
+-### Bug Fixes
+-
+-* require nthlayer-common 5.6.0 (opensrm-wo62.4.1) ([a91f6cc](https://github.com/rsionnach/nthlayer-core/commit/a91f6cc56f923e62143417e070fab0396eec2877))
+-* require nthlayer-common 5.6.0 (opensrm-wo62.4.1) ([75395d5](https://github.com/rsionnach/nthlayer-core/commit/75395d5c7c8cc078dd31c7544edd28523f42e6e6))
+-* require nthlayer-common 5.7.0 (opensrm-wo62.4.7) ([1c455c8](https://github.com/rsionnach/nthlayer-core/commit/1c455c8254093ff50c6f82c4de1b67b3b4c6e7d8))
+-* require nthlayer-common 5.7.0 (opensrm-wo62.4.7) ([5e64917](https://github.com/rsionnach/nthlayer-core/commit/5e649179b47548add1677dd150d68686dc909f0a))
+-
+-## [4.0.2](https://github.com/rsionnach/nthlayer-core/compare/v4.0.1...v4.0.2) (2026-10-27)
+-
+-
+-### Dependencies
+-
+-* require nthlayer-common 5.5.0 (opensrm-wo62.1) ([d38ffc4](https://github.com/rsionnach/nthlayer-core/commit/d38ffc414b8779d87013f2617cd2f4166342840e))
+-
+ ## [4.0.1](https://github.com/rsionnach/nthlayer-core/compare/v4.0.0...v4.0.1) (2026-10-24)
+ 
+ 
+diff --git a/LICENSE b/LICENSE
+deleted file mode 100644
+index b485d9a..0000000
+--- a/LICENSE
++++ /dev/null
+@@ -1,190 +0,0 @@
+-                                 Apache License
+-                           Version 2.0, January 2004
+-                        http://www.apache.org/licenses/
+-
+-   TERMS AND CONDITIONS FOR USE, REPRODUCTION, AND DISTRIBUTION
+-
+-   1. Definitions.
+-
+-      "License" shall mean the terms and conditions for use, reproduction,
+-      and distribution as defined by Sections 1 through 9 of this document.
+-
+-      "Licensor" shall mean the copyright owner or entity authorized by
+-      the copyright owner that is granting the License.
+-
+-      "Legal Entity" shall mean the union of the acting entity and all
+-      other entities that control, are controlled by, or are under common
+-      control with that entity. For the purposes of this definition,
+-      "control" means (i) the power, direct or indirect, to cause the
+-      direction or management of such entity, whether by contract or
+-      otherwise, or (ii) ownership of fifty percent (50%) or more of the
+-      outstanding shares, or (iii) beneficial ownership of such entity.
+-
+-      "You" (or "Your") shall mean an individual or Legal Entity
+-      exercising permissions granted by this License.
+-
+-      "Source" form shall mean the preferred form for making modifications,
+-      including but not limited to software source code, documentation
+-      source, and configuration files.
+-
+-      "Object" form shall mean any form resulting from mechanical
+-      transformation or translation of a Source form, including but
+-      not limited to compiled object code, generated documentation,
+-      and conversions to other media types.
+-
+-      "Work" shall mean the work of authorship, whether in Source or
+-      Object form, made available under the License, as indicated by a
+-      copyright notice that is included in or attached to the work
+-      (an example is provided in the Appendix below).
+-
+-      "Derivative Works" shall mean any work, whether in Source or Object
+-      form, that is based on (or derived from) the Work and for which the
+-      editorial revisions, annotations, elaborations, or other modifications
+-      represent, as a whole, an original work of authorship. For the purposes
+-      of this License, Derivative Works shall not include works that remain
+-      separable from, or merely link (or bind by name) to the interfaces of,
+-      the Work and Derivative Works thereof.
+-
+-      "Contribution" shall mean any work of authorship, including
+-      the original version of the Work and any modifications or additions
+-      to that Work or Derivative Works thereof, that is intentionally
+-      submitted to the Licensor for inclusion in the Work by the copyright owner
+-      or by an individual or Legal Entity authorized to submit on behalf of
+-      the copyright owner. For the purposes of this definition, "submitted"
+-      means any form of electronic, verbal, or written communication sent
+-      to the Licensor or its representatives, including but not limited to
+-      communication on electronic mailing lists, source code control systems,
+-      and issue tracking systems that are managed by, or on behalf of, the
+-      Licensor for the purpose of discussing and improving the Work, but
+-      excluding communication that is conspicuously marked or otherwise
+-      designated in writing by the copyright owner as "Not a Contribution."
+-
+-      "Contributor" shall mean Licensor and any individual or Legal Entity
+-      on behalf of whom a Contribution has been received by Licensor and
+-      subsequently incorporated within the Work.
+-
+-   2. Grant of Copyright License. Subject to the terms and conditions of
+-      this License, each Contributor hereby grants to You a perpetual,
+-      worldwide, non-exclusive, no-charge, royalty-free, irrevocable
+-      copyright license to reproduce, prepare Derivative Works of,
+-      publicly display, publicly perform, sublicense, and distribute the
+-      Work and such Derivative Works in Source or Object form.
+-
+-   3. Grant of Patent License. Subject to the terms and conditions of
+-      this License, each Contributor hereby grants to You a perpetual,
+-      worldwide, non-exclusive, no-charge, royalty-free, irrevocable
+-      (except as stated in this section) patent license to make, have made,
+-      use, offer to sell, sell, import, and otherwise transfer the Work,
+-      where such license applies only to those patent claims licensable
+-      by such Contributor that are necessarily infringed by their
+-      Contribution(s) alone or by combination of their Contribution(s)
+-      with the Work to which such Contribution(s) was submitted. If You
+-      institute patent litigation against any entity (including a
+-      cross-claim or counterclaim in a lawsuit) alleging that the Work
+-      or a Contribution incorporated within the Work constitutes direct
+-      or contributory patent infringement, then any patent licenses
+-      granted to You under this License for that Work shall terminate
+-      as of the date such litigation is filed.
+-
+-   4. Redistribution. You may reproduce and distribute copies of the
+-      Work or Derivative Works thereof in any medium, with or without
+-      modifications, and in Source or Object form, provided that You
+-      meet the following conditions:
+-
+-      (a) You must give any other recipients of the Work or
+-          Derivative Works a copy of this License; and
+-
+-      (b) You must cause any modified files to carry prominent notices
+-          stating that You changed the files; and
+-
+-      (c) You must retain, in the Source form of any Derivative Works
+-          that You distribute, all copyright, patent, trademark, and
+-          attribution notices from the Source form of the Work,
+-          excluding those notices that do not pertain to any part of
+-          the Derivative Works; and
+-
+-      (d) If the Work includes a "NOTICE" text file as part of its
+-          distribution, then any Derivative Works that You distribute must
+-          include a readable copy of the attribution notices contained
+-          within such NOTICE file, excluding those notices that do not
+-          pertain to any part of the Derivative Works, in at least one
+-          of the following places: within a NOTICE text file distributed
+-          as part of the Derivative Works; within the Source form or
+-          documentation, if provided along with the Derivative Works; or,
+-          within a display generated by the Derivative Works, if and
+-          wherever such third-party notices normally appear. The contents
+-          of the NOTICE file are for informational purposes only and
+-          do not modify the License. You may add Your own attribution
+-          notices within Derivative Works that You distribute, alongside
+-          or as an addendum to the NOTICE text from the Work, provided
+-          that such additional attribution notices cannot be construed
+-          as modifying the License.
+-
+-      You may add Your own copyright statement to Your modifications and
+-      may provide additional or different license terms and conditions
+-      for use, reproduction, or distribution of Your modifications, or
+-      for any such Derivative Works as a whole, provided Your use,
+-      reproduction, and distribution of the Work otherwise complies with
+-      the conditions stated in this License.
+-
+-   5. Submission of Contributions. Unless You explicitly state otherwise,
+-      any Contribution intentionally submitted for inclusion in the Work
+-      by You to the Licensor shall be under the terms and conditions of
+-      this License, without any additional terms or conditions.
+-      Notwithstanding the above, nothing herein shall supersede or modify
+-      the terms of any separate license agreement you may have executed
+-      with Licensor regarding such Contributions.
+-
+-   6. Trademarks. This License does not grant permission to use the trade
+-      names, trademarks, service marks, or product names of the Licensor,
+-      except as required for reasonable and customary use in describing the
+-      origin of the Work and reproducing the content of the NOTICE file.
+-
+-   7. Disclaimer of Warranty. Unless required by applicable law or
+-      agreed to in writing, Licensor provides the Work (and each
+-      Contributor provides its Contributions) on an "AS IS" BASIS,
+-      WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+-      implied, including, without limitation, any warranties or conditions
+-      of TITLE, NON-INFRINGEMENT, MERCHANTABILITY, or FITNESS FOR A
+-      PARTICULAR PURPOSE. You are solely responsible for determining the
+-      appropriateness of using or redistributing the Work and assume any
+-      risks associated with Your exercise of permissions under this License.
+-
+-   8. Limitation of Liability. In no event and under no legal theory,
+-      whether in tort (including negligence), contract, or otherwise,
+-      unless required by applicable law (such as deliberate and grossly
+-      negligent acts) or agreed to in writing, shall any Contributor be
+-      liable to You for damages, including any direct, indirect, special,
+-      incidental, or consequential damages of any character arising as a
+-      result of this License or out of the use or inability to use the
+-      Work (including but not limited to damages for loss of goodwill,
+-      work stoppage, computer failure or malfunction, or any and all
+-      other commercial damages or losses), even if such Contributor
+-      has been advised of the possibility of such damages.
+-
+-   9. Accepting Warranty or Additional Liability. While redistributing
+-      the Work or Derivative Works thereof, You may choose to offer,
+-      and charge a fee for, acceptance of support, warranty, indemnity,
+-      or other liability obligations and/or rights consistent with this
+-      License. However, in accepting such obligations, You may act only
+-      on Your own behalf and on Your sole responsibility, not on behalf
+-      of any other Contributor, and only if You agree to indemnify,
+-      defend, and hold each Contributor harmless for any liability
+-      incurred by, or claims asserted against, such Contributor by reason
+-      of your accepting any such warranty or additional liability.
+-
+-   END OF TERMS AND CONDITIONS
+-
+-   Copyright 2026 NthLayer Contributors
+-
+-   Licensed under the Apache License, Version 2.0 (the "License");
+-   you may not use this file except in compliance with the License.
+-   You may obtain a copy of the License at
+-
+-       http://www.apache.org/licenses/LICENSE-2.0
+-
+-   Unless required by applicable law or agreed to in writing, software
+-   distributed under the License is distributed on an "AS IS" BASIS,
+-   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+-   See the License for the specific language governing permissions and
+-   limitations under the License.
+diff --git a/pyproject.toml b/pyproject.toml
+index 0696889..e527d6b 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -4,10 +4,9 @@ build-backend = "setuptools.build_meta"
+ 
+ [project]
+ name = "nthlayer-core"
+-version = "4.0.12"
++version = "4.0.1"
+ description = "NthLayer core — reliability-critical verdict store, case management, and HTTP API"
+ readme = "README.md"
+-license = {text = "Apache-2.0"}
+ requires-python = ">=3.11"
+ dependencies = [
+     # Floor is the version this repo is built and tested against, NOT the
+@@ -26,7 +25,7 @@ dependencies = [
+     # every nthlayer-common minor release: the floor guard fails until you do.
+     # History: raised to 5.3.1 (opensrm-dww5, a patch) because its opensrm/v1
+     # rejection names a command that runs in a co-install.
+-    "nthlayer-common>=5.12.0,<6.0.0",
++    "nthlayer-common>=5.5.0,<6.0.0",
+     "starlette>=0.40",
+     "uvicorn>=0.30",
+     "httpx>=0.27",
+diff --git a/uv.lock b/uv.lock
+index 971a334..816f36d 100644
+--- a/uv.lock
++++ b/uv.lock
+@@ -926,7 +926,7 @@ wheels = [
+ 
+ [[package]]
+ name = "nthlayer-common"
+-version = "5.12.0"
++version = "5.5.0"
+ source = { editable = "../nthlayer-common" }
+ dependencies = [
+     { name = "anthropic" },
+@@ -954,10 +954,7 @@ requires-dist = [
+     { name = "instructor", specifier = ">=1.5" },
+     { name = "jsonschema", marker = "extra == 'dev'", specifier = ">=4.21" },
+     { name = "openai", specifier = ">=1.50" },
+-    { name = "opentelemetry-api", specifier = ">=1.38,<2" },
+-    { name = "opentelemetry-exporter-otlp-proto-grpc", marker = "extra == 'otel'", specifier = ">=1.38,<2" },
+-    { name = "opentelemetry-sdk", marker = "extra == 'dev'", specifier = ">=1.38,<2" },
+-    { name = "opentelemetry-sdk", marker = "extra == 'otel'", specifier = ">=1.38,<2" },
++    { name = "opentelemetry-api", specifier = ">=1.28" },
+     { name = "pagerduty", specifier = ">=6.0.0,<8.0.0" },
+     { name = "prometheus-client", specifier = ">=0.21" },
+     { name = "pydantic", specifier = ">=2.7.0,<3.0.0" },
+@@ -969,11 +966,11 @@ requires-dist = [
+     { name = "structlog", specifier = ">=24.1.0" },
+     { name = "tenacity", specifier = ">=8.2.3,<10.0.0" },
+ ]
+-provides-extras = ["otel", "dev"]
++provides-extras = ["dev"]
+ 
+ [[package]]
+ name = "nthlayer-core"
+-version = "4.0.12"
++version = "4.0.1"
+ source = { editable = "." }
+ dependencies = [
+     { name = "httpx" },

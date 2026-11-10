@@ -1,0 +1,344 @@
+diff --git a/CLAUDE.md b/CLAUDE.md
+index ba54676..321bcc9 100644
+--- a/CLAUDE.md
++++ b/CLAUDE.md
+@@ -19,7 +19,7 @@ src/nthlayer_bench/
+     __init__.py          # Exports all brief + case_bench + reasoning_capture + post_incident + situation_board + escalation + write_queue public names
+     brief.py             # Pure async logic: build_paging_brief(client, case_id) → PagingBrief; render_brief(brief) → str. No Textual import. PagingBrief fields: case_id, service, severity, summary, likely_cause, cause_confidence, blast_radius, recommended_action, recommended_target, state, awaiting. BriefError hierarchy: CaseNotFoundError, AnchorVerdictMissingError, CoreUnreachableError.
+     case_bench.py        # Pure async logic: fetch_case_bench(client, state, limit, now) → CaseBenchView; CaseSummary dataclass (case_id, priority, service, state, created_at, age_minutes, briefing); CaseBenchView dataclass (ordered_priorities, cases_by_priority, flat); PRIORITY_ORDER=("P0","P1","P2","P3"); unrecognised priority → "Other" bucket; _age_minutes fail-closed to None on malformed ISO/mixed tz; _group_and_sort: known priorities in canonical order then extras alphabetically; render_case_bench(view) → str; CaseBenchError(BriefError)
+-    post_incident.py     # Pure async logic: build_post_incident_review(client, case_id) → PostIncidentReview; render_post_incident_review(review) → str. No Textual import. Chronological timeline (asc by created_at, ties by verdict_id); accuracy via outcome_resolution verdicts (parent_ids match, latest-wins); worked/to_improve classification (confirmed→worked, overridden→to_improve). PostIncidentError(BriefError). ReviewState: "in_progress" | "resolved". severity from latest triage metadata.custom.severity (int only, never fabricated). _is_outcome_resolution() checks both subject.type and verdict_type.
++    post_incident.py     # Pure async logic: build_post_incident_review(client, case_id) → PostIncidentReview; render_post_incident_review(review) → str. No Textual import. Chronological timeline (asc by created_at, ties by verdict_id); accuracy via outcome_resolution verdicts (parent_ids match, latest-wins) + mutation-style outcome.override on original verdict (jmy.19); worked/to_improve classification (confirmed→worked, overridden→to_improve). PostIncidentError(BriefError). ReviewState: "in_progress" | "resolved". severity from latest triage metadata.custom.severity (int only, never fabricated). _is_outcome_resolution() checks both subject.type and verdict_type. VerdictAccuracy: 5 override_* fields (override_by, override_at, override_action, override_reasoning, override_original_action); all-None when no override. render emits "## Overrides" section when any accuracy record has override_by set.
+     reasoning_capture.py # Pure async logic: fetch_case(client, case_id) → dict (public case fetch, used to prime write-queue cache); fetch_operator_notes(client, case_id) → list[OperatorNote]; submit_operator_note(client, case_id, text, *, author) → OperatorNote; build_operator_note_verdict(case, text, *, author) → Verdict (pure factory, no I/O, stable ID at build time for 409-idempotent queue replay, raises ValueError empty text / AnchorVerdictMissingError missing anchor); submit_operator_note_verdict(client, verdict) → APIResult (submits pre-built Verdict directly); operator_note_from_verdict(verdict, case_id) → OperatorNote. No Textual import. OperatorNote dataclass (verdict_id, case_id, author, text, created_at). DEFAULT_AUTHOR="operator". Verdict shape: subject.type="custom", verdict_type="operator_note", parent_ids=[case.underlying_verdict], judgment.action="flag", confidence=1.0, metadata.custom.author. _is_operator_note(): dual-path detection — subject.type OR verdict_type (supports legacy producers). submit normalises empty/whitespace author → DEFAULT_AUTHOR. ReasoningCaptureError(BriefError). Spec: opensrm-81rn.4.
+     situation_board.py   # Pure async logic: fetch_situation_board(client, breach_limit=10) → SituationBoardView; render_situation_board(view) → str. No Textual import. Dataclasses: PortfolioSnapshot (total_services, healthy, warning, critical, exhausted, captured_at), BreachEvent (verdict_id, service, summary, created_at, severity str|None), SituationBoardView (portfolio: PortfolioSnapshot|None, recent_breaches: list[BreachEvent], queue: CaseBenchView). SituationBoardError(BriefError). Three asyncio.gather parallel fetches: _fetch_portfolio (GET /assessments kind=portfolio_status limit=1), _fetch_recent_breaches (GET /verdicts verdict_type=quality_breach), fetch_case_bench. Cold start (empty portfolio rows) → None, not an error. _project_portfolio: non-dict guard → None; total_services not int → None; missing counts via _int_or_zero → 0. _to_breach_event: _safe_dict() guards nested subject/judgment/metadata/custom; severity only if str. Breaches sorted newest-first by (created_at, id). Spec: opensrm-81rn.2.
+     escalation.py        # Stateful poller: EscalationMonitor.poll(client) → list[EscalationEvent]. No Textual import. ESCALATION_SEVERITIES=frozenset{"high","critical"}, DEFAULT_POLL_LIMIT=20. Cold-start: first successful poll records baseline (_seen_ids populated) and returns [] — no replay spam on relaunch. Delta detection: _seen_ids set grows unbounded (acceptable at v1.5 demo scale). Connection failures swallowed (best-effort toasts, _baseline_done NOT set on failure so a failed first poll doesn't suppress future events). _to_escalation_event(): returns None for low-severity or malformed. Sorted newest-first by (created_at, id). EscalationEvent dataclass (verdict_id, service, severity, summary, created_at). Spec: opensrm-81rn.5.
+@@ -48,7 +48,7 @@ tests/
+   test_sre_reasoning_capture.py      # fetch_operator_notes: chronological sort, filters to operator notes only, legacy subject.type detection, verdict_type-only detection, extracts author/text/timestamp, CaseNotFoundError (404), AnchorVerdictMissingError, CoreUnreachableError (status_code=0), empty descendants; submit_operator_note: happy path writes correct verdict fields, empty text raises ValueError, whitespace author normalised to DEFAULT_AUTHOR, CoreUnreachableError on network failure, non-201 raises ReasoningCaptureError; build_operator_note_verdict: pure factory, stable ID, author normalisation, raises on empty text/missing anchor; submit_operator_note_verdict: submits pre-built Verdict directly (APIResult ok=True→201, APIResult ok=False→ReasoningCaptureError)
+   test_sre_write_queue.py            # WriteQueue: empty queue len/pending, enqueue appends PendingNote, pending() defensive copy, drain empty no-call; drain: 201→submitted/drop, 409→duplicates/drop, transient error keeps queued, unexpected exception keeps queued, multiple items mixed outcomes, skip-if-locked concurrent drain returns immediate DrainResult
+   test_sre_case_bench.py             # fetch_case_bench: priority grouping in canonical order, unrecognised priority → Other bucket, age computation, CoreUnreachableError on status_code=0, CaseBenchError on non-200; render_case_bench tests
+-  test_sre_post_incident.py          # build_post_incident_review: resolved/in-progress state, chronological timeline ordering, summary→reasoning fallback, accuracy matching, worked/to_improve classification, error propagation
++  test_sre_post_incident.py          # build_post_incident_review: resolved/in-progress state, chronological timeline ordering, summary→reasoning fallback, accuracy matching, worked/to_improve classification, error propagation; TestMutationStyleOverride (jmy.19): override field extraction, no-override stays None, empty override dict ignored, lineage backward-compat, render includes/omits "## Overrides" section
+   test_sre_situation_board.py        # fetch_situation_board: portfolio projection (full, cold start→None, malformed→None, missing counts→0), breach feed (sorted newest-first, field extraction, no-severity→None, non-dict rows dropped), queue integration, CoreUnreachableError on status_code=0, SituationBoardError on non-2xx; render_situation_board (populated, cold-start placeholders)
+   test_widgets_case_bench.py         # CaseBenchPanel: priority count status line, empty view "No active cases.", ListView populated with headers + rows, selection fires CaseSelected, priority-header row not selectable, CoreUnreachableError inline render, asyncio.Lock reentrant guard, timer unmount lifecycle
+   test_widgets_reasoning_capture.py  # ReasoningCapturePanel: renders existing notes on mount, placeholder when no notes, submit happy path clears input, empty input dropped silently, keeps input and shows error on CoreUnreachableError, keeps input on ReasoningCaptureError, asyncio.Lock reentrant guard, _submit_in_flight double-submit guard, timer unmount lifecycle, markup=False; write queue integration: enqueues on CoreUnreachableError when write_queue+_cached_case available (clears input, shows "queued" status), falls back to inline error when no write_queue, falls back when no _cached_case; fetch_case called on each refresh to keep cache warm
+@@ -112,6 +112,7 @@ Migrated from `nthlayer-respond/feat/opensrm-0rg-cli` (sre/post_incident.py). Se
+ - `PostIncidentError` inherits `BriefError` — widget-level catch covers both brief and review surfaces
+ - Partial review for in-progress cases: state=`”in_progress”`, DRAFT banner rendered; no blocking wait for resolution
+ - `render_post_incident_review()` produces markdown-shaped output; `[bold]` markers NOT parsed (markup=False in widget)
++- `VerdictAccuracy` carries 5 override_* fields (jmy.19): `override_by`, `override_at`, `override_action`, `override_reasoning`, `override_original_action` — populated from `outcome.override` on the original verdict (mutation-style); all-None when no override. When both lineage-style `outcome_resolution` child and mutation-style `outcome.override` exist, lineage child wins for `outcome_status` (preserves existing semantics) but override_* fields are populated either way. Mutation-style `outcome_status` surfaced only when no lineage child exists AND `outcome.override.by` is non-empty (prevents empty-override fabrication). `render_post_incident_review()` emits `## Overrides` section showing attribution (by, at), action transition (`original_action → action`), and reasoning; section omitted entirely when no accuracy record has `override_by` set.
+ 
+ **Navigation:** Accessed via `r` key on `CaseDetailScreen` → pushes `CaseReviewScreen`; `escape` returns to case detail.
+ 
+diff --git a/src/nthlayer_bench/sre/post_incident.py b/src/nthlayer_bench/sre/post_incident.py
+index ad27b48..39310d8 100644
+--- a/src/nthlayer_bench/sre/post_incident.py
++++ b/src/nthlayer_bench/sre/post_incident.py
+@@ -47,15 +47,28 @@ class TimelineEntry:
+ class VerdictAccuracy:
+     """Accuracy record for a single verdict.
+ 
+-    Built by matching outcome_resolution verdicts (which carry
+-    ``parent_ids: [original_id]`` per core's immutable contract) back to
+-    the original verdict they resolve.
++    outcome_status is populated from either pattern:
++    - lineage-style: latest outcome_resolution child verdict's status (existing behaviour)
++    - mutation-style: the original verdict's own outcome.status (opensrm-jmy.19)
++
++    When mutation-style outcome.status == "overridden", the override_*
++    fields below capture the operator attribution from outcome.override.
++    Both patterns coexist; the renderer surfaces both when both exist.
+     """
+ 
+     verdict_id: str
+     role: str                  # original verdict's subject.type
+     confidence: float | None   # original verdict's judgment.confidence
+     outcome_status: str | None  # confirmed | overridden | partial | superseded | expired
++    # NEW (jmy.19) — populated only when the original verdict has been
++    # mutation-style overridden (outcome.status=="overridden" with a
++    # non-empty outcome.override). All-None for non-override outcomes
++    # and for lineage-style-only resolutions.
++    override_by: str | None = None
++    override_at: str | None = None
++    override_action: str | None = None
++    override_reasoning: str | None = None
++    override_original_action: str | None = None
+ 
+ 
+ @dataclass
+@@ -178,8 +191,17 @@ def _verdict_to_entry(v: dict) -> TimelineEntry:
+ 
+ 
+ def _build_accuracy(chain: list[dict]) -> list[VerdictAccuracy]:
+-    """For each non-outcome verdict, match it to an outcome_resolution
+-    verdict (if any) and emit a VerdictAccuracy.
++    """For each non-outcome verdict, emit a VerdictAccuracy combining:
++
++    - lineage-style: latest outcome_resolution child status (existing)
++    - mutation-style: the original verdict's outcome.status and
++      outcome.override fields (jmy.19)
++
++    When both signals exist for the same verdict, both are surfaced
++    via outcome_status and the override_* fields respectively.
++    Mutation-style takes precedence for outcome_status when no lineage
++    child exists (mirrors the spec § 2 contract that the original is
++    authoritative for operator-imposed amendments).
+ 
+     Outcome resolutions carry ``parent_ids: [original_id]`` per core's
+     immutable verdict contract. Multiple outcome resolutions for the
+@@ -207,12 +229,36 @@ def _build_accuracy(chain: list[dict]) -> list[VerdictAccuracy]:
+         original_id = v.get("id", "")
+         if not original_id:
+             continue
++
++        # Lineage-style outcome_status (existing behaviour).
+         outcome = outcomes_for.get(original_id)
+         outcome_status = None
+         if outcome is not None:
+             outcome_status = outcome.get("outcome_status") or (
+                 (outcome.get("outcome") or {}).get("status")
+             )
++
++        # Mutation-style outcome.status + outcome.override (jmy.19).
++        # The original verdict's outcome dict may carry status="overridden"
++        # and a populated override dict. Read defensively — both paths
++        # tolerate missing/malformed payloads.
++        own_outcome = v.get("outcome") or {}
++        own_status = own_outcome.get("status")
++        override = own_outcome.get("override") or {}
++        override_by = override.get("by") if override else None
++        override_at = override.get("at") if override else None
++        override_action = override.get("action") if override else None
++        override_reasoning = override.get("reasoning") if override else None
++        override_original_action = override.get("original_action") if override else None
++
++        # If we have a mutation-style "overridden" status and no lineage
++        # outcome to override it, surface the mutation status. (When both
++        # exist, the lineage child wins for outcome_status — preserves
++        # existing semantics — but the override_* fields are populated
++        # either way so the renderer can show both.)
++        if outcome_status is None and own_status == "overridden" and override_by:
++            outcome_status = "overridden"
++
+         judgment = v.get("judgment") or {}
+         accuracy.append(
+             VerdictAccuracy(
+@@ -220,6 +266,11 @@ def _build_accuracy(chain: list[dict]) -> list[VerdictAccuracy]:
+                 role=(v.get("subject") or {}).get("type", ""),
+                 confidence=judgment.get("confidence"),
+                 outcome_status=outcome_status,
++                override_by=override_by,
++                override_at=override_at,
++                override_action=override_action,
++                override_reasoning=override_reasoning,
++                override_original_action=override_original_action,
+             )
+         )
+     return accuracy
+@@ -419,4 +470,27 @@ def render_post_incident_review(review: PostIncidentReview) -> str:
+     else:
+         lines.append("- (no verdicts to score)")
+ 
++    # Overrides section — rendered only when at least one VerdictAccuracy
++    # carries mutation-style override attribution (jmy.19). Omit the header
++    # entirely when no overrides exist so operators reading the plain-text
++    # output don't see a dangling empty section.
++    override_records = [a for a in review.accuracy if a.override_by]
++    if override_records:
++        lines.append("")
++        lines.append("## Overrides")
++        for record in override_records:
++            at_part = f" at {record.override_at}" if record.override_at else ""
++            reason_part = (
++                f" — {record.override_reasoning}" if record.override_reasoning else ""
++            )
++            action_part = (
++                f"; was {record.override_original_action} → {record.override_action}"
++                if record.override_original_action and record.override_action
++                else ""
++            )
++            lines.append(
++                f"- {record.role} (`{record.verdict_id}`): "
++                f"overridden by {record.override_by}{at_part}{reason_part}{action_part}"
++            )
++
+     return "\n".join(lines)
+diff --git a/tests/test_sre_post_incident.py b/tests/test_sre_post_incident.py
+index b096a16..ce7332b 100644
+--- a/tests/test_sre_post_incident.py
++++ b/tests/test_sre_post_incident.py
+@@ -16,6 +16,8 @@ from nthlayer_bench.sre.post_incident import (
+     CaseNotFoundError,
+     CoreUnreachableError,
+     PostIncidentReview,
++    VerdictAccuracy,
++    _build_accuracy,
+     build_post_incident_review,
+     render_post_incident_review,
+ )
+@@ -705,3 +707,145 @@ class TestRenderPostIncidentReview:
+     def test_empty_to_improve_renders_placeholder(self):
+         text = render_post_incident_review(self._make_review())
+         assert "(no overridden outcomes yet)" in text
++
++
++# ------------------------------------------------------------------ #
++# opensrm-jmy.19: mutation-style override attribution                  #
++# ------------------------------------------------------------------ #
++
++class TestMutationStyleOverride:
++    """opensrm-jmy.19: bench surfaces outcome.override attribution off
++    the original verdict (mutation-style), parallel to its existing
++    outcome_resolution lineage walk (lineage-style)."""
++
++    def test_build_accuracy_extracts_override_fields_from_original(self):
++        """A verdict whose own outcome.status=='overridden' with a populated
++        outcome.override produces a VerdictAccuracy with override_* fields."""
++        chain = [
++            {
++                "id": "vrd-1",
++                "subject": {"type": "triage"},
++                "judgment": {"confidence": 0.85},
++                "outcome": {
++                    "status": "overridden",
++                    "override": {
++                        "by": "operator-hash",
++                        "at": "2026-05-25T10:00:00+00:00",
++                        "action": "approve",
++                        "reasoning": "false positive on synthetic txn",
++                        "original_action": "reject",
++                    },
++                },
++            },
++        ]
++        accuracy = _build_accuracy(chain)
++        assert len(accuracy) == 1
++        a = accuracy[0]
++        assert a.verdict_id == "vrd-1"
++        assert a.outcome_status == "overridden"
++        assert a.override_by == "operator-hash"
++        assert a.override_at == "2026-05-25T10:00:00+00:00"
++        assert a.override_action == "approve"
++        assert a.override_reasoning == "false positive on synthetic txn"
++        assert a.override_original_action == "reject"
++
++    def test_build_accuracy_no_override_leaves_fields_none(self):
++        chain = [
++            {
++                "id": "vrd-1",
++                "subject": {"type": "triage"},
++                "judgment": {"confidence": 0.85},
++                "outcome": {"status": "pending"},
++            },
++        ]
++        a = _build_accuracy(chain)[0]
++        assert a.outcome_status is None  # pending isn't a final status in this view
++        assert a.override_by is None
++        assert a.override_reasoning is None
++
++    def test_build_accuracy_empty_override_dict_ignored(self):
++        """An empty outcome.override (malformed payload) doesn't fabricate attribution."""
++        chain = [
++            {
++                "id": "vrd-1",
++                "subject": {"type": "triage"},
++                "judgment": {"confidence": 0.85},
++                "outcome": {"status": "overridden", "override": {}},  # empty
++            },
++        ]
++        a = _build_accuracy(chain)[0]
++        assert a.override_by is None
++        assert a.outcome_status is None  # no real override → no mutation-style status
++
++    def test_lineage_outcome_resolution_still_works(self):
++        """Pre-jmy.19 lineage-style behaviour is unchanged."""
++        chain = [
++            {
++                "id": "vrd-1",
++                "subject": {"type": "triage"},
++                "judgment": {"confidence": 0.85},
++                "outcome": {"status": "pending"},  # no mutation-style override
++            },
++            {
++                "id": "vrd-2",
++                "subject": {"type": "outcome_resolution"},
++                "verdict_type": "outcome_resolution",
++                "parent_ids": ["vrd-1"],
++                "created_at": "2026-05-25T10:00:00+00:00",
++                "outcome_status": "confirmed",
++            },
++        ]
++        accuracy_records = _build_accuracy(chain)
++        # Only non-outcome verdicts appear in accuracy; the resolution itself doesn't.
++        target = [a for a in accuracy_records if a.verdict_id == "vrd-1"][0]
++        assert target.outcome_status == "confirmed"
++        assert target.override_by is None  # mutation-style fields stay None
++
++    def test_render_includes_override_section(self):
++        """When a verdict has mutation-style override attribution, the
++        rendered post-incident output includes an 'Overrides' section."""
++        review = PostIncidentReview(
++            case_id="case-1",
++            service="fraud-detect",
++            severity=2,
++            state="resolved",
++            duration_minutes=15,
++            accuracy=[
++                VerdictAccuracy(
++                    verdict_id="vrd-1",
++                    role="triage",
++                    confidence=0.85,
++                    outcome_status="overridden",
++                    override_by="operator-hash",
++                    override_at="2026-05-25T10:00:00+00:00",
++                    override_action="approve",
++                    override_reasoning="false positive",
++                    override_original_action="reject",
++                ),
++            ],
++        )
++        output = render_post_incident_review(review)
++        assert "## Overrides" in output  # section header rendered
++        assert "operator-hash" in output  # operator attribution surfaced
++        assert "false positive" in output  # reasoning surfaced
++        assert "reject → approve" in output  # action transition surfaced
++
++    def test_render_omits_override_section_when_no_overrides(self):
++        """No mutation-style override → no 'Overrides' header in the output."""
++        review = PostIncidentReview(
++            case_id="case-2",
++            service="fraud-detect",
++            severity=2,
++            state="resolved",
++            duration_minutes=15,
++            accuracy=[
++                VerdictAccuracy(
++                    verdict_id="vrd-1",
++                    role="triage",
++                    confidence=0.85,
++                    outcome_status="confirmed",
++                ),
++            ],
++        )
++        output = render_post_incident_review(review)
++        assert "Overrides" not in output  # no section when no overrides exist
+diff --git a/uv.lock b/uv.lock
+index aa8fde2..97d34c4 100644
+--- a/uv.lock
++++ b/uv.lock
+@@ -874,7 +874,7 @@ wheels = [
+ 
+ [[package]]
+ name = "nthlayer-bench"
+-version = "1.5.0"
++version = "1.6.0"
+ source = { editable = "." }
+ dependencies = [
+     { name = "httpx" },
+@@ -902,7 +902,7 @@ provides-extras = ["dev"]
+ 
+ [[package]]
+ name = "nthlayer-common"
+-version = "1.5.0"
++version = "1.6.0"
+ source = { editable = "../nthlayer-common" }
+ dependencies = [
+     { name = "anthropic" },

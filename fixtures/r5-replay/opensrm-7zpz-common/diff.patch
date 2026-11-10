@@ -1,0 +1,2029 @@
+diff --git a/CLAUDE.md b/CLAUDE.md
+index d885418..b351572 100644
+--- a/CLAUDE.md
++++ b/CLAUDE.md
+@@ -41,8 +41,9 @@ These are load-bearing — wrong-side mistakes cause silent breakage.
+          converted at all"), `judgment_target_percent()` [inbound],
+          `judgment_target_ratio()` [outbound],
+          `judgment_promise_direction()`, `judgment_promise()` [factory].
+-       - thresholds — `manifest/thresholds.py` (bound tables,
+-         `FORBIDDEN_THRESHOLD_KEYS`, `srm_v1_threshold()`,
++       - thresholds — `manifest/thresholds.py` (bound tables, the
++         closure table `THRESHOLD_TYPE_FIELDS` and `SEGMENTS_METRICS`
++         (opensrm-7zpz), `FORBIDDEN_THRESHOLD_KEYS`, `srm_v1_threshold()`,
+          `threshold_to_v2_entry()`, `check_type_fields()`,
+          `parse_bounds()`, `is_duration()`, `normalise_bins()`,
+          `duration_seconds()`), also package-internal and not
+diff --git a/docs/architecture.md b/docs/architecture.md
+index 3d6475f..275d1b2 100644
+--- a/docs/architecture.md
++++ b/docs/architecture.md
+@@ -320,7 +320,16 @@ a fourth directory walk** — three existed before this was shared
+   judgment-SLO `JudgmentMeasurement`) and land in
+   `ReliabilityManifest.judgment_thresholds`, never in `slos`. Bounds are stored
+   as declared, never converted. Vocabulary sets: `V2_JUDGMENT_SLO_TYPES` and
+-  `V2_JUDGMENT_THRESHOLD_TYPES`. See `docs/upgrading-4.0.md`.
++  `V2_JUDGMENT_THRESHOLD_TYPES`. Entries are closed (CORE §5.5, opensrm-7zpz):
++  `thresholds.check_type_fields` rejects any key a type does not define, from
++  the one `THRESHOLD_TYPE_FIELDS` table (pinned against schema.json). A
++  `segments` entry names its `metric` (`reversal_rate`,
++  `high_confidence_failure`, `outcomes`, `escalation`) and that metric's
++  parameter, carried on `ThresholdMeasurement` (`source`,
++  `confidence_threshold`, `outcome_signal` as an `OutcomeSignal`), with the
++  population `window` defaulting to `30d`. The srm/v1 lift accepts only
++  `target`, `window`, `unit`, `description` and `labels` (opensrm-1rnr). See
++  `docs/upgrading-4.0.md` and `docs/upgrading-5.0.md`.
+ - v1→v2 compat helpers in `v1_compat.py`:
+   `default_statistical_requirements`, `default_measurement`,
+   `convert_v1_contract`, `convert_v1_to_v2(v1_data: dict) -> dict`.
+diff --git a/docs/upgrading-4.0.md b/docs/upgrading-4.0.md
+index eeb96a5..6dcc035 100644
+--- a/docs/upgrading-4.0.md
++++ b/docs/upgrading-4.0.md
+@@ -49,7 +49,8 @@ are now rejected and must be declared in a v2 manifest.
+ ## Threshold entries
+ 
+ - Entries are flat (`type`, `bounds`, ...), not wrapped in `metadata`/`spec`.
+-- Other keys that do not belong to a threshold's type are ignored.
++- Other keys that do not belong to a threshold's type are ignored. (5.0 closes
++  entries: such keys are errors. See [upgrading-5.0.md](upgrading-5.0.md).)
+ - `breach_actions`, `target`, `judgment_type` and `service` on a threshold raise
+   `OpenSRMV2ParseError`, as does `measurement.method` on a `calibration` threshold.
+ - `segment_dimension` and every `segment_values` entry must be non-empty strings.
+diff --git a/docs/upgrading-5.0.md b/docs/upgrading-5.0.md
+new file mode 100644
+index 0000000..b9d60ec
+--- /dev/null
++++ b/docs/upgrading-5.0.md
+@@ -0,0 +1,123 @@
++# Upgrading to nthlayer-common 5.0
++
++5.0 tracks two OpenSRM changes to judgment thresholds:
++
++- **opensrm-7zpz** — a `segments` threshold names the rate it compares
++  (`metric`, OPENSRM-CORE-v2 §5.5.1), and every threshold entry is closed: a key
++  its type does not define is an error, never a silently ignored field
++  (OPENSRM-CORE-v2 §5.5).
++- **opensrm-1rnr** — the srm/v1 threshold lift stops dropping keys it cannot
++  carry, and honours `unit` on `feedback_latency`.
++
++The release notes link here for detail. 4.0's changes are in
++[upgrading-4.0.md](upgrading-4.0.md).
++
++## What changed
++
++| | 4.x | 5.0 |
++|---|---|---|
++| `segments` without `metric` | accepted | `OpenSRMV2ParseError`: `metric` is required |
++| `segments` `metric` | not read (any value ignored) | one of `reversal_rate`, `high_confidence_failure`, `outcomes`, `escalation`; `audit_sampling` is rejected with its own reason (it measures sampling, not performance) |
++| a key a threshold's type does not define (entry level, or inside `measurement`, `probe` or `outcome_signal`) | ignored | `OpenSRMV2ParseError` naming the key and CORE §5.5 |
++| `segments` `measurement` | ignored | `window` (Duration, > 0, default `30d`), `source` (required iff `reversal_rate`; `lineage` / `calibration_sample` / `downstream_signal`), `confidence_threshold` (Ratio, required iff `high_confidence_failure`); each rejected with any other metric |
++| `segments` `outcome_signal` | ignored | `{source, window}`, required iff `metric: outcomes`, rejected otherwise; `window` is a Duration and may be zero |
++| pre-3c `segments` under `judgment_slo` | fix-it block loaded unchanged | fix-it block carries a `metric` placeholder and says how to choose; it loads once a metric is filled in |
++| srm/v1 `calibration` / `feedback_latency` keys other than `target`, `window`, `unit` (`feedback_latency` only), `description`, `labels` | ignored (dropped) | `ValueError` (`OpenSRMParseError` from the parser) naming the key |
++| srm/v1 `feedback_latency` `unit` | ignored: the target was always read as seconds | honoured: absent or `s` → `"<n>s"`; `ms`, `m`, `h`, `d`, `w` → `"<n><unit>"`; anything else rejected |
++| srm/v1 `feedback_latency` `window` | ignored | absent or `30d` accepted (v2 fixes the window at 30d, CORE §5.5.5); anything else rejected |
++| srm/v1 `calibration` `unit` | ignored | rejected (the target is an ECE ratio) |
++
++`description` and `labels` on an srm/v1 threshold entry are still accepted and
++dropped. The existing srm/v1 rejections (`p50`, `p90`, `bins`, `method`,
++`maximum_*`) are unchanged.
++
++## Threshold entries are closed
++
++Each entry may hold `type`, `bounds` and the keys its type defines, nothing else:
++
++| type | entry keys besides `type` / `bounds` | nested, closed |
++|---|---|---|
++| `segments` | `metric`, `segment_dimension`, `segment_values`, `measurement`, `outcome_signal` | `measurement`: `window`, `source`, `confidence_threshold`; `outcome_signal`: `source`, `window` |
++| `stability` | `probe` | `probe`: `frozen_input_set`, `frequency` |
++| `calibration` | `measurement` | `measurement`: `bins`, `window` (`method` keeps its own error) |
++| `audit_backlog` | none | |
++| `feedback_latency` | none | |
++
++This applies to every source of an entry: a template's, the manifest's, and one
++appended through `overrides.judgment_threshold` (the schema does not validate
++`template.overrides`, so the parser is the only check there; opensrm-0myj).
++
++## segments: choosing the metric
++
++```yaml
++judgment_threshold:
++  - type: segments
++    metric: reversal_rate          # the rate compared across segments
++    measurement:
++      source: lineage              # reversal_rate's parameter
++      window: 7d                   # optional population window; default 30d
++    segment_dimension: customer_tier
++    segment_values: [enterprise, smb, consumer]
++    bounds:
++      maximum_variance_from_overall: 0.05
++```
++
++| `metric` | its parameter |
++|---|---|
++| `reversal_rate` | `measurement.source` |
++| `high_confidence_failure` | `measurement.confidence_threshold` |
++| `outcomes` | `outcome_signal: {source, window}` (`window` = how long to wait for each outcome, not the population window) |
++| `escalation` | none (the escalation rate, not the human agreement rate) |
++
++One entry compares one rate; declare an entry per rate that must hold evenly.
++
++## API
++
++- New: `OutcomeSignal(source: str, window: str)`, a frozen dataclass,
++  re-exported from `nthlayer_common.manifest`.
++- `ThresholdMeasurement` gains four fields, all defaulting to `None` and set only
++  on `segments`:
++
++| Field | Holds |
++|---|---|
++| `metric` | The compared rate, one of the four above. |
++| `source` | `reversal_rate` only. |
++| `confidence_threshold` | `high_confidence_failure` only; a float in [0, 1]. |
++| `outcome_signal` | `outcomes` only; an `OutcomeSignal`. |
++
++- On `segments`, `ThresholdMeasurement.window` is the population window and is
++  always set: the declared `measurement.window`, or `"30d"` when absent.
++- `threshold_to_v2_entry` emits `metric`, `measurement` (always with `window`)
++  and `outcome_signal` for `segments`.
++
++Worked example: the outcomes entry from the spec's
++`examples/judgment-thresholds/segments-two-dimensions.yaml`. The real repr from
++`parse_opensrm_v2`:
++
++```
++JudgmentThreshold(type='segments', bounds={'maximum_variance_from_overall': 0.08}, measurement=ThresholdMeasurement(bins=None, window='7d', probe=None, segment_dimension='region', segment_values=['eu', 'us', 'apac'], metric='outcomes', source=None, confidence_threshold=None, outcome_signal=OutcomeSignal(source='retro-consumer', window='1h')))
++```
++
++`ThresholdMeasurement` now has `source` and `confidence_threshold`; it still has
++no `method`, `frequency` or `sampling`.
++
++## What consumers must change
++
++- Raise the nthlayer-common requirement to `>=5.0.0,<6.0.0`.
++- Add `metric` (and its parameter) to every `segments` threshold in manifests,
++  templates and test fixtures, and remove any key a threshold's type does not
++  define.
++- nthlayer-core must serialise the new fields (`metric`, `source`,
++  `confidence_threshold`, `outcome_signal`, and `window` on `segments`)
++  wherever it serialises a `ThresholdMeasurement`, and update its inline
++  `segments` fixtures.
++- nthlayer-generate and nthlayer-workers read no `ThresholdMeasurement` field
++  today, so they need only the version bump and any `segments` fixtures; an
++  evaluator added to workers later must read `metric` and its parameters.
++- Evaluators compare the rate `metric` names, per CORE §5.5.1. For `outcomes`,
++  count only decisions in `measurement.window` whose `outcome_signal.window` has
++  elapsed; a listed segment with none is not evaluable (CORE §5.5.6 E3).
++- srm/v1 manifests: move any `feedback_latency` with a non-30d `window`, and
++  any threshold entry using keys outside `target`/`window`/`unit`/`description`/
++  `labels`, to a v2 `judgment_threshold`. Check `unit` on `feedback_latency`:
++  a `unit: ms` that 4.x ignored now changes the bound.
+diff --git a/src/nthlayer_common/manifest/__init__.py b/src/nthlayer_common/manifest/__init__.py
+index 8b37370..ab6d3a2 100644
+--- a/src/nthlayer_common/manifest/__init__.py
++++ b/src/nthlayer_common/manifest/__init__.py
+@@ -39,6 +39,7 @@ from nthlayer_common.manifest.models import (
+     Observability,
+     OnCallConfig,
+     Outcomes,
++    OutcomeSignal,
+     Override,
+     Ownership,
+     PagerDutyConfig,
+@@ -133,6 +134,7 @@ __all__ = [
+     "BreachAction",
+     "StatisticalRequirements",
+     "ProbeConfig",
++    "OutcomeSignal",
+     "SamplingConfig",
+     "StratifiedSample",
+     # Contract
+diff --git a/src/nthlayer_common/manifest/models.py b/src/nthlayer_common/manifest/models.py
+index 2ea3e89..2e8ddad 100644
+--- a/src/nthlayer_common/manifest/models.py
++++ b/src/nthlayer_common/manifest/models.py
+@@ -354,6 +354,21 @@ class JudgmentMeasurement:
+     segment_values: list[str] = field(default_factory=list)
+ 
+ 
++@dataclass(frozen=True)
++class OutcomeSignal:
++    """Where a decision's outcome comes from, and how long to wait for it.
++
++    The ``outcome_signal`` of a segments threshold whose ``metric`` is
++    ``outcomes`` (CORE §5.5.1, opensrm-7zpz), with the meaning the outcomes
++    judgment SLO gives it. ``window`` is the outcome wait, a Duration string
++    kept as declared (``"0s"`` allowed); it is not the population window,
++    which is ``ThresholdMeasurement.window``.
++    """
++
++    source: str
++    window: str
++
++
+ @dataclass
+ class ThresholdMeasurement:
+     """Type-specific measurement fields of a JudgmentThreshold (opensrm-l33e).
+@@ -362,26 +377,41 @@ class ThresholdMeasurement:
+ 
+     - calibration: ``bins`` and ``window``
+     - stability: ``probe`` (``frozen_input_set``, ``frequency``)
+-    - segments: ``segment_dimension`` and ``segment_values``
++    - segments: ``metric``, ``segment_dimension``, ``segment_values`` and
++      ``window`` (the population window; the parser stores the spec default
++      ``"30d"`` when ``measurement.window`` is absent), plus the parameter the
++      metric takes (CORE §5.5.1, opensrm-7zpz): ``source`` for
++      ``reversal_rate``, ``confidence_threshold`` for
++      ``high_confidence_failure``, ``outcome_signal`` for ``outcomes``;
++      ``escalation`` takes none
+     - audit_backlog, feedback_latency: none; every field stays at its default
+ 
+-    Deliberately omits JudgmentMeasurement's SLO-only fields (``source``,
+-    ``confidence_threshold``, ``method``, ``frequency``, ``sampling``). On a
+-    threshold they were always None, so an evaluator reading ``.frequency``
+-    instead of ``.probe.frequency`` got a silent None. Here it is an
+-    AttributeError.
++    Deliberately omits JudgmentMeasurement's SLO-only fields (``method``,
++    ``frequency``, ``sampling``). On a threshold they were always None, so an
++    evaluator reading ``.frequency`` instead of ``.probe.frequency`` got a
++    silent None. Here it is an AttributeError. ``source`` and
++    ``confidence_threshold`` are present because a segments metric takes them.
+ 
+     Nothing here enforces which fields go with which type: the parsers are the
+     only invariant enforcer, so a hand-built instance can pair any fields.
+     ``window`` keeps the declared Duration string (so it round-trips);
+-    convert it with ``duration_seconds()``.
++    convert it with ``duration_seconds()``. A hand-built segments threshold
++    must set ``window`` itself, normally to ``"30d"``
++    (``manifest.thresholds.SEGMENTS_DEFAULT_WINDOW``): a parsed one always
++    carries it, so a ``None`` window compares unequal to the parsed form and
++    ``threshold_to_v2_entry`` rejects it.
+     """
+ 
+     bins: int | None = None
+-    window: str | None = None
++    window: str | None = None  # calibration: ECE window; segments: population window (parser stores 30d)
+     probe: ProbeConfig | None = None
+     segment_dimension: str | None = None
+     segment_values: list[str] = field(default_factory=list)
++    # segments only (opensrm-7zpz): the rate compared, and its parameter.
++    metric: str | None = None  # reversal_rate | high_confidence_failure | outcomes | escalation
++    source: str | None = None  # reversal_rate: lineage | calibration_sample | downstream_signal
++    confidence_threshold: float | None = None  # high_confidence_failure, a ratio
++    outcome_signal: OutcomeSignal | None = None  # outcomes
+ 
+ 
+ @dataclass
+@@ -491,7 +521,8 @@ class JudgmentThreshold:
+ 
+     ``measurement`` is a ThresholdMeasurement holding the type-specific
+     fields (calibration bins/window, stability probe, segments
+-    dimension/values), not the judgment-SLO JudgmentMeasurement.
++    metric/dimension/values/window and the metric's parameter), not the
++    judgment-SLO JudgmentMeasurement.
+     """
+ 
+     # A plain str by design, like every judgment_type in this module; the
+diff --git a/src/nthlayer_common/manifest/parser/v2.py b/src/nthlayer_common/manifest/parser/v2.py
+index dbf3656..3af95be 100644
+--- a/src/nthlayer_common/manifest/parser/v2.py
++++ b/src/nthlayer_common/manifest/parser/v2.py
+@@ -31,6 +31,7 @@ from nthlayer_common.manifest.models import (
+     JudgmentMeasurement,
+     JudgmentThreshold,
+     Outcomes,
++    OutcomeSignal,
+     Ownership,
+     ProbeConfig,
+     ReliabilityContract,
+@@ -61,7 +62,11 @@ from nthlayer_common.manifest.target_validation import (
+     judgment_target_percent,
+ )
+ from nthlayer_common.manifest.thresholds import (
++    SEGMENTS_DEFAULT_WINDOW,
++    SEGMENTS_METRIC_HINT,
++    SEGMENTS_METRICS,
+     THRESHOLD_REQUIRED_FIELDS,
++    THRESHOLD_TYPE_FIELDS,
+     check_type_fields,
+     normalise_bins,
+     parse_bounds,
+@@ -230,14 +235,10 @@ def parse_opensrm_v2(
+             f"spec.judgment_threshold must be a list, got "
+             f"{type(thresholds_block).__name__}."
+         )
+-    judgment_thresholds: list[JudgmentThreshold] = []
+-    for index, th_data in enumerate(thresholds_block):
+-        if not isinstance(th_data, dict):
+-            raise OpenSRMV2ParseError(
+-                f"spec.judgment_threshold[{index}] must be a mapping, got "
+-                f"{type(th_data).__name__}."
+-            )
+-        judgment_thresholds.append(_parse_judgment_threshold(index, th_data))
++    # A manifest that extends a template has already had each entry parsed
++    # against its own source by resolve_v2_template, so an error there names
++    # the template or override; here every entry is located in the merged list.
++    judgment_thresholds = _parse_threshold_entries("spec.judgment_threshold", thresholds_block)
+ 
+     # Parse contracts (§6)
+     contracts = _parse_contracts(spec.get("contracts", []))
+@@ -392,6 +393,11 @@ _THRESHOLD_OWN_FIELDS: dict[str, tuple[str, ...]] = {
+     t: fields for t, fields in THRESHOLD_REQUIRED_FIELDS.items() if fields
+ }
+ 
++# A pre-3c segments item names no rate, and the fix-it cannot guess one
++# (CORE §5.5.1, opensrm-7zpz). The placeholder is not a metric, so a
++# suggestion pasted unedited fails on `metric` rather than loading.
++_METRIC_PLACEHOLDER = f"<choose one: {' | '.join(SEGMENTS_METRICS)}>"
++
+ 
+ def _render_threshold_block(entry: dict[str, Any]) -> str:
+     """Render a judgment_threshold block, indented as a message example.
+@@ -429,29 +435,42 @@ def _reject_pre_3c_placement(index: int, js_data: dict[str, Any]) -> None:
+     where = f"spec.judgment_slo[{index}]"
+ 
+     if judgment_type in V2_JUDGMENT_THRESHOLD_TYPES:
+-        # A loadable judgment_threshold entry: the type's own fields carry
+-        # over (schema JudgmentThresholdSpec requires them), `target` becomes
+-        # `bounds`, and measurement.method is dropped (the schema forbids it).
++        # A loadable judgment_threshold entry. Only the type's required fields
++        # carry over, each object filtered to the keys the closed entry defines
++        # (CORE §5.5), so the suggestion never carries a key the threshold would
++        # reject (measurement.method, a stray measurement on segments); `target`
++        # becomes `bounds`.
+         entry: dict[str, Any] = {"type": judgment_type}
+         for field in _THRESHOLD_OWN_FIELDS.get(judgment_type, ()):
++            if field == "metric":
++                entry[field] = _METRIC_PLACEHOLDER
++                continue
+             if field not in body:
+                 continue
+             value = body[field]
+-            if field == "measurement" and isinstance(value, dict):
+-                value = {k: v for k, v in value.items() if k != "method"}
++            allowed = THRESHOLD_TYPE_FIELDS[judgment_type].get(field)
++            if allowed is not None and isinstance(value, dict):
++                value = {k: v for k, v in value.items() if k in allowed}
+             entry[field] = value
+         entry["bounds"] = target
+-        dropped = ""
++        fix_it_notes = ""
++        if judgment_type == "segments":
++            fix_it_notes = (
++                "\n\nA segments threshold must name the rate it compares: "
++                "replace the `metric` placeholder with "
++                + SEGMENTS_METRIC_HINT
++                + "."
++            )
+         measurement = entry.get("measurement")
+         if judgment_type == "calibration" and not (
+             isinstance(measurement, dict) and "bins" in measurement and "window" in measurement
+         ):
+-            dropped = (
++            fix_it_notes += (
+                 "\n\nA calibration threshold requires `measurement` with `bins` "
+                 "and `window`; add one."
+             )
+         if "breach_actions" in body or "service" in body:
+-            dropped += (
++            fix_it_notes += (
+                 "\n\n`breach_actions` and `service` do not carry over: "
+                 "thresholds do not declare them."
+             )
+@@ -461,7 +480,7 @@ def _reject_pre_3c_placement(index: int, js_data: dict[str, Any]) -> None:
+             f"no error budget. Move it to spec.judgment_threshold, renaming "
+             f"'target' to 'bounds':\n\n"
+             + _render_threshold_block(entry)
+-            + dropped
++            + fix_it_notes
+         )
+     if judgment_type == "audit_sampling" and "audit_backlog_maximum_age" in target:
+         suggested = {
+@@ -601,9 +620,22 @@ def _parse_judgment_measurement(
+     return measurement
+ 
+ 
+-def _parse_judgment_threshold(index: int, data: dict[str, Any]) -> JudgmentThreshold:
+-    """Parse one flat ``spec.judgment_threshold`` entry (§5.5, opensrm-l33e)."""
+-    where = f"spec.judgment_threshold[{index}]"
++def _parse_threshold_entries(prefix: str, entries: list[Any]) -> list[JudgmentThreshold]:
++    """Parse a list of threshold entries, locating each as ``<prefix>[i]``."""
++    parsed: list[JudgmentThreshold] = []
++    for index, th_data in enumerate(entries):
++        where = f"{prefix}[{index}]"
++        if not isinstance(th_data, dict):
++            raise OpenSRMV2ParseError(
++                f"{where} must be a mapping, got {type(th_data).__name__}."
++            )
++        parsed.append(_parse_judgment_threshold(where, th_data))
++    return parsed
++
++
++def _parse_judgment_threshold(where: str, data: dict[str, Any]) -> JudgmentThreshold:
++    """Parse one flat threshold entry (§5.5, opensrm-l33e); *where* locates it
++    in the document that declares it, for errors."""
+     threshold_type = data.get("type")
+     # The schema's `type` is an enum of strings. Checked first: a list or
+     # mapping here would otherwise raise TypeError (unhashable) at the set
+@@ -636,14 +668,12 @@ def _parse_judgment_threshold(index: int, data: dict[str, Any]) -> JudgmentThres
+ 
+ 
+ def _threshold_measurement(threshold_type: str, data: dict[str, Any]) -> ThresholdMeasurement:
+-    """Build a threshold's measurement from the keys its type uses, only.
+-
+-    JudgmentThresholdSpec is open: ``measurement``, ``probe``, ``sampling`` and
+-    the ``segment_*`` keys are constrained only inside the branch of the type
+-    that uses them, so on any other type the schema accepts any value for them.
+-    Those keys are ignored here. The keys read are exactly the ones
+-    ``check_type_fields`` has already validated for this type, which is why
+-    this does not reuse ``_parse_judgment_measurement`` (the judgment_slo path).
++    """Build a threshold's measurement from an entry check_type_fields accepted.
++
++    Entries are closed (CORE §5.5, opensrm-7zpz), so by now *data* holds only
++    the keys its type defines, each validated. This does not reuse
++    ``_parse_judgment_measurement`` (the judgment_slo path), whose fields are
++    a different set.
+     """
+     if threshold_type == "calibration":
+         m_data = data["measurement"]
+@@ -662,7 +692,18 @@ def _threshold_measurement(threshold_type: str, data: dict[str, Any]) -> Thresho
+             ),
+         )
+     if threshold_type == "segments":
++        m_data = data.get("measurement", {})
++        signal = data.get("outcome_signal")
++        confidence = m_data.get("confidence_threshold")
+         return ThresholdMeasurement(
++            metric=data["metric"],
++            window=m_data.get("window", SEGMENTS_DEFAULT_WINDOW),
++            source=m_data.get("source"),
++            confidence_threshold=None if confidence is None else float(confidence),
++            outcome_signal=(
++                None if signal is None
++                else OutcomeSignal(source=signal["source"], window=signal["window"])
++            ),
+             segment_dimension=data["segment_dimension"],
+             segment_values=list(data["segment_values"]),
+         )
+@@ -1135,6 +1176,7 @@ def resolve_v2_template(
+             )
+ 
+     merged_spec = _merge_template_spec(template_spec, spec, overrides)
++    _check_threshold_sources(extends, template_spec, spec, overrides)
+ 
+     result = dict(manifest_data)
+     result["spec"] = merged_spec
+@@ -1201,6 +1243,34 @@ def _merge_template_spec(
+     return result
+ 
+ 
++def _check_threshold_sources(
++    extends: str,
++    template_spec: dict[str, Any],
++    manifest_spec: dict[str, Any],
++    overrides: dict[str, Any],
++) -> None:
++    """Parse each source's threshold entries before they are concatenated.
++
++    The merged list puts template entries first, so an error located by its
++    merged index named the wrong entry, in the wrong document: a template's
++    entry 0 was reported as the manifest's spec.judgment_threshold[0]. Each
++    entry is located in the document that declares it instead. Runs after
++    _merge_template_spec, whose guards have already rejected non-list blocks.
++    """
++    directive = overrides.get(_THRESHOLD_KEY)
++    sources = (
++        (f"template '{extends}' judgment_threshold", template_spec.get(_THRESHOLD_KEY)),
++        ("spec.judgment_threshold", manifest_spec.get(_THRESHOLD_KEY)),
++        (
++            "spec.template.overrides.judgment_threshold.append",
++            directive.get("append") if isinstance(directive, dict) else None,
++        ),
++    )
++    for prefix, entries in sources:
++        if isinstance(entries, list):
++            _parse_threshold_entries(prefix, entries)
++
++
+ def _concatenate_thresholds(template_value: Any, manifest_value: Any) -> list[Any]:
+     """Template entries followed by manifest entries (CORE §5.5).
+ 
+diff --git a/src/nthlayer_common/manifest/thresholds.py b/src/nthlayer_common/manifest/thresholds.py
+index 1a9faf6..8d88af9 100644
+--- a/src/nthlayer_common/manifest/thresholds.py
++++ b/src/nthlayer_common/manifest/thresholds.py
+@@ -5,13 +5,17 @@ error budget; a breach is the measured value exceeding a declared bound. So
+ the parsers never convert a v2 bound: bounds are stored exactly as declared,
+ which is the opposite of target_validation.py's job for judgment SLO targets.
+ The coercions are normalise_bins() (an integral float bins becomes an int) and
+-srm_v1_threshold(), which builds a float ECE bound and a "<n>s" duration from
+-srm/v1's bare numbers.
++srm_v1_threshold(), which builds a float ECE bound and a "<n><unit>" duration
++(unit default s) from srm/v1's bare numbers.
+ 
+ This module also holds the srm/v1 lift (srm_v1_threshold), the v2 emit
+ (threshold_to_v2_entry), and duration_seconds(), which turns a Duration bound
+ into seconds for evaluators.
+ 
++Threshold entries are closed (CORE §5.5, opensrm-7zpz): check_type_fields
++rejects any key a type does not define, from the one THRESHOLD_TYPE_FIELDS
++table, and a segments entry names the rate it compares (SEGMENTS_METRICS).
++
+ The tables restate opensrm/spec/v2/schema.json's JudgmentThresholdSpec so the
+ parsers can enforce it without a JSON-Schema dependency. They are pinned against
+ the live schema in BOTH directions by
+@@ -26,6 +30,7 @@ target_validation; except duration_seconds(), which is public and re-exported.
+ from __future__ import annotations
+ 
+ import math
++from collections.abc import Iterable
+ from typing import Any
+ 
+ from nthlayer_common.manifest.models import JudgmentThreshold, ThresholdMeasurement
+@@ -45,7 +50,7 @@ THRESHOLD_BOUNDS: dict[str, dict[str, str]] = {
+ }
+ 
+ THRESHOLD_REQUIRED_FIELDS: dict[str, tuple[str, ...]] = {
+-    "segments": ("segment_dimension", "segment_values"),
++    "segments": ("metric", "segment_dimension", "segment_values"),
+     "stability": ("probe",),
+     "calibration": ("measurement",),
+     "audit_backlog": (),
+@@ -61,6 +66,49 @@ FORBIDDEN_THRESHOLD_KEYS: tuple[str, ...] = (
+     "service",
+ )
+ 
++# Every key each type defines besides `type` and `bounds` (CORE §5.5: entries
++# are closed, opensrm-7zpz). The value is the closed key set of an
++# object-valued key, or None for a non-object key. Closure is enforced from
++# this one table, and it is pinned against the schema's per-type branches in
++# both directions. calibration's measurement.method is absent on purpose: the
++# schema defines it only to forbid it.
++THRESHOLD_TYPE_FIELDS: dict[str, dict[str, tuple[str, ...] | None]] = {
++    "segments": {
++        "metric": None,
++        "segment_dimension": None,
++        "segment_values": None,
++        "measurement": ("window", "source", "confidence_threshold"),
++        "outcome_signal": ("source", "window"),
++    },
++    "stability": {"probe": ("frozen_input_set", "frequency")},
++    "calibration": {"measurement": ("bins", "window")},
++    "audit_backlog": {},
++    "feedback_latency": {},
++}
++
++# The rates a segments threshold may compare (CORE §5.5.1). audit_sampling is
++# a judgment SLO type but not a segments metric: it measures sampling.
++SEGMENTS_METRICS: tuple[str, ...] = (
++    "reversal_rate",
++    "high_confidence_failure",
++    "outcomes",
++    "escalation",
++)
++
++# How to choose a segments metric, shared by the missing-metric error and the
++# pre-3c fix-it note so the two cannot drift.
++SEGMENTS_METRIC_HINT = (
++    f"one of {', '.join(SEGMENTS_METRICS)} (OPENSRM-CORE-v2 §5.5.1). "
++    "reversal_rate also needs `measurement.source`, high_confidence_failure "
++    "`measurement.confidence_threshold`, and outcomes an `outcome_signal`; "
++    "escalation takes none"
++)
++# measurement.source for metric reversal_rate, as on the reversal_rate SLO.
++SEGMENTS_SOURCES: tuple[str, ...] = ("lineage", "calibration_sample", "downstream_signal")
++# CORE §5.5.1: measurement.window is optional on segments; the parser stores
++# this default so every parsed segments threshold carries its window.
++SEGMENTS_DEFAULT_WINDOW = "30d"
++
+ _PROBE_FREQUENCIES = ("hourly", "daily", "weekly")
+ 
+ # Longest suffix first: "5ms" must not be read as "5m" + a stray "s".
+@@ -116,18 +164,23 @@ def duration_seconds(value: str) -> float:
+     raise AssertionError(f"unreachable: is_duration accepted {value!r}")  # pragma: no cover
+ 
+ 
+-def _ratio(name: str, value: object) -> float:
++def _ratio(name: str, value: object, what: str = "bound") -> float:
++    """Validate a schema Ratio (``type: number``, 0..1); return it as a float.
++
++    A string spelling a number is rejected, unlike target_validation's
++    require_number(): the schema's ``type: number`` rejects it too.
++    """
+     # bool first: it is an int subclass, and YAML 1.1 reads `yes` as True.
+     if isinstance(value, bool) or not isinstance(value, (int, float)):
+         raise ValueError(
+-            f"bound '{name}' must be a number, got {type(value).__name__}: {value!r}"
++            f"{what} '{name}' must be a number, got {type(value).__name__}: {value!r}"
+         )
+     # Only floats can be non-finite. math.isfinite on a huge YAML int raises
+     # OverflowError, which is not a parse error, so ints go straight to range.
+     if isinstance(value, float) and not math.isfinite(value):
+-        raise ValueError(f"bound '{name}' must be a finite number, got {value!r}")
++        raise ValueError(f"{what} '{name}' must be a finite number, got {value!r}")
+     if not 0.0 <= value <= 1.0:
+-        raise ValueError(f"bound '{name}' must be in [0, 1], got {value!r}")
++        raise ValueError(f"{what} '{name}' must be in [0, 1], got {value!r}")
+     return float(value)
+ 
+ 
+@@ -183,10 +236,134 @@ def normalise_bins(value: int | float) -> int:
+     return int(value)
+ 
+ 
++def _reject_undefined_keys(where: str, keys: Iterable[Any], allowed: tuple[str, ...]) -> None:
++    """Closure (CORE §5.5): raise naming every key of *keys* not in *allowed*.
++
++    Sorted by repr: YAML admits int and null keys beside strings.
++    """
++    unknown = sorted((k for k in keys if k not in allowed), key=repr)
++    if unknown:
++        raise ValueError(
++            f"{', '.join(repr(k) for k in unknown)} {'is' if len(unknown) == 1 else 'are'} "
++            f"not defined on {where} (OPENSRM-CORE-v2 §5.5: threshold entries are "
++            f"closed); its keys are {', '.join(allowed) or 'none'}"
++        )
++
++
++def _is_zero_duration(value: str) -> bool:
++    """Whether a valid Duration is zero: schema ``^0+(ms|s|m|h|d|w)$``."""
++    return set(value.rstrip("mshdw")) == {"0"}
++
++
++def _check_closed_objects(threshold_type: str, entry: dict[str, Any]) -> None:
++    """Every object-valued key present is a mapping holding only its keys.
++
++    calibration's measurement.method is reported first with its own message:
++    it is the one key a 3.x manifest is known to carry there.
++    """
++    for key, allowed in THRESHOLD_TYPE_FIELDS[threshold_type].items():
++        if allowed is None or key not in entry:
++            continue
++        value = entry[key]
++        if not isinstance(value, dict):
++            raise ValueError(f"'{key}' must be a mapping, got {type(value).__name__}: {value!r}")
++        if threshold_type == "calibration" and key == "measurement" and "method" in value:
++            raise ValueError(
++                "'measurement.method' is not part of a calibration threshold in "
++                "OpenSRM v2 (OPENSRM-CORE-v2 §5.5); the declared "
++                "bounds decide what is evaluated"
++            )
++        _reject_undefined_keys(f"a '{threshold_type}' threshold's '{key}'", value, allowed)
++
++
++# Each metric's parameter (CORE §5.5.1): required with that metric, rejected
++# with any other. (location, key) - location None is the entry itself.
++_SEGMENTS_METRIC_PARAMETER: dict[str, tuple[str | None, str]] = {
++    "reversal_rate": ("measurement", "source"),
++    "high_confidence_failure": ("measurement", "confidence_threshold"),
++    "outcomes": (None, "outcome_signal"),
++}
++
++
++def _check_segments(entry: dict[str, Any]) -> None:
++    """The segments-specific rules (CORE §5.5.1). Closure is already checked."""
++    # Emptiness is enforced by the required-field guard.
++    if not isinstance(entry["segment_dimension"], str):
++        raise ValueError("'segment_dimension' must be a non-empty string")
++    values = entry["segment_values"]
++    if not isinstance(values, list) or not all(isinstance(v, str) and v for v in values):
++        raise ValueError("'segment_values' must be a non-empty list of non-empty strings")
++
++    metric = entry["metric"]
++    if metric == "audit_sampling":
++        raise ValueError(
++            "'metric' cannot be 'audit_sampling': it measures how decisions are "
++            "sampled, not how they perform (OPENSRM-CORE-v2 §5.5.1); use one of "
++            f"{', '.join(SEGMENTS_METRICS)}"
++        )
++    if not isinstance(metric, str) or metric not in SEGMENTS_METRICS:
++        raise ValueError(
++            f"'metric' must be one of {', '.join(SEGMENTS_METRICS)} "
++            f"(OPENSRM-CORE-v2 §5.5.1), got {metric!r}"
++        )
++
++    measurement: dict[str, Any] = entry.get("measurement", {})
++    for owner, (location, key) in _SEGMENTS_METRIC_PARAMETER.items():
++        holder = entry if location is None else measurement
++        name = key if location is None else f"{location}.{key}"
++        if owner == metric and key not in holder:
++            raise ValueError(f"metric '{metric}' requires '{name}' (OPENSRM-CORE-v2 §5.5.1)")
++        if owner != metric and key in holder:
++            raise ValueError(
++                f"'{name}' parameterises metric '{owner}' only, not '{metric}' "
++                f"(OPENSRM-CORE-v2 §5.5.1)"
++            )
++
++    if "window" in measurement:
++        window = measurement["window"]
++        if not is_duration(window):
++            raise ValueError(
++                f"'measurement.window' must be a duration such as '30d', got {window!r}"
++            )
++        if _is_zero_duration(window):
++            raise ValueError(
++                f"'measurement.window' must be greater than zero: an empty population "
++                f"window could never be evaluated (OPENSRM-CORE-v2 §5.5.1), got {window!r}"
++            )
++    if "source" in measurement:
++        source = measurement["source"]
++        if not isinstance(source, str) or source not in SEGMENTS_SOURCES:
++            raise ValueError(
++                f"'measurement.source' must be one of {', '.join(SEGMENTS_SOURCES)}, "
++                f"got {source!r}"
++            )
++    if "confidence_threshold" in measurement:
++        _ratio("measurement.confidence_threshold", measurement["confidence_threshold"], "field")
++    if "outcome_signal" in entry:
++        signal = entry["outcome_signal"]
++        for key in ("source", "window"):
++            if key not in signal:
++                raise ValueError(f"'outcome_signal' requires '{key}' (OPENSRM-CORE-v2 §5.5.1)")
++        if not isinstance(signal["source"], str):
++            raise ValueError(
++                f"'outcome_signal.source' must be a string, got {signal['source']!r}"
++            )
++        # Unlike the population window, the outcome wait may be zero (as on
++        # the outcomes judgment SLO, whose Duration it shares).
++        if not is_duration(signal["window"]):
++            raise ValueError(
++                f"'outcome_signal.window' must be a duration such as '1h', got "
++                f"{signal['window']!r}"
++            )
++
++
+ def check_type_fields(threshold_type: str, entry: dict[str, Any]) -> None:
+-    """Enforce the non-``bounds`` fields schema.json requires per type.
++    """Enforce the non-``bounds`` fields schema.json defines per type.
+ 
+-    Order: forbidden keys, then required fields, then type-specific shape.
++    Order: forbidden keys, then entry closure, then required fields, then the
++    closure of each object-valued key, then type-specific shape. ``type`` and
++    ``bounds`` are admitted but not validated here: the parser checks
++    ``type`` and ``parse_bounds`` checks ``bounds``.
+     """
+     for key in FORBIDDEN_THRESHOLD_KEYS:
+         if key in entry:
+@@ -194,20 +371,25 @@ def check_type_fields(threshold_type: str, entry: dict[str, Any]) -> None:
+                 f"'{key}' is not allowed on a '{threshold_type}' threshold; "
+                 f"thresholds do not carry it (OPENSRM-CORE-v2 §5.5)"
+             )
++    fields = THRESHOLD_TYPE_FIELDS[threshold_type]
++    _reject_undefined_keys(
++        f"threshold type '{threshold_type}'", entry, ("type", "bounds", *fields)
++    )
+     for name in THRESHOLD_REQUIRED_FIELDS.get(threshold_type, ()):
+         if entry.get(name) in (None, "", [], {}):
++            if threshold_type == "segments" and name == "metric":
++                raise ValueError(
++                    "'segments' requires 'metric', the rate it compares: "
++                    + SEGMENTS_METRIC_HINT
++                )
+             raise ValueError(f"'{threshold_type}' requires '{name}'")
++    _check_closed_objects(threshold_type, entry)
+ 
+     if threshold_type == "segments":
+-        # Emptiness is enforced by the required-field guard above.
+-        if not isinstance(entry["segment_dimension"], str):
+-            raise ValueError("'segment_dimension' must be a non-empty string")
+-        values = entry["segment_values"]
+-        if not isinstance(values, list) or not all(isinstance(v, str) and v for v in values):
+-            raise ValueError("'segment_values' must be a non-empty list of non-empty strings")
++        _check_segments(entry)
+     elif threshold_type == "stability":
+         probe = entry["probe"]
+-        if not isinstance(probe, dict) or not isinstance(probe.get("frozen_input_set"), str):
++        if not isinstance(probe.get("frozen_input_set"), str):
+             raise ValueError("'probe' must be a mapping with a 'frozen_input_set' string")
+         if probe.get("frequency") not in _PROBE_FREQUENCIES:
+             raise ValueError(
+@@ -216,14 +398,6 @@ def check_type_fields(threshold_type: str, entry: dict[str, Any]) -> None:
+             )
+     elif threshold_type == "calibration":
+         measurement = entry["measurement"]
+-        if not isinstance(measurement, dict):
+-            raise ValueError("'measurement' must be a mapping")
+-        if "method" in measurement:
+-            raise ValueError(
+-                "'measurement.method' is not part of a calibration threshold in "
+-                "OpenSRM v2 (OPENSRM-CORE-v2 §5.5); the declared "
+-                "bounds decide what is evaluated"
+-            )
+         bins = measurement.get("bins")
+         # schema.json: bins is `type: integer`, which draft-07 satisfies with an
+         # integral float such as 10.0, so the parser accepts it too. This is a
+@@ -252,11 +426,67 @@ _SRM_V1_UNCARRIABLE_KEYS: dict[str, tuple[str, ...]] = {
+ }
+ 
+ 
++# The srm/v1 SLO keys the lift accepts (opensrm-1rnr). Of srm/v1's SLO key set
++# (target | minimum, window, type, unit, percentile, query, description,
++# labels), the others have no threshold meaning; they are rejected rather than
++# dropped. description and labels are accepted and dropped: nothing evaluated
++# depends on them.
++_SRM_V1_THRESHOLD_KEYS = ("target", "window", "unit", "description", "labels")
++
++# v2's feedback_latency window is fixed at 30d (CORE §5.5.5), so the only
++# srm/v1 window the lift can carry is that one.
++_FEEDBACK_LATENCY_WINDOW = "30d"
++
++
++_SRM_V1_MAX_WHOLE_TARGET = 2**53
++
++
++def _srm_v1_feedback_latency_bound(config: dict[str, Any]) -> str:
++    """The maximum_p50 Duration for an srm/v1 feedback_latency entry.
++
++    The target is a whole number of ``unit`` (default seconds); ``unit`` must
++    be a Duration unit, so the bound is the same quantity in v2's grammar.
++    """
++    unit = config.get("unit", "s")
++    if not isinstance(unit, str) or unit not in _DURATION_SECONDS:
++        raise ValueError(
++            f"srm/v1 'feedback_latency' unit must be one of "
++            f"{', '.join(_DURATION_UNITS)} (default s), got {unit!r}"
++        )
++    if "window" in config and config["window"] != _FEEDBACK_LATENCY_WINDOW:
++        raise ValueError(
++            f"srm/v1 'feedback_latency' window must be {_FEEDBACK_LATENCY_WINDOW} or "
++            f"absent: v2 measures feedback latency over a fixed "
++            f"{_FEEDBACK_LATENCY_WINDOW} window (OPENSRM-CORE-v2 §5.5.5), so the lift "
++            f"cannot carry {config['window']!r}"
++        )
++    target = config.get("target")
++    # An integral float (3600.0) is a whole number of units, as for bins.
++    whole = isinstance(target, int) or (isinstance(target, float) and target.is_integer())
++    if isinstance(target, bool) or not whole or target < 0:
++        units = "seconds" if unit == "s" else f"'{unit}'"
++        raise ValueError(
++            f"srm/v1 'feedback_latency' target must be a non-negative whole "
++            f"number of {units}, got {target!r}"
++        )
++    # Past 2**53 a float no longer holds every whole number, and 1e300 would
++    # emit a 300-digit bound: no latency anyone means. The cap applies to ints
++    # too, so the two spellings of one number get one verdict.
++    if target > _SRM_V1_MAX_WHOLE_TARGET:
++        raise ValueError(
++            f"srm/v1 'feedback_latency' target must be at most "
++            f"{_SRM_V1_MAX_WHOLE_TARGET} (2**53), got {target!r}"
++        )
++    return f"{int(target)}{unit}"
++
++
+ def srm_v1_threshold(name: str, config: dict[str, Any]) -> JudgmentThreshold:
+     """Lift an srm/v1 ``spec.slos.<name>`` entry into a JudgmentThreshold.
+ 
+     Shared by parser/v1.py and v1_compat.convert_v1_to_v2 so the two cannot
+-    map one srm/v1 entry to different thresholds. Raises ValueError.
++    map one srm/v1 entry to different thresholds. Accepts only the keys in
++    _SRM_V1_THRESHOLD_KEYS (calibration: not ``unit``); any other key is an
++    error, never dropped (opensrm-1rnr). Raises ValueError.
+     """
+     if name == "audit_backlog":
+         raise ValueError(
+@@ -283,10 +513,24 @@ def srm_v1_threshold(name: str, config: dict[str, Any]) -> JudgmentThreshold:
+         if lost:
+             raise ValueError(
+                 f"srm/v1 '{name}' cannot express {', '.join(map(str, lost))}: the "
+-                f"lift would drop it silently. Declare the threshold in an "
++                f"lift would drop {'them' if len(lost) > 1 else 'it'} silently. Declare the threshold in an "
+                 f"opensrm.nthlayer.io/v2 manifest under spec.judgment_threshold "
+                 f"(OPENSRM-CORE-v2 §5.5)."
+             )
++    # calibration's target is a ratio (ECE): a unit on it means nothing the
++    # lift could carry, so it is an error rather than dropped.
++    accepted = tuple(
++        k for k in _SRM_V1_THRESHOLD_KEYS if not (name == "calibration" and k == "unit")
++    )
++    unknown = sorted((k for k in config if k not in accepted), key=repr)
++    if unknown:
++        raise ValueError(
++            f"srm/v1 '{name}' does not take {', '.join(map(repr, unknown))}: the lift "
++            f"accepts only {', '.join(accepted)} and would otherwise drop "
++            f"{'them' if len(unknown) > 1 else 'it'} "
++            f"silently. Declare the threshold in an opensrm.nthlayer.io/v2 manifest "
++            f"under spec.judgment_threshold (OPENSRM-CORE-v2 §5.5)."
++        )
+     target = config.get("target")
+     if name == "calibration":
+         if target is None:
+@@ -301,14 +545,10 @@ def srm_v1_threshold(name: str, config: dict[str, Any]) -> JudgmentThreshold:
+             measurement=ThresholdMeasurement(window=window, bins=_SRM_V1_CALIBRATION_BINS),
+         )
+     if name == "feedback_latency":
+-        # An integral float (3600.0) is a whole number of seconds, as for bins.
+-        whole = isinstance(target, int) or (isinstance(target, float) and target.is_integer())
+-        if isinstance(target, bool) or not whole or target < 0:
+-            raise ValueError(
+-                f"srm/v1 'feedback_latency' target must be a non-negative whole "
+-                f"number of seconds, got {target!r}"
+-            )
+-        return JudgmentThreshold(type="feedback_latency", bounds={"maximum_p50": f"{int(target)}s"})
++        return JudgmentThreshold(
++            type="feedback_latency",
++            bounds={"maximum_p50": _srm_v1_feedback_latency_bound(config)},
++        )
+     raise ValueError(f"'{name}' is not an srm/v1 judgment threshold")
+ 
+ 
+@@ -317,6 +557,11 @@ def threshold_to_v2_entry(threshold: JudgmentThreshold) -> dict[str, Any]:
+ 
+     Inverse of parser/v2.py::_parse_judgment_threshold for every type, so that
+     convert_v1_to_v2's output re-parses to an equal JudgmentThreshold.
++
++    The built entry is checked with the parser's own rules before it is
++    returned: a hand-built threshold the parser could never produce (segments
++    with no metric or window, an outcome_signal on escalation, calibration
++    without bins) raises ValueError instead of emitting a schema-invalid entry.
+     """
+     entry: dict[str, Any] = {"type": threshold.type, "bounds": dict(threshold.bounds)}
+     m = threshold.measurement
+@@ -325,6 +570,21 @@ def threshold_to_v2_entry(threshold: JudgmentThreshold) -> dict[str, Any]:
+     elif threshold.type == "stability" and m.probe is not None:
+         entry["probe"] = {"frozen_input_set": m.probe.frozen_input_set, "frequency": m.probe.frequency}
+     elif threshold.type == "segments":
++        entry["metric"] = m.metric
++        # window always: the parser stores the 30d default when it is absent.
++        measurement: dict[str, Any] = {"window": m.window}
++        if m.source is not None:
++            measurement["source"] = m.source
++        if m.confidence_threshold is not None:
++            measurement["confidence_threshold"] = m.confidence_threshold
++        entry["measurement"] = measurement
++        if m.outcome_signal is not None:
++            entry["outcome_signal"] = {
++                "source": m.outcome_signal.source,
++                "window": m.outcome_signal.window,
++            }
+         entry["segment_dimension"] = m.segment_dimension
+         entry["segment_values"] = list(m.segment_values)
++    check_type_fields(threshold.type, entry)
++    parse_bounds(threshold.type, entry["bounds"])
+     return entry
+diff --git a/tests/test_judgment_thresholds_against_spec.py b/tests/test_judgment_thresholds_against_spec.py
+index c21f214..942d046 100644
+--- a/tests/test_judgment_thresholds_against_spec.py
++++ b/tests/test_judgment_thresholds_against_spec.py
+@@ -26,13 +26,21 @@ from nthlayer_common.manifest import (
+     V2_JUDGMENT_SLO_TYPES,
+     V2_JUDGMENT_THRESHOLD_TYPES,
+ )
+-from nthlayer_common.manifest.parser.v2 import parse_opensrm_v2, parse_opensrm_v2_file
++from nthlayer_common.manifest.parser.v2 import (
++    OpenSRMV2ParseError,
++    parse_opensrm_v2,
++    parse_opensrm_v2_file,
++)
+ from nthlayer_common.manifest.thresholds import (
+     DURATION,
+     FORBIDDEN_THRESHOLD_KEYS,
+     RATIO,
++    SEGMENTS_DEFAULT_WINDOW,
++    SEGMENTS_METRICS,
++    SEGMENTS_SOURCES,
+     THRESHOLD_BOUNDS,
+     THRESHOLD_REQUIRED_FIELDS,
++    THRESHOLD_TYPE_FIELDS,
+     check_type_fields,
+ )
+ 
+@@ -40,6 +48,7 @@ from nthlayer_common.manifest.thresholds import (
+ SPEC_V2_DIR = Path(__file__).resolve().parents[2] / "opensrm" / "spec" / "v2"
+ SCHEMA_PATH = SPEC_V2_DIR / "schema.json"
+ THRESHOLD_EXAMPLES_DIR = SPEC_V2_DIR / "examples" / "judgment-thresholds"
++INVALID_DIR = SPEC_V2_DIR / "tests" / "invalid"
+ 
+ 
+ def _schema() -> dict[str, Any]:
+@@ -115,6 +124,111 @@ def test_required_type_fields_match_the_schema():
+     assert derived == THRESHOLD_REQUIRED_FIELDS
+ 
+ 
++def test_every_threshold_entry_is_closed_in_the_schema():
++    """CORE §5.5 (opensrm-7zpz): the entry, and every object it holds besides
++    bounds, rejects keys its type does not define."""
++    for t, then in _branches().items():
++        assert then.get("additionalProperties") is False, t
++        for key, prop in then["properties"].items():
++            if key != "bounds" and prop.get("type") == "object":
++                assert prop.get("additionalProperties") is False, (t, key)
++
++
++def _defined(props: dict[str, Any]) -> set[str]:
++    """Keys an object defines: its properties, less the ones no value
++    satisfies (calibration's measurement.method)."""
++    return {name for name, prop in props.items() if not _is_forbidden(prop)}
++
++
++def test_type_field_table_matches_the_schema_both_ways():
++    """THRESHOLD_TYPE_FIELDS is the one table closure is enforced from: per
++    type, the entry keys besides type/bounds, and for each object-valued key
++    the keys that object may hold (None for a non-object key)."""
++    derived: dict[str, dict[str, frozenset[str] | None]] = {}
++    for t, then in _branches().items():
++        props = then["properties"]
++        assert "type" in props and "bounds" in props, t
++        derived[t] = {
++            key: frozenset(_defined(prop["properties"])) if prop.get("type") == "object" else None
++            for key, prop in props.items()
++            if key not in ("type", "bounds")
++        }
++    table = {
++        t: {k: (frozenset(v) if v is not None else None) for k, v in fields.items()}
++        for t, fields in THRESHOLD_TYPE_FIELDS.items()
++    }
++    assert derived == table
++
++
++def test_segments_metric_and_source_vocabularies_match_the_schema():
++    props = _branches()["segments"]["properties"]
++    assert set(props["metric"]["enum"]) == set(SEGMENTS_METRICS)
++    assert len(props["metric"]["enum"]) == len(SEGMENTS_METRICS)
++    assert "audit_sampling" not in SEGMENTS_METRICS
++    assert set(props["measurement"]["properties"]["source"]["enum"]) == set(SEGMENTS_SOURCES)
++
++
++def test_segments_metric_parameters_match_the_schema_conditionals():
++    """The schema's allOf ties each parameter to one metric: required with it,
++    forbidden with any other. The parser enforces the same pairing."""
++    rules = _branches()["segments"]["allOf"]
++    pairing = {}
++    for rule in rules:
++        metric = rule["if"]["properties"]["metric"]["const"]
++        then = rule["then"]
++        if "outcome_signal" in then.get("required", []):
++            pairing[metric] = "outcome_signal"
++        else:
++            [param] = then["properties"]["measurement"]["required"]
++            assert then["required"] == ["measurement"]
++            pairing[metric] = f"measurement.{param}"
++    assert pairing == {
++        "reversal_rate": "measurement.source",
++        "high_confidence_failure": "measurement.confidence_threshold",
++        "outcomes": "outcome_signal",
++    }
++
++
++def _7zpz_negatives() -> list[Path]:
++    """opensrm-7zpz's negatives, n67-n92, one defect each. Read at import:
++    a missing spec is caught by test_the_7zpz_negatives_are_present rather
++    than collapsing the parametrize list into a silent skip."""
++    found = []
++    for path in sorted(INVALID_DIR.glob("n*.yaml")):
++        number = path.name[1:].split("-", 1)[0]
++        if number.isdigit() and 67 <= int(number) <= 92:
++            found.append(path)
++    return found
++
++
++_NEGATIVES = _7zpz_negatives()
++
++
++def test_the_7zpz_negatives_are_present():
++    assert len(_NEGATIVES) >= 26, f"expected n67-n92 in {INVALID_DIR}, found {len(_NEGATIVES)}"
++
++
++@pytest.mark.parametrize("fixture", _NEGATIVES, ids=lambda p: p.name)
++def test_7zpz_negatives_are_rejected_by_the_schema_and_the_parser(fixture: Path):
++    """Both halves of the seam reject the same bytes, and the parser rejects
++    them for the threshold: the same document without its judgment_threshold
++    block parses (the control), so the rejection is not some other field's.
++
++    metadata.labels.tier is added because the parser requires it and the
++    schema does not (opensrm-9bil); that is unrelated to the defect under test.
++    """
++    doc = yaml.safe_load(fixture.read_text(encoding="utf-8"))
++    with pytest.raises(jsonschema.ValidationError):
++        jsonschema.validate(doc, _schema())
++
++    doc["metadata"].setdefault("labels", {})["tier"] = "critical"
++    with pytest.raises(OpenSRMV2ParseError, match=r"judgment_threshold\[0\]"):
++        parse_opensrm_v2(doc, base_dir=fixture.parent)
++
++    control = {**doc, "spec": {k: v for k, v in doc["spec"].items() if k != "judgment_threshold"}}
++    parse_opensrm_v2(control, base_dir=fixture.parent)
++
++
+ @pytest.mark.parametrize(
+     "example",
+     sorted(THRESHOLD_EXAMPLES_DIR.glob("*.yaml")),
+@@ -237,3 +351,28 @@ def test_threshold_examples_parse_to_the_declared_bounds(example: Path, tmp_path
+         elif entry["type"] == "segments":
+             assert m.segment_dimension == entry["segment_dimension"]
+             assert m.segment_values == entry["segment_values"]
++            # CORE §5.5.1: the metric and its parameter, and the population
++            # window with its 30d default.
++            declared_m = entry.get("measurement", {})
++            assert m.metric == entry["metric"]
++            assert m.window == declared_m.get("window", SEGMENTS_DEFAULT_WINDOW)
++            assert m.source == declared_m.get("source")
++            assert m.confidence_threshold == declared_m.get("confidence_threshold")
++            signal = entry.get("outcome_signal")
++            if signal is None:
++                assert m.outcome_signal is None
++            else:
++                assert m.outcome_signal is not None
++                assert (m.outcome_signal.source, m.outcome_signal.window) == (
++                    signal["source"], signal["window"],
++                )
++        # Every field the type does not set stays at its default.
++        unset = {
++            "stability": ("bins", "window", "segment_dimension", "metric", "source",
++                          "confidence_threshold", "outcome_signal"),
++            "calibration": ("probe", "segment_dimension", "metric", "source",
++                            "confidence_threshold", "outcome_signal"),
++            "segments": ("bins", "probe"),
++        }.get(entry["type"], ())
++        for name in unset:
++            assert getattr(m, name) is None, (entry["type"], name)
+diff --git a/tests/test_manifest_models.py b/tests/test_manifest_models.py
+index f32294d..d0e4123 100644
+--- a/tests/test_manifest_models.py
++++ b/tests/test_manifest_models.py
+@@ -13,6 +13,7 @@ from nthlayer_common.manifest.models import (
+     JudgmentMeasurement,
+     JudgmentPromise,
+     JudgmentThreshold,
++    OutcomeSignal,
+     Ownership,
+     ReliabilityContract,
+     ReliabilityManifest,
+@@ -277,9 +278,9 @@ def test_threshold_defaults_to_an_empty_measurement():
+     assert type(threshold.measurement) is ThresholdMeasurement
+ 
+ 
+-@pytest.mark.parametrize(
+-    "slo_only_field", ["method", "frequency", "source", "sampling", "confidence_threshold"]
+-)
++# source and confidence_threshold left this list in 5.0.0 (opensrm-7zpz): a
++# segments threshold's metric takes them as parameters (CORE §5.5.1).
++@pytest.mark.parametrize("slo_only_field", ["method", "frequency", "sampling"])
+ def test_threshold_measurement_has_no_slo_only_fields(slo_only_field):
+     """The trap ThresholdMeasurement exists to remove: on JudgmentMeasurement
+     these were always None for a threshold, so an evaluator reading
+@@ -303,3 +304,25 @@ def test_threshold_measurement_defaults_are_not_shared():
+     a.measurement.segment_values.append("x")
+     assert b.measurement.segment_values == []
+     assert a.measurement is not b.measurement
++
++
++def test_segments_metric_parameters_default_to_none():
++    """CORE §5.5.1: metric and its parameters exist only on segments; every
++    other type leaves them unset."""
++    m = ThresholdMeasurement()
++    assert (m.metric, m.source, m.confidence_threshold, m.outcome_signal) == (None, None, None, None)
++
++
++def test_outcome_signal_is_frozen_and_compares_by_value():
++    a = OutcomeSignal(source="retro-consumer", window="1h")
++    assert a == OutcomeSignal(source="retro-consumer", window="1h")
++    assert (a.source, a.window) == ("retro-consumer", "1h")
++    with pytest.raises(AttributeError):
++        a.window = "2h"  # type: ignore[misc]
++
++
++def test_outcome_signal_is_exported_from_the_package():
++    from nthlayer_common import manifest
++
++    assert manifest.OutcomeSignal is OutcomeSignal
++    assert "OutcomeSignal" in manifest.__all__
+diff --git a/tests/test_manifest_parser_thresholds.py b/tests/test_manifest_parser_thresholds.py
+index 88f1a31..c20832b 100644
+--- a/tests/test_manifest_parser_thresholds.py
++++ b/tests/test_manifest_parser_thresholds.py
+@@ -15,7 +15,7 @@ import jsonschema
+ import pytest
+ import yaml
+ 
+-from nthlayer_common.manifest.models import ThresholdMeasurement
++from nthlayer_common.manifest.models import OutcomeSignal, ThresholdMeasurement
+ from nthlayer_common.manifest.parser.v2 import (
+     OpenSRMV2ParseError,
+     parse_opensrm_v2,
+@@ -111,6 +111,7 @@ def test_scalar_judgment_slo_metadata_is_a_parse_error_not_an_attribute_error():
+ def test_segment_fields_are_carried():
+     entry = {
+         "type": "segments",
++        "metric": "escalation",
+         "segment_dimension": "customer_tier",
+         "segment_values": ["enterprise", "smb"],
+         "bounds": {"maximum_variance_from_overall": 0.05},
+@@ -118,6 +119,55 @@ def test_segment_fields_are_carried():
+     [threshold] = parse_opensrm_v2(_manifest(judgment_threshold=[entry])).judgment_thresholds
+     assert threshold.measurement.segment_dimension == "customer_tier"
+     assert threshold.measurement.segment_values == ["enterprise", "smb"]
++    assert threshold.measurement.metric == "escalation"
++    # CORE §5.5.1: measurement.window defaults to 30d, stored as such.
++    assert threshold.measurement.window == "30d"
++    assert threshold.measurement.source is None
++    assert threshold.measurement.confidence_threshold is None
++    assert threshold.measurement.outcome_signal is None
++
++
++@pytest.mark.parametrize(
++    ("extra", "expected"),
++    [
++        ({"metric": "reversal_rate", "measurement": {"source": "downstream_signal", "window": "14d"}},
++         {"metric": "reversal_rate", "source": "downstream_signal", "window": "14d"}),
++        ({"metric": "high_confidence_failure", "measurement": {"confidence_threshold": 0.8}},
++         {"metric": "high_confidence_failure", "confidence_threshold": 0.8, "window": "30d"}),
++        ({"metric": "outcomes", "outcome_signal": {"source": "retro", "window": "2h"},
++          "measurement": {"window": "60d"}},
++         {"metric": "outcomes", "outcome_signal": OutcomeSignal(source="retro", window="2h"),
++          "window": "60d"}),
++    ],
++    ids=["reversal_rate", "high_confidence_failure", "outcomes"],
++)
++def test_segments_metric_parameters_are_carried(extra, expected):
++    """Non-default values throughout (14d/60d windows, a 0.8 threshold, a
++    downstream_signal source), so a hardcoded default cannot pass."""
++    entry = {
++        "type": "segments",
++        "segment_dimension": "tier",
++        "segment_values": ["a"],
++        "bounds": {"maximum_variance_from_overall": 0.05},
++        **extra,
++    }
++    [threshold] = parse_opensrm_v2(_manifest(judgment_threshold=[entry])).judgment_thresholds
++    defaults = {"source": None, "confidence_threshold": None, "outcome_signal": None}
++    m = threshold.measurement
++    for name, value in {**defaults, **expected}.items():
++        assert getattr(m, name) == value, name
++
++
++def test_segments_confidence_threshold_is_carried_as_a_float():
++    entry = {
++        "type": "segments", "metric": "high_confidence_failure",
++        "measurement": {"confidence_threshold": 1},
++        "segment_dimension": "tier", "segment_values": ["a"],
++        "bounds": {"maximum_variance_from_overall": 0.05},
++    }
++    [threshold] = parse_opensrm_v2(_manifest(judgment_threshold=[entry])).judgment_thresholds
++    assert threshold.measurement.confidence_threshold == 1.0
++    assert isinstance(threshold.measurement.confidence_threshold, float)
+ 
+ 
+ def test_integral_float_bins_become_an_int():
+@@ -191,7 +241,7 @@ def test_an_slo_type_points_back_to_judgment_slo():
+         ({"type": "calibration",
+           "measurement": {"bins": 10, "window": "30d", "method": "brier_score"},
+           "bounds": {"maximum_brier_score": 0.05}}, "method"),                     # n28
+-        ({"type": "segments", "segment_values": ["a"],
++        ({"type": "segments", "metric": "escalation", "segment_values": ["a"],
+           "bounds": {"maximum_variance_from_overall": 0.05}}, "segment_dimension"),  # n30
+         ({"type": "calibration", "measurement": {"bins": 1, "window": "30d"},
+           "bounds": {"maximum_brier_score": 0.05}}, "bins"),                       # n12
+@@ -215,54 +265,54 @@ def test_mixed_type_bound_keys_raise_the_parser_error(bounds):
+         parse_opensrm_v2(_manifest(judgment_threshold=[entry]))
+ 
+ 
+-# JudgmentThresholdSpec is open: `measurement`, `probe`, `sampling` and the
+-# segment_* keys are constrained only inside the allOf branch of the type that
+-# uses them, so on any other type the schema accepts every value for them.
+-_STRAY_KEYS = ("measurement", "probe", "sampling", "segment_values")
++# CORE §5.5 (opensrm-7zpz): each entry is closed. Keys that belong to another
++# type, or to no type, are errors on every type that does not define them,
++# whatever their value. Until 5.0.0 these were ignored.
++_STRAY_KEYS = ("measurement", "probe", "sampling", "segment_values", "metric", "window",
++               "outcome_signal")
+ _STRAY_VALUES = (None, "x", [1])
+ 
+ 
+-def _assert_empty_measurement(threshold: Any) -> None:
+-    m = threshold.measurement
+-    assert type(m) is ThresholdMeasurement
+-    assert (m.bins, m.window, m.probe, m.segment_dimension) == (None, None, None, None)
+-    assert m.segment_values == []
+-    assert m == ThresholdMeasurement()
+-
+-
+ @pytest.mark.parametrize("value", _STRAY_VALUES, ids=repr)
+ @pytest.mark.parametrize("key", _STRAY_KEYS)
+-def test_keys_irrelevant_to_the_type_are_ignored(key, value):
++def test_keys_irrelevant_to_the_type_are_rejected(key, value):
+     entry = {**AUDIT_BACKLOG, key: value}
+-    [threshold] = parse_opensrm_v2(_manifest(judgment_threshold=[entry])).judgment_thresholds
+-    _assert_empty_measurement(threshold)
++    with pytest.raises(OpenSRMV2ParseError, match=rf"judgment_threshold\[0\].*'{key}'"):
++        parse_opensrm_v2(_manifest(judgment_threshold=[entry]))
+ 
+ 
+-def test_keys_irrelevant_to_feedback_latency_are_ignored():
+-    entry = {**FEEDBACK_LATENCY, "probe": "x", "measurement": [1], "segment_values": "abc"}
+-    [threshold] = parse_opensrm_v2(_manifest(judgment_threshold=[entry])).judgment_thresholds
+-    _assert_empty_measurement(threshold)
++@pytest.mark.parametrize("key", ["probe", "measurement", "segment_values", "window"])
++def test_keys_irrelevant_to_feedback_latency_are_rejected(key):
++    entry = {**FEEDBACK_LATENCY, key: "x"}
++    with pytest.raises(OpenSRMV2ParseError, match=rf"'{key}'"):
++        parse_opensrm_v2(_manifest(judgment_threshold=[entry]))
+ 
+ 
+-def test_the_schema_accepts_stray_keys_on_a_type_that_does_not_use_them():
+-    """Pins the premise of the two tests above: if the schema ever closes
+-    JudgmentThresholdSpec, the parser must start rejecting these too."""
+-    entry = {**AUDIT_BACKLOG, "measurement": "x", "probe": [1], "sampling": None,
+-             "segment_values": "abc"}
++def test_the_schema_rejects_stray_keys_on_a_type_that_does_not_use_them():
++    """Pins the premise of the tests above against the live schema: it closed
++    JudgmentThresholdSpec in opensrm-7zpz, so the parser rejects these too."""
++    entry = {**AUDIT_BACKLOG, "measurement": "x"}
+     schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
+-    jsonschema.validate(_manifest(judgment_threshold=[entry]), schema)
+-    parse_opensrm_v2(_manifest(judgment_threshold=[entry]))
++    with pytest.raises(jsonschema.ValidationError):
++        jsonschema.validate(_manifest(judgment_threshold=[entry]), schema)
++    with pytest.raises(OpenSRMV2ParseError, match="'measurement'"):
++        parse_opensrm_v2(_manifest(judgment_threshold=[entry]))
+ 
+ 
+-def test_stability_carries_only_its_probe():
+-    entry = {**STABILITY, "measurement": "x", "sampling": "x", "segment_values": "abc"}
+-    [threshold] = parse_opensrm_v2(_manifest(judgment_threshold=[entry])).judgment_thresholds
++@pytest.mark.parametrize("key", ["measurement", "sampling", "segment_values"])
++def test_stability_rejects_keys_beside_its_probe(key):
++    entry = {**STABILITY, key: "x"}
++    with pytest.raises(OpenSRMV2ParseError, match=rf"'{key}'"):
++        parse_opensrm_v2(_manifest(judgment_threshold=[entry]))
++
++
++def test_stability_measurement_has_no_slo_only_fields():
++    [threshold] = parse_opensrm_v2(_manifest(judgment_threshold=[STABILITY])).judgment_thresholds
+     m = threshold.measurement
+     assert type(m) is ThresholdMeasurement
+     assert m.probe is not None
+-    # A stray `sampling` has nowhere to land: the type has no such field.
+     assert not hasattr(m, "sampling")
+-    assert (m.bins, m.window, m.segment_dimension) == (None, None, None)
++    assert (m.bins, m.window, m.segment_dimension, m.metric) == (None, None, None, None)
+     assert m.segment_values == []
+ 
+ 
+@@ -288,7 +338,7 @@ def test_forbidden_keys_surface_as_the_parser_error(key):
+ )
+ def test_segment_strings_must_be_non_empty(entry):
+     # schema.json segments branch: minLength 1 on both.
+-    full = {"type": "segments", **entry, "bounds": {"maximum_variance_from_overall": 0.05}}
++    full = {"type": "segments", "metric": "escalation", **entry, "bounds": {"maximum_variance_from_overall": 0.05}}
+     with pytest.raises(OpenSRMV2ParseError, match="segment_"):
+         parse_opensrm_v2(_manifest(judgment_threshold=[full]))
+ 
+@@ -355,6 +405,79 @@ def test_override_append_lands_after_the_concatenation(tmp_path):
+     assert _types(path) == ["stability", "audit_backlog", "feedback_latency"]
+ 
+ 
++_TEMPLATE_REF = "template:default/base"
++
++
++@pytest.mark.parametrize(
++    ("via", "location"),
++    [
++        ("template", rf"^template '{_TEMPLATE_REF}' judgment_threshold\[1\] "),
++        ("manifest", r"^spec\.judgment_threshold\[0\] "),
++        ("override", r"^spec\.template\.overrides\.judgment_threshold\.append\[0\] "),
++    ],
++)
++def test_closure_applies_to_every_source_of_an_entry(tmp_path, via, location):
++    """The schema checks closure only on judgment_threshold itself, not on
++    template.overrides (AUTHORING §9, opensrm-0myj); the parser checks every
++    source, so an appended entry is closed too. The error locates the entry
++    in the document that declares it, not in the merged list."""
++    stray = {**AUDIT_BACKLOG, "window": "7d"}
++    kwargs: dict[str, Any] = {}
++    template_spec: dict[str, Any] = {"judgment_threshold": [STABILITY]}
++    if via == "template":
++        template_spec = {"judgment_threshold": [STABILITY, stray]}
++    elif via == "manifest":
++        kwargs["judgment_threshold"] = [stray]
++    else:
++        kwargs["overrides"] = {"judgment_threshold": {"append": [stray]}}
++    path = _write_pair(tmp_path, template_spec, **kwargs)
++    with pytest.raises(OpenSRMV2ParseError, match=location + r".*'window'"):
++        parse_opensrm_v2_file(path)
++
++
++def test_a_template_entry_error_names_the_template_not_the_manifest_entry(tmp_path):
++    """The merged list puts template entries first, so merged index 0 is the
++    template's. Reported as spec.judgment_threshold[0] it named the
++    manifest's own, valid, entry and never mentioned the template."""
++    metricless = {
++        "type": "segments", "segment_dimension": "tier", "segment_values": ["a"],
++        "bounds": {"maximum_variance_from_overall": 0.05},
++    }
++    path = _write_pair(
++        tmp_path, {"judgment_threshold": [metricless]}, judgment_threshold=[FEEDBACK_LATENCY]
++    )
++    with pytest.raises(OpenSRMV2ParseError) as exc_info:
++        parse_opensrm_v2_file(path)
++    location = str(exc_info.value).split(" (", 1)[0]
++    assert location == f"template '{_TEMPLATE_REF}' judgment_threshold[0]"
++
++
++def test_manifest_entries_are_indexed_within_the_manifest(tmp_path):
++    path = _write_pair(
++        tmp_path,
++        {"judgment_threshold": [STABILITY, AUDIT_BACKLOG]},
++        judgment_threshold=[FEEDBACK_LATENCY, {**AUDIT_BACKLOG, "probe": {}}],
++    )
++    with pytest.raises(OpenSRMV2ParseError) as exc_info:
++        parse_opensrm_v2_file(path)
++    assert str(exc_info.value).split(" (", 1)[0] == "spec.judgment_threshold[1]"
++
++
++@pytest.mark.parametrize("via", ["template", "override"])
++def test_a_non_mapping_entry_is_located_in_its_source(tmp_path, via):
++    kwargs: dict[str, Any] = {}
++    template_spec: dict[str, Any] = {"judgment_threshold": [STABILITY]}
++    if via == "template":
++        template_spec = {"judgment_threshold": [STABILITY, "x"]}
++        expected = rf"^template '{_TEMPLATE_REF}' judgment_threshold\[1\] must be a mapping"
++    else:
++        kwargs["overrides"] = {"judgment_threshold": {"append": ["x"]}}
++        expected = r"^spec\.template\.overrides\.judgment_threshold\.append\[0\] must be a mapping"
++    path = _write_pair(tmp_path, template_spec, **kwargs)
++    with pytest.raises(OpenSRMV2ParseError, match=expected):
++        parse_opensrm_v2_file(path)
++
++
+ def test_override_replace_is_rejected(tmp_path):
+     """CORE §5.5: overrides MUST NOT remove or replace a template's entries."""
+     path = _write_pair(
+diff --git a/tests/test_srm_v1_thresholds.py b/tests/test_srm_v1_thresholds.py
+index fb5fa34..f8d455e 100644
+--- a/tests/test_srm_v1_thresholds.py
++++ b/tests/test_srm_v1_thresholds.py
+@@ -104,11 +104,89 @@ def test_bound_like_keys_srm_v1_cannot_carry_are_rejected_not_dropped(name, conf
+     assert "judgment_threshold" in str(exc_info.value)
+ 
+ 
+-def test_keys_the_lift_ignores_harmlessly_stay_accepted():
++# srm/v1's SLO key set, from what the srm/v1 parsers read
++# (nthlayer-generate specs/opensrm_parser.py; parser/v1.py::_parse_slos):
++# target | minimum, window, type, unit, percentile, query, description, labels.
++# The lift accepts exactly target, window, unit, description and labels
++# (opensrm-1rnr); the rest have no threshold meaning and are rejected rather
++# than dropped.
++
++
++def test_description_and_labels_are_accepted_and_dropped():
++    """Prose and labels: a threshold has no home for them, and losing them
++    changes nothing that is evaluated."""
+     manifest = parse_srm_v1(_srm_v1({
+         "feedback_latency": {"target": 60, "window": "30d", "description": "d", "labels": {"a": "b"}},
++        "calibration": {"target": 0.05, "description": "d", "labels": {"a": "b"}},
+     }))
+-    assert manifest.judgment_thresholds[0].bounds == {"maximum_p50": "60s"}
++    by_type = {t.type: t for t in manifest.judgment_thresholds}
++    assert by_type["feedback_latency"].bounds == {"maximum_p50": "60s"}
++    assert by_type["calibration"].bounds == {"maximum_expected_calibration_error": 0.05}
++
++
++@pytest.mark.parametrize("name", ["feedback_latency", "calibration"])
++@pytest.mark.parametrize(
++    ("key", "value"),
++    [
++        ("minimum", 1),
++        ("type", "latency"),
++        ("percentile", "p50"),
++        ("query", "rate(x[5m])"),
++        ("indicator", {"type": "ratio"}),
++    ],
++)
++def test_srm_v1_keys_with_no_threshold_meaning_are_rejected_not_dropped(name, key, value):
++    target = 3600 if name == "feedback_latency" else 0.05
++    with pytest.raises(OpenSRMParseError, match=key):
++        parse_srm_v1(_srm_v1({name: {"target": target, key: value}}))
++
++
++@pytest.mark.parametrize(
++    ("unit", "bound"),
++    [(None, "90s"), ("s", "90s"), ("ms", "90ms"), ("m", "90m"), ("h", "90h"), ("d", "90d"), ("w", "90w")],
++)
++def test_feedback_latency_honours_unit(unit, bound):
++    """The target is a count of `unit` (default seconds); the bound keeps it,
++    in the Duration grammar the v2 bound uses."""
++    config: dict[str, Any] = {"target": 90}
++    if unit is not None:
++        config["unit"] = unit
++    [threshold] = parse_srm_v1(_srm_v1({"feedback_latency": config})).judgment_thresholds
++    assert threshold.bounds == {"maximum_p50": bound}
++
++
++@pytest.mark.parametrize("unit", ["hours", "sec", "H", "", 5, None], ids=repr)
++def test_feedback_latency_rejects_a_unit_outside_the_duration_table(unit):
++    with pytest.raises(OpenSRMParseError, match="unit"):
++        parse_srm_v1(_srm_v1({"feedback_latency": {"target": 90, "unit": unit}}))
++
++
++@pytest.mark.parametrize("window", ["7d", "1w", "720h", 30, "30 days"], ids=repr)
++def test_feedback_latency_window_other_than_30d_is_rejected(window):
++    """v2's feedback_latency window is fixed at 30d (CORE §5.5.5); a different
++    srm/v1 window has nowhere to go, so it is an error, not dropped."""
++    with pytest.raises(OpenSRMParseError, match="window"):
++        parse_srm_v1(_srm_v1({"feedback_latency": {"target": 90, "window": window}}))
++
++
++@pytest.mark.parametrize("config", [{"target": 90}, {"target": 90, "window": "30d"}])
++def test_feedback_latency_window_absent_or_30d_is_accepted(config):
++    [threshold] = parse_srm_v1(_srm_v1({"feedback_latency": config})).judgment_thresholds
++    assert threshold.bounds == {"maximum_p50": "90s"}
++
++
++def test_calibration_rejects_unit():
++    """The calibration target is a ratio (ECE); a unit on it is a mistake the
++    lift would otherwise drop silently."""
++    with pytest.raises(OpenSRMParseError, match="unit"):
++        parse_srm_v1(_srm_v1({"calibration": {"target": 0.05, "unit": "ratio"}}))
++
++
++def test_unknown_keys_are_reported_through_convert_v1_to_v2_too():
++    from nthlayer_common.manifest.v1_compat import convert_v1_to_v2
++
++    with pytest.raises(ValueError, match="query"):
++        convert_v1_to_v2(_srm_v1({"feedback_latency": {"target": 90, "query": "x"}}))
+ 
+ 
+ def test_calibration_window_defaults_to_30d_when_absent():
+@@ -121,3 +199,17 @@ def test_calibration_window_defaults_to_30d_when_absent():
+ def test_calibration_rejects_a_non_duration_window(window):
+     with pytest.raises(OpenSRMParseError, match="window"):
+         parse_srm_v1(_srm_v1({"calibration": {"target": 0.05, "window": window}}))
++
++
++@pytest.mark.parametrize("target", [2**53 + 1, float(2**54), 1e300], ids=repr)
++def test_feedback_latency_target_beyond_two_to_the_53_is_rejected(target):
++    """Past 2**53 a float no longer holds every whole number, and 1e300 would
++    emit a 300-digit bound; neither is a latency anyone means."""
++    with pytest.raises(OpenSRMParseError, match="target"):
++        parse_srm_v1(_srm_v1({"feedback_latency": {"target": target}}))
++
++
++@pytest.mark.parametrize("target", [2**53, float(2**53)], ids=repr)
++def test_feedback_latency_target_up_to_two_to_the_53_is_accepted(target):
++    [threshold] = parse_srm_v1(_srm_v1({"feedback_latency": {"target": target}})).judgment_thresholds
++    assert threshold.bounds == {"maximum_p50": f"{2**53}s"}
+diff --git a/tests/test_threshold_migration_errors.py b/tests/test_threshold_migration_errors.py
+index a2854d1..857a8f1 100644
+--- a/tests/test_threshold_migration_errors.py
++++ b/tests/test_threshold_migration_errors.py
+@@ -118,7 +118,6 @@ def _suggested_entry(message: str) -> dict[str, Any]:
+ @pytest.mark.parametrize(
+     "fixture",
+     [
+-        "n20-segments-as-judgment-slo.yaml",
+         "n21-stability-as-judgment-slo.yaml",
+         "n22-calibration-as-judgment-slo.yaml",
+     ],
+@@ -138,6 +137,60 @@ def test_suggested_threshold_entry_loads_unchanged(fixture, shape):
+     assert manifest.judgment_thresholds[0].bounds == doc["spec"]["target"]
+ 
+ 
++@pytest.mark.parametrize("shape", ["wrapped", "flat"])
++def test_suggested_segments_entry_asks_for_a_metric_and_loads_once_chosen(shape):
++    """A pre-3c segments item names no rate, and the fix-it cannot guess one
++    (CORE §5.5.1, opensrm-7zpz): the suggestion carries a `metric` the author
++    must replace. Filled in with escalation (which takes no parameter), it
++    loads; left as suggested, it does not."""
++    doc = yaml.safe_load(
++        (INVALID_DIR / "n20-segments-as-judgment-slo.yaml").read_text(encoding="utf-8")
++    )
++    item = {"metadata": doc["metadata"], "spec": doc["spec"]} if shape == "wrapped" else doc["spec"]
++    with pytest.raises(OpenSRMV2ParseError) as exc_info:
++        parse_opensrm_v2(_manifest(judgment_slo=[item]))
++
++    entry = _suggested_entry(str(exc_info.value))
++    assert "metric" in entry
++    assert "metric" in str(exc_info.value).split(":\n\n", 1)[1].split("\n\n", 1)[1]
++    with pytest.raises(OpenSRMV2ParseError, match="metric"):
++        parse_opensrm_v2(_manifest(judgment_threshold=[entry]))
++
++    manifest = parse_opensrm_v2(_manifest(judgment_threshold=[{**entry, "metric": "escalation"}]))
++    [threshold] = manifest.judgment_thresholds
++    assert threshold.type == "segments"
++    assert threshold.bounds == doc["spec"]["target"]
++    assert threshold.measurement.segment_values == doc["spec"]["segment_values"]
++
++
++@pytest.mark.parametrize(
++    "item",
++    [
++        {"judgment_type": "segments", "segment_dimension": "tier", "segment_values": ["a"],
++         "measurement": {"source": "lineage", "window": "7d"}, "window": "7d",
++         "target": {"maximum_variance_from_overall": 0.05}},
++        {"judgment_type": "stability", "measurement": {"window": "7d"},
++         "probe": {"frozen_input_set": "s3://x", "frequency": "daily", "stray": 1},
++         "target": {"maximum_drift": 0.02}},
++        {"judgment_type": "calibration", "probe": {"frozen_input_set": "s3://x"},
++         "measurement": {"bins": 10, "window": "30d", "method": "brier_score", "stray": 1},
++         "target": {"maximum_brier_score": 0.05}},
++    ],
++    ids=["segments", "stability", "calibration"],
++)
++def test_suggestion_never_carries_keys_the_closed_entry_rejects(item):
++    """Closed entries (CORE §5.5): a key carried over from the judgment_slo
++    item that the threshold type does not define would make the suggestion
++    itself fail to load."""
++    with pytest.raises(OpenSRMV2ParseError) as exc_info:
++        parse_opensrm_v2(_manifest(judgment_slo=[item]))
++    entry = _suggested_entry(str(exc_info.value))
++    if entry["type"] == "segments":
++        entry = {**entry, "metric": "escalation"}
++    [threshold] = parse_opensrm_v2(_manifest(judgment_threshold=[entry])).judgment_thresholds
++    assert threshold.type == item["judgment_type"]
++
++
+ def test_suggested_calibration_entry_drops_measurement_method():
+     doc = yaml.safe_load(
+         (INVALID_DIR / "n22-calibration-as-judgment-slo.yaml").read_text(encoding="utf-8")
+diff --git a/tests/test_thresholds.py b/tests/test_thresholds.py
+index 502f8aa..7e9130e 100644
+--- a/tests/test_thresholds.py
++++ b/tests/test_thresholds.py
+@@ -11,11 +11,15 @@ from __future__ import annotations
+ import copy
+ import math
+ from pathlib import Path
++from typing import Any
+ 
+ import pytest
+ 
++from nthlayer_common.manifest.models import OutcomeSignal
+ from nthlayer_common.manifest.thresholds import (
+     FORBIDDEN_THRESHOLD_KEYS,
++    SEGMENTS_DEFAULT_WINDOW,
++    SEGMENTS_METRICS,
+     THRESHOLD_BOUNDS,
+     check_type_fields,
+     duration_seconds,
+@@ -123,10 +127,10 @@ def test_parse_bounds_rejects_an_unknown_type():
+ @pytest.mark.parametrize(
+     ("threshold_type", "entry", "match"),
+     [
+-        ("segments", {"segment_values": ["a"]}, "segment_dimension"),
+-        ("segments", {"segment_dimension": "tier", "segment_values": []}, "segment_values"),
+-        ("segments", {"segment_dimension": "tier", "segment_values": "a"}, "segment_values"),
+-        ("segments", {"segment_dimension": "tier", "segment_values": [1]}, "segment_values"),
++        ("segments", {"metric": "escalation", "segment_values": ["a"]}, "segment_dimension"),
++        ("segments", {"metric": "escalation", "segment_dimension": "tier", "segment_values": []}, "segment_values"),
++        ("segments", {"metric": "escalation", "segment_dimension": "tier", "segment_values": "a"}, "segment_values"),
++        ("segments", {"metric": "escalation", "segment_dimension": "tier", "segment_values": [1]}, "segment_values"),
+         ("stability", {}, "probe"),
+         ("stability", {"probe": {"frozen_input_set": "s3://x"}}, "frequency"),
+         ("stability", {"probe": {"frozen_input_set": "s3://x", "frequency": "monthly"}}, "frequency"),
+@@ -137,11 +141,11 @@ def test_parse_bounds_rejects_an_unknown_type():
+         ("calibration", {"measurement": {"bins": 2.5, "window": "30d"}}, "bins"),
+         ("calibration", {"measurement": {"bins": 10, "window": "30"}}, "window"),
+         ("calibration", {"measurement": {"bins": 10, "window": "30d", "method": "brier_score"}}, "method"),
+-        ("segments", {"segment_dimension": "", "segment_values": ["a"]}, "segment_dimension"),
+-        ("segments", {"segment_dimension": 5, "segment_values": ["a"]}, "segment_dimension"),
++        ("segments", {"metric": "escalation", "segment_dimension": "", "segment_values": ["a"]}, "segment_dimension"),
++        ("segments", {"metric": "escalation", "segment_dimension": 5, "segment_values": ["a"]}, "segment_dimension"),
+         ("stability", {"probe": {"frequency": "daily"}}, "frozen_input_set"),
+         ("stability", {"probe": {"frozen_input_set": 5, "frequency": "daily"}}, "frozen_input_set"),
+-        ("segments", {"segment_dimension": "tier", "segment_values": ["a", ""]}, "segment_values"),
++        ("segments", {"metric": "escalation", "segment_dimension": "tier", "segment_values": ["a", ""]}, "segment_values"),
+     ],
+ )
+ def test_check_type_fields_rejects_what_the_schema_rejects(threshold_type, entry, match):
+@@ -152,7 +156,7 @@ def test_check_type_fields_rejects_what_the_schema_rejects(threshold_type, entry
+ @pytest.mark.parametrize(
+     ("threshold_type", "entry"),
+     [
+-        ("segments", {"segment_dimension": "tier", "segment_values": ["a", "b"]}),
++        ("segments", {"metric": "escalation", "segment_dimension": "tier", "segment_values": ["a", "b"]}),
+         ("stability", {"probe": {"frozen_input_set": "s3://x", "frequency": "daily"}}),
+         ("calibration", {"measurement": {"bins": 10, "window": "30d"}}),
+         # schema.json bins `type: integer`: draft-07 accepts an integral float
+@@ -169,7 +173,7 @@ def test_check_type_fields_accepts_the_schema_shapes(threshold_type, entry):
+ @pytest.mark.parametrize(
+     ("threshold_type", "entry"),
+     [
+-        ("segments", {"segment_dimension": "tier", "segment_values": ["a"]}),
++        ("segments", {"metric": "escalation", "segment_dimension": "tier", "segment_values": ["a"]}),
+         ("stability", {"probe": {"frozen_input_set": "s3://x", "frequency": "daily"}}),
+         ("calibration", {"measurement": {"bins": 10, "window": "30d"}}),
+         ("audit_backlog", {}),
+@@ -214,29 +218,228 @@ def test_a_huge_integer_bound_is_a_range_error_not_an_overflow():
+ 
+ 
+ # parents: [0]=tests/ [1]=nthlayer-common/ [2]=<ecosystem>/
+-_ALL_FIVE = (
+-    Path(__file__).resolve().parents[2]
+-    / "opensrm" / "spec" / "v2" / "examples" / "judgment-thresholds" / "all-five-types.yaml"
+-)
+-
+-
+-def test_threshold_to_v2_entry_round_trips_all_five_types():
+-    """The docstring claims it inverts the v2 parser for every type; callers
+-    only reach calibration/feedback_latency, so check the rest directly."""
++_SPEC_V2 = Path(__file__).resolve().parents[2] / "opensrm" / "spec" / "v2"
++_THRESHOLD_EXAMPLES = _SPEC_V2 / "examples" / "judgment-thresholds"
++_AI_GATE = _SPEC_V2 / "examples" / "services" / "ai-gate.yaml"
++
++
++def _threshold_sources() -> list[Path]:
++    """The live spec files whose thresholds the round trip covers: every
++    segments metric form the spec ships (opensrm-7zpz) and all five types."""
++    return [
++        _THRESHOLD_EXAMPLES / "all-five-types.yaml",
++        _THRESHOLD_EXAMPLES / "segments-two-dimensions.yaml",
++        _AI_GATE,
++    ]
++
++
++def _bare_ai_gate(entries: list[Any]) -> dict[str, Any]:
++    """A minimal ai-gate manifest carrying *entries*. ai-gate.yaml itself does
++    not parse whole yet (opensrm-a742: its flat judgment_slo items), so its
++    thresholds are lifted into this shell, unchanged."""
++    return {
++        "apiVersion": "opensrm.nthlayer.io/v2",
++        "kind": "ServiceManifest",
++        "metadata": {"name": "svc", "labels": {"tier": "critical"}},
++        "spec": {
++            "owner": {"group": "group:default/team"},
++            "service": {"name": "svc", "type": "ai-gate"},
++            "judgment_threshold": entries,
++        },
++    }
++
++
++@pytest.mark.parametrize("source", _threshold_sources(), ids=lambda p: p.name)
++def test_threshold_to_v2_entry_round_trips_the_spec_examples(source):
++    """threshold_to_v2_entry inverts the v2 parser: emitting a parsed threshold
++    and re-parsing it gives an equal JudgmentThreshold."""
+     import yaml
+ 
+     from nthlayer_common.manifest.parser.v2 import parse_opensrm_v2
+ 
+-    assert _ALL_FIVE.is_file(), f"spec example missing: {_ALL_FIVE}"
+-    doc = yaml.safe_load(_ALL_FIVE.read_text(encoding="utf-8"))
+-    originals = parse_opensrm_v2(doc, base_dir=_ALL_FIVE.parent).judgment_thresholds
+-    assert {t.type for t in originals} == set(THRESHOLD_BOUNDS)
++    assert source.is_file(), f"spec example missing: {source}"
++    entries = yaml.safe_load(source.read_text(encoding="utf-8"))["spec"]["judgment_threshold"]
++    assert entries, f"{source.name} declares no thresholds"
++    originals = parse_opensrm_v2(_bare_ai_gate(entries)).judgment_thresholds
++    assert len(originals) == len(entries)
+ 
+-    doc["spec"]["judgment_threshold"] = [threshold_to_v2_entry(t) for t in originals]
+-    reparsed = parse_opensrm_v2(doc, base_dir=_ALL_FIVE.parent).judgment_thresholds
++    emitted = [threshold_to_v2_entry(t) for t in originals]
++    reparsed = parse_opensrm_v2(_bare_ai_gate(emitted)).judgment_thresholds
+     assert reparsed == originals
+ 
+ 
++def test_the_round_trip_sources_cover_every_type_and_metric():
++    """Pins the coverage the round trip claims, so a spec edit that drops a
++    form from these files fails here instead of thinning the test."""
++    import yaml
++
++    entries = [
++        e
++        for path in _threshold_sources()
++        for e in yaml.safe_load(path.read_text(encoding="utf-8"))["spec"]["judgment_threshold"]
++    ]
++    assert {e["type"] for e in entries} == set(THRESHOLD_BOUNDS)
++    assert {e["metric"] for e in entries if e["type"] == "segments"} == set(SEGMENTS_METRICS)
++
++
++def test_segments_emit_always_carries_the_stored_window():
++    """The parser stores the 30d default, so the emit writes it out."""
++    from nthlayer_common.manifest.models import JudgmentThreshold, ThresholdMeasurement
++
++    threshold = JudgmentThreshold(
++        type="segments",
++        bounds={"maximum_variance_from_overall": 0.05},
++        measurement=ThresholdMeasurement(
++            metric="escalation", window=SEGMENTS_DEFAULT_WINDOW,
++            segment_dimension="tier", segment_values=["a"],
++        ),
++    )
++    entry = threshold_to_v2_entry(threshold)
++    assert entry["metric"] == "escalation"
++    assert entry["measurement"] == {"window": SEGMENTS_DEFAULT_WINDOW}
++    assert "outcome_signal" not in entry
++
++
++# =============================================================================
++# segments metric (CORE §5.5.1, opensrm-7zpz) and closed entries (CORE §5.5).
++# Each rejected shape is one the schema's segments branch rejects; the clause
++# is named beside it. The spec's own negatives (n67-n92) are run whole in
++# test_judgment_thresholds_against_spec.py.
++# =============================================================================
++
++_SEG = {"segment_dimension": "tier", "segment_values": ["a"]}
++
++
++@pytest.mark.parametrize(
++    ("entry", "match"),
++    [
++        ({**_SEG}, "metric"),                                                     # required
++        ({**_SEG, "metric": "audit_sampling"}, "audit_sampling"),                # enum, by name
++        ({**_SEG, "metric": "accuracy"}, "metric"),                              # enum
++        ({**_SEG, "metric": ["escalation"]}, "metric"),                          # enum, unhashable
++        ({**_SEG, "metric": "reversal_rate"}, "source"),                         # then: required
++        ({**_SEG, "metric": "reversal_rate", "measurement": {}}, "source"),
++        ({**_SEG, "metric": "reversal_rate", "measurement": {"source": "audit"}}, "source"),
++        ({**_SEG, "metric": "reversal_rate", "measurement": {"source": ["lineage"]}}, "source"),
++        ({**_SEG, "metric": "high_confidence_failure"}, "confidence_threshold"),
++        ({**_SEG, "metric": "high_confidence_failure",
++          "measurement": {"window": "7d"}}, "confidence_threshold"),
++        ({**_SEG, "metric": "escalation", "measurement": {"source": "lineage"}}, "source"),  # else: not
++        ({**_SEG, "metric": "outcomes", "measurement": {"source": "lineage"},
++          "outcome_signal": {"source": "s", "window": "1h"}}, "source"),
++        ({**_SEG, "metric": "escalation",
++          "measurement": {"confidence_threshold": 0.9}}, "confidence_threshold"),
++        ({**_SEG, "metric": "outcomes"}, "outcome_signal"),
++        ({**_SEG, "metric": "escalation",
++          "outcome_signal": {"source": "s", "window": "1h"}}, "outcome_signal"),
++        ({**_SEG, "metric": "escalation", "measurement": "7d"}, "measurement"),  # type object
++        ({**_SEG, "metric": "escalation", "measurement": {"windw": "7d"}}, "windw"),  # closed
++        ({**_SEG, "metric": "escalation", "measurement": {"window": "7 days"}}, "window"),
++        ({**_SEG, "metric": "escalation", "measurement": {"window": 7}}, "window"),
++        ({**_SEG, "metric": "escalation", "measurement": {"window": "0d"}}, "window"),  # not 0+
++        ({**_SEG, "metric": "escalation", "measurement": {"window": "000ms"}}, "window"),
++        ({**_SEG, "metric": "outcomes", "outcome_signal": "s"}, "outcome_signal"),
++        ({**_SEG, "metric": "outcomes", "outcome_signal": {"source": "s"}}, "window"),
++        ({**_SEG, "metric": "outcomes", "outcome_signal": {"window": "1h"}}, "source"),
++        ({**_SEG, "metric": "outcomes",
++          "outcome_signal": {"source": "s", "window": "1 hour"}}, "window"),
++        ({**_SEG, "metric": "outcomes",
++          "outcome_signal": {"source": 5, "window": "1h"}}, "source"),
++        ({**_SEG, "metric": "outcomes",
++          "outcome_signal": {"source": "s", "window": "1h", "wait": "2h"}}, "wait"),
++    ],
++)
++def test_segments_metric_rules_reject_what_the_schema_rejects(entry, match):
++    with pytest.raises(ValueError, match=match):
++        check_type_fields("segments", entry)
++
++
++# Ratio: number, 0..1. A string is not a number to the schema.
++@pytest.mark.parametrize("value", [1.5, -0.1, True, "0.9", None, math.nan, math.inf, 10**400], ids=repr)
++def test_segments_confidence_threshold_is_a_ratio(value):
++    entry = {**_SEG, "metric": "high_confidence_failure", "measurement": {"confidence_threshold": value}}
++    with pytest.raises(ValueError, match="confidence_threshold"):
++        check_type_fields("segments", entry)
++
++
++@pytest.mark.parametrize(
++    "entry",
++    [
++        {**_SEG, "metric": "escalation"},
++        {**_SEG, "metric": "escalation", "measurement": {"window": "7d"}},
++        {**_SEG, "metric": "escalation", "measurement": {}},
++        {**_SEG, "metric": "reversal_rate", "measurement": {"source": "lineage"}},
++        {**_SEG, "metric": "reversal_rate", "measurement": {"source": "calibration_sample", "window": "1w"}},
++        {**_SEG, "metric": "reversal_rate", "measurement": {"source": "downstream_signal"}},
++        {**_SEG, "metric": "high_confidence_failure", "measurement": {"confidence_threshold": 0}},
++        {**_SEG, "metric": "high_confidence_failure", "measurement": {"confidence_threshold": 1}},
++        {**_SEG, "metric": "high_confidence_failure", "measurement": {"confidence_threshold": 0.9}},
++        {**_SEG, "metric": "outcomes", "outcome_signal": {"source": "s", "window": "1h"}},
++        # The outcome wait may be zero: it is the SLO's Duration, unguarded.
++        {**_SEG, "metric": "outcomes", "outcome_signal": {"source": "s", "window": "0s"}},
++        {**_SEG, "metric": "outcomes", "outcome_signal": {"source": "", "window": "1h"},
++         "measurement": {"window": "10d"}},
++    ],
++    ids=lambda e: f"{e['metric']}-{sorted(e.get('measurement', {}))}-{sorted(e.get('outcome_signal', {}))}",
++)
++def test_segments_metric_rules_accept_the_schema_shapes(entry):
++    check_type_fields("segments", entry)
++
++
++@pytest.mark.parametrize(
++    ("threshold_type", "entry", "key"),
++    [
++        # entry level: n74, n79, n85, n86, n87
++        ("segments", {**_SEG, "metric": "escalation", "window": "7d"}, "window"),
++        ("segments", {**_SEG, "metric": "escalation", "probe": {}}, "probe"),
++        ("segments", {**_SEG, "metric": "escalation", "sampling": None}, "sampling"),
++        ("stability", {"window": "7d", "probe": {"frozen_input_set": "s3://x", "frequency": "daily"}},
++         "window"),
++        ("stability", {"metric": "escalation", "probe": {"frozen_input_set": "s3://x", "frequency": "daily"}},
++         "metric"),
++        ("calibration", {"bins": 10, "measurement": {"bins": 10, "window": "30d"}}, "bins"),
++        ("calibration", {"segment_values": ["a"], "measurement": {"bins": 10, "window": "30d"}},
++         "segment_values"),
++        ("audit_backlog", {"measurement": {"window": "7d"}}, "measurement"),
++        ("audit_backlog", {"metric": "escalation"}, "metric"),
++        ("feedback_latency", {"window": "7d"}, "window"),
++        ("feedback_latency", {"outcome_signal": {"source": "s", "window": "1h"}}, "outcome_signal"),
++        # nested objects: n77, n78
++        ("stability", {"probe": {"frozen_input_set": "s3://x", "frequency": "daily", "frequncy": "hourly"}},
++         "frequncy"),
++        ("calibration", {"measurement": {"bins": 10, "window": "30d", "bin": 20}}, "bin"),
++    ],
++)
++def test_threshold_entries_are_closed(threshold_type, entry, key):
++    with pytest.raises(ValueError, match=rf"'{key}'.*§5\.5"):
++        check_type_fields(threshold_type, entry)
++
++
++@pytest.mark.parametrize("threshold_type", list(THRESHOLD_BOUNDS))
++def test_type_and_bounds_are_always_allowed(threshold_type):
++    """Closure admits the two keys every entry has; check_type_fields leaves
++    their validation to the parser and parse_bounds."""
++    entry = {
++        "segments": {**_SEG, "metric": "escalation"},
++        "stability": {"probe": {"frozen_input_set": "s3://x", "frequency": "daily"}},
++        "calibration": {"measurement": {"bins": 10, "window": "30d"}},
++    }.get(threshold_type, {})
++    check_type_fields(threshold_type, {"type": threshold_type, "bounds": {}, **entry})
++
++
++def test_mixed_type_entry_keys_are_a_value_error():
++    """YAML allows int/null mapping keys; sorting them with str keys is a TypeError."""
++    with pytest.raises(ValueError, match="audit_backlog"):
++        check_type_fields("audit_backlog", {1: "x", None: "y", "z": 2})
++
++
++def test_unknown_calibration_measurement_key_is_reported_after_method():
++    """measurement.method keeps its own message (schema: method is `not`)."""
++    with pytest.raises(ValueError, match="measurement.method"):
++        check_type_fields(
++            "calibration", {"measurement": {"bins": 10, "window": "30d", "method": "x", "bin": 1}}
++        )
++
+ 
+ def test_duration_seconds_reports_an_unrepresentable_duration_as_value_error():
+     """'1' + 400 zeros + 'd' passes is_duration but overflows a float; it must
+@@ -254,3 +457,54 @@ def test_duration_seconds_is_correctly_rounded_for_milliseconds():
+ def test_duration_seconds_past_the_int_digit_limit_uses_the_same_message():
+     with pytest.raises(ValueError, match="too large"):
+         duration_seconds("1" + "0" * 5000 + "s")
++
++
++def test_audit_sampling_gets_its_own_rejection_not_the_generic_enum_one():
++    """CORE §5.5.1 says why audit_sampling is excluded; the parser must say so
++    rather than list it as an unknown value. Compared structurally: the two
++    messages differ beyond the value they echo."""
++    def message(metric: str) -> str:
++        with pytest.raises(ValueError) as exc_info:
++            check_type_fields("segments", {**_SEG, "metric": metric})
++        return str(exc_info.value)
++
++    assert message("audit_sampling") != message("accuracy").replace("accuracy", "audit_sampling")
++
++
++# threshold_to_v2_entry validates what it builds: a hand-built threshold the
++# parser could never produce must fail here, not emit a schema-invalid entry.
++def _hand_built(threshold_type: str, bounds: dict[str, Any], **fields: Any):
++    from nthlayer_common.manifest.models import JudgmentThreshold, ThresholdMeasurement
++
++    return JudgmentThreshold(type=threshold_type, bounds=bounds, measurement=ThresholdMeasurement(**fields))
++
++
++_SEG_BOUNDS = {"maximum_variance_from_overall": 0.05}
++
++
++@pytest.mark.parametrize(
++    ("threshold_type", "bounds", "fields", "match"),
++    [
++        ("segments", _SEG_BOUNDS,
++         {"metric": None, "window": "30d", "segment_dimension": "t", "segment_values": ["a"]}, "metric"),
++        ("segments", _SEG_BOUNDS,
++         {"metric": "escalation", "window": None, "segment_dimension": "t", "segment_values": ["a"]},
++         "window"),
++        ("segments", _SEG_BOUNDS,
++         {"metric": "escalation", "window": "30d", "segment_dimension": "t", "segment_values": ["a"],
++          "outcome_signal": OutcomeSignal(source="s", window="1h")}, "outcome_signal"),
++        ("segments", _SEG_BOUNDS,
++         {"metric": "reversal_rate", "window": "30d", "segment_dimension": "t", "segment_values": ["a"]},
++         "source"),
++        ("calibration", {"maximum_brier_score": 0.05}, {"bins": None, "window": "30d"}, "bins"),
++        ("stability", {"maximum_drift": 0.02}, {}, "probe"),
++        ("audit_backlog", {"maximum_age": 24}, {}, "duration"),
++    ],
++    ids=["segments-no-metric", "segments-no-window", "escalation-outcome-signal",
++         "reversal-rate-no-source", "calibration-no-bins", "stability-no-probe", "bad-bound"],
++)
++def test_threshold_to_v2_entry_rejects_a_threshold_the_parser_could_not_produce(
++    threshold_type, bounds, fields, match
++):
++    with pytest.raises(ValueError, match=match):
++        threshold_to_v2_entry(_hand_built(threshold_type, bounds, **fields))
+diff --git a/uv.lock b/uv.lock
+index a89d608..3ee0c38 100644
+--- a/uv.lock
++++ b/uv.lock
+@@ -476,8 +476,8 @@ name = "httpcore2"
+ version = "2.13.1"
+ source = { registry = "https://pypi.org/simple" }
+ dependencies = [
+-    { name = "h11" },
+-    { name = "truststore" },
++    { name = "h11", marker = "python_full_version < '3.12' or sys_platform != 'emscripten'" },
++    { name = "truststore", marker = "python_full_version < '3.12' or sys_platform != 'emscripten'" },
+ ]
+ sdist = { url = "https://files.pythonhosted.org/packages/cb/f3/1db7aa2bc2524062192bb0e0323969492d1883152a232fe36eea65f4e35c/httpcore2-2.13.1.tar.gz", hash = "sha256:e0aa977abe17e69a3b820a24542a6fa88702676d83880b8d194dcd18408e5103", size = 68071, upload-time = "2026-09-23T07:47:22.372Z" }
+ wheels = [
+@@ -903,7 +903,7 @@ wheels = [
+ 
+ [[package]]
+ name = "nthlayer-common"
+-version = "3.0.0"
++version = "4.0.0"
+ source = { editable = "." }
+ dependencies = [
+     { name = "anthropic" },

@@ -1,0 +1,174 @@
+{
+ "schema_version": 1,
+ "entry": "opensrm-g32d-checkpointA",
+ "bead": "opensrm-g32d",
+ "record": "g32d-checkpointA",
+ "archive": "r5-state-g32d-checkpointA-completed.json",
+ "record_repos": [
+  "nthlayer"
+ ],
+ "repo": "nthlayer",
+ "part": "checkpointA",
+ "base": "2e8180c3990c8521a5cdfe39df9145e0787210b8",
+ "head": "157263415897292725a6fe4950d06871176dc752",
+ "record_head": null,
+ "synthetic_base": "5b03d2442a4c8c43bb3728f8c63a73957fb6eca2",
+ "synthetic_head": "f27d54f63f3273690f2dcbdc94b015cd6a9a92a8",
+ "base_tree": "f81e8c553821537d056c4fc82f67251b51655e67",
+ "tree_sha": "9492e809d6b0295fafc199e9428bd1d7dcc760d6",
+ "unavailable": null,
+ "bundle": {
+  "repo": "nthlayer",
+  "sha256": "46087845a4b5b8e2275091e728f99e5dd635bd712a9d9344386afe3a8f045272"
+ },
+ "sequential_steps": 21,
+ "record_sequential_steps": 21,
+ "bead_sequential_steps": 55,
+ "fidelity": "counts_only",
+ "blocking_findings": 24,
+ "escape": false,
+ "brief_source": "reviewer_prompt",
+ "roster": {
+  "record_version": 2,
+  "passes": [
+   "correctness",
+   "clarity",
+   "edge-cases",
+   "provenance"
+  ]
+ },
+ "lens_order": [
+  "correctness",
+  "clarity",
+  "edge-cases",
+  "provenance",
+  "excellence",
+  "scoped(correctness+edge)",
+  "scoped re-check"
+ ],
+ "counts": {
+  "correctness": [
+   {
+    "critical": 1,
+    "important": 4,
+    "minor": 6
+   },
+   {
+    "critical": 0,
+    "important": 2,
+    "minor": 0
+   },
+   {
+    "critical": 0,
+    "important": 0,
+    "minor": 0
+   }
+  ],
+  "clarity": [
+   {
+    "critical": 0,
+    "important": 6,
+    "minor": 7
+   },
+   {
+    "critical": 0,
+    "important": 0,
+    "minor": 0
+   }
+  ],
+  "edge-cases": [
+   {
+    "critical": 1,
+    "important": 3,
+    "minor": 8
+   },
+   {
+    "critical": 0,
+    "important": 1,
+    "minor": 2
+   },
+   {
+    "critical": 0,
+    "important": 0,
+    "minor": 1
+   }
+  ],
+  "provenance": [
+   {
+    "critical": 3,
+    "important": 0,
+    "minor": 4
+   },
+   {
+    "critical": 0,
+    "important": 0,
+    "minor": 0
+   }
+  ],
+  "scoped(correctness+edge)": [
+   {
+    "critical": 0,
+    "important": 3,
+    "minor": 7
+   }
+  ],
+  "scoped re-check": [
+   {
+    "critical": 0,
+    "important": 0,
+    "minor": 1
+   }
+  ]
+ },
+ "baseline": {
+  "correctness": {
+   "reviews": 3,
+   "fix_rounds": 2,
+   "findings_first_review": 11,
+   "unattributed": 0,
+   "steps": 5
+  },
+  "clarity": {
+   "reviews": 2,
+   "fix_rounds": 1,
+   "findings_first_review": 13,
+   "unattributed": 0,
+   "steps": 3
+  },
+  "edge-cases": {
+   "reviews": 3,
+   "fix_rounds": 3,
+   "findings_first_review": 12,
+   "unattributed": 0,
+   "steps": 6
+  },
+  "provenance": {
+   "reviews": 2,
+   "fix_rounds": 1,
+   "findings_first_review": 7,
+   "unattributed": 0,
+   "steps": 3
+  },
+  "excellence": {
+   "reviews": 1,
+   "fix_rounds": 0,
+   "findings_first_review": 6,
+   "unattributed": 0,
+   "steps": 1
+  },
+  "scoped(correctness+edge)": {
+   "reviews": 1,
+   "fix_rounds": 1,
+   "findings_first_review": 10,
+   "unattributed": 0,
+   "steps": 2
+  },
+  "scoped re-check": {
+   "reviews": 1,
+   "fix_rounds": 0,
+   "findings_first_review": 1,
+   "unattributed": 0,
+   "steps": 1
+  }
+ }
+}

@@ -1,0 +1,5 @@
+PASS 1 (CORRECTNESS) sequential R5 review on bead opensrm-wo62.1 — nthlayer-common 5.4.1 (legacy parser judgment parity).
+Read your lens: ~/.claude/skills/rule-of-five-review/correctness-reviewer.md — follow it exactly.
+Read the scope: <claude-tmp>/scratchpad/c541-scope.md
+Check: srm/v1 behaviour byte-identical after the helper extraction (compare _parse_slos before/after); legacy judgment SLOs get the same judgment_type/measurement/statistical_requirements/slo_type as srm/v1; legacy threshold lift mapping (objective→target, window default, unit handling); _extract_slos_from_resources' changed return type — every caller in common and in the five consumer repos (<workspace>/{nthlayer-generate-wo62,nthlayer-core,nthlayer-workers,nthlayer-bench,nthlayer-override-adapter}/src) updated or unaffected; the warning class/stacklevel; non-judgment legacy SLOs unchanged.
+Focus: correctness only. Read-only; targeted runs fine; no subagents. CRITICAL / IMPORTANT / MINOR with file:line + fix; verdict. Under 350 words.

@@ -1,0 +1,3201 @@
+diff --git a/CLAUDE.md b/CLAUDE.md
+index 0352e6c..8fd5959 100644
+--- a/CLAUDE.md
++++ b/CLAUDE.md
+@@ -164,7 +164,8 @@ examples, generator-specific scripts.
+     Phase A, opensrm-6kqs.1): per bead and lens, reviews, findings by
+     severity per review, model steps, lens order;
+     `--json` for the replay corpus's `sequential_steps`. Standard library
+-    only. Tests: `test/test_r5_baseline.py` (run by `ci.yml`). The
++    only. Tests: `test/test_r5_baseline.py` (run by `ci.yml`) over synthetic
++    fixtures, one per archive pattern (opensrm-6kqs.8). The
+     workspace root's `.claude/bin/r5-baseline.sh` is a shim.
+   - `meta-resolve-check.sh` — fails when `pip install nthlayer` would
+     hold a tier below its newest in-range release, or a tier's newest
+diff --git a/scripts/r5_baseline.py b/scripts/r5_baseline.py
+index cb46ecd..a715ade 100644
+--- a/scripts/r5_baseline.py
++++ b/scripts/r5_baseline.py
+@@ -157,6 +157,7 @@ def _scan_events(record: dict) -> dict:
+         "dispatched": Counter(),  # lens -> reviewer_dispatched, less BLOCKED_DISPATCHES
+         "seen": [],  # first appearance of each pass in any event
+         "sequence": [],  # pass_started in order, repeats kept
++        "table_hits": [],  # BLOCKED_DISPATCHES / PASSLESS_EVENTS keys used
+     }
+     advisory: dict[str, list[Counter]] = {}
+     for event in record.get("audit_trail") or []:
+@@ -165,7 +166,10 @@ def _scan_events(record: dict) -> dict:
+         kind = event.get("event")
+         lens = event.get("pass")
+         if not isinstance(lens, str):
+-            lens = PASSLESS_EVENTS.get((record.get("target_bead"), kind, event.get("ts")))
++            key = (record.get("target_bead"), kind, event.get("ts"))
++            lens = PASSLESS_EVENTS.get(key)
++            if lens is not None:
++                scan["table_hits"].append(key)
+         if lens is None:
+             if kind in COUNTING_EVENTS:
+                 raise RecordError(f"{kind} at {event.get('ts')} has no pass")
+@@ -187,11 +191,12 @@ def _scan_events(record: dict) -> dict:
+             scan["runs"].setdefault(lens, []).append(
+                 _count(event["fix_iterations"], f"{lens} pass_completed fix_iterations")
+             )
+-        elif (
+-            kind == "reviewer_dispatched"
+-            and (record.get("target_bead"), lens, event.get("ts")) not in BLOCKED_DISPATCHES
+-        ):
+-            scan["dispatched"][lens] += 1
++        elif kind == "reviewer_dispatched":
++            key = (record.get("target_bead"), lens, event.get("ts"))
++            if key in BLOCKED_DISPATCHES:
++                scan["table_hits"].append(key)
++            else:
++                scan["dispatched"][lens] += 1
+     for lens, found in advisory.items():
+         scan["reviews"].setdefault(lens, found)
+     return scan
+@@ -287,9 +292,21 @@ def analyse_record(record: dict) -> dict:
+         "dispatch_sequence": [lens for lens in sequence if lens in lenses],
+         "lenses": lenses,
+         "sequential_steps": sum(v["steps"] for v in lenses.values()),
++        "table_hits": [list(key) for key in scan["table_hits"]],
+     }
+ 
+ 
++def unmatched_table_entries(rows: list[dict]) -> list[tuple]:
++    """BLOCKED_DISPATCHES and PASSLESS_EVENTS keys no analysed record used.
++
++    Run over the full archive, every entry should match: an unmatched one is a
++    mistyped key, which would silently exclude or place nothing, or an archive
++    gone missing. The tests cannot check this (their fixtures are synthetic),
++    so main() warns on it."""
++    hits = {tuple(key) for row in rows for key in row["table_hits"]}
++    return sorted((set(BLOCKED_DISPATCHES) | set(PASSLESS_EVENTS)) - hits, key=str)
++
++
+ def load_records(archive_dir: Path) -> list[tuple[str, dict]]:
+     """Every archived record, by file name, sorted by name for a stable report."""
+     out = []
+@@ -429,6 +446,9 @@ def main(argv: list[str] | None = None) -> int:
+         except RecordError as exc:
+             print(f"r5-baseline: {name}: {exc}", file=sys.stderr)
+             return 2
++    for key in unmatched_table_entries(rows):
++        print(f"r5-baseline: warning: known-data entry {key} matched no archived event",
++              file=sys.stderr)
+     if not baseline_rows(rows):
+         print(f"r5-baseline: no live, reviewed gate in {args.archive_dir}", file=sys.stderr)
+         return 2
+diff --git a/test/fixtures/r5-baseline/README.md b/test/fixtures/r5-baseline/README.md
+index d5f2bd6..8699caa 100644
+--- a/test/fixtures/r5-baseline/README.md
++++ b/test/fixtures/r5-baseline/README.md
+@@ -1,14 +1,18 @@
+ # r5_baseline fixtures
+ 
+-Trimmed copies of thirteen real archived gate records from the workspace root's
+-`.claude/` (untracked, so they cannot be referenced in place). Each keeps the
+-record's structure and every number the baseline reads; free text (notes,
+-rulings, briefs) and session details are dropped, because the archives are
+-internal and this repository is public.
++Synthetic gate records, one per structural pattern the archived
++`.claude/r5-state-*-completed.json` records show. Each has the structure and
++the numbers of a record that exhibits the pattern, with an invented bead id
++(`fx-<pattern>`) and invented timestamps (`2000-01-01T…`, in event order). They
++carry no free text: no notes, rulings, briefs or session fields.
+ 
+-How each was made: load the archive, keep only these fields, write it back
+-with `json.dump(..., indent=1)`. Nothing is edited by hand; to add one, apply
+-the same filter to another archive.
++They are synthetic, not trimmed copies of real records, so that nobody
++"refreshes" them from the archive later with more fields in them (opensrm-6kqs.8).
++The rule for what may be published from gate work: content derived from public
++repositories (code, diffs, briefs in a repo, findings about that code) may be;
++a gate record's free-text notes, rulings and session fields may not.
++
++Fields present, and nothing else:
+ 
+ - top level: `supervisor`, `version`, `target_bead`, `started_at`, `dry_run`,
+   `passes`, `advisory_passes`, `status`;
+@@ -17,20 +21,27 @@ the same filter to another archive.
+ - `audit_trail[]` events `pass_started`, `findings_received`,
+   `advisory_pass_completed`, `pass_completed`, `fixes_applied`,
+   `fix_dispatched`, `reviewer_dispatched`, `reviewer_dispatch_blocked` and
+-  `supervisor_blocked`, keeping `ts`, `event`, `pass`, `iteration`, `counts`
+-  and `fix_iterations`.
++  `supervisor_blocked`, with `ts`, `event`, `pass`, `iteration`, `counts` and
++  `fix_iterations`.
++
++The script's known-data tables (`BLOCKED_DISPATCHES`, `PASSLESS_EVENTS`) hold
++real archive keys, which match none of these. The tests swap in the synthetic
++counterparts (`SYNTHETIC_BLOCKED_DISPATCHES`, `SYNTHETIC_PASSLESS_EVENTS` in
++`test_r5_baseline.py`); the real keys are checked against the archive when the
++script runs, by `unmatched_table_entries`.
+ 
+-| file | why it is here |
++| fixture (`r5-state-fx-…-completed.json`) | pattern |
+ |---|---|
+-| `r5-state-3ntg-completed.json` | schema v2, severities logged per iteration, advisory excellence as `advisory_pass_completed` |
+-| `r5-state-1mja-completed.json` | schema v1, no `findings_received` at all: pass totals only, so every finding is unattributed |
+-| `r5-state-oh27-completed.json` | schema v1, the oh27 escape; totals only, multi-iteration fix loops |
+-| `r5-state-m7su-dryrun-completed.json` | the one dry run (excluded from totals), and the one `counts` key outside the three severities (`missing_tests`) |
+-| `r5-state-g32d-checkpointB-completed.json` | passes re-run after the first round: reviews, fixes and the dispatch sequence across runs |
+-| `r5-state-g35i-completed.json` | a combined `clarity+edge-cases` pass that `completed_passes` lists as two |
+-| `r5-state-wo62-1-checkpointA-common-completed.json` | fixes applied with `fix_iterations: 0`, and `findings_count_initial` counting only blocking findings |
+-| `r5-state-bnal-completed.json` | a stalled reviewer re-dispatched: more `reviewer_dispatched` than `findings_received` |
+-| `r5-state-ir5m-completed.json`, `r5-state-wo62-4-1-completed.json` | the two archived dispatches the hook blocked before a reviewer ran (`BLOCKED_DISPATCHES`), beside real stalls re-sent |
+-| `r5-state-tu04.1.2.2-completed.json` | a gate abandoned after `pass_started` with nothing reviewed (excluded from the totals) |
+-| `r5-state-g32d-checkpointA-completed.json` | the two counting events logged with no `pass` (`PASSLESS_EVENTS`) |
+-| `r5-state-pnmv-checkpointB-completed.json` | a re-run pass whose fix rounds only the summed runs show (events and summary hold one each) |
++| `v2-per-review-severities` | schema v2: severities logged per review, advisory excellence as `advisory_pass_completed` |
++| `v1-totals-only` | schema v1 with no `findings_received`: pass totals only, so every finding is unattributed |
++| `v1-fix-loops` | schema v1, totals only, multi-iteration fix loops |
++| `dry-run-with-other-bucket` | a dry run (excluded from the totals), and a `counts` key outside the three severities (`missing_tests`) |
++| `combined-pass` | one review covering two passes (`clarity+edge-cases`) that `completed_passes` lists separately |
++| `re-run-passes` | passes re-run after the first round: reviews, fixes and the dispatch sequence across runs |
++| `re-run-fixes-only-in-runs` | a re-run pass whose fix rounds only the summed runs show (events and summary hold one each) |
++| `blocking-only-initial-count` | fixes applied with `fix_iterations: 0`, and `findings_count_initial` counting only blocking findings |
++| `stall-and-resend` | a stalled reviewer re-dispatched: more `reviewer_dispatched` than `findings_received` |
++| `blocked-dispatch-after-launch` | a dispatch the hook refused, followed by `reviewer_dispatch_blocked`, beside a real stall in another pass |
++| `blocked-dispatch-before-launch` | a dispatch the hook refused, followed by `supervisor_blocked` |
++| `passless-fix-events` | two counting events logged with no `pass`, and one-off re-check passes |
++| `abandoned-unreviewed` | a gate abandoned after `pass_started`, nothing reviewed (excluded from the totals) |
+diff --git a/test/fixtures/r5-baseline/r5-state-tu04.1.2.2-completed.json b/test/fixtures/r5-baseline/r5-state-fx-abandoned-unreviewed-completed.json
+similarity index 70%
+rename from test/fixtures/r5-baseline/r5-state-tu04.1.2.2-completed.json
+rename to test/fixtures/r5-baseline/r5-state-fx-abandoned-unreviewed-completed.json
+index 7ee53b7..76797ac 100644
+--- a/test/fixtures/r5-baseline/r5-state-tu04.1.2.2-completed.json
++++ b/test/fixtures/r5-baseline/r5-state-fx-abandoned-unreviewed-completed.json
+@@ -1,8 +1,8 @@
+ {
+  "supervisor": "r5-supervise",
+  "version": 1,
+- "target_bead": "opensrm-tu04.1.2.2",
+- "started_at": "2026-06-15T00:00:00Z",
++ "target_bead": "fx-abandoned-unreviewed",
++ "started_at": "2000-01-01T00:00:00Z",
+  "dry_run": false,
+  "passes": [
+   "correctness",
+@@ -14,7 +14,7 @@
+  "completed_passes": [],
+  "audit_trail": [
+   {
+-   "ts": "2026-06-15T00:00:00Z",
++   "ts": "2000-01-01T00:00:00Z",
+    "event": "pass_started",
+    "pass": "correctness"
+   }
+diff --git a/test/fixtures/r5-baseline/r5-state-ir5m-completed.json b/test/fixtures/r5-baseline/r5-state-fx-blocked-dispatch-after-launch-completed.json
+similarity index 77%
+rename from test/fixtures/r5-baseline/r5-state-ir5m-completed.json
+rename to test/fixtures/r5-baseline/r5-state-fx-blocked-dispatch-after-launch-completed.json
+index 928259e..5fe0a25 100644
+--- a/test/fixtures/r5-baseline/r5-state-ir5m-completed.json
++++ b/test/fixtures/r5-baseline/r5-state-fx-blocked-dispatch-after-launch-completed.json
+@@ -1,8 +1,8 @@
+ {
+  "supervisor": "r5-supervise",
+  "version": 2,
+- "target_bead": "opensrm-ir5m",
+- "started_at": "2026-10-02T21:12:26Z",
++ "target_bead": "fx-blocked-dispatch-after-launch",
++ "started_at": "2000-01-01T00:00:00Z",
+  "dry_run": false,
+  "passes": [
+   "correctness",
+@@ -42,17 +42,17 @@
+  ],
+  "audit_trail": [
+   {
+-   "ts": "2026-10-02T21:12:26Z",
++   "ts": "2000-01-01T00:00:00Z",
+    "event": "pass_started",
+    "pass": "correctness"
+   },
+   {
+-   "ts": "2026-10-02T21:13:11Z",
++   "ts": "2000-01-01T00:00:01Z",
+    "event": "reviewer_dispatched",
+    "pass": "correctness"
+   },
+   {
+-   "ts": "2026-10-02T21:30:18Z",
++   "ts": "2000-01-01T00:00:02Z",
+    "event": "findings_received",
+    "pass": "correctness",
+    "iteration": 1,
+@@ -63,25 +63,25 @@
+    }
+   },
+   {
+-   "ts": "2026-10-02T21:32:57Z",
++   "ts": "2000-01-01T00:00:03Z",
+    "event": "reviewer_dispatched",
+    "pass": "correctness",
+    "iteration": 2
+   },
+   {
+-   "ts": "2026-10-02T21:33:50Z",
++   "ts": "2000-01-01T00:00:04Z",
+    "event": "reviewer_dispatch_blocked",
+    "pass": "correctness",
+    "iteration": 2
+   },
+   {
+-   "ts": "2026-10-02T21:34:23Z",
++   "ts": "2000-01-01T00:00:05Z",
+    "event": "reviewer_dispatched",
+    "pass": "correctness",
+    "iteration": 2
+   },
+   {
+-   "ts": "2026-10-02T21:42:34Z",
++   "ts": "2000-01-01T00:00:06Z",
+    "event": "findings_received",
+    "pass": "correctness",
+    "iteration": 2,
+@@ -92,30 +92,30 @@
+    }
+   },
+   {
+-   "ts": "2026-10-02T21:42:34Z",
++   "ts": "2000-01-01T00:00:07Z",
+    "event": "pass_completed",
+    "pass": "correctness",
+    "fix_iterations": 1
+   },
+   {
+-   "ts": "2026-10-02T21:42:34Z",
++   "ts": "2000-01-01T00:00:08Z",
+    "event": "pass_started",
+    "pass": "clarity"
+   },
+   {
+-   "ts": "2026-10-02T21:43:09Z",
++   "ts": "2000-01-01T00:00:09Z",
+    "event": "reviewer_dispatched",
+    "pass": "clarity",
+    "iteration": 1
+   },
+   {
+-   "ts": "2026-10-05T19:30:24Z",
++   "ts": "2000-01-01T00:00:10Z",
+    "event": "reviewer_dispatched",
+    "pass": "clarity",
+    "iteration": 1
+   },
+   {
+-   "ts": "2026-10-05T19:32:21Z",
++   "ts": "2000-01-01T00:00:11Z",
+    "event": "findings_received",
+    "pass": "clarity",
+    "iteration": 1,
+@@ -126,18 +126,18 @@
+    }
+   },
+   {
+-   "ts": "2026-10-05T19:38:14Z",
++   "ts": "2000-01-01T00:00:12Z",
+    "event": "fixes_applied",
+    "pass": "clarity"
+   },
+   {
+-   "ts": "2026-10-05T19:38:48Z",
++   "ts": "2000-01-01T00:00:13Z",
+    "event": "reviewer_dispatched",
+    "pass": "clarity",
+    "iteration": 2
+   },
+   {
+-   "ts": "2026-10-05T19:40:16Z",
++   "ts": "2000-01-01T00:00:14Z",
+    "event": "findings_received",
+    "pass": "clarity",
+    "iteration": 2,
+@@ -148,19 +148,19 @@
+    }
+   },
+   {
+-   "ts": "2026-10-05T19:42:02Z",
++   "ts": "2000-01-01T00:00:15Z",
+    "event": "fixes_applied",
+    "pass": "clarity",
+    "iteration": 2
+   },
+   {
+-   "ts": "2026-10-05T19:42:37Z",
++   "ts": "2000-01-01T00:00:16Z",
+    "event": "reviewer_dispatched",
+    "pass": "clarity",
+    "iteration": 3
+   },
+   {
+-   "ts": "2026-10-05T19:45:52Z",
++   "ts": "2000-01-01T00:00:17Z",
+    "event": "findings_received",
+    "pass": "clarity",
+    "iteration": 3,
+@@ -171,24 +171,24 @@
+    }
+   },
+   {
+-   "ts": "2026-10-05T19:45:52Z",
++   "ts": "2000-01-01T00:00:18Z",
+    "event": "pass_completed",
+    "pass": "clarity",
+    "fix_iterations": 2
+   },
+   {
+-   "ts": "2026-10-05T19:45:52Z",
++   "ts": "2000-01-01T00:00:19Z",
+    "event": "pass_started",
+    "pass": "edge-cases"
+   },
+   {
+-   "ts": "2026-10-05T19:46:37Z",
++   "ts": "2000-01-01T00:00:20Z",
+    "event": "reviewer_dispatched",
+    "pass": "edge-cases",
+    "iteration": 1
+   },
+   {
+-   "ts": "2026-10-05T19:51:48Z",
++   "ts": "2000-01-01T00:00:21Z",
+    "event": "findings_received",
+    "pass": "edge-cases",
+    "iteration": 1,
+@@ -199,18 +199,18 @@
+    }
+   },
+   {
+-   "ts": "2026-10-05T19:55:17Z",
++   "ts": "2000-01-01T00:00:22Z",
+    "event": "fixes_applied",
+    "pass": "edge-cases"
+   },
+   {
+-   "ts": "2026-10-05T19:55:55Z",
++   "ts": "2000-01-01T00:00:23Z",
+    "event": "reviewer_dispatched",
+    "pass": "edge-cases",
+    "iteration": 2
+   },
+   {
+-   "ts": "2026-10-05T20:04:11Z",
++   "ts": "2000-01-01T00:00:24Z",
+    "event": "findings_received",
+    "pass": "edge-cases",
+    "iteration": 2,
+@@ -221,19 +221,19 @@
+    }
+   },
+   {
+-   "ts": "2026-10-05T20:04:11Z",
++   "ts": "2000-01-01T00:00:25Z",
+    "event": "fixes_applied",
+    "pass": "edge-cases",
+    "iteration": 2
+   },
+   {
+-   "ts": "2026-10-05T20:47:15Z",
++   "ts": "2000-01-01T00:00:26Z",
+    "event": "reviewer_dispatched",
+    "pass": "edge-cases",
+    "iteration": 3
+   },
+   {
+-   "ts": "2026-10-05T20:51:26Z",
++   "ts": "2000-01-01T00:00:27Z",
+    "event": "findings_received",
+    "pass": "edge-cases",
+    "iteration": 3,
+@@ -244,30 +244,30 @@
+    }
+   },
+   {
+-   "ts": "2026-10-05T20:51:26Z",
++   "ts": "2000-01-01T00:00:28Z",
+    "event": "fixes_applied",
+    "pass": "edge-cases",
+    "iteration": 3
+   },
+   {
+-   "ts": "2026-10-05T20:51:26Z",
++   "ts": "2000-01-01T00:00:29Z",
+    "event": "pass_completed",
+    "pass": "edge-cases",
+    "fix_iterations": 2
+   },
+   {
+-   "ts": "2026-10-05T20:51:26Z",
++   "ts": "2000-01-01T00:00:30Z",
+    "event": "pass_started",
+    "pass": "provenance"
+   },
+   {
+-   "ts": "2026-10-05T20:52:33Z",
++   "ts": "2000-01-01T00:00:31Z",
+    "event": "reviewer_dispatched",
+    "pass": "provenance",
+    "iteration": 1
+   },
+   {
+-   "ts": "2026-10-05T21:17:18Z",
++   "ts": "2000-01-01T00:00:32Z",
+    "event": "findings_received",
+    "pass": "provenance",
+    "iteration": 1,
+@@ -278,18 +278,18 @@
+    }
+   },
+   {
+-   "ts": "2026-10-05T21:17:18Z",
++   "ts": "2000-01-01T00:00:33Z",
+    "event": "fixes_applied",
+    "pass": "provenance"
+   },
+   {
+-   "ts": "2026-10-05T21:18:05Z",
++   "ts": "2000-01-01T00:00:34Z",
+    "event": "reviewer_dispatched",
+    "pass": "provenance",
+    "iteration": 2
+   },
+   {
+-   "ts": "2026-10-05T21:26:27Z",
++   "ts": "2000-01-01T00:00:35Z",
+    "event": "findings_received",
+    "pass": "provenance",
+    "iteration": 2,
+@@ -300,19 +300,19 @@
+    }
+   },
+   {
+-   "ts": "2026-10-05T21:26:27Z",
++   "ts": "2000-01-01T00:00:36Z",
+    "event": "fixes_applied",
+    "pass": "provenance",
+    "iteration": 2
+   },
+   {
+-   "ts": "2026-10-06T19:48:51Z",
++   "ts": "2000-01-01T00:00:37Z",
+    "event": "reviewer_dispatched",
+    "pass": "provenance",
+    "iteration": 3
+   },
+   {
+-   "ts": "2026-10-06T20:01:49Z",
++   "ts": "2000-01-01T00:00:38Z",
+    "event": "findings_received",
+    "pass": "provenance",
+    "iteration": 3,
+@@ -323,25 +323,25 @@
+    }
+   },
+   {
+-   "ts": "2026-10-06T20:01:49Z",
++   "ts": "2000-01-01T00:00:39Z",
+    "event": "fixes_applied",
+    "pass": "provenance",
+    "iteration": 3
+   },
+   {
+-   "ts": "2026-10-06T20:01:49Z",
++   "ts": "2000-01-01T00:00:40Z",
+    "event": "pass_completed",
+    "pass": "provenance",
+    "fix_iterations": 3
+   },
+   {
+-   "ts": "2026-10-06T20:02:35Z",
++   "ts": "2000-01-01T00:00:41Z",
+    "event": "reviewer_dispatched",
+    "pass": "excellence",
+    "iteration": 1
+   },
+   {
+-   "ts": "2026-10-06T20:04:53Z",
++   "ts": "2000-01-01T00:00:42Z",
+    "event": "advisory_pass_completed",
+    "pass": "excellence",
+    "counts": {
+diff --git a/test/fixtures/r5-baseline/r5-state-wo62-4-1-completed.json b/test/fixtures/r5-baseline/r5-state-fx-blocked-dispatch-before-launch-completed.json
+similarity index 71%
+rename from test/fixtures/r5-baseline/r5-state-wo62-4-1-completed.json
+rename to test/fixtures/r5-baseline/r5-state-fx-blocked-dispatch-before-launch-completed.json
+index e4d6ca9..264502c 100644
+--- a/test/fixtures/r5-baseline/r5-state-wo62-4-1-completed.json
++++ b/test/fixtures/r5-baseline/r5-state-fx-blocked-dispatch-before-launch-completed.json
+@@ -1,8 +1,8 @@
+ {
+  "supervisor": "r5-supervise",
+  "version": 2,
+- "target_bead": "opensrm-wo62.4.1",
+- "started_at": "2026-10-27T17:10:04.925906+00:00",
++ "target_bead": "fx-blocked-dispatch-before-launch",
++ "started_at": "2000-01-01T00:00:00Z",
+  "dry_run": false,
+  "passes": [
+   "correctness",
+@@ -42,29 +42,29 @@
+  ],
+  "audit_trail": [
+   {
+-   "ts": "2026-10-27T17:10:04.979910+00:00",
++   "ts": "2000-01-01T00:00:00Z",
+    "event": "pass_started",
+    "pass": "correctness"
+   },
+   {
+-   "ts": "2026-10-27T17:10:18.968444+00:00",
++   "ts": "2000-01-01T00:00:01Z",
+    "event": "reviewer_dispatched",
+    "pass": "correctness",
+    "iteration": 1
+   },
+   {
+-   "ts": "2026-10-27T17:10:30.618830+00:00",
++   "ts": "2000-01-01T00:00:02Z",
+    "event": "supervisor_blocked",
+    "pass": "correctness"
+   },
+   {
+-   "ts": "2026-10-27T17:10:43.138316+00:00",
++   "ts": "2000-01-01T00:00:03Z",
+    "event": "reviewer_dispatched",
+    "pass": "correctness",
+    "iteration": 1
+   },
+   {
+-   "ts": "2026-10-27T17:12:40.953179+00:00",
++   "ts": "2000-01-01T00:00:04Z",
+    "event": "findings_received",
+    "pass": "correctness",
+    "iteration": 1,
+@@ -75,18 +75,18 @@
+    }
+   },
+   {
+-   "ts": "2026-10-27T17:13:31.342347+00:00",
++   "ts": "2000-01-01T00:00:05Z",
+    "event": "fixes_applied",
+    "pass": "correctness"
+   },
+   {
+-   "ts": "2026-10-27T17:13:34.868108+00:00",
++   "ts": "2000-01-01T00:00:06Z",
+    "event": "reviewer_dispatched",
+    "pass": "correctness",
+    "iteration": 2
+   },
+   {
+-   "ts": "2026-10-27T17:15:15.027314+00:00",
++   "ts": "2000-01-01T00:00:07Z",
+    "event": "findings_received",
+    "pass": "correctness",
+    "iteration": 2,
+@@ -97,24 +97,24 @@
+    }
+   },
+   {
+-   "ts": "2026-10-27T17:15:15.056606+00:00",
++   "ts": "2000-01-01T00:00:08Z",
+    "event": "pass_completed",
+    "pass": "correctness",
+    "fix_iterations": 1
+   },
+   {
+-   "ts": "2026-10-27T17:15:15.144881+00:00",
++   "ts": "2000-01-01T00:00:09Z",
+    "event": "pass_started",
+    "pass": "clarity"
+   },
+   {
+-   "ts": "2026-10-27T17:15:18.868418+00:00",
++   "ts": "2000-01-01T00:00:10Z",
+    "event": "reviewer_dispatched",
+    "pass": "clarity",
+    "iteration": 1
+   },
+   {
+-   "ts": "2026-10-27T17:16:08.233747+00:00",
++   "ts": "2000-01-01T00:00:11Z",
+    "event": "findings_received",
+    "pass": "clarity",
+    "iteration": 1,
+@@ -125,18 +125,18 @@
+    }
+   },
+   {
+-   "ts": "2026-10-27T17:16:44.729659+00:00",
++   "ts": "2000-01-01T00:00:12Z",
+    "event": "fixes_applied",
+    "pass": "clarity"
+   },
+   {
+-   "ts": "2026-10-27T17:16:48.410523+00:00",
++   "ts": "2000-01-01T00:00:13Z",
+    "event": "reviewer_dispatched",
+    "pass": "clarity",
+    "iteration": 2
+   },
+   {
+-   "ts": "2026-10-27T17:17:20.473422+00:00",
++   "ts": "2000-01-01T00:00:14Z",
+    "event": "findings_received",
+    "pass": "clarity",
+    "iteration": 2,
+@@ -147,24 +147,24 @@
+    }
+   },
+   {
+-   "ts": "2026-10-27T17:17:20.499127+00:00",
++   "ts": "2000-01-01T00:00:15Z",
+    "event": "pass_completed",
+    "pass": "clarity",
+    "fix_iterations": 1
+   },
+   {
+-   "ts": "2026-10-27T17:17:20.575551+00:00",
++   "ts": "2000-01-01T00:00:16Z",
+    "event": "pass_started",
+    "pass": "edge-cases"
+   },
+   {
+-   "ts": "2026-10-27T17:17:24.256209+00:00",
++   "ts": "2000-01-01T00:00:17Z",
+    "event": "reviewer_dispatched",
+    "pass": "edge-cases",
+    "iteration": 1
+   },
+   {
+-   "ts": "2026-10-27T17:19:37.668919+00:00",
++   "ts": "2000-01-01T00:00:18Z",
+    "event": "findings_received",
+    "pass": "edge-cases",
+    "iteration": 1,
+@@ -175,18 +175,18 @@
+    }
+   },
+   {
+-   "ts": "2026-10-27T17:22:13.637795+00:00",
++   "ts": "2000-01-01T00:00:19Z",
+    "event": "fixes_applied",
+    "pass": "edge-cases"
+   },
+   {
+-   "ts": "2026-10-27T17:22:17.388602+00:00",
++   "ts": "2000-01-01T00:00:20Z",
+    "event": "reviewer_dispatched",
+    "pass": "edge-cases",
+    "iteration": 2
+   },
+   {
+-   "ts": "2026-10-27T17:24:48.914336+00:00",
++   "ts": "2000-01-01T00:00:21Z",
+    "event": "findings_received",
+    "pass": "edge-cases",
+    "iteration": 2,
+@@ -197,24 +197,24 @@
+    }
+   },
+   {
+-   "ts": "2026-10-27T17:24:48.957156+00:00",
++   "ts": "2000-01-01T00:00:22Z",
+    "event": "pass_completed",
+    "pass": "edge-cases",
+    "fix_iterations": 1
+   },
+   {
+-   "ts": "2026-10-27T17:24:49.080178+00:00",
++   "ts": "2000-01-01T00:00:23Z",
+    "event": "pass_started",
+    "pass": "provenance"
+   },
+   {
+-   "ts": "2026-10-27T17:24:52.751575+00:00",
++   "ts": "2000-01-01T00:00:24Z",
+    "event": "reviewer_dispatched",
+    "pass": "provenance",
+    "iteration": 1
+   },
+   {
+-   "ts": "2026-10-27T17:29:16.472956+00:00",
++   "ts": "2000-01-01T00:00:25Z",
+    "event": "findings_received",
+    "pass": "provenance",
+    "iteration": 1,
+@@ -225,18 +225,18 @@
+    }
+   },
+   {
+-   "ts": "2026-10-27T17:30:22.676074+00:00",
++   "ts": "2000-01-01T00:00:26Z",
+    "event": "fixes_applied",
+    "pass": "provenance"
+   },
+   {
+-   "ts": "2026-10-27T17:30:26.675663+00:00",
++   "ts": "2000-01-01T00:00:27Z",
+    "event": "reviewer_dispatched",
+    "pass": "provenance",
+    "iteration": 2
+   },
+   {
+-   "ts": "2026-10-27T17:33:03.004533+00:00",
++   "ts": "2000-01-01T00:00:28Z",
+    "event": "findings_received",
+    "pass": "provenance",
+    "iteration": 2,
+@@ -247,19 +247,19 @@
+    }
+   },
+   {
+-   "ts": "2026-10-27T17:33:44.134167+00:00",
++   "ts": "2000-01-01T00:00:29Z",
+    "event": "fixes_applied",
+    "pass": "provenance",
+    "iteration": 2
+   },
+   {
+-   "ts": "2026-10-27T17:33:50.332130+00:00",
++   "ts": "2000-01-01T00:00:30Z",
+    "event": "reviewer_dispatched",
+    "pass": "provenance",
+    "iteration": 3
+   },
+   {
+-   "ts": "2026-10-27T18:31:19.893102+00:00",
++   "ts": "2000-01-01T00:00:31Z",
+    "event": "findings_received",
+    "pass": "provenance",
+    "iteration": 3,
+@@ -270,36 +270,36 @@
+    }
+   },
+   {
+-   "ts": "2026-10-27T18:31:19.935176+00:00",
++   "ts": "2000-01-01T00:00:32Z",
+    "event": "supervisor_blocked",
+    "pass": "provenance"
+   },
+   {
+-   "ts": "2026-10-27T18:33:32.032716+00:00",
++   "ts": "2000-01-01T00:00:33Z",
+    "event": "fixes_applied",
+    "pass": "provenance",
+    "iteration": 3
+   },
+   {
+-   "ts": "2026-10-27T18:33:36.913449+00:00",
++   "ts": "2000-01-01T00:00:34Z",
+    "event": "reviewer_dispatched",
+    "pass": "provenance",
+    "iteration": 4
+   },
+   {
+-   "ts": "2026-10-27T19:53:53.266943+00:00",
++   "ts": "2000-01-01T00:00:35Z",
+    "event": "findings_received",
+    "pass": "provenance",
+    "iteration": 4
+   },
+   {
+-   "ts": "2026-10-27T19:54:11.635743+00:00",
++   "ts": "2000-01-01T00:00:36Z",
+    "event": "reviewer_dispatched",
+    "pass": "provenance",
+    "iteration": 4
+   },
+   {
+-   "ts": "2026-10-27T19:56:30.382921+00:00",
++   "ts": "2000-01-01T00:00:37Z",
+    "event": "findings_received",
+    "pass": "provenance",
+    "iteration": 4,
+@@ -310,13 +310,13 @@
+    }
+   },
+   {
+-   "ts": "2026-10-27T19:56:30.509634+00:00",
++   "ts": "2000-01-01T00:00:38Z",
+    "event": "pass_completed",
+    "pass": "provenance",
+    "fix_iterations": 4
+   },
+   {
+-   "ts": "2026-10-27T19:57:10.461271+00:00",
++   "ts": "2000-01-01T00:00:39Z",
+    "event": "advisory_pass_completed",
+    "pass": "excellence",
+    "counts": {
+diff --git a/test/fixtures/r5-baseline/r5-state-wo62-1-checkpointA-common-completed.json b/test/fixtures/r5-baseline/r5-state-fx-blocking-only-initial-count-completed.json
+similarity index 78%
+rename from test/fixtures/r5-baseline/r5-state-wo62-1-checkpointA-common-completed.json
+rename to test/fixtures/r5-baseline/r5-state-fx-blocking-only-initial-count-completed.json
+index c095138..a4cc481 100644
+--- a/test/fixtures/r5-baseline/r5-state-wo62-1-checkpointA-common-completed.json
++++ b/test/fixtures/r5-baseline/r5-state-fx-blocking-only-initial-count-completed.json
+@@ -1,8 +1,8 @@
+ {
+  "supervisor": "r5-supervise",
+  "version": 2,
+- "target_bead": "opensrm-wo62.1",
+- "started_at": "2026-10-24T19:39:22Z",
++ "target_bead": "fx-blocking-only-initial-count",
++ "started_at": "2000-01-01T00:00:00Z",
+  "dry_run": false,
+  "passes": [
+   "correctness",
+@@ -42,12 +42,12 @@
+  ],
+  "audit_trail": [
+   {
+-   "ts": "2026-10-24T19:39:22Z",
++   "ts": "2000-01-01T00:00:00Z",
+    "event": "pass_started",
+    "pass": "correctness"
+   },
+   {
+-   "ts": "2026-10-24T19:40:44Z",
++   "ts": "2000-01-01T00:00:01Z",
+    "event": "findings_received",
+    "pass": "correctness",
+    "counts": {
+@@ -57,18 +57,18 @@
+    }
+   },
+   {
+-   "ts": "2026-10-24T19:40:44Z",
++   "ts": "2000-01-01T00:00:02Z",
+    "event": "pass_completed",
+    "pass": "correctness",
+    "fix_iterations": 0
+   },
+   {
+-   "ts": "2026-10-24T19:40:44Z",
++   "ts": "2000-01-01T00:00:03Z",
+    "event": "pass_started",
+    "pass": "clarity"
+   },
+   {
+-   "ts": "2026-10-24T19:41:15Z",
++   "ts": "2000-01-01T00:00:04Z",
+    "event": "findings_received",
+    "pass": "clarity",
+    "counts": {
+@@ -78,23 +78,23 @@
+    }
+   },
+   {
+-   "ts": "2026-10-24T19:41:51Z",
++   "ts": "2000-01-01T00:00:05Z",
+    "event": "fixes_applied",
+    "pass": "clarity"
+   },
+   {
+-   "ts": "2026-10-24T19:41:51Z",
++   "ts": "2000-01-01T00:00:06Z",
+    "event": "pass_completed",
+    "pass": "clarity",
+    "fix_iterations": 0
+   },
+   {
+-   "ts": "2026-10-24T19:41:51Z",
++   "ts": "2000-01-01T00:00:07Z",
+    "event": "pass_started",
+    "pass": "edge-cases"
+   },
+   {
+-   "ts": "2026-10-24T19:43:00Z",
++   "ts": "2000-01-01T00:00:08Z",
+    "event": "findings_received",
+    "pass": "edge-cases",
+    "counts": {
+@@ -104,23 +104,23 @@
+    }
+   },
+   {
+-   "ts": "2026-10-24T19:44:22Z",
++   "ts": "2000-01-01T00:00:09Z",
+    "event": "fixes_applied",
+    "pass": "edge-cases"
+   },
+   {
+-   "ts": "2026-10-24T19:44:22Z",
++   "ts": "2000-01-01T00:00:10Z",
+    "event": "pass_completed",
+    "pass": "edge-cases",
+    "fix_iterations": 0
+   },
+   {
+-   "ts": "2026-10-24T19:44:22Z",
++   "ts": "2000-01-01T00:00:11Z",
+    "event": "pass_started",
+    "pass": "provenance"
+   },
+   {
+-   "ts": "2026-10-24T19:47:12Z",
++   "ts": "2000-01-01T00:00:12Z",
+    "event": "findings_received",
+    "pass": "provenance",
+    "counts": {
+@@ -130,18 +130,18 @@
+    }
+   },
+   {
+-   "ts": "2026-10-24T19:47:52Z",
++   "ts": "2000-01-01T00:00:13Z",
+    "event": "fixes_applied",
+    "pass": "provenance"
+   },
+   {
+-   "ts": "2026-10-24T19:47:52Z",
++   "ts": "2000-01-01T00:00:14Z",
+    "event": "pass_completed",
+    "pass": "provenance",
+    "fix_iterations": 0
+   },
+   {
+-   "ts": "2026-10-24T19:48:24Z",
++   "ts": "2000-01-01T00:00:15Z",
+    "event": "advisory_pass_completed",
+    "pass": "excellence",
+    "counts": {
+diff --git a/test/fixtures/r5-baseline/r5-state-g35i-completed.json b/test/fixtures/r5-baseline/r5-state-fx-combined-pass-completed.json
+similarity index 76%
+rename from test/fixtures/r5-baseline/r5-state-g35i-completed.json
+rename to test/fixtures/r5-baseline/r5-state-fx-combined-pass-completed.json
+index 58caf36..f298827 100644
+--- a/test/fixtures/r5-baseline/r5-state-g35i-completed.json
++++ b/test/fixtures/r5-baseline/r5-state-fx-combined-pass-completed.json
+@@ -1,8 +1,8 @@
+ {
+  "supervisor": "r5-supervise",
+  "version": 2,
+- "target_bead": "opensrm-g35i",
+- "started_at": "2026-10-21T21:01:56+00:00",
++ "target_bead": "fx-combined-pass",
++ "started_at": "2000-01-01T00:00:00Z",
+  "dry_run": false,
+  "passes": [
+   "correctness",
+@@ -42,17 +42,17 @@
+  ],
+  "audit_trail": [
+   {
+-   "ts": "2026-10-21T21:01:56+00:00",
++   "ts": "2000-01-01T00:00:00Z",
+    "event": "pass_started",
+    "pass": "correctness"
+   },
+   {
+-   "ts": "2026-10-21T21:02:39+00:00",
++   "ts": "2000-01-01T00:00:01Z",
+    "event": "reviewer_dispatched",
+    "pass": "correctness"
+   },
+   {
+-   "ts": "2026-10-21T21:03:39+00:00",
++   "ts": "2000-01-01T00:00:02Z",
+    "event": "findings_received",
+    "pass": "correctness",
+    "counts": {
+@@ -62,18 +62,18 @@
+    }
+   },
+   {
+-   "ts": "2026-10-21T21:03:39+00:00",
++   "ts": "2000-01-01T00:00:03Z",
+    "event": "pass_completed",
+    "pass": "correctness",
+    "fix_iterations": 1
+   },
+   {
+-   "ts": "2026-10-21T21:03:39+00:00",
++   "ts": "2000-01-01T00:00:04Z",
+    "event": "pass_started",
+    "pass": "clarity+edge-cases"
+   },
+   {
+-   "ts": "2026-10-21T21:08:57+00:00",
++   "ts": "2000-01-01T00:00:05Z",
+    "event": "findings_received",
+    "pass": "clarity+edge-cases",
+    "counts": {
+@@ -83,32 +83,32 @@
+    }
+   },
+   {
+-   "ts": "2026-10-21T21:08:57+00:00",
++   "ts": "2000-01-01T00:00:06Z",
+    "event": "fixes_applied",
+    "pass": "clarity+edge-cases"
+   },
+   {
+-   "ts": "2026-10-21T21:08:57+00:00",
++   "ts": "2000-01-01T00:00:07Z",
+    "event": "pass_completed",
+    "pass": "clarity"
+   },
+   {
+-   "ts": "2026-10-21T21:08:57+00:00",
++   "ts": "2000-01-01T00:00:08Z",
+    "event": "pass_completed",
+    "pass": "edge-cases"
+   },
+   {
+-   "ts": "2026-10-21T21:08:57+00:00",
++   "ts": "2000-01-01T00:00:09Z",
+    "event": "pass_started",
+    "pass": "provenance"
+   },
+   {
+-   "ts": "2026-10-21T21:09:11+00:00",
++   "ts": "2000-01-01T00:00:10Z",
+    "event": "reviewer_dispatched",
+    "pass": "provenance"
+   },
+   {
+-   "ts": "2026-10-21T21:10:10+00:00",
++   "ts": "2000-01-01T00:00:11Z",
+    "event": "findings_received",
+    "pass": "provenance",
+    "counts": {
+@@ -118,13 +118,13 @@
+    }
+   },
+   {
+-   "ts": "2026-10-21T21:10:10+00:00",
++   "ts": "2000-01-01T00:00:12Z",
+    "event": "pass_completed",
+    "pass": "provenance",
+    "fix_iterations": 0
+   },
+   {
+-   "ts": "2026-10-21T21:10:49+00:00",
++   "ts": "2000-01-01T00:00:13Z",
+    "event": "advisory_pass_completed",
+    "pass": "excellence",
+    "counts": {
+diff --git a/test/fixtures/r5-baseline/r5-state-m7su-dryrun-completed.json b/test/fixtures/r5-baseline/r5-state-fx-dry-run-with-other-bucket-completed.json
+similarity index 79%
+rename from test/fixtures/r5-baseline/r5-state-m7su-dryrun-completed.json
+rename to test/fixtures/r5-baseline/r5-state-fx-dry-run-with-other-bucket-completed.json
+index 803588f..1affe36 100644
+--- a/test/fixtures/r5-baseline/r5-state-m7su-dryrun-completed.json
++++ b/test/fixtures/r5-baseline/r5-state-fx-dry-run-with-other-bucket-completed.json
+@@ -1,8 +1,8 @@
+ {
+  "supervisor": "r5-supervise",
+  "version": 1,
+- "target_bead": "opensrm-m7su",
+- "started_at": "2026-05-31T07:20:58Z",
++ "target_bead": "fx-dry-run-with-other-bucket",
++ "started_at": "2000-01-01T00:00:00Z",
+  "dry_run": true,
+  "passes": [
+   "correctness",
+@@ -39,12 +39,12 @@
+  ],
+  "audit_trail": [
+   {
+-   "ts": "2026-05-31T07:27:14Z",
++   "ts": "2000-01-01T00:00:00Z",
+    "event": "reviewer_dispatched",
+    "pass": "correctness"
+   },
+   {
+-   "ts": "2026-05-31T07:27:14Z",
++   "ts": "2000-01-01T00:00:01Z",
+    "event": "findings_received",
+    "pass": "correctness",
+    "counts": {
+@@ -54,18 +54,18 @@
+    }
+   },
+   {
+-   "ts": "2026-05-31T07:27:14Z",
++   "ts": "2000-01-01T00:00:02Z",
+    "event": "pass_completed",
+    "pass": "correctness",
+    "fix_iterations": 0
+   },
+   {
+-   "ts": "2026-05-31T07:27:14Z",
++   "ts": "2000-01-01T00:00:03Z",
+    "event": "pass_started",
+    "pass": "clarity"
+   },
+   {
+-   "ts": "2026-05-31T07:28:57Z",
++   "ts": "2000-01-01T00:00:04Z",
+    "event": "findings_received",
+    "pass": "clarity",
+    "counts": {
+@@ -75,18 +75,18 @@
+    }
+   },
+   {
+-   "ts": "2026-05-31T07:28:57Z",
++   "ts": "2000-01-01T00:00:05Z",
+    "event": "pass_completed",
+    "pass": "clarity",
+    "fix_iterations": 0
+   },
+   {
+-   "ts": "2026-05-31T07:28:57Z",
++   "ts": "2000-01-01T00:00:06Z",
+    "event": "pass_started",
+    "pass": "edge-cases"
+   },
+   {
+-   "ts": "2026-05-31T07:32:30Z",
++   "ts": "2000-01-01T00:00:07Z",
+    "event": "findings_received",
+    "pass": "edge-cases",
+    "counts": {
+@@ -97,18 +97,18 @@
+    }
+   },
+   {
+-   "ts": "2026-05-31T07:32:30Z",
++   "ts": "2000-01-01T00:00:08Z",
+    "event": "pass_completed",
+    "pass": "edge-cases",
+    "fix_iterations": 0
+   },
+   {
+-   "ts": "2026-05-31T07:32:30Z",
++   "ts": "2000-01-01T00:00:09Z",
+    "event": "pass_started",
+    "pass": "excellence"
+   },
+   {
+-   "ts": "2026-05-31T07:34:35Z",
++   "ts": "2000-01-01T00:00:10Z",
+    "event": "findings_received",
+    "pass": "excellence",
+    "counts": {
+@@ -118,7 +118,7 @@
+    }
+   },
+   {
+-   "ts": "2026-05-31T07:34:35Z",
++   "ts": "2000-01-01T00:00:11Z",
+    "event": "pass_completed",
+    "pass": "excellence",
+    "fix_iterations": 0
+diff --git a/test/fixtures/r5-baseline/r5-state-g32d-checkpointA-completed.json b/test/fixtures/r5-baseline/r5-state-fx-passless-fix-events-completed.json
+similarity index 73%
+rename from test/fixtures/r5-baseline/r5-state-g32d-checkpointA-completed.json
+rename to test/fixtures/r5-baseline/r5-state-fx-passless-fix-events-completed.json
+index 41483fe..5050f2a 100644
+--- a/test/fixtures/r5-baseline/r5-state-g32d-checkpointA-completed.json
++++ b/test/fixtures/r5-baseline/r5-state-fx-passless-fix-events-completed.json
+@@ -1,8 +1,8 @@
+ {
+  "supervisor": "r5-supervise",
+  "version": 2,
+- "target_bead": "opensrm-g32d",
+- "started_at": "2026-10-12T20:14:05+00:00",
++ "target_bead": "fx-passless-fix-events",
++ "started_at": "2000-01-01T00:00:00Z",
+  "dry_run": false,
+  "passes": [
+   "correctness",
+@@ -42,18 +42,18 @@
+  ],
+  "audit_trail": [
+   {
+-   "ts": "2026-10-12T20:14:05+00:00",
++   "ts": "2000-01-01T00:00:00Z",
+    "event": "pass_started",
+    "pass": "correctness"
+   },
+   {
+-   "ts": "2026-10-12T20:14:10+00:00",
++   "ts": "2000-01-01T00:00:01Z",
+    "event": "reviewer_dispatched",
+    "pass": "correctness",
+    "iteration": 1
+   },
+   {
+-   "ts": "2026-10-12T20:22:05+00:00",
++   "ts": "2000-01-01T00:00:02Z",
+    "event": "findings_received",
+    "pass": "correctness",
+    "iteration": 1,
+@@ -64,18 +64,18 @@
+    }
+   },
+   {
+-   "ts": "2026-10-12T20:22:05+00:00",
++   "ts": "2000-01-01T00:00:03Z",
+    "event": "fixes_applied",
+    "pass": "correctness"
+   },
+   {
+-   "ts": "2026-10-12T20:22:09+00:00",
++   "ts": "2000-01-01T00:00:04Z",
+    "event": "reviewer_dispatched",
+    "pass": "correctness",
+    "iteration": 2
+   },
+   {
+-   "ts": "2026-10-12T20:24:22+00:00",
++   "ts": "2000-01-01T00:00:05Z",
+    "event": "findings_received",
+    "pass": "correctness",
+    "iteration": 2,
+@@ -86,13 +86,13 @@
+    }
+   },
+   {
+-   "ts": "2026-10-12T20:24:38+00:00",
++   "ts": "2000-01-01T00:00:06Z",
+    "event": "reviewer_dispatched",
+    "pass": "correctness",
+    "iteration": 3
+   },
+   {
+-   "ts": "2026-10-12T20:25:17+00:00",
++   "ts": "2000-01-01T00:00:07Z",
+    "event": "findings_received",
+    "pass": "correctness",
+    "iteration": 3,
+@@ -103,24 +103,24 @@
+    }
+   },
+   {
+-   "ts": "2026-10-12T20:25:17+00:00",
++   "ts": "2000-01-01T00:00:08Z",
+    "event": "pass_completed",
+    "pass": "correctness",
+    "fix_iterations": 2
+   },
+   {
+-   "ts": "2026-10-12T20:25:17+00:00",
++   "ts": "2000-01-01T00:00:09Z",
+    "event": "pass_started",
+    "pass": "clarity"
+   },
+   {
+-   "ts": "2026-10-12T20:25:21+00:00",
++   "ts": "2000-01-01T00:00:10Z",
+    "event": "reviewer_dispatched",
+    "pass": "clarity",
+    "iteration": 1
+   },
+   {
+-   "ts": "2026-10-12T20:27:03+00:00",
++   "ts": "2000-01-01T00:00:11Z",
+    "event": "findings_received",
+    "pass": "clarity",
+    "iteration": 1,
+@@ -131,23 +131,23 @@
+    }
+   },
+   {
+-   "ts": "2026-10-12T20:27:03+00:00",
++   "ts": "2000-01-01T00:00:12Z",
+    "event": "fix_dispatched",
+    "pass": "clarity"
+   },
+   {
+-   "ts": "2026-10-12T20:31:34+00:00",
++   "ts": "2000-01-01T00:00:13Z",
+    "event": "fixes_applied",
+    "pass": "clarity"
+   },
+   {
+-   "ts": "2026-10-12T20:31:38+00:00",
++   "ts": "2000-01-01T00:00:14Z",
+    "event": "reviewer_dispatched",
+    "pass": "clarity",
+    "iteration": 2
+   },
+   {
+-   "ts": "2026-10-12T20:32:17+00:00",
++   "ts": "2000-01-01T00:00:15Z",
+    "event": "findings_received",
+    "pass": "clarity",
+    "iteration": 2,
+@@ -158,24 +158,24 @@
+    }
+   },
+   {
+-   "ts": "2026-10-12T20:32:17+00:00",
++   "ts": "2000-01-01T00:00:16Z",
+    "event": "pass_completed",
+    "pass": "clarity",
+    "fix_iterations": 1
+   },
+   {
+-   "ts": "2026-10-12T20:32:17+00:00",
++   "ts": "2000-01-01T00:00:17Z",
+    "event": "pass_started",
+    "pass": "edge-cases"
+   },
+   {
+-   "ts": "2026-10-12T20:32:21+00:00",
++   "ts": "2000-01-01T00:00:18Z",
+    "event": "reviewer_dispatched",
+    "pass": "edge-cases",
+    "iteration": 1
+   },
+   {
+-   "ts": "2026-10-12T20:36:09+00:00",
++   "ts": "2000-01-01T00:00:19Z",
+    "event": "findings_received",
+    "pass": "edge-cases",
+    "iteration": 1,
+@@ -186,23 +186,23 @@
+    }
+   },
+   {
+-   "ts": "2026-10-12T20:36:09+00:00",
++   "ts": "2000-01-01T00:00:20Z",
+    "event": "fix_dispatched",
+    "pass": "edge-cases"
+   },
+   {
+-   "ts": "2026-10-12T20:51:45+00:00",
++   "ts": "2000-01-01T00:00:21Z",
+    "event": "fixes_applied",
+    "pass": "edge-cases"
+   },
+   {
+-   "ts": "2026-10-12T20:51:49+00:00",
++   "ts": "2000-01-01T00:00:22Z",
+    "event": "reviewer_dispatched",
+    "pass": "edge-cases",
+    "iteration": 2
+   },
+   {
+-   "ts": "2026-10-12T20:53:37+00:00",
++   "ts": "2000-01-01T00:00:23Z",
+    "event": "findings_received",
+    "pass": "edge-cases",
+    "iteration": 2,
+@@ -213,23 +213,23 @@
+    }
+   },
+   {
+-   "ts": "2026-10-12T20:53:37+00:00",
++   "ts": "2000-01-01T00:00:24Z",
+    "event": "fix_dispatched",
+    "pass": "edge-cases"
+   },
+   {
+-   "ts": "2026-10-12T20:55:05+00:00",
++   "ts": "2000-01-01T00:00:25Z",
+    "event": "fixes_applied",
+    "pass": "edge-cases"
+   },
+   {
+-   "ts": "2026-10-12T20:55:09+00:00",
++   "ts": "2000-01-01T00:00:26Z",
+    "event": "reviewer_dispatched",
+    "pass": "edge-cases",
+    "iteration": 3
+   },
+   {
+-   "ts": "2026-10-12T20:55:40+00:00",
++   "ts": "2000-01-01T00:00:27Z",
+    "event": "findings_received",
+    "pass": "edge-cases",
+    "iteration": 3,
+@@ -240,29 +240,29 @@
+    }
+   },
+   {
+-   "ts": "2026-10-12T20:55:40+00:00",
++   "ts": "2000-01-01T00:00:28Z",
+    "event": "fix_dispatched",
+    "pass": "edge-cases"
+   },
+   {
+-   "ts": "2026-10-12T20:56:15+00:00",
++   "ts": "2000-01-01T00:00:29Z",
+    "event": "pass_completed",
+    "pass": "edge-cases",
+    "fix_iterations": 2
+   },
+   {
+-   "ts": "2026-10-12T20:56:15+00:00",
++   "ts": "2000-01-01T00:00:30Z",
+    "event": "pass_started",
+    "pass": "provenance"
+   },
+   {
+-   "ts": "2026-10-12T20:56:34+00:00",
++   "ts": "2000-01-01T00:00:31Z",
+    "event": "reviewer_dispatched",
+    "pass": "provenance",
+    "iteration": 1
+   },
+   {
+-   "ts": "2026-10-12T21:02:29+00:00",
++   "ts": "2000-01-01T00:00:32Z",
+    "event": "findings_received",
+    "pass": "provenance",
+    "iteration": 1,
+@@ -273,23 +273,23 @@
+    }
+   },
+   {
+-   "ts": "2026-10-12T21:02:29+00:00",
++   "ts": "2000-01-01T00:00:33Z",
+    "event": "fix_dispatched",
+    "pass": "provenance"
+   },
+   {
+-   "ts": "2026-10-12T21:04:26+00:00",
++   "ts": "2000-01-01T00:00:34Z",
+    "event": "fixes_applied",
+    "pass": "provenance"
+   },
+   {
+-   "ts": "2026-10-12T21:04:32+00:00",
++   "ts": "2000-01-01T00:00:35Z",
+    "event": "reviewer_dispatched",
+    "pass": "provenance",
+    "iteration": 2
+   },
+   {
+-   "ts": "2026-10-12T21:05:37+00:00",
++   "ts": "2000-01-01T00:00:36Z",
+    "event": "findings_received",
+    "pass": "provenance",
+    "iteration": 2,
+@@ -300,18 +300,18 @@
+    }
+   },
+   {
+-   "ts": "2026-10-12T21:05:37+00:00",
++   "ts": "2000-01-01T00:00:37Z",
+    "event": "pass_completed",
+    "pass": "provenance",
+    "fix_iterations": 1
+   },
+   {
+-   "ts": "2026-10-12T21:05:42+00:00",
++   "ts": "2000-01-01T00:00:38Z",
+    "event": "reviewer_dispatched",
+    "pass": "excellence"
+   },
+   {
+-   "ts": "2026-10-12T21:06:34+00:00",
++   "ts": "2000-01-01T00:00:39Z",
+    "event": "advisory_pass_completed",
+    "pass": "excellence",
+    "counts": {
+@@ -321,12 +321,12 @@
+    }
+   },
+   {
+-   "ts": "2026-10-12T21:14:54+00:00",
++   "ts": "2000-01-01T00:00:40Z",
+    "event": "reviewer_dispatched",
+    "pass": "scoped(correctness+edge)"
+   },
+   {
+-   "ts": "2026-10-20T13:58:06+00:00",
++   "ts": "2000-01-01T00:00:41Z",
+    "event": "findings_received",
+    "pass": "scoped(correctness+edge)",
+    "counts": {
+@@ -336,20 +336,20 @@
+    }
+   },
+   {
+-   "ts": "2026-10-20T13:58:06+00:00",
++   "ts": "2000-01-01T00:00:42Z",
+    "event": "fix_dispatched"
+   },
+   {
+-   "ts": "2026-10-20T14:04:07+00:00",
++   "ts": "2000-01-01T00:00:43Z",
+    "event": "fixes_applied"
+   },
+   {
+-   "ts": "2026-10-20T14:04:17+00:00",
++   "ts": "2000-01-01T00:00:44Z",
+    "event": "reviewer_dispatched",
+    "pass": "scoped re-check"
+   },
+   {
+-   "ts": "2026-10-20T15:44:53+00:00",
++   "ts": "2000-01-01T00:00:45Z",
+    "event": "findings_received",
+    "pass": "scoped re-check",
+    "counts": {
+diff --git a/test/fixtures/r5-baseline/r5-state-pnmv-checkpointB-completed.json b/test/fixtures/r5-baseline/r5-state-fx-re-run-fixes-only-in-runs-completed.json
+similarity index 74%
+rename from test/fixtures/r5-baseline/r5-state-pnmv-checkpointB-completed.json
+rename to test/fixtures/r5-baseline/r5-state-fx-re-run-fixes-only-in-runs-completed.json
+index eb54811..e00eb44 100644
+--- a/test/fixtures/r5-baseline/r5-state-pnmv-checkpointB-completed.json
++++ b/test/fixtures/r5-baseline/r5-state-fx-re-run-fixes-only-in-runs-completed.json
+@@ -1,8 +1,8 @@
+ {
+  "supervisor": "r5-supervise",
+  "version": 2,
+- "target_bead": "opensrm-pnmv",
+- "started_at": "2026-10-22T15:56:33+00:00",
++ "target_bead": "fx-re-run-fixes-only-in-runs",
++ "started_at": "2000-01-01T00:00:00Z",
+  "dry_run": false,
+  "passes": [
+   "correctness",
+@@ -42,18 +42,18 @@
+  ],
+  "audit_trail": [
+   {
+-   "ts": "2026-10-22T15:56:33+00:00",
++   "ts": "2000-01-01T00:00:00Z",
+    "event": "pass_started",
+    "pass": "correctness"
+   },
+   {
+-   "ts": "2026-10-22T15:56:37+00:00",
++   "ts": "2000-01-01T00:00:01Z",
+    "event": "reviewer_dispatched",
+    "pass": "correctness",
+    "iteration": 1
+   },
+   {
+-   "ts": "2026-10-22T15:59:35+00:00",
++   "ts": "2000-01-01T00:00:02Z",
+    "event": "findings_received",
+    "pass": "correctness",
+    "iteration": 1,
+@@ -64,24 +64,24 @@
+    }
+   },
+   {
+-   "ts": "2026-10-22T15:59:35+00:00",
++   "ts": "2000-01-01T00:00:03Z",
+    "event": "pass_completed",
+    "pass": "correctness",
+    "fix_iterations": 0
+   },
+   {
+-   "ts": "2026-10-22T15:59:35+00:00",
++   "ts": "2000-01-01T00:00:04Z",
+    "event": "pass_started",
+    "pass": "clarity"
+   },
+   {
+-   "ts": "2026-10-22T16:00:36+00:00",
++   "ts": "2000-01-01T00:00:05Z",
+    "event": "reviewer_dispatched",
+    "pass": "clarity",
+    "iteration": 1
+   },
+   {
+-   "ts": "2026-10-22T16:00:36+00:00",
++   "ts": "2000-01-01T00:00:06Z",
+    "event": "findings_received",
+    "pass": "clarity",
+    "iteration": 1,
+@@ -92,23 +92,23 @@
+    }
+   },
+   {
+-   "ts": "2026-10-22T16:00:36+00:00",
++   "ts": "2000-01-01T00:00:07Z",
+    "event": "fix_dispatched",
+    "pass": "clarity"
+   },
+   {
+-   "ts": "2026-10-22T16:03:02+00:00",
++   "ts": "2000-01-01T00:00:08Z",
+    "event": "fixes_applied",
+    "pass": "clarity"
+   },
+   {
+-   "ts": "2026-10-22T16:03:17+00:00",
++   "ts": "2000-01-01T00:00:09Z",
+    "event": "reviewer_dispatched",
+    "pass": "clarity",
+    "iteration": 2
+   },
+   {
+-   "ts": "2026-10-22T16:04:19+00:00",
++   "ts": "2000-01-01T00:00:10Z",
+    "event": "findings_received",
+    "pass": "clarity",
+    "iteration": 2,
+@@ -119,19 +119,19 @@
+    }
+   },
+   {
+-   "ts": "2026-10-22T16:04:19+00:00",
++   "ts": "2000-01-01T00:00:11Z",
+    "event": "fix_dispatched",
+    "pass": "clarity",
+    "iteration": 2
+   },
+   {
+-   "ts": "2026-10-22T16:05:57+00:00",
++   "ts": "2000-01-01T00:00:12Z",
+    "event": "reviewer_dispatched",
+    "pass": "clarity",
+    "iteration": 3
+   },
+   {
+-   "ts": "2026-10-22T16:07:59+00:00",
++   "ts": "2000-01-01T00:00:13Z",
+    "event": "findings_received",
+    "pass": "clarity",
+    "iteration": 3,
+@@ -142,19 +142,19 @@
+    }
+   },
+   {
+-   "ts": "2026-10-22T16:07:59+00:00",
++   "ts": "2000-01-01T00:00:14Z",
+    "event": "fix_dispatched",
+    "pass": "clarity",
+    "iteration": 3
+   },
+   {
+-   "ts": "2026-10-22T16:09:40+00:00",
++   "ts": "2000-01-01T00:00:15Z",
+    "event": "reviewer_dispatched",
+    "pass": "clarity",
+    "iteration": 4
+   },
+   {
+-   "ts": "2026-10-22T16:10:10+00:00",
++   "ts": "2000-01-01T00:00:16Z",
+    "event": "findings_received",
+    "pass": "clarity",
+    "iteration": 4,
+@@ -165,24 +165,24 @@
+    }
+   },
+   {
+-   "ts": "2026-10-22T16:10:10+00:00",
++   "ts": "2000-01-01T00:00:17Z",
+    "event": "pass_completed",
+    "pass": "clarity",
+    "fix_iterations": 3
+   },
+   {
+-   "ts": "2026-10-22T16:10:10+00:00",
++   "ts": "2000-01-01T00:00:18Z",
+    "event": "pass_started",
+    "pass": "edge-cases"
+   },
+   {
+-   "ts": "2026-10-22T16:10:25+00:00",
++   "ts": "2000-01-01T00:00:19Z",
+    "event": "reviewer_dispatched",
+    "pass": "edge-cases",
+    "iteration": 1
+   },
+   {
+-   "ts": "2026-10-22T19:02:14+00:00",
++   "ts": "2000-01-01T00:00:20Z",
+    "event": "findings_received",
+    "pass": "edge-cases",
+    "iteration": 1,
+@@ -193,18 +193,18 @@
+    }
+   },
+   {
+-   "ts": "2026-10-22T19:02:14+00:00",
++   "ts": "2000-01-01T00:00:21Z",
+    "event": "fix_dispatched",
+    "pass": "edge-cases"
+   },
+   {
+-   "ts": "2026-10-22T19:04:08+00:00",
++   "ts": "2000-01-01T00:00:22Z",
+    "event": "reviewer_dispatched",
+    "pass": "edge-cases",
+    "iteration": 2
+   },
+   {
+-   "ts": "2026-10-22T19:04:31+00:00",
++   "ts": "2000-01-01T00:00:23Z",
+    "event": "findings_received",
+    "pass": "edge-cases",
+    "iteration": 2,
+@@ -215,24 +215,24 @@
+    }
+   },
+   {
+-   "ts": "2026-10-22T19:04:31+00:00",
++   "ts": "2000-01-01T00:00:24Z",
+    "event": "pass_completed",
+    "pass": "edge-cases",
+    "fix_iterations": 1
+   },
+   {
+-   "ts": "2026-10-22T19:04:31+00:00",
++   "ts": "2000-01-01T00:00:25Z",
+    "event": "pass_started",
+    "pass": "provenance"
+   },
+   {
+-   "ts": "2026-10-22T19:04:51+00:00",
++   "ts": "2000-01-01T00:00:26Z",
+    "event": "reviewer_dispatched",
+    "pass": "provenance",
+    "iteration": 1
+   },
+   {
+-   "ts": "2026-10-22T20:03:27+00:00",
++   "ts": "2000-01-01T00:00:27Z",
+    "event": "findings_received",
+    "pass": "provenance",
+    "iteration": 1,
+@@ -243,18 +243,18 @@
+    }
+   },
+   {
+-   "ts": "2026-10-22T20:03:50+00:00",
++   "ts": "2000-01-01T00:00:28Z",
+    "event": "fix_dispatched",
+    "pass": "provenance"
+   },
+   {
+-   "ts": "2026-10-22T20:07:59+00:00",
++   "ts": "2000-01-01T00:00:29Z",
+    "event": "reviewer_dispatched",
+    "pass": "provenance",
+    "iteration": 2
+   },
+   {
+-   "ts": "2026-10-22T20:09:47+00:00",
++   "ts": "2000-01-01T00:00:30Z",
+    "event": "findings_received",
+    "pass": "provenance",
+    "iteration": 2,
+@@ -265,18 +265,18 @@
+    }
+   },
+   {
+-   "ts": "2026-10-22T20:09:47+00:00",
++   "ts": "2000-01-01T00:00:31Z",
+    "event": "pass_completed",
+    "pass": "provenance",
+    "fix_iterations": 1
+   },
+   {
+-   "ts": "2026-10-22T20:09:59+00:00",
++   "ts": "2000-01-01T00:00:32Z",
+    "event": "reviewer_dispatched",
+    "pass": "excellence"
+   },
+   {
+-   "ts": "2026-10-22T20:10:36+00:00",
++   "ts": "2000-01-01T00:00:33Z",
+    "event": "advisory_pass_completed",
+    "pass": "excellence",
+    "counts": {
+@@ -286,17 +286,17 @@
+    }
+   },
+   {
+-   "ts": "2026-10-22T20:14:18+00:00",
++   "ts": "2000-01-01T00:00:34Z",
+    "event": "pass_started",
+    "pass": "correctness"
+   },
+   {
+-   "ts": "2026-10-22T20:14:30+00:00",
++   "ts": "2000-01-01T00:00:35Z",
+    "event": "reviewer_dispatched",
+    "pass": "correctness"
+   },
+   {
+-   "ts": "2026-10-22T20:15:11+00:00",
++   "ts": "2000-01-01T00:00:36Z",
+    "event": "findings_received",
+    "pass": "correctness",
+    "counts": {
+@@ -306,23 +306,23 @@
+    }
+   },
+   {
+-   "ts": "2026-10-22T20:15:11+00:00",
++   "ts": "2000-01-01T00:00:37Z",
+    "event": "pass_completed",
+    "pass": "correctness",
+    "fix_iterations": 0
+   },
+   {
+-   "ts": "2026-10-22T20:15:11+00:00",
++   "ts": "2000-01-01T00:00:38Z",
+    "event": "pass_started",
+    "pass": "edge-cases"
+   },
+   {
+-   "ts": "2026-10-22T20:15:23+00:00",
++   "ts": "2000-01-01T00:00:39Z",
+    "event": "reviewer_dispatched",
+    "pass": "edge-cases"
+   },
+   {
+-   "ts": "2026-10-22T20:16:32+00:00",
++   "ts": "2000-01-01T00:00:40Z",
+    "event": "findings_received",
+    "pass": "edge-cases",
+    "counts": {
+@@ -332,23 +332,23 @@
+    }
+   },
+   {
+-   "ts": "2026-10-22T20:16:32+00:00",
++   "ts": "2000-01-01T00:00:41Z",
+    "event": "pass_completed",
+    "pass": "edge-cases",
+    "fix_iterations": 0
+   },
+   {
+-   "ts": "2026-10-22T20:16:32+00:00",
++   "ts": "2000-01-01T00:00:42Z",
+    "event": "pass_started",
+    "pass": "provenance"
+   },
+   {
+-   "ts": "2026-10-22T20:16:48+00:00",
++   "ts": "2000-01-01T00:00:43Z",
+    "event": "reviewer_dispatched",
+    "pass": "provenance"
+   },
+   {
+-   "ts": "2026-10-22T20:20:44+00:00",
++   "ts": "2000-01-01T00:00:44Z",
+    "event": "findings_received",
+    "pass": "provenance",
+    "iteration": 1,
+@@ -359,13 +359,13 @@
+    }
+   },
+   {
+-   "ts": "2026-10-22T20:22:47+00:00",
++   "ts": "2000-01-01T00:00:45Z",
+    "event": "reviewer_dispatched",
+    "pass": "provenance",
+    "iteration": 2
+   },
+   {
+-   "ts": "2026-10-22T20:24:55+00:00",
++   "ts": "2000-01-01T00:00:46Z",
+    "event": "findings_received",
+    "pass": "provenance",
+    "iteration": 2,
+@@ -376,7 +376,7 @@
+    }
+   },
+   {
+-   "ts": "2026-10-22T20:24:55+00:00",
++   "ts": "2000-01-01T00:00:47Z",
+    "event": "pass_completed",
+    "pass": "provenance",
+    "fix_iterations": 1
+diff --git a/test/fixtures/r5-baseline/r5-state-g32d-checkpointB-completed.json b/test/fixtures/r5-baseline/r5-state-fx-re-run-passes-completed.json
+similarity index 72%
+rename from test/fixtures/r5-baseline/r5-state-g32d-checkpointB-completed.json
+rename to test/fixtures/r5-baseline/r5-state-fx-re-run-passes-completed.json
+index c6dc309..880a151 100644
+--- a/test/fixtures/r5-baseline/r5-state-g32d-checkpointB-completed.json
++++ b/test/fixtures/r5-baseline/r5-state-fx-re-run-passes-completed.json
+@@ -1,8 +1,8 @@
+ {
+  "supervisor": "r5-supervise",
+  "version": 2,
+- "target_bead": "opensrm-g32d",
+- "started_at": "2026-10-20T17:45:24+00:00",
++ "target_bead": "fx-re-run-passes",
++ "started_at": "2000-01-01T00:00:00Z",
+  "dry_run": false,
+  "passes": [
+   "correctness",
+@@ -42,18 +42,18 @@
+  ],
+  "audit_trail": [
+   {
+-   "ts": "2026-10-20T17:45:24+00:00",
++   "ts": "2000-01-01T00:00:00Z",
+    "event": "pass_started",
+    "pass": "correctness"
+   },
+   {
+-   "ts": "2026-10-20T17:45:50+00:00",
++   "ts": "2000-01-01T00:00:01Z",
+    "event": "reviewer_dispatched",
+    "pass": "correctness",
+    "iteration": 1
+   },
+   {
+-   "ts": "2026-10-20T17:47:42+00:00",
++   "ts": "2000-01-01T00:00:02Z",
+    "event": "findings_received",
+    "pass": "correctness",
+    "iteration": 1,
+@@ -64,23 +64,23 @@
+    }
+   },
+   {
+-   "ts": "2026-10-20T17:47:42+00:00",
++   "ts": "2000-01-01T00:00:03Z",
+    "event": "fix_dispatched",
+    "pass": "correctness"
+   },
+   {
+-   "ts": "2026-10-20T19:13:50+00:00",
++   "ts": "2000-01-01T00:00:04Z",
+    "event": "fixes_applied",
+    "pass": "correctness"
+   },
+   {
+-   "ts": "2026-10-20T19:14:01+00:00",
++   "ts": "2000-01-01T00:00:05Z",
+    "event": "reviewer_dispatched",
+    "pass": "correctness",
+    "iteration": 2
+   },
+   {
+-   "ts": "2026-10-20T19:14:30+00:00",
++   "ts": "2000-01-01T00:00:06Z",
+    "event": "findings_received",
+    "pass": "correctness",
+    "iteration": 2,
+@@ -91,24 +91,24 @@
+    }
+   },
+   {
+-   "ts": "2026-10-20T19:14:30+00:00",
++   "ts": "2000-01-01T00:00:07Z",
+    "event": "pass_completed",
+    "pass": "correctness",
+    "fix_iterations": 1
+   },
+   {
+-   "ts": "2026-10-20T19:14:30+00:00",
++   "ts": "2000-01-01T00:00:08Z",
+    "event": "pass_started",
+    "pass": "clarity"
+   },
+   {
+-   "ts": "2026-10-20T19:14:33+00:00",
++   "ts": "2000-01-01T00:00:09Z",
+    "event": "reviewer_dispatched",
+    "pass": "clarity",
+    "iteration": 1
+   },
+   {
+-   "ts": "2026-10-20T19:15:21+00:00",
++   "ts": "2000-01-01T00:00:10Z",
+    "event": "findings_received",
+    "pass": "clarity",
+    "iteration": 1,
+@@ -119,23 +119,23 @@
+    }
+   },
+   {
+-   "ts": "2026-10-20T19:15:21+00:00",
++   "ts": "2000-01-01T00:00:11Z",
+    "event": "fix_dispatched",
+    "pass": "clarity"
+   },
+   {
+-   "ts": "2026-10-20T19:16:13+00:00",
++   "ts": "2000-01-01T00:00:12Z",
+    "event": "fixes_applied",
+    "pass": "clarity"
+   },
+   {
+-   "ts": "2026-10-20T19:16:17+00:00",
++   "ts": "2000-01-01T00:00:13Z",
+    "event": "reviewer_dispatched",
+    "pass": "clarity",
+    "iteration": 2
+   },
+   {
+-   "ts": "2026-10-20T19:16:45+00:00",
++   "ts": "2000-01-01T00:00:14Z",
+    "event": "findings_received",
+    "pass": "clarity",
+    "iteration": 2,
+@@ -146,24 +146,24 @@
+    }
+   },
+   {
+-   "ts": "2026-10-20T19:16:45+00:00",
++   "ts": "2000-01-01T00:00:15Z",
+    "event": "pass_completed",
+    "pass": "clarity",
+    "fix_iterations": 1
+   },
+   {
+-   "ts": "2026-10-20T19:16:45+00:00",
++   "ts": "2000-01-01T00:00:16Z",
+    "event": "pass_started",
+    "pass": "edge-cases"
+   },
+   {
+-   "ts": "2026-10-20T19:16:50+00:00",
++   "ts": "2000-01-01T00:00:17Z",
+    "event": "reviewer_dispatched",
+    "pass": "edge-cases",
+    "iteration": 1
+   },
+   {
+-   "ts": "2026-10-20T19:19:24+00:00",
++   "ts": "2000-01-01T00:00:18Z",
+    "event": "findings_received",
+    "pass": "edge-cases",
+    "iteration": 1,
+@@ -174,23 +174,23 @@
+    }
+   },
+   {
+-   "ts": "2026-10-20T19:19:24+00:00",
++   "ts": "2000-01-01T00:00:19Z",
+    "event": "fix_dispatched",
+    "pass": "edge-cases"
+   },
+   {
+-   "ts": "2026-10-20T19:21:10+00:00",
++   "ts": "2000-01-01T00:00:20Z",
+    "event": "fixes_applied",
+    "pass": "edge-cases"
+   },
+   {
+-   "ts": "2026-10-20T19:21:23+00:00",
++   "ts": "2000-01-01T00:00:21Z",
+    "event": "reviewer_dispatched",
+    "pass": "edge-cases",
+    "iteration": 2
+   },
+   {
+-   "ts": "2026-10-20T19:27:13+00:00",
++   "ts": "2000-01-01T00:00:22Z",
+    "event": "findings_received",
+    "pass": "edge-cases",
+    "iteration": 2,
+@@ -201,34 +201,34 @@
+    }
+   },
+   {
+-   "ts": "2026-10-20T19:27:13+00:00",
++   "ts": "2000-01-01T00:00:23Z",
+    "event": "fix_dispatched",
+    "pass": "edge-cases"
+   },
+   {
+-   "ts": "2026-10-20T19:28:00+00:00",
++   "ts": "2000-01-01T00:00:24Z",
+    "event": "fixes_applied",
+    "pass": "edge-cases"
+   },
+   {
+-   "ts": "2026-10-20T19:28:00+00:00",
++   "ts": "2000-01-01T00:00:25Z",
+    "event": "pass_completed",
+    "pass": "edge-cases",
+    "fix_iterations": 2
+   },
+   {
+-   "ts": "2026-10-20T19:28:00+00:00",
++   "ts": "2000-01-01T00:00:26Z",
+    "event": "pass_started",
+    "pass": "provenance"
+   },
+   {
+-   "ts": "2026-10-20T19:28:16+00:00",
++   "ts": "2000-01-01T00:00:27Z",
+    "event": "reviewer_dispatched",
+    "pass": "provenance",
+    "iteration": 1
+   },
+   {
+-   "ts": "2026-10-20T19:31:14+00:00",
++   "ts": "2000-01-01T00:00:28Z",
+    "event": "findings_received",
+    "pass": "provenance",
+    "iteration": 1,
+@@ -239,23 +239,23 @@
+    }
+   },
+   {
+-   "ts": "2026-10-20T19:31:14+00:00",
++   "ts": "2000-01-01T00:00:29Z",
+    "event": "fix_dispatched",
+    "pass": "provenance"
+   },
+   {
+-   "ts": "2026-10-20T19:32:35+00:00",
++   "ts": "2000-01-01T00:00:30Z",
+    "event": "fixes_applied",
+    "pass": "provenance"
+   },
+   {
+-   "ts": "2026-10-20T19:32:48+00:00",
++   "ts": "2000-01-01T00:00:31Z",
+    "event": "reviewer_dispatched",
+    "pass": "provenance",
+    "iteration": 2
+   },
+   {
+-   "ts": "2026-10-20T19:33:54+00:00",
++   "ts": "2000-01-01T00:00:32Z",
+    "event": "findings_received",
+    "pass": "provenance",
+    "iteration": 2,
+@@ -266,18 +266,18 @@
+    }
+   },
+   {
+-   "ts": "2026-10-20T19:33:54+00:00",
++   "ts": "2000-01-01T00:00:33Z",
+    "event": "pass_completed",
+    "pass": "provenance",
+    "fix_iterations": 1
+   },
+   {
+-   "ts": "2026-10-20T19:34:06+00:00",
++   "ts": "2000-01-01T00:00:34Z",
+    "event": "reviewer_dispatched",
+    "pass": "excellence"
+   },
+   {
+-   "ts": "2026-10-20T19:34:45+00:00",
++   "ts": "2000-01-01T00:00:35Z",
+    "event": "advisory_pass_completed",
+    "pass": "excellence",
+    "counts": {
+@@ -287,17 +287,17 @@
+    }
+   },
+   {
+-   "ts": "2026-10-20T20:28:42+00:00",
++   "ts": "2000-01-01T00:00:36Z",
+    "event": "pass_started",
+    "pass": "correctness"
+   },
+   {
+-   "ts": "2026-10-20T20:28:55+00:00",
++   "ts": "2000-01-01T00:00:37Z",
+    "event": "reviewer_dispatched",
+    "pass": "correctness"
+   },
+   {
+-   "ts": "2026-10-20T20:29:38+00:00",
++   "ts": "2000-01-01T00:00:38Z",
+    "event": "findings_received",
+    "pass": "correctness",
+    "counts": {
+@@ -307,23 +307,23 @@
+    }
+   },
+   {
+-   "ts": "2026-10-20T20:29:38+00:00",
++   "ts": "2000-01-01T00:00:39Z",
+    "event": "pass_completed",
+    "pass": "correctness",
+    "fix_iterations": 0
+   },
+   {
+-   "ts": "2026-10-20T20:29:38+00:00",
++   "ts": "2000-01-01T00:00:40Z",
+    "event": "pass_started",
+    "pass": "edge-cases"
+   },
+   {
+-   "ts": "2026-10-20T20:29:47+00:00",
++   "ts": "2000-01-01T00:00:41Z",
+    "event": "reviewer_dispatched",
+    "pass": "edge-cases"
+   },
+   {
+-   "ts": "2026-10-20T20:31:12+00:00",
++   "ts": "2000-01-01T00:00:42Z",
+    "event": "findings_received",
+    "pass": "edge-cases",
+    "counts": {
+@@ -333,28 +333,28 @@
+    }
+   },
+   {
+-   "ts": "2026-10-20T20:31:12+00:00",
++   "ts": "2000-01-01T00:00:43Z",
+    "event": "fix_dispatched",
+    "pass": "edge-cases"
+   },
+   {
+-   "ts": "2026-10-20T20:31:53+00:00",
++   "ts": "2000-01-01T00:00:44Z",
+    "event": "pass_completed",
+    "pass": "edge-cases",
+    "fix_iterations": 1
+   },
+   {
+-   "ts": "2026-10-20T20:31:53+00:00",
++   "ts": "2000-01-01T00:00:45Z",
+    "event": "pass_started",
+    "pass": "provenance"
+   },
+   {
+-   "ts": "2026-10-20T20:32:05+00:00",
++   "ts": "2000-01-01T00:00:46Z",
+    "event": "reviewer_dispatched",
+    "pass": "provenance"
+   },
+   {
+-   "ts": "2026-10-20T20:34:06+00:00",
++   "ts": "2000-01-01T00:00:47Z",
+    "event": "findings_received",
+    "pass": "provenance",
+    "counts": {
+@@ -364,12 +364,12 @@
+    }
+   },
+   {
+-   "ts": "2026-10-20T20:34:06+00:00",
++   "ts": "2000-01-01T00:00:48Z",
+    "event": "fixes_applied",
+    "pass": "provenance"
+   },
+   {
+-   "ts": "2026-10-20T20:34:06+00:00",
++   "ts": "2000-01-01T00:00:49Z",
+    "event": "pass_completed",
+    "pass": "provenance",
+    "fix_iterations": 1
+diff --git a/test/fixtures/r5-baseline/r5-state-bnal-completed.json b/test/fixtures/r5-baseline/r5-state-fx-stall-and-resend-completed.json
+similarity index 79%
+rename from test/fixtures/r5-baseline/r5-state-bnal-completed.json
+rename to test/fixtures/r5-baseline/r5-state-fx-stall-and-resend-completed.json
+index e481a85..20c79f0 100644
+--- a/test/fixtures/r5-baseline/r5-state-bnal-completed.json
++++ b/test/fixtures/r5-baseline/r5-state-fx-stall-and-resend-completed.json
+@@ -1,8 +1,8 @@
+ {
+  "supervisor": "r5-supervise",
+  "version": 2,
+- "target_bead": "opensrm-bnal",
+- "started_at": "2026-09-29T21:02:00Z",
++ "target_bead": "fx-stall-and-resend",
++ "started_at": "2000-01-01T00:00:00Z",
+  "dry_run": false,
+  "passes": [
+   "correctness",
+@@ -42,18 +42,18 @@
+  ],
+  "audit_trail": [
+   {
+-   "ts": "2026-09-29T21:04:00Z",
++   "ts": "2000-01-01T00:00:00Z",
+    "event": "pass_started",
+    "pass": "correctness"
+   },
+   {
+-   "ts": "2026-09-29T21:04:10Z",
++   "ts": "2000-01-01T00:00:01Z",
+    "event": "reviewer_dispatched",
+    "pass": "correctness",
+    "iteration": 1
+   },
+   {
+-   "ts": "2026-09-29T21:10:00Z",
++   "ts": "2000-01-01T00:00:02Z",
+    "event": "findings_received",
+    "pass": "correctness",
+    "iteration": 1,
+@@ -64,24 +64,24 @@
+    }
+   },
+   {
+-   "ts": "2026-09-29T21:16:00Z",
++   "ts": "2000-01-01T00:00:03Z",
+    "event": "fixes_applied",
+    "pass": "correctness"
+   },
+   {
+-   "ts": "2026-09-29T21:19:00Z",
++   "ts": "2000-01-01T00:00:04Z",
+    "event": "reviewer_dispatched",
+    "pass": "correctness",
+    "iteration": 2
+   },
+   {
+-   "ts": "2026-09-30T19:14:00Z",
++   "ts": "2000-01-01T00:00:05Z",
+    "event": "reviewer_dispatched",
+    "pass": "correctness",
+    "iteration": 3
+   },
+   {
+-   "ts": "2026-09-30T19:18:00Z",
++   "ts": "2000-01-01T00:00:06Z",
+    "event": "findings_received",
+    "pass": "correctness",
+    "iteration": 3,
+@@ -92,18 +92,18 @@
+    }
+   },
+   {
+-   "ts": "2026-09-30T19:20:30Z",
++   "ts": "2000-01-01T00:00:07Z",
+    "event": "pass_completed",
+    "pass": "correctness",
+    "fix_iterations": 1
+   },
+   {
+-   "ts": "2026-09-30T19:21:00Z",
++   "ts": "2000-01-01T00:00:08Z",
+    "event": "pass_started",
+    "pass": "clarity"
+   },
+   {
+-   "ts": "2026-09-30T19:26:00Z",
++   "ts": "2000-01-01T00:00:09Z",
+    "event": "findings_received",
+    "pass": "clarity",
+    "iteration": 1,
+@@ -114,23 +114,23 @@
+    }
+   },
+   {
+-   "ts": "2026-09-30T19:32:00Z",
++   "ts": "2000-01-01T00:00:10Z",
+    "event": "fixes_applied",
+    "pass": "clarity"
+   },
+   {
+-   "ts": "2026-09-30T19:35:30Z",
++   "ts": "2000-01-01T00:00:11Z",
+    "event": "pass_completed",
+    "pass": "clarity",
+    "fix_iterations": 1
+   },
+   {
+-   "ts": "2026-09-30T19:36:00Z",
++   "ts": "2000-01-01T00:00:12Z",
+    "event": "pass_started",
+    "pass": "edge-cases"
+   },
+   {
+-   "ts": "2026-09-30T19:44:00Z",
++   "ts": "2000-01-01T00:00:13Z",
+    "event": "findings_received",
+    "pass": "edge-cases",
+    "iteration": 1,
+@@ -141,12 +141,12 @@
+    }
+   },
+   {
+-   "ts": "2026-09-30T19:52:00Z",
++   "ts": "2000-01-01T00:00:14Z",
+    "event": "fixes_applied",
+    "pass": "edge-cases"
+   },
+   {
+-   "ts": "2026-09-30T20:05:00Z",
++   "ts": "2000-01-01T00:00:15Z",
+    "event": "findings_received",
+    "pass": "edge-cases",
+    "iteration": 2,
+@@ -157,7 +157,7 @@
+    }
+   },
+   {
+-   "ts": "2026-09-30T20:14:00Z",
++   "ts": "2000-01-01T00:00:16Z",
+    "event": "findings_received",
+    "pass": "edge-cases",
+    "iteration": 3,
+@@ -168,18 +168,18 @@
+    }
+   },
+   {
+-   "ts": "2026-09-30T20:21:00Z",
++   "ts": "2000-01-01T00:00:17Z",
+    "event": "pass_completed",
+    "pass": "edge-cases",
+    "fix_iterations": 2
+   },
+   {
+-   "ts": "2026-09-30T20:22:00Z",
++   "ts": "2000-01-01T00:00:18Z",
+    "event": "pass_started",
+    "pass": "provenance"
+   },
+   {
+-   "ts": "2026-09-30T20:40:00Z",
++   "ts": "2000-01-01T00:00:19Z",
+    "event": "findings_received",
+    "pass": "provenance",
+    "iteration": 1,
+@@ -190,7 +190,7 @@
+    }
+   },
+   {
+-   "ts": "2026-09-30T21:05:00Z",
++   "ts": "2000-01-01T00:00:20Z",
+    "event": "findings_received",
+    "pass": "provenance",
+    "iteration": 2,
+@@ -201,13 +201,13 @@
+    }
+   },
+   {
+-   "ts": "2026-09-30T21:11:30Z",
++   "ts": "2000-01-01T00:00:21Z",
+    "event": "pass_completed",
+    "pass": "provenance",
+    "fix_iterations": 1
+   },
+   {
+-   "ts": "2026-09-30T21:15:00Z",
++   "ts": "2000-01-01T00:00:22Z",
+    "event": "advisory_pass_completed",
+    "pass": "excellence",
+    "counts": {
+diff --git a/test/fixtures/r5-baseline/r5-state-oh27-completed.json b/test/fixtures/r5-baseline/r5-state-fx-v1-fix-loops-completed.json
+similarity index 78%
+rename from test/fixtures/r5-baseline/r5-state-oh27-completed.json
+rename to test/fixtures/r5-baseline/r5-state-fx-v1-fix-loops-completed.json
+index 1f22cff..7f7048b 100644
+--- a/test/fixtures/r5-baseline/r5-state-oh27-completed.json
++++ b/test/fixtures/r5-baseline/r5-state-fx-v1-fix-loops-completed.json
+@@ -1,8 +1,8 @@
+ {
+  "supervisor": "r5-supervise",
+  "version": 1,
+- "target_bead": "opensrm-oh27",
+- "started_at": "2026-08-28T00:00:00Z",
++ "target_bead": "fx-v1-fix-loops",
++ "started_at": "2000-01-01T00:00:00Z",
+  "dry_run": false,
+  "passes": [
+   "correctness",
+@@ -39,51 +39,51 @@
+  ],
+  "audit_trail": [
+   {
+-   "ts": "2026-08-28T00:01:00Z",
++   "ts": "2000-01-01T00:00:00Z",
+    "event": "pass_started",
+    "pass": "correctness"
+   },
+   {
+-   "ts": "2026-08-28T00:20:00Z",
++   "ts": "2000-01-01T00:00:01Z",
+    "event": "pass_completed",
+    "pass": "correctness",
+    "fix_iterations": 1
+   },
+   {
+-   "ts": "2026-08-28T00:21:00Z",
++   "ts": "2000-01-01T00:00:02Z",
+    "event": "pass_started",
+    "pass": "clarity"
+   },
+   {
+-   "ts": "2026-08-28T00:45:00Z",
++   "ts": "2000-01-01T00:00:03Z",
+    "event": "pass_completed",
+    "pass": "clarity",
+    "fix_iterations": 3
+   },
+   {
+-   "ts": "2026-08-28T00:46:00Z",
++   "ts": "2000-01-01T00:00:04Z",
+    "event": "pass_started",
+    "pass": "edge-cases"
+   },
+   {
+-   "ts": "2026-08-28T01:30:00Z",
++   "ts": "2000-01-01T00:00:05Z",
+    "event": "fixes_applied",
+    "pass": "edge-cases",
+    "iteration": 3
+   },
+   {
+-   "ts": "2026-08-28T02:10:00Z",
++   "ts": "2000-01-01T00:00:06Z",
+    "event": "pass_completed",
+    "pass": "edge-cases",
+    "fix_iterations": 5
+   },
+   {
+-   "ts": "2026-08-28T02:11:00Z",
++   "ts": "2000-01-01T00:00:07Z",
+    "event": "pass_started",
+    "pass": "excellence"
+   },
+   {
+-   "ts": "2026-08-28T02:40:00Z",
++   "ts": "2000-01-01T00:00:08Z",
+    "event": "pass_completed",
+    "pass": "excellence",
+    "fix_iterations": 1
+diff --git a/test/fixtures/r5-baseline/r5-state-1mja-completed.json b/test/fixtures/r5-baseline/r5-state-fx-v1-totals-only-completed.json
+similarity index 82%
+rename from test/fixtures/r5-baseline/r5-state-1mja-completed.json
+rename to test/fixtures/r5-baseline/r5-state-fx-v1-totals-only-completed.json
+index 10320e1..81cd887 100644
+--- a/test/fixtures/r5-baseline/r5-state-1mja-completed.json
++++ b/test/fixtures/r5-baseline/r5-state-fx-v1-totals-only-completed.json
+@@ -1,8 +1,8 @@
+ {
+  "supervisor": "r5-supervise",
+  "version": 1,
+- "target_bead": "opensrm-1mja",
+- "started_at": "2026-05-30T02:00:00Z",
++ "target_bead": "fx-v1-totals-only",
++ "started_at": "2000-01-01T00:00:00Z",
+  "dry_run": false,
+  "passes": [
+   "correctness",
+@@ -39,24 +39,24 @@
+  ],
+  "audit_trail": [
+   {
+-   "ts": "2026-05-30T02:30:00Z",
++   "ts": "2000-01-01T00:00:00Z",
+    "event": "pass_completed",
+    "pass": "correctness",
+    "fix_iterations": 1
+   },
+   {
+-   "ts": "2026-05-30T02:45:00Z",
++   "ts": "2000-01-01T00:00:01Z",
+    "event": "pass_completed",
+    "pass": "clarity"
+   },
+   {
+-   "ts": "2026-05-30T03:05:00Z",
++   "ts": "2000-01-01T00:00:02Z",
+    "event": "pass_completed",
+    "pass": "edge-cases",
+    "fix_iterations": 1
+   },
+   {
+-   "ts": "2026-05-30T03:15:00Z",
++   "ts": "2000-01-01T00:00:03Z",
+    "event": "pass_completed",
+    "pass": "excellence"
+   }
+diff --git a/test/fixtures/r5-baseline/r5-state-3ntg-completed.json b/test/fixtures/r5-baseline/r5-state-fx-v2-per-review-severities-completed.json
+similarity index 78%
+rename from test/fixtures/r5-baseline/r5-state-3ntg-completed.json
+rename to test/fixtures/r5-baseline/r5-state-fx-v2-per-review-severities-completed.json
+index 8fa1cac..ded166f 100644
+--- a/test/fixtures/r5-baseline/r5-state-3ntg-completed.json
++++ b/test/fixtures/r5-baseline/r5-state-fx-v2-per-review-severities-completed.json
+@@ -1,8 +1,8 @@
+ {
+  "supervisor": "r5-supervise",
+  "version": 2,
+- "target_bead": "opensrm-3ntg",
+- "started_at": "2026-10-23T20:06:45Z",
++ "target_bead": "fx-v2-per-review-severities",
++ "started_at": "2000-01-01T00:00:00Z",
+  "dry_run": false,
+  "passes": [
+   "correctness",
+@@ -42,12 +42,12 @@
+  ],
+  "audit_trail": [
+   {
+-   "ts": "2026-10-23T20:06:45Z",
++   "ts": "2000-01-01T00:00:00Z",
+    "event": "pass_started",
+    "pass": "correctness"
+   },
+   {
+-   "ts": "2026-10-23T20:09:35Z",
++   "ts": "2000-01-01T00:00:01Z",
+    "event": "findings_received",
+    "pass": "correctness",
+    "counts": {
+@@ -57,12 +57,12 @@
+    }
+   },
+   {
+-   "ts": "2026-10-23T20:15:21Z",
++   "ts": "2000-01-01T00:00:02Z",
+    "event": "fixes_applied",
+    "pass": "correctness"
+   },
+   {
+-   "ts": "2026-10-23T20:16:20Z",
++   "ts": "2000-01-01T00:00:03Z",
+    "event": "findings_received",
+    "pass": "correctness",
+    "iteration": 2,
+@@ -73,13 +73,13 @@
+    }
+   },
+   {
+-   "ts": "2026-10-23T20:20:38Z",
++   "ts": "2000-01-01T00:00:04Z",
+    "event": "fixes_applied",
+    "pass": "correctness",
+    "iteration": 2
+   },
+   {
+-   "ts": "2026-10-23T20:21:13Z",
++   "ts": "2000-01-01T00:00:05Z",
+    "event": "findings_received",
+    "pass": "correctness",
+    "iteration": 3,
+@@ -90,18 +90,18 @@
+    }
+   },
+   {
+-   "ts": "2026-10-23T20:21:13Z",
++   "ts": "2000-01-01T00:00:06Z",
+    "event": "pass_completed",
+    "pass": "correctness",
+    "fix_iterations": 2
+   },
+   {
+-   "ts": "2026-10-23T20:21:13Z",
++   "ts": "2000-01-01T00:00:07Z",
+    "event": "pass_started",
+    "pass": "clarity"
+   },
+   {
+-   "ts": "2026-10-23T20:22:00Z",
++   "ts": "2000-01-01T00:00:08Z",
+    "event": "findings_received",
+    "pass": "clarity",
+    "counts": {
+@@ -111,12 +111,12 @@
+    }
+   },
+   {
+-   "ts": "2026-10-23T20:27:40Z",
++   "ts": "2000-01-01T00:00:09Z",
+    "event": "fixes_applied",
+    "pass": "clarity"
+   },
+   {
+-   "ts": "2026-10-23T20:28:08Z",
++   "ts": "2000-01-01T00:00:10Z",
+    "event": "findings_received",
+    "pass": "clarity",
+    "iteration": 2,
+@@ -127,18 +127,18 @@
+    }
+   },
+   {
+-   "ts": "2026-10-23T20:28:08Z",
++   "ts": "2000-01-01T00:00:11Z",
+    "event": "pass_completed",
+    "pass": "clarity",
+    "fix_iterations": 1
+   },
+   {
+-   "ts": "2026-10-23T20:28:08Z",
++   "ts": "2000-01-01T00:00:12Z",
+    "event": "pass_started",
+    "pass": "edge-cases"
+   },
+   {
+-   "ts": "2026-10-23T20:32:04Z",
++   "ts": "2000-01-01T00:00:13Z",
+    "event": "findings_received",
+    "pass": "edge-cases",
+    "counts": {
+@@ -148,12 +148,12 @@
+    }
+   },
+   {
+-   "ts": "2026-10-23T20:38:01Z",
++   "ts": "2000-01-01T00:00:14Z",
+    "event": "fixes_applied",
+    "pass": "edge-cases"
+   },
+   {
+-   "ts": "2026-10-23T20:39:44Z",
++   "ts": "2000-01-01T00:00:15Z",
+    "event": "findings_received",
+    "pass": "edge-cases",
+    "iteration": 2,
+@@ -164,18 +164,18 @@
+    }
+   },
+   {
+-   "ts": "2026-10-23T20:39:44Z",
++   "ts": "2000-01-01T00:00:16Z",
+    "event": "pass_completed",
+    "pass": "edge-cases",
+    "fix_iterations": 1
+   },
+   {
+-   "ts": "2026-10-23T20:39:44Z",
++   "ts": "2000-01-01T00:00:17Z",
+    "event": "pass_started",
+    "pass": "provenance"
+   },
+   {
+-   "ts": "2026-10-23T20:44:04Z",
++   "ts": "2000-01-01T00:00:18Z",
+    "event": "findings_received",
+    "pass": "provenance",
+    "counts": {
+@@ -185,12 +185,12 @@
+    }
+   },
+   {
+-   "ts": "2026-10-23T20:48:19Z",
++   "ts": "2000-01-01T00:00:19Z",
+    "event": "fixes_applied",
+    "pass": "provenance"
+   },
+   {
+-   "ts": "2026-10-23T20:49:31Z",
++   "ts": "2000-01-01T00:00:20Z",
+    "event": "findings_received",
+    "pass": "provenance",
+    "iteration": 2,
+@@ -201,13 +201,13 @@
+    }
+   },
+   {
+-   "ts": "2026-10-23T20:54:07Z",
++   "ts": "2000-01-01T00:00:21Z",
+    "event": "fixes_applied",
+    "pass": "provenance",
+    "iteration": 2
+   },
+   {
+-   "ts": "2026-10-23T20:55:17Z",
++   "ts": "2000-01-01T00:00:22Z",
+    "event": "findings_received",
+    "pass": "provenance",
+    "iteration": 3,
+@@ -218,13 +218,13 @@
+    }
+   },
+   {
+-   "ts": "2026-10-23T20:55:17Z",
++   "ts": "2000-01-01T00:00:23Z",
+    "event": "pass_completed",
+    "pass": "provenance",
+    "fix_iterations": 2
+   },
+   {
+-   "ts": "2026-10-23T20:55:50Z",
++   "ts": "2000-01-01T00:00:24Z",
+    "event": "advisory_pass_completed",
+    "pass": "excellence",
+    "counts": {
+diff --git a/test/test_r5_baseline.py b/test/test_r5_baseline.py
+index d00ee3c..339ffc8 100644
+--- a/test/test_r5_baseline.py
++++ b/test/test_r5_baseline.py
+@@ -1,9 +1,10 @@
+ """Tests for scripts/r5_baseline.py (opensrm-6kqs.1, R5-R0).
+ 
+-The fixtures are trimmed real archives (test/fixtures/r5-baseline/README.md),
+-and every expected number below is read off those files by hand: the
+-findings_received counts, findings_count_initial and fix_iterations each one
+-records. None is copied from the script's output.
++The fixtures are synthetic records, one per structural pattern the archives
++show (test/fixtures/r5-baseline/README.md), and every expected number below is
++read off those files by hand: the findings_received counts,
++findings_count_initial and fix_iterations each one records. None is copied
++from the script's output.
+ 
+ Run: uv run --no-project --with pytest pytest -q test/test_r5_baseline.py
+ """
+@@ -25,6 +26,25 @@ r5_baseline = importlib.util.module_from_spec(_spec)
+ _spec.loader.exec_module(r5_baseline)
+ 
+ 
++# The fixtures are synthetic (README.md), so the known-data tables' real keys
++# match none of them. Each test runs with the tables keyed to the synthetic
++# counterparts of the real entries instead: same pattern, invented identity.
++SYNTHETIC_BLOCKED_DISPATCHES = frozenset({
++    ("fx-blocked-dispatch-after-launch", "correctness", "2000-01-01T00:00:03Z"),
++    ("fx-blocked-dispatch-before-launch", "correctness", "2000-01-01T00:00:01Z"),
++})
++SYNTHETIC_PASSLESS_EVENTS = {
++    ("fx-passless-fix-events", "fix_dispatched", "2000-01-01T00:00:42Z"): "scoped(correctness+edge)",
++    ("fx-passless-fix-events", "fixes_applied", "2000-01-01T00:00:43Z"): "scoped(correctness+edge)",
++}
++
++
++@pytest.fixture(autouse=True)
++def _synthetic_known_data(monkeypatch):
++    monkeypatch.setattr(r5_baseline, "BLOCKED_DISPATCHES", SYNTHETIC_BLOCKED_DISPATCHES)
++    monkeypatch.setattr(r5_baseline, "PASSLESS_EVENTS", SYNTHETIC_PASSLESS_EVENTS)
++
++
+ def _row(name: str) -> dict:
+     record = json.loads((FIXTURES / f"r5-state-{name}-completed.json").read_text())
+     return r5_baseline.analyse_record(record)
+@@ -34,26 +54,26 @@ def test_fixtures_are_present():
+     # A missing fixture must fail here, not shrink the suite.
+     names = sorted(p.name for p in FIXTURES.glob("r5-state-*-completed.json"))
+     assert names == [
+-        "r5-state-1mja-completed.json",
+-        "r5-state-3ntg-completed.json",
+-        "r5-state-bnal-completed.json",
+-        "r5-state-g32d-checkpointA-completed.json",
+-        "r5-state-g32d-checkpointB-completed.json",
+-        "r5-state-g35i-completed.json",
+-        "r5-state-ir5m-completed.json",
+-        "r5-state-m7su-dryrun-completed.json",
+-        "r5-state-oh27-completed.json",
+-        "r5-state-pnmv-checkpointB-completed.json",
+-        "r5-state-tu04.1.2.2-completed.json",
+-        "r5-state-wo62-1-checkpointA-common-completed.json",
+-        "r5-state-wo62-4-1-completed.json",
++        "r5-state-fx-abandoned-unreviewed-completed.json",
++        "r5-state-fx-blocked-dispatch-after-launch-completed.json",
++        "r5-state-fx-blocked-dispatch-before-launch-completed.json",
++        "r5-state-fx-blocking-only-initial-count-completed.json",
++        "r5-state-fx-combined-pass-completed.json",
++        "r5-state-fx-dry-run-with-other-bucket-completed.json",
++        "r5-state-fx-passless-fix-events-completed.json",
++        "r5-state-fx-re-run-fixes-only-in-runs-completed.json",
++        "r5-state-fx-re-run-passes-completed.json",
++        "r5-state-fx-stall-and-resend-completed.json",
++        "r5-state-fx-v1-fix-loops-completed.json",
++        "r5-state-fx-v1-totals-only-completed.json",
++        "r5-state-fx-v2-per-review-severities-completed.json",
+     ]
+ 
+ 
+ def test_severities_per_review_come_from_findings_received():
+-    # 3ntg correctness logged three reviews: 0/1/3, then 0/1/0, then 0/0/1,
++    # v2-per-review-severities correctness logged three reviews: 0/1/3, then 0/1/0, then 0/0/1,
+     # with fix_iterations 2.
+-    lens = _row("3ntg")["lenses"]["correctness"]
++    lens = _row("fx-v2-per-review-severities")["lenses"]["correctness"]
+     assert lens["findings_by_review"] == [
+         {"critical": 0, "important": 1, "minor": 3, "other": 0},
+         {"critical": 0, "important": 1, "minor": 0, "other": 0},
+@@ -65,13 +85,13 @@ def test_severities_per_review_come_from_findings_received():
+ 
+ 
+ def test_advisory_excellence_is_one_review_from_advisory_pass_completed():
+-    lens = _row("3ntg")["lenses"]["excellence"]
++    lens = _row("fx-v2-per-review-severities")["lenses"]["excellence"]
+     assert lens["findings_by_review"] == [{"critical": 0, "important": 0, "minor": 4, "other": 0}]
+     assert (lens["reviews"], lens["fix_rounds"], lens["steps"]) == (1, 0, 1)
+ 
+ 
+ def test_lens_order_and_critical_path_for_a_v2_record():
+-    row = _row("3ntg")
++    row = _row("fx-v2-per-review-severities")
+     assert row["lens_order"] == ["correctness", "clarity", "edge-cases", "provenance", "excellence"]
+     # reviews + fixes: correctness 3+2, clarity 2+1, edge-cases 2+1,
+     # provenance 3+2, excellence 1+0.
+@@ -79,8 +99,8 @@ def test_lens_order_and_critical_path_for_a_v2_record():
+ 
+ 
+ def test_a_totals_only_record_reports_every_finding_unattributed():
+-    # 1mja (v1) has no findings_received: totals 2/5/3/0, fix_iterations 1/0/1/0.
+-    lenses = _row("1mja")["lenses"]
++    # v1-totals-only (v1) has no findings_received: totals 2/5/3/0, fix_iterations 1/0/1/0.
++    lenses = _row("fx-v1-totals-only")["lenses"]
+     assert {k: (v["recorded_initial"], v["unattributed"]) for k, v in lenses.items()} == {
+         "correctness": (2, 2), "clarity": (5, 5), "edge-cases": (3, 3), "excellence": (0, 0),
+     }
+@@ -93,23 +113,23 @@ def test_a_totals_only_record_reports_every_finding_unattributed():
+ 
+ 
+ def test_without_events_reviews_are_fix_iterations_plus_one():
+-    # oh27: fix_iterations 1/3/5/1, so reviews 2/4/6/2 and steps 3+7+11+3.
+-    row = _row("oh27")
++    # v1-fix-loops: fix_iterations 1/3/5/1, so reviews 2/4/6/2 and steps 3+7+11+3.
++    row = _row("fx-v1-fix-loops")
+     assert [row["lenses"][k]["reviews"] for k in row["lens_order"]] == [2, 4, 6, 2]
+     assert row["sequential_steps"] == 24
+ 
+ 
+ def test_a_count_key_outside_the_three_severities_goes_to_other():
+-    # m7su's first edge-cases review logged missing_tests: 5.
+-    first = _row("m7su-dryrun")["lenses"]["edge-cases"]["findings_by_review"][0]
++    # dry-run-with-other-bucket's first edge-cases review logged missing_tests: 5.
++    first = _row("fx-dry-run-with-other-bucket")["lenses"]["edge-cases"]["findings_by_review"][0]
+     assert first["other"] == 5
+ 
+ 
+ def test_dry_runs_are_excluded_from_the_totals():
+     rows = [r5_baseline.analyse_record(json.loads(p.read_text())) for p in sorted(FIXTURES.glob("*.json"))]
+     counted = r5_baseline.baseline_rows(rows)
+-    assert "opensrm-m7su" not in {r["bead"] for r in counted}
+-    # Excluded: the m7su dry run and tu04.1.2.2, abandoned with nothing reviewed.
++    assert "fx-dry-run-with-other-bucket" not in {r["bead"] for r in counted}
++    # Excluded: the dry-run-with-other-bucket dry run and abandoned-unreviewed, abandoned with nothing reviewed.
+     assert len(counted) == len(rows) - 2
+ 
+ 
+@@ -127,7 +147,7 @@ def test_json_mode_reports_every_record(tmp_path, capsys):
+     assert r5_baseline.main(["--archive-dir", str(FIXTURES), "--json"]) == 0
+     out = json.loads(capsys.readouterr().out)
+     assert len(out["records"]) == 13
+-    assert "opensrm-m7su" not in {r["bead"] for r in r5_baseline.baseline_rows(out["records"])}
++    assert "fx-dry-run-with-other-bucket" not in {r["bead"] for r in r5_baseline.baseline_rows(out["records"])}
+ 
+ 
+ @pytest.mark.parametrize("make", ["missing", "empty"])
+@@ -139,40 +159,40 @@ def test_no_records_is_a_usage_error(tmp_path, make):
+ 
+ 
+ def test_a_non_archive_file_is_ignored(tmp_path):
+-    shutil.copy(FIXTURES / "r5-state-1mja-completed.json", tmp_path)
++    shutil.copy(FIXTURES / "r5-state-fx-v1-totals-only-completed.json", tmp_path)
+     (tmp_path / "r5-state.json").write_text("{}")  # the live state file, not an archive
+-    assert [n for n, _ in r5_baseline.load_records(tmp_path)] == ["r5-state-1mja-completed.json"]
++    assert [n for n, _ in r5_baseline.load_records(tmp_path)] == ["r5-state-fx-v1-totals-only-completed.json"]
+ 
+ 
+ def test_fixes_with_no_re_review_are_counted():
+-    # wo62-1-A: clarity, edge-cases and provenance each logged fixes_applied
++    # blocking-only-initial-count: clarity, edge-cases and provenance each logged fixes_applied
+     # with fix_iterations 0. Reviews 1 each; fixes 0/1/1/1; excellence 1.
+-    row = _row("wo62-1-checkpointA-common")
++    row = _row("fx-blocking-only-initial-count")
+     assert [row["lenses"][k]["fix_rounds"] for k in ("correctness", "clarity", "edge-cases", "provenance")] == [0, 1, 1, 1]
+     assert row["sequential_steps"] == 8
+ 
+ 
+ def test_a_re_run_pass_counts_every_run():
+-    # g32d-B re-ran correctness, edge-cases and provenance. edge-cases: three
++    # re-run-passes re-ran correctness, edge-cases and provenance. edge-cases: three
+     # reviews (2 + 1), three fix_dispatched, runs' fix_iterations 2 + 1.
+-    lenses = _row("g32d-checkpointB")["lenses"]
++    lenses = _row("fx-re-run-passes")["lenses"]
+     assert (lenses["edge-cases"]["reviews"], lenses["edge-cases"]["fix_rounds"]) == (3, 3)
+     assert (lenses["provenance"]["reviews"], lenses["provenance"]["fix_rounds"]) == (3, 2)
+     # correctness 3+1, clarity 2+1, edge-cases 3+3, provenance 3+2, excellence 1+0.
+-    assert _row("g32d-checkpointB")["sequential_steps"] == 19
++    assert _row("fx-re-run-passes")["sequential_steps"] == 19
+ 
+ 
+ def test_a_re_run_shows_in_the_dispatch_sequence():
+-    assert _row("g32d-checkpointB")["dispatch_sequence"] == [
++    assert _row("fx-re-run-passes")["dispatch_sequence"] == [
+         "correctness", "clarity", "edge-cases", "provenance",
+         "correctness", "edge-cases", "provenance",
+     ]
+ 
+ 
+ def test_a_combined_pass_is_counted_once():
+-    # g35i reviewed clarity and edge-cases as one pass, "clarity+edge-cases",
++    # combined-pass reviewed clarity and edge-cases as one pass, "clarity+edge-cases",
+     # yet completed_passes lists both. One review and one fix, counted there.
+-    row = _row("g35i")
++    row = _row("fx-combined-pass")
+     assert row["lens_order"] == ["correctness", "clarity+edge-cases", "provenance", "excellence"]
+     assert (row["lenses"]["clarity+edge-cases"]["reviews"], row["lenses"]["clarity+edge-cases"]["fix_rounds"]) == (1, 1)
+     # correctness 1+1, combined 1+1, provenance 1+0, excellence 1+0.
+@@ -180,21 +200,21 @@ def test_a_combined_pass_is_counted_once():
+ 
+ 
+ def test_lens_order_follows_first_appearance_not_the_roster():
+-    # m7su has no pass_started for correctness, which nonetheless ran first.
+-    assert _row("m7su-dryrun")["lens_order"][0] == "correctness"
++    # dry-run-with-other-bucket has no pass_started for correctness, which nonetheless ran first.
++    assert _row("fx-dry-run-with-other-bucket")["lens_order"][0] == "correctness"
+ 
+ 
+ def test_first_review_findings_are_never_below_the_logged_severities():
+     # Some passes counted only blocking findings in findings_count_initial:
+-    # wo62-1-A records 0 everywhere but logged MINORs (1/5/3/2).
+-    lenses = _row("wo62-1-checkpointA-common")["lenses"]
++    # blocking-only-initial-count records 0 everywhere but logged MINORs (1/5/3/2).
++    lenses = _row("fx-blocking-only-initial-count")["lenses"]
+     assert [lenses[k]["findings_first_review"] for k in ("correctness", "clarity", "edge-cases", "provenance")] == [1, 5, 3, 2]
+ 
+ 
+ def test_a_re_sent_dispatch_counts_as_a_review():
+-    # bnal correctness: three reviewer_dispatched, two findings_received (a
++    # stall-and-resend correctness: three reviewer_dispatched, two findings_received (a
+     # stalled dispatch was re-sent).
+-    assert _row("bnal")["lenses"]["correctness"]["reviews"] == 3
++    assert _row("fx-stall-and-resend")["lenses"]["correctness"]["reviews"] == 3
+ 
+ 
+ def test_a_pass_started_but_never_reviewed_is_not_a_lens_run():
+@@ -206,13 +226,13 @@ def test_a_pass_started_but_never_reviewed_is_not_a_lens_run():
+ # The two archived dispatches the hook blocked before any reviewer ran
+ # (BLOCKED_DISPATCHES). Hand counts from each record's events, per lens
+ # reviews + fix rounds:
+-#   ir5m      correctness 2+1 (3 dispatched, 1 blocked), clarity 4+2 (a real
++#   blocked-dispatch-after-launch      correctness 2+1 (3 dispatched, 1 blocked), clarity 4+2 (a real
+ #             stall re-sent), edge-cases 3+3, provenance 3+3, excellence 1.
+-#   wo62-4-1  correctness 2+1 (3 dispatched, 1 blocked), clarity 2+1,
++#   blocked-dispatch-before-launch  correctness 2+1 (3 dispatched, 1 blocked), clarity 2+1,
+ #             edge-cases 2+1, provenance 5+4, excellence 1.
+ @pytest.mark.parametrize(("name", "steps", "correctness_reviews"), [
+-    ("ir5m", 22, 2),
+-    ("wo62-4-1", 19, 2),
++    ("fx-blocked-dispatch-after-launch", 22, 2),
++    ("fx-blocked-dispatch-before-launch", 19, 2),
+ ])
+ def test_a_dispatch_the_hook_blocked_is_not_a_model_step(name, steps, correctness_reviews):
+     row = _row(name)
+@@ -220,26 +240,15 @@ def test_a_dispatch_the_hook_blocked_is_not_a_model_step(name, steps, correctnes
+     assert row["sequential_steps"] == steps
+ 
+ 
+-def test_the_blocked_dispatch_table_names_events_that_exist():
+-    # An entry that matches no archived event would silently exclude nothing.
+-    fixtures = {
+-        (rec["target_bead"], e.get("pass"), e.get("ts"))
+-        for p in FIXTURES.glob("*.json")
+-        for rec in [json.loads(p.read_text())]
+-        for e in rec["audit_trail"] if e.get("event") == "reviewer_dispatched"
+-    }
+-    assert fixtures >= r5_baseline.BLOCKED_DISPATCHES
+-
+-
+ def test_a_gate_with_no_lens_reviewed_is_not_counted():
+-    # tu04.1.2.2 was abandoned after pass_started (status in_progress).
+-    row = _row("tu04.1.2.2")
++    # abandoned-unreviewed was abandoned after pass_started (status in_progress).
++    row = _row("fx-abandoned-unreviewed")
+     assert row["lenses"] == {} and row["sequential_steps"] == 0
+     assert row not in r5_baseline.baseline_rows([row])
+ 
+ 
+ def test_only_excluded_records_is_a_usage_error_not_a_crash(tmp_path):
+-    shutil.copy(FIXTURES / "r5-state-m7su-dryrun-completed.json", tmp_path)
++    shutil.copy(FIXTURES / "r5-state-fx-dry-run-with-other-bucket-completed.json", tmp_path)
+     assert r5_baseline.main(["--archive-dir", str(tmp_path)]) == 2
+ 
+ 
+@@ -269,22 +278,12 @@ def test_a_record_it_cannot_count_is_refused(tmp_path, record):
+ 
+ 
+ def test_a_known_passless_fix_is_given_to_its_pass():
+-    # g32d-A logged the scoped(correctness+edge) re-check's fix_dispatched and
++    # passless-fix-events logged the scoped(correctness+edge) re-check's fix_dispatched and
+     # fixes_applied with no pass (PASSLESS_EVENTS): one review, one fix round.
+-    lens = _row("g32d-checkpointA")["lenses"]["scoped(correctness+edge)"]
++    lens = _row("fx-passless-fix-events")["lenses"]["scoped(correctness+edge)"]
+     assert (lens["reviews"], lens["fix_rounds"]) == (1, 1)
+ 
+ 
+-def test_the_passless_table_names_events_that_exist():
+-    events = {
+-        (rec["target_bead"], e.get("event"), e.get("ts"))
+-        for p in FIXTURES.glob("*.json")
+-        for rec in [json.loads(p.read_text())]
+-        for e in rec["audit_trail"] if "pass" not in e
+-    }
+-    assert set(r5_baseline.PASSLESS_EVENTS) <= events
+-
+-
+ def test_a_non_counting_event_without_a_pass_is_ignored():
+     # supervisor_started, commit_made and the like carry no pass in real records.
+     record = {"completed_passes": [], "audit_trail": [{"event": "supervisor_started"}]}
+@@ -300,18 +299,18 @@ def test_an_unreadable_archive_is_refused(tmp_path, content):
+ 
+ 
+ def test_a_re_run_s_fixes_come_from_its_runs_when_events_and_summary_hold_one():
+-    # pnmv-B provenance ran twice, each pass_completed fix_iterations 1, but
++    # re-run-fixes-only-in-runs provenance ran twice, each pass_completed fix_iterations 1, but
+     # logged one fix_dispatched and its summary holds the last run's 1.
+-    lens = _row("pnmv-checkpointB")["lenses"]["provenance"]
++    lens = _row("fx-re-run-fixes-only-in-runs")["lenses"]["provenance"]
+     assert (lens["reviews"], lens["fix_rounds"]) == (4, 2)
+ 
+ 
+ def test_totals_take_the_first_review_s_severities_and_count_re_reviews_apart():
+-    # 3ntg's findings_received, first review then the rest, per lens:
++    # v2-per-review-severities's findings_received, first review then the rest, per lens:
+     #   correctness 0/1/3 then 0/1/0, 0/0/1; clarity 0/2/9 then 0/0/1;
+     #   edge-cases 0/1/6 then 0/0/1; provenance 3/1/1 then 0/1/0, 0/0/1;
+     #   excellence (advisory) 0/0/4.
+-    t = r5_baseline.totals([_row("3ntg")])
++    t = r5_baseline.totals([_row("fx-v2-per-review-severities")])
+     first = {k: (v["critical"], v["important"], v["minor"]) for k, v in t.items()}
+     assert first == {
+         "correctness": (0, 1, 3), "clarity": (0, 2, 9), "edge-cases": (0, 1, 6),
+@@ -323,8 +322,8 @@ def test_totals_take_the_first_review_s_severities_and_count_re_reviews_apart():
+ 
+ 
+ def test_passes_outside_the_roster_fold_into_one_row():
+-    # g35i's combined "clarity+edge-cases" review: first review 0/1/5.
+-    folded = r5_baseline.fold_other_passes(r5_baseline.totals([_row("g35i")]))
++    # combined-pass's combined "clarity+edge-cases" review: first review 0/1/5.
++    folded = r5_baseline.fold_other_passes(r5_baseline.totals([_row("fx-combined-pass")]))
+     assert "clarity+edge-cases" not in folded
+     other = folded["other passes"]
+     assert (other["critical"], other["important"], other["minor"], other["records"]) == (0, 1, 5, 1)
+@@ -333,14 +332,14 @@ def test_passes_outside_the_roster_fold_into_one_row():
+ def test_step_stats_use_a_true_median():
+     # The eight gates whose steps are hand-counted above: 17, 8, 24, 6, 19, 8,
+     # 22, 19. An even count, so the median is the mean of the middle two.
+-    names = ["3ntg", "1mja", "oh27", "g35i", "g32d-checkpointB", "wo62-1-checkpointA-common", "ir5m", "wo62-4-1"]
++    names = ["fx-v2-per-review-severities", "fx-v1-totals-only", "fx-v1-fix-loops", "fx-combined-pass", "fx-re-run-passes", "fx-blocking-only-initial-count", "fx-blocked-dispatch-after-launch", "fx-blocked-dispatch-before-launch"]
+     assert r5_baseline.step_stats([_row(n) for n in names]) == {"total": 123, "median": 18, "max": 24}
+ 
+ 
+ def test_the_published_table_folds_other_passes_and_follows_the_roster():
+     # What docs/r5-gate.md publishes, as data. The fixtures' live, reviewed
+-    # gates use the five roster passes plus three one-off names (g35i
+-    # "clarity+edge-cases", g32d-A "scoped(correctness+edge)" and
++    # gates use the five roster passes plus three one-off names (combined-pass
++    # "clarity+edge-cases", passless-fix-events "scoped(correctness+edge)" and
+     # "scoped re-check"), which the table must show as one "other passes" row.
+     r = r5_baseline.report([_row(p.name.removeprefix("r5-state-").removesuffix("-completed.json"))
+                             for p in sorted(FIXTURES.glob("*.json"))])
+@@ -348,7 +347,7 @@ def test_the_published_table_folds_other_passes_and_follows_the_roster():
+         "correctness", "clarity", "edge-cases", "provenance", "excellence", "other passes",
+     ]
+     assert (r["excluded_dry_runs"], r["excluded_unreviewed"]) == (1, 1)
+-    # 13 fixtures less the m7su dry run and tu04.1.2.2 (nothing reviewed); all
++    # 13 fixtures less the dry-run-with-other-bucket dry run and abandoned-unreviewed (nothing reviewed); all
+     # 11 have a reviewed correctness pass. With the exclusions skipped, either
+     # number would rise.
+     assert r["records"] == 11
+@@ -356,15 +355,15 @@ def test_the_published_table_folds_other_passes_and_follows_the_roster():
+     # Every row has a cell per column, or every later value shifts left.
+     assert all(len(row) == len(r5_baseline.TABLE_COLUMNS) for row in r["table"])
+     # The three one-off passes, by hand from the fixtures' events:
+-    #   g35i clarity+edge-cases     1 review, 0/1/5, 1 fix (fixes_applied)
+-    #   g32d-A scoped(correctness+edge)  1 review, 0/3/7, 1 fix (PASSLESS_EVENTS)
+-    #   g32d-A scoped re-check      1 review, 0/0/1, no fix
++    #   combined-pass clarity+edge-cases     1 review, 0/1/5, 1 fix (fixes_applied)
++    #   passless-fix-events scoped(correctness+edge)  1 review, 0/3/7, 1 fix (PASSLESS_EVENTS)
++    #   passless-fix-events scoped re-check      1 review, 0/0/1, no fix
+     # No summaries, so findings = severities and nothing is unattributed.
+     assert r["table"][-1] == ["other passes", 3, 17, 0, 4, 13, 0, 0, 0, 3, 5]
+ 
+ 
+ def test_render_markdown_prints_every_report_row():
+-    rows = [_row("3ntg"), _row("g35i")]
++    rows = [_row("fx-v2-per-review-severities"), _row("fx-combined-pass")]
+     markdown = r5_baseline.render_markdown(rows)
+     report = r5_baseline.report(rows)
+     body = [line for line in markdown.splitlines() if line.startswith("| ") and "---" not in line][1:]
+@@ -373,3 +372,15 @@ def test_render_markdown_prints_every_report_row():
+     stats_line = [line for line in markdown.splitlines() if line.startswith("Sequential model steps")]
+     assert len(stats_line) == 1
+     assert all(f"{v:g}" in stats_line[0] for v in report["steps"].values())
++
++
++def test_every_known_data_entry_matches_a_fixture_event():
++    rows = [_row(p.name.removeprefix("r5-state-").removesuffix("-completed.json"))
++            for p in sorted(FIXTURES.glob("*.json"))]
++    assert r5_baseline.unmatched_table_entries(rows) == []
++
++
++def test_an_entry_matching_no_event_is_reported():
++    # A mistyped key would silently exclude nothing; main() warns on it.
++    rows = [_row("fx-v1-totals-only")]
++    assert len(r5_baseline.unmatched_table_entries(rows)) == 4

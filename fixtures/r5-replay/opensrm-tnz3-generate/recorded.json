@@ -1,0 +1,153 @@
+{
+ "schema_version": 1,
+ "entry": "opensrm-tnz3-generate",
+ "fidelity": "recorded",
+ "lens_order": [
+  "correctness",
+  "clarity",
+  "edge-cases",
+  "provenance",
+  "excellence"
+ ],
+ "iterations": {
+  "correctness": 1,
+  "clarity": 2,
+  "edge-cases": 1,
+  "provenance": 2
+ },
+ "rounds": [
+  {
+   "lens": "correctness",
+   "iteration": 1,
+   "recorded_iteration": 1,
+   "counts": {
+    "critical": 0,
+    "important": 0,
+    "minor": 2
+   },
+   "findings": null
+  },
+  {
+   "lens": "clarity",
+   "iteration": 1,
+   "recorded_iteration": 1,
+   "counts": {
+    "critical": 0,
+    "important": 1,
+    "minor": 4
+   },
+   "findings": [
+    {
+     "lens": "clarity",
+     "severity": "IMPORTANT",
+     "path": "pyproject.toml",
+     "start_line": 12,
+     "end_line": 20,
+     "claim": "names 'audit_backlog' among rejected srm/v1 sections, but no test covers it",
+     "evidence": null,
+     "fix": null,
+     "fingerprint": "545e75deac901b28",
+     "verification_level": "asserted",
+     "resolves": null,
+     "regression": false,
+     "status": null,
+     "derived_from": "reviewer_transcript",
+     "extracted_by": "model",
+     "handback_sha256": "65566160bff9c4ef3565d64c9dc73b5fe57f6fbd3e17be7d4e6b7152e940028a",
+     "fix_commit": "79a927ea2ff0db1aaa6cda668c062affe8ed2c2b",
+     "reported_path": "pyproject.toml",
+     "path_in_tree": true
+    }
+   ]
+  },
+  {
+   "lens": "clarity",
+   "iteration": 2,
+   "recorded_iteration": 2,
+   "counts": {
+    "critical": 0,
+    "important": 0,
+    "minor": 2
+   },
+   "findings": null
+  },
+  {
+   "lens": "edge_cases",
+   "iteration": 1,
+   "recorded_iteration": 1,
+   "counts": {
+    "critical": 0,
+    "important": 0,
+    "minor": 5
+   },
+   "findings": null
+  },
+  {
+   "lens": "provenance",
+   "iteration": 1,
+   "recorded_iteration": 1,
+   "counts": {
+    "critical": 0,
+    "important": 2,
+    "minor": 2
+   },
+   "findings": [
+    {
+     "lens": "provenance",
+     "severity": "IMPORTANT",
+     "path": "tests/test_cli_migrate_manifest.py",
+     "start_line": 193,
+     "end_line": 193,
+     "claim": "Calibration `measurement` is never asserted.",
+     "evidence": null,
+     "fix": null,
+     "fingerprint": "3eec5e2e15e35644",
+     "verification_level": "asserted",
+     "resolves": null,
+     "regression": false,
+     "status": null,
+     "derived_from": "reviewer_transcript",
+     "extracted_by": "model",
+     "handback_sha256": "fa9783afac0914b5038a9b31704121a2e71cb08c12acdaf2338db2eaaddadd4f",
+     "fix_commit": "e51a9e8b653ddf2919bd1f7490fec185dd10678b",
+     "reported_path": "tests/test_cli_migrate_manifest.py",
+     "path_in_tree": true
+    },
+    {
+     "lens": "provenance",
+     "severity": "IMPORTANT",
+     "path": null,
+     "start_line": null,
+     "end_line": null,
+     "claim": "The fixture shapes come from the parsers, not the srm/v1 schema.",
+     "evidence": null,
+     "fix": null,
+     "fingerprint": "3b49a9942870a115",
+     "verification_level": "asserted",
+     "resolves": null,
+     "regression": false,
+     "status": null,
+     "derived_from": "reviewer_transcript",
+     "extracted_by": "model",
+     "handback_sha256": "fa9783afac0914b5038a9b31704121a2e71cb08c12acdaf2338db2eaaddadd4f",
+     "fix_commit": "e51a9e8b653ddf2919bd1f7490fec185dd10678b",
+     "reported_path": null,
+     "path_in_tree": false
+    }
+   ]
+  },
+  {
+   "lens": "provenance",
+   "iteration": 2,
+   "recorded_iteration": 2,
+   "counts": {
+    "critical": 0,
+    "important": 0,
+    "minor": 0
+   },
+   "findings": null
+  }
+ ],
+ "cross_repo_findings": [],
+ "escaped": []
+}

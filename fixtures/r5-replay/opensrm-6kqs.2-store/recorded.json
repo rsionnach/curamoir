@@ -1,0 +1,125 @@
+{
+ "schema_version": 1,
+ "entry": "opensrm-6kqs.2-store",
+ "fidelity": "counts_only",
+ "lens_order": [
+  "correctness",
+  "clarity",
+  "edge-cases",
+  "provenance",
+  "excellence"
+ ],
+ "iterations": {
+  "correctness": 4,
+  "clarity": 2,
+  "edge-cases": 4,
+  "provenance": 3
+ },
+ "rounds": [
+  {
+   "lens": "correctness",
+   "iteration": 1,
+   "recorded_iteration": null,
+   "counts": {},
+   "findings": null
+  },
+  {
+   "lens": "correctness",
+   "iteration": 2,
+   "recorded_iteration": null,
+   "counts": {},
+   "findings": null
+  },
+  {
+   "lens": "correctness",
+   "iteration": 3,
+   "recorded_iteration": null,
+   "counts": {},
+   "findings": null
+  },
+  {
+   "lens": "correctness",
+   "iteration": 4,
+   "recorded_iteration": null,
+   "counts": {},
+   "findings": null
+  },
+  {
+   "lens": "clarity",
+   "iteration": 1,
+   "recorded_iteration": null,
+   "counts": {},
+   "findings": null
+  },
+  {
+   "lens": "clarity",
+   "iteration": 2,
+   "recorded_iteration": null,
+   "counts": {},
+   "findings": null
+  },
+  {
+   "lens": "edge_cases",
+   "iteration": 1,
+   "recorded_iteration": null,
+   "counts": {},
+   "findings": null
+  },
+  {
+   "lens": "edge_cases",
+   "iteration": 2,
+   "recorded_iteration": null,
+   "counts": {},
+   "findings": null
+  },
+  {
+   "lens": "edge_cases",
+   "iteration": 3,
+   "recorded_iteration": null,
+   "counts": {},
+   "findings": null
+  },
+  {
+   "lens": "edge_cases",
+   "iteration": 4,
+   "recorded_iteration": null,
+   "counts": {},
+   "findings": null
+  },
+  {
+   "lens": "provenance",
+   "iteration": 1,
+   "recorded_iteration": null,
+   "counts": {
+    "critical": 5,
+    "important": 2,
+    "minor": 1
+   },
+   "findings": null
+  },
+  {
+   "lens": "provenance",
+   "iteration": 2,
+   "recorded_iteration": null,
+   "counts": {
+    "critical": 1,
+    "important": 0,
+    "minor": 3
+   },
+   "findings": null
+  },
+  {
+   "lens": "provenance",
+   "iteration": 3,
+   "recorded_iteration": null,
+   "counts": {
+    "critical": 0,
+    "important": 0,
+    "minor": 0
+   },
+   "findings": null
+  }
+ ],
+ "cross_repo_findings": [],
+ "escaped": []
+}

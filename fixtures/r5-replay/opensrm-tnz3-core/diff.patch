@@ -1,0 +1,508 @@
+diff --git a/docs/api/openapi.json b/docs/api/openapi.json
+index 63a1fb5..a72e498 100644
+--- a/docs/api/openapi.json
++++ b/docs/api/openapi.json
+@@ -2552,7 +2552,7 @@
+       },
+       "Manifest": {
+         "type": "object",
+-        "description": "An OpenSRM v2 service manifest serialised by ``catalogue.manifest_to_dict``. The shape is flat \u2014 there is no nested ``spec`` wrapper \u2014 and ``slos`` / ``dependencies`` are always present (possibly empty).",
++        "description": "An OpenSRM v2 service manifest serialised by ``catalogue.manifest_to_dict``. The shape is flat \u2014 there is no nested ``spec`` wrapper \u2014 and ``slos`` / ``dependencies`` / ``judgment_thresholds`` are always present (possibly empty). ``judgment_thresholds`` holds bounds on judgment error magnitudes (OpenSRM decision 3c); they are not SLOs and never appear under ``slos``.",
+         "required": [
+           "name",
+           "team",
+@@ -2561,7 +2561,8 @@
+           "namespace",
+           "source_format",
+           "slos",
+-          "dependencies"
++          "dependencies",
++          "judgment_thresholds"
+         ],
+         "properties": {
+           "name": {
+@@ -2611,6 +2612,48 @@
+               "type": "object",
+               "additionalProperties": true
+             }
++          },
++          "judgment_thresholds": {
++            "type": "array",
++            "items": {
++              "type": "object",
++              "required": [
++                "type",
++                "bounds",
++                "measurement"
++              ],
++              "properties": {
++                "type": {
++                  "type": "string",
++                  "enum": [
++                    "segments",
++                    "stability",
++                    "calibration",
++                    "audit_backlog",
++                    "feedback_latency"
++                  ]
++                },
++                "bounds": {
++                  "type": "object",
++                  "description": "Bound name to value, as declared: a number for Ratio bounds, a duration string such as ``24h`` for Duration bounds.",
++                  "additionalProperties": {
++                    "oneOf": [
++                      {
++                        "type": "number"
++                      },
++                      {
++                        "type": "string"
++                      }
++                    ]
++                  }
++                },
++                "measurement": {
++                  "type": "object",
++                  "description": "Only the fields set for the threshold's type: calibration bins/window; stability probe {frozen_input_set, frequency}; segments segment_dimension/segment_values; empty for audit_backlog and feedback_latency.",
++                  "additionalProperties": true
++                }
++              }
++            }
+           }
+         },
+         "additionalProperties": true
+diff --git a/pyproject.toml b/pyproject.toml
+index 9ba903a..1d5b498 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -14,7 +14,10 @@ dependencies = [
+     # tests/test_dependency_declarations.py and
+     # tests/smoke/test_resolved_dependencies.py; see CLAUDE.md
+     # hard rule 10 for why both are needed [opensrm-p3bm].
+-    "nthlayer-common>=3.0.0,<4.0.0",
++    # 4.0.0 moved segments/stability/calibration/audit_backlog/feedback_latency
++    # out of manifest.slos into manifest.judgment_thresholds [opensrm-l33e];
++    # catalogue.manifest_to_dict serialises them under judgment_thresholds.
++    "nthlayer-common>=4.0.0,<5.0.0",
+     "starlette>=0.40",
+     "uvicorn>=0.30",
+     "httpx>=0.27",
+@@ -32,6 +35,8 @@ dev = [
+     "pytest-asyncio>=0.23",
+     "httpx>=0.27",
+     "openapi-spec-validator>=0.7",
++    # Imported directly by tests/test_api_manifests.py.
++    "jsonschema>=4.18",
+     "ruff>=0.8",
+ ]
+ 
+diff --git a/src/nthlayer_core/_openapi/paths_other.py b/src/nthlayer_core/_openapi/paths_other.py
+index 98fce14..8cf9306 100644
+--- a/src/nthlayer_core/_openapi/paths_other.py
++++ b/src/nthlayer_core/_openapi/paths_other.py
+@@ -848,8 +848,11 @@ SCHEMAS: dict[str, dict] = {
+         "description": (
+             "An OpenSRM v2 service manifest serialised by "
+             "``catalogue.manifest_to_dict``. The shape is flat — there is "
+-            "no nested ``spec`` wrapper — and ``slos`` / ``dependencies`` "
+-            "are always present (possibly empty)."
++            "no nested ``spec`` wrapper — and ``slos`` / ``dependencies`` / "
++            "``judgment_thresholds`` are always present (possibly empty). "
++            "``judgment_thresholds`` holds bounds on judgment error "
++            "magnitudes (OpenSRM decision 3c); they are not SLOs and never "
++            "appear under ``slos``."
+         ),
+         "required": [
+             "name",
+@@ -860,6 +863,7 @@ SCHEMAS: dict[str, dict] = {
+             "source_format",
+             "slos",
+             "dependencies",
++            "judgment_thresholds",
+         ],
+         "properties": {
+             "name": {"type": "string"},
+@@ -894,6 +898,47 @@ SCHEMAS: dict[str, dict] = {
+                     "additionalProperties": True,
+                 },
+             },
++            "judgment_thresholds": {
++                "type": "array",
++                "items": {
++                    "type": "object",
++                    "required": ["type", "bounds", "measurement"],
++                    "properties": {
++                        "type": {
++                            "type": "string",
++                            "enum": [
++                                "segments",
++                                "stability",
++                                "calibration",
++                                "audit_backlog",
++                                "feedback_latency",
++                            ],
++                        },
++                        "bounds": {
++                            "type": "object",
++                            "description": (
++                                "Bound name to value, as declared: a number "
++                                "for Ratio bounds, a duration string such as "
++                                "``24h`` for Duration bounds."
++                            ),
++                            "additionalProperties": {
++                                "oneOf": [{"type": "number"}, {"type": "string"}]
++                            },
++                        },
++                        "measurement": {
++                            "type": "object",
++                            "description": (
++                                "Only the fields set for the threshold's type: "
++                                "calibration bins/window; stability probe "
++                                "{frozen_input_set, frequency}; segments "
++                                "segment_dimension/segment_values; empty for "
++                                "audit_backlog and feedback_latency."
++                            ),
++                            "additionalProperties": True,
++                        },
++                    },
++                },
++            },
+         },
+         "additionalProperties": True,
+     },
+diff --git a/src/nthlayer_core/catalogue.py b/src/nthlayer_core/catalogue.py
+index b4c8f45..80b4d38 100644
+--- a/src/nthlayer_core/catalogue.py
++++ b/src/nthlayer_core/catalogue.py
+@@ -156,6 +156,31 @@ def manifest_to_dict(m: ReliabilityManifest) -> dict[str, Any]:
+             slo_dict["description"] = slo.description
+         result["slos"].append(slo_dict)
+ 
++    # Judgment thresholds (nthlayer-common 4.0.0, opensrm-l33e): error-magnitude
++    # bounds live beside slos, not in them. Bounds are emitted as parsed (srm/v1 calibration targets
++    # are translated to maximum_expected_calibration_error by nthlayer-common);
++    # measurement carries only the fields that are set.
++    result["judgment_thresholds"] = []
++    for t in m.judgment_thresholds:
++        tm = t.measurement
++        measurement: dict[str, Any] = {}
++        if tm.bins is not None:
++            measurement["bins"] = tm.bins
++        if tm.window:
++            measurement["window"] = tm.window
++        if tm.probe:
++            measurement["probe"] = {
++                "frozen_input_set": tm.probe.frozen_input_set,
++                "frequency": tm.probe.frequency,
++            }
++        if tm.segment_dimension:
++            measurement["segment_dimension"] = tm.segment_dimension
++        if tm.segment_values:
++            measurement["segment_values"] = list(tm.segment_values)
++        result["judgment_thresholds"].append(
++            {"type": t.type, "bounds": dict(t.bounds), "measurement": measurement}
++        )
++
+     # Dependencies
+     result["dependencies"] = [
+         {
+diff --git a/tests/smoke/test_resolved_dependencies.py b/tests/smoke/test_resolved_dependencies.py
+index 077a402..8419498 100644
+--- a/tests/smoke/test_resolved_dependencies.py
++++ b/tests/smoke/test_resolved_dependencies.py
+@@ -43,7 +43,7 @@ FRONT_DOOR = "nthlayer"
+ # fails if a sibling appears in the metadata without an entry here — so adding a
+ # dependency forces someone to state its expected major rather than quietly
+ # leaving it unguarded.
+-EXPECTED_MAJORS = {"nthlayer-common": 3}
++EXPECTED_MAJORS = {"nthlayer-common": 4}
+ 
+ 
+ def _sibling_requirements() -> dict[str, Requirement]:
+diff --git a/tests/test_api_manifests.py b/tests/test_api_manifests.py
+index 7213a07..f527355 100644
+--- a/tests/test_api_manifests.py
++++ b/tests/test_api_manifests.py
+@@ -5,8 +5,11 @@ import time
+ import pytest
+ import yaml
+ from httpx import ASGITransport, AsyncClient
++from jsonschema import Draft202012Validator
++from nthlayer_common.manifest import ManifestLoadError, load_manifest
+ 
+ from nthlayer_core.catalogue import ManifestCatalogue
++from nthlayer_core.openapi_spec import OPENAPI
+ from nthlayer_core.server import app, set_catalogue, set_store
+ from nthlayer_core.store import Store
+ 
+@@ -92,6 +95,181 @@ class TestGetManifests:
+         assert judgment_slos[0]["judgment_type"] == "reversal_rate"
+ 
+ 
++# Shapes follow opensrm/spec/v2/examples/judgment-thresholds/all-five-types.yaml
++# (decision 3c, opensrm-l33e), inlined rather than loaded from the sibling repo.
++_V2_THRESHOLDS = [
++    {"type": "segments", "segment_dimension": "customer_tier",
++     "segment_values": ["enterprise", "smb", "consumer"],
++     "bounds": {"maximum_variance_from_overall": 0.05}},
++    {"type": "stability",
++     "probe": {"frozen_input_set": "s3://probes/credit-decision-2026q1.jsonl",
++               "frequency": "daily"},
++     "bounds": {"maximum_drift": 0.02}},
++    {"type": "calibration", "measurement": {"bins": 10, "window": "30d"},
++     "bounds": {"maximum_brier_score": 0.05}},
++    {"type": "audit_backlog", "bounds": {"maximum_age": "24h"}},
++    {"type": "feedback_latency",
++     "bounds": {"maximum_p50": "1h", "maximum_p90": "24h"}},
++]
++
++
++def _write_v2_spec(specs_dir, name, thresholds=None):
++    spec = {
++        "apiVersion": "opensrm.nthlayer.io/v2",
++        "kind": "ServiceManifest",
++        "metadata": {"name": name, "labels": {"tier": "critical"}},
++        "spec": {
++            "owner": {"group": "group:default/risk"},
++            "service": {"name": name, "type": "ai-gate"},
++        },
++    }
++    if thresholds is not None:
++        spec["spec"]["judgment_threshold"] = thresholds
++    (specs_dir / f"{name}.yaml").write_text(yaml.dump(spec))
++
++
++class TestJudgmentThresholds:
++    async def test_all_five_types_serialised_as_declared(self, client, catalogue, specs_dir):
++        _write_v2_spec(specs_dir, "credit-decision-agent", _V2_THRESHOLDS)
++        catalogue.load()
++        resp = await client.get("/manifests/credit-decision-agent")
++        body = resp.json()
++        by_type = {t["type"]: t for t in body["judgment_thresholds"]}
++        assert list(by_type) == [
++            "segments", "stability", "calibration", "audit_backlog", "feedback_latency"
++        ]
++        assert by_type["segments"] == {
++            "type": "segments",
++            "bounds": {"maximum_variance_from_overall": 0.05},
++            "measurement": {
++                "segment_dimension": "customer_tier",
++                "segment_values": ["enterprise", "smb", "consumer"],
++            },
++        }
++        assert by_type["stability"]["measurement"] == {
++            "probe": {
++                "frozen_input_set": "s3://probes/credit-decision-2026q1.jsonl",
++                "frequency": "daily",
++            }
++        }
++        assert by_type["calibration"]["measurement"] == {"bins": 10, "window": "30d"}
++        assert by_type["calibration"]["bounds"] == {"maximum_brier_score": 0.05}
++        # Duration bounds stay strings as declared; unset measurement is empty.
++        assert by_type["audit_backlog"]["bounds"] == {"maximum_age": "24h"}
++        assert by_type["audit_backlog"]["measurement"] == {}
++        assert by_type["feedback_latency"]["bounds"] == {
++            "maximum_p50": "1h", "maximum_p90": "24h"
++        }
++
++    async def test_thresholds_do_not_appear_under_slos(self, client, catalogue, specs_dir):
++        _write_v2_spec(specs_dir, "credit-decision-agent", _V2_THRESHOLDS)
++        catalogue.load()
++        body = (await client.get("/manifests/credit-decision-agent")).json()
++        slo_types = {s.get("judgment_type") for s in body["slos"]}
++        assert not slo_types & {"segments", "stability", "calibration"}
++
++    async def test_manifest_without_thresholds_has_empty_list(self, client):
++        resp = await client.get("/manifests")
++        assert resp.json()
++        for m in resp.json():
++            assert m["judgment_thresholds"] == []
++
++    async def test_srm_v1_calibration_surfaces_as_threshold(self, client, catalogue, specs_dir):
++        _write_v1_spec(specs_dir, "cal-svc", svc_type="ai-gate",
++                       slos={"calibration": {"target": 0.05, "window": "30d"}})
++        catalogue.load()
++        body = (await client.get("/manifests/cal-svc")).json()
++        # Expected bound and bins: 10 come from nthlayer-common's srm/v1 lift
++        # (nthlayer_common.manifest.thresholds.srm_v1_threshold; docs/upgrading-4.0.md).
++        assert body["judgment_thresholds"] == [{
++            "type": "calibration",
++            "bounds": {"maximum_expected_calibration_error": 0.05},
++            "measurement": {"bins": 10, "window": "30d"},
++        }]
++        assert all(s.get("judgment_type") != "calibration" for s in body["slos"])
++
++
++    async def test_srm_v1_feedback_latency_target_lifts_to_p50_seconds(
++        self, client, catalogue, specs_dir
++    ):
++        _write_v1_spec(specs_dir, "fl-svc", svc_type="ai-gate",
++                       slos={"feedback_latency": {"target": 3600}})
++        catalogue.load()
++        body = (await client.get("/manifests/fl-svc")).json()
++        # Expected bound is nthlayer-common's srm/v1 lift
++        # (nthlayer_common.manifest.thresholds.srm_v1_threshold): a whole-second
++        # target becomes maximum_p50 "<n>s"; measurement is unset.
++        assert body["judgment_thresholds"] == [{
++            "type": "feedback_latency",
++            "bounds": {"maximum_p50": "3600s"},
++            "measurement": {},
++        }]
++
++
++class TestManifestSchemaConformance:
++    async def test_every_served_manifest_validates_against_openapi_manifest(
++        self, client, catalogue, specs_dir
++    ):
++        """The served body must satisfy the schema the spec publishes for it.
++
++        test_openapi.py only proves the dict equals the checked-in JSON, so a
++        wrong schema regenerated consistently passes there. This is the check
++        against real output, with all five threshold types in play.
++        """
++        _write_v2_spec(specs_dir, "credit-decision-agent", _V2_THRESHOLDS)
++        catalogue.load()
++        manifests = (await client.get("/manifests")).json()
++        served = next(m for m in manifests if m["name"] == "credit-decision-agent")
++        assert {t["type"] for t in served["judgment_thresholds"]} == {
++            "segments", "stability", "calibration", "audit_backlog", "feedback_latency"
++        }
++        schema = OPENAPI["components"]["schemas"]["Manifest"]
++        Draft202012Validator.check_schema(schema)
++        validator = Draft202012Validator(schema)
++        assert len(manifests) == 4
++        for m in manifests:
++            errors = [e.message for e in validator.iter_errors(m)]
++            assert not errors, (m["name"], errors)
++
++
++class TestRejectedManifests:
++    async def test_calibration_under_judgment_slo_is_omitted_not_fatal(
++        self, client, catalogue, specs_dir
++    ):
++        # Shape of opensrm/spec/v2/tests/invalid/n22-calibration-as-judgment-slo.yaml
++        # as an inline spec.judgment_slo item.
++        rejected = {
++            "apiVersion": "opensrm.nthlayer.io/v2",
++            "kind": "ServiceManifest",
++            "metadata": {"name": "bad-cal", "labels": {"tier": "critical"}},
++            "spec": {
++                "owner": {"group": "group:default/risk"},
++                "service": {"name": "bad-cal", "type": "ai-gate"},
++                "judgment_slo": [{
++                    "service": "bad-cal",
++                    "judgment_type": "calibration",
++                    "measurement": {"bins": 10, "window": "30d", "method": "brier_score"},
++                    "target": {"maximum_brier_score": 0.05},
++                }],
++            },
++        }
++        rejected_path = specs_dir / "bad-cal.yaml"
++        rejected_path.write_text(yaml.dump(rejected))
++        # Guard against an unrelated failure standing in for the real rejection.
++        with pytest.raises(ManifestLoadError) as excinfo:
++            load_manifest(rejected_path)
++        assert "judgment_threshold" in str(excinfo.value)
++
++        _write_v2_spec(specs_dir, "good-v2", _V2_THRESHOLDS)
++        catalogue.load()
++        resp = await client.get("/manifests")
++        assert resp.status_code == 200
++        names = {m["name"] for m in resp.json()}
++        assert "good-v2" in names
++        assert "bad-cal" not in names
++        assert names >= {"fraud-detect", "payment-api", "checkout-svc"}
++
++
+ class TestGetManifest:
+     async def test_get_existing(self, client):
+         resp = await client.get("/manifests/payment-api")
+diff --git a/tests/test_dependency_declarations.py b/tests/test_dependency_declarations.py
+index 3fbaa6d..64cdae3 100644
+--- a/tests/test_dependency_declarations.py
++++ b/tests/test_dependency_declarations.py
+@@ -234,3 +234,30 @@ def test_bounding_operators_match_packaging_behaviour(spec, bounded):
+ 
+     assert predicate is bounded
+     assert (UNBOUNDED_PROBE in specifier) is not bounded
++
++
++@pytest.mark.parametrize("name", SIBLINGS)
++def test_declared_ceiling_is_exactly_the_next_major(name):
++    """The ceiling must exclude the first release of the NEXT major, and nothing more.
++
++    test_declared_range_has_an_upper_bound only asks that SOME bound exists, so
++    `<6.0.0` while 4.x is under test passes it (measured: suite stays green) and
++    admits all of major 5, which nothing here has run. Mirror image of the floor
++    test: the floor admits nothing below the tested version, this admits nothing
++    above its major. Like the floor, it must be bumped deliberately when the
++    sibling's major advances.
++    """
++    specifier = _siblings()[name].specifier
++    installed = Version(version(name))
++
++    ceilings = [s.version for s in specifier if s.operator == "<"]
++    assert len(ceilings) == 1, (
++        f"'{name}{specifier}' declares {len(ceilings)} '<' bounds; this guard "
++        f"reads exactly one"
++    )
++    expected = Version(f"{installed.major + 1}.0.0")
++    assert Version(ceilings[0]) == expected, (
++        f"{name} ceiling is declared '<{ceilings[0]}' but the installed version "
++        f"is {installed}, so the ceiling must be '<{expected}'. A wider ceiling "
++        f"publishes a major nothing here has run."
++    )
+diff --git a/uv.lock b/uv.lock
+index 4f8ce0e..be730c5 100644
+--- a/uv.lock
++++ b/uv.lock
+@@ -926,7 +926,7 @@ wheels = [
+ 
+ [[package]]
+ name = "nthlayer-common"
+-version = "3.0.0"
++version = "4.0.0"
+ source = { editable = "../nthlayer-common" }
+ dependencies = [
+     { name = "anthropic" },
+@@ -948,14 +948,14 @@ dependencies = [
+ [package.metadata]
+ requires-dist = [
+     { name = "anthropic", specifier = ">=0.40" },
+-    { name = "cachetools", specifier = ">=5.3.0,<7.0.0" },
++    { name = "cachetools", specifier = ">=5.3.0,<8.0.0" },
+     { name = "circuitbreaker", specifier = ">=2.0.0,<3.0.0" },
+     { name = "httpx", specifier = ">=0.27" },
+     { name = "instructor", specifier = ">=1.5" },
+     { name = "jsonschema", marker = "extra == 'dev'", specifier = ">=4.21" },
+     { name = "openai", specifier = ">=1.50" },
+     { name = "opentelemetry-api", specifier = ">=1.28" },
+-    { name = "pagerduty", specifier = ">=6.0.0,<7.0.0" },
++    { name = "pagerduty", specifier = ">=6.0.0,<8.0.0" },
+     { name = "prometheus-client", specifier = ">=0.21" },
+     { name = "pydantic", specifier = ">=2.7.0,<3.0.0" },
+     { name = "pygments", specifier = ">=2.20.0" },
+@@ -970,7 +970,7 @@ provides-extras = ["dev"]
+ 
+ [[package]]
+ name = "nthlayer-core"
+-version = "1.8.1"
++version = "1.8.2"
+ source = { editable = "." }
+ dependencies = [
+     { name = "httpx" },
+@@ -982,6 +982,7 @@ dependencies = [
+ [package.optional-dependencies]
+ dev = [
+     { name = "httpx" },
++    { name = "jsonschema" },
+     { name = "openapi-spec-validator" },
+     { name = "packaging" },
+     { name = "pytest" },
+@@ -993,6 +994,7 @@ dev = [
+ requires-dist = [
+     { name = "httpx", specifier = ">=0.27" },
+     { name = "httpx", marker = "extra == 'dev'", specifier = ">=0.27" },
++    { name = "jsonschema", marker = "extra == 'dev'", specifier = ">=4.18" },
+     { name = "nthlayer-common", editable = "../nthlayer-common" },
+     { name = "openapi-spec-validator", marker = "extra == 'dev'", specifier = ">=0.7" },
+     { name = "packaging", marker = "extra == 'dev'", specifier = ">=22" },

@@ -1,0 +1,11 @@
+PASS 1 (CORRECTNESS) sequential R5 review on bead opensrm-tnz3 (nthlayer-generate part). STRICTLY READ-ONLY: never run git checkout/switch/stash/reset. Scratch only under <claude-tmp>/.
+
+Template: ~/.claude/skills/rule-of-five-review/correctness-reviewer.md.
+
+Scope: `git -C <workspace>/nthlayer-generate diff bf88dc7..571087a`. Do not raise findings outside it.
+Affected repos: nthlayer-generate: base=bf88dc7, head=571087a, path=<workspace>/nthlayer-generate
+
+Requirements (bead scope, agreed with maintainer): generate moves to nthlayer-common >=4.0.0,<5.0.0 WITHOUT migrating its own manifest stack (separate epic opensrm-wo62). Generate uses common's parsers only in cli/migrate_manifest.py (convert_v1_to_v2 + parse_opensrm_v2). Required: (1) pin + WHY comment + relock (lock diff only nthlayer-common + stale self-version); (2) tests: `nthlayer migrate-manifest` on examples/opensrm/ai-gate.reliability.yaml writes v2 with judgment_threshold for calibration (maximum_expected_calibration_error = file's target) and feedback_latency (maximum_p50 = "<target>s"), none under judgment_slo; srm/v1 ai-gate with segments / stability → clean error, exit 1, no output file; (3) generate's local JUDGMENT_SLO_TYPES comment says it's generate's own srm/v1 vocabulary, not common's, pointing to opensrm-wo62.
+Check: the "no break" claim — grep generate's src for every name common 4.0.0 removed/changed (JUDGMENT_SLO_TYPES, judgment_target_percent/ratio, judgment_promise, TARGET_FIELD_IS_CEILING, JudgmentMeasurement used for thresholds) — confirm none used; the migrate tests assert the right values read from the example file (not hardcoded drift); an ai-gate srm/v1 file with a contract promise on calibration, or bound-like keys (p90) — what does migrate-manifest do now (clean error?) — one probe; mypy/ruff claims. You may run `uv run pytest -q tests/test_cli_migrate_manifest.py` and small probes. Do not modify the repo.
+
+Report: CRITICAL / IMPORTANT / MINOR with file:line, under 250 words; verdict PASS / PASS WITH FIXES / FAIL.

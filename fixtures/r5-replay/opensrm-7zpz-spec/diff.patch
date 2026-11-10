@@ -1,0 +1,1110 @@
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index e0cf7ee..7438575 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -8,6 +8,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
+ ## [Unreleased]
+ 
+ ### Changed — BREAKING (v2-draft)
++- **A `segments` threshold names the rate it compares** (opensrm-7zpz).
++  `metric` is now required: `reversal_rate`, `high_confidence_failure`,
++  `outcomes` or `escalation` (the escalation rate), each defined as for the
++  judgment SLO of that name; `audit_sampling` is excluded because it
++  measures sampling, not performance. The
++  rate's parameters come with it: `measurement.window` (population window,
++  default `30d`), `measurement.source` (required for `reversal_rate`),
++  `measurement.confidence_threshold` (required for
++  `high_confidence_failure`) and `outcome_signal` (`source`, `window`;
++  required for `outcomes`). Previously an entry named neither a rate nor a
++  window, so no two implementations had to evaluate it alike.
++
++  ```yaml
++  judgment_threshold:
++    - type: segments
++      metric: reversal_rate
++      measurement: { source: lineage }
++      segment_dimension: customer_tier
++      segment_values: [enterprise, smb, consumer]
++      bounds: { maximum_variance_from_overall: 0.05 }
++  ```
++- **Judgment threshold entries are closed**, as are their `measurement`,
++  `probe` and `outcome_signal` objects (opensrm-7zpz). A key the type does not define is now a
++  validation error; before, a misplaced `window:` or a misspelled
++  `frequncy:` validated and was silently ignored.
+ - **Judgment error magnitudes are no longer SLOs** (decision 3c, opensrm-l33e).
+   `segments`, `stability` and `calibration` leave `judgment_slo`, and
+   `audit_sampling`'s `audit_backlog_maximum_age` leaves its target. All four
+diff --git a/OPENSRM-CORE-v2.md b/OPENSRM-CORE-v2.md
+index b6649d6..e0d620e 100644
+--- a/OPENSRM-CORE-v2.md
++++ b/OPENSRM-CORE-v2.md
+@@ -382,15 +382,28 @@ How these actions are dispatched — which consumer handles which action type, w
+ 
+ ### 5.5 Judgment thresholds
+ 
+-Some measures of decision quality are not SLOs. A segment variance, a drift bound, a calibration error, an audit backlog age and a feedback delay are *error magnitudes*: they have no population of good events, no complement and no error budget. In every standard surveyed they would be monitored metrics with thresholds. OpenSRM declares them under `spec.judgment_threshold`, an inline list on an `ai-gate` ServiceManifest, or a ServiceManifestTemplate it extends. The resolved `judgment_threshold` list is the template's entries followed by the manifest's entries — a manifest cannot remove a threshold its template declares; `overrides.judgment_threshold` may append entries but MUST NOT remove or replace a template's entries — and the ai-gate requirement applies to the resolved manifest. Each entry names a `type` and a closed `bounds` object. Thresholds do not declare `breach_actions` in this version of the spec. A threshold entry MUST NOT carry `service`, `target` or `judgment_type`: the service is the enclosing manifest's, the value is `bounds`, and the discriminator is `type`. `segment_dimension` and each `segment_values` entry MUST be non-empty. A manifest MAY declare several entries of the same `type` (for example `segments` on two dimensions). How an implementation evaluates thresholds is defined in §5.5.6. (Decision 3c, opensrm-l33e.)
++Some measures of decision quality are not SLOs. A segment variance, a drift bound, a calibration error, an audit backlog age and a feedback delay are *error magnitudes*: they have no population of good events, no complement and no error budget. In every standard surveyed they would be monitored metrics with thresholds. OpenSRM declares them under `spec.judgment_threshold`, an inline list on an `ai-gate` ServiceManifest, or a ServiceManifestTemplate it extends. The resolved `judgment_threshold` list is the template's entries followed by the manifest's entries — a manifest cannot remove a threshold its template declares; `overrides.judgment_threshold` may append entries but MUST NOT remove or replace a template's entries — and the ai-gate requirement applies to the resolved manifest. Each entry names a `type` and a closed `bounds` object. The entry itself is closed, and so are its `measurement`, `probe` and `outcome_signal` objects: a key its type does not define is an error, never a silently ignored field (opensrm-7zpz). Thresholds do not declare `breach_actions` in this version of the spec. A threshold entry MUST NOT carry `service`, `target` or `judgment_type`: the service is the enclosing manifest's, the value is `bounds`, and the discriminator is `type`. `segment_dimension` and each `segment_values` entry MUST be non-empty. A manifest MAY declare several entries of the same `type` (for example `segments` on two dimensions). How an implementation evaluates thresholds is defined in §5.5.6. (Decision 3c, opensrm-l33e.)
+ 
+ #### 5.5.1 Segments
+ 
+-Tracks that measured performance does not vary beyond the declared bound across meaningful segments (customer tiers, geographies, request types). A service with 95% accuracy overall but 60% accuracy on a specific segment has a segment problem that overall SLOs hide. `maximum_variance_from_overall` is the largest permitted absolute difference between any listed segment's rate and the overall rate (`0.05` = five percentage points): a segment's rate may sit at most that far from the overall rate, above or below, so a segment doing better than overall by more than the bound also breaches (§5.5.6 E1), because the bound caps spread. The breach is decided on the measured difference (the point estimate); the hypothesis tests §5.3 requires for segment variance are reported as confidence alongside it and do not decide the breach.
++Tracks that measured performance does not vary beyond the declared bound across meaningful segments (customer tiers, geographies, request types). A service with 95% accuracy overall but 60% accuracy on a specific segment has a segment problem that overall SLOs hide. `maximum_variance_from_overall` is the largest permitted absolute difference between any listed segment's rate (the rate `metric` names, below) and the overall rate (`0.05` = five percentage points): a segment's rate may sit at most that far from the overall rate, above or below, so a segment doing better than overall by more than the bound also breaches (§5.5.6 E1), because the bound caps spread. The breach is decided on the measured difference (the point estimate); the hypothesis tests §5.3 requires for segment variance are reported as confidence alongside it and do not decide the breach.
++
++`metric` names the rate compared: `reversal_rate` (§5.2.1), `high_confidence_failure` (§5.2.2), `outcomes` (§5.2.4) or `escalation` (§5.2.5), with the definition that judgment SLO type gives it. For `escalation` that rate is the escalation rate, the fraction of decisions escalated to human review (the rate `maximum_escalation_rate` bounds); the human agreement rate among escalations is not a segments metric in this version of the spec. `audit_sampling` is not a segments metric: it measures how decisions are sampled, not how they perform. A metric whose judgment SLO form takes a parameter takes it here too:
++
++- `measurement.window` — any metric; the population window, over which the rate is measured for each listed segment and for the overall population alike. Default `30d`; it MUST be greater than zero, since an empty population window could never be evaluated.
++- `measurement.source` — required for `reversal_rate`; not allowed with any other metric.
++- `measurement.confidence_threshold` — required for `high_confidence_failure`; not allowed with any other metric.
++- `outcome_signal` (`source`, `window`) — required for `outcomes`, with the same meaning as the outcomes judgment SLO's; not allowed with any other metric. Its `window` is how long to wait for a decision's outcome, not the population window. The `outcomes` rate counts only decisions in `measurement.window` whose `outcome_signal.window` has elapsed; a decision still awaiting its outcome is in neither the numerator nor the denominator.
++
++One entry compares one rate; a manifest that needs several rates to hold evenly declares an entry for each. (opensrm-7zpz)
+ 
+ ```yaml
+ judgment_threshold:
+   - type: segments
++    metric: reversal_rate
++    measurement:
++      source: lineage
++      window: 7d          # optional; default 30d
+     segment_dimension: customer_tier
+     segment_values: [enterprise, smb, consumer]
+     bounds:
+@@ -456,7 +469,7 @@ The rules below apply to every threshold type; the type-specific rules in §5.5.
+ 
+ 1. **E1 Breach.** A breach is a measured value strictly exceeding a declared bound; a value equal to the bound is within bounds. Every declared bound of every entry is evaluated, each entry independently, and a breach of any one bound of any entry is a breach.
+ 2. **E2 Units.** Duration bounds are compared after normalising both values to a common unit.
+-3. **E3 Not evaluable.** When a bound cannot be measured — no decisions, a listed segment with no decisions, or no ground truth arriving in a `feedback_latency` window — its outcome is *not evaluable*: not a breach, and an implementation MUST report it rather than treat it as within bounds. The outcome is decided per bound and, for `segments`, per listed segment. The form of the report is implementation-defined.
++3. **E3 Not evaluable.** When a bound cannot be measured — no decisions, a listed segment with no decisions (for `metric: outcomes`, none whose outcome window has elapsed), or no ground truth arriving in a `feedback_latency` window — its outcome is *not evaluable*: not a breach, and an implementation MUST report it rather than treat it as within bounds. The outcome is decided per bound and, for `segments`, per listed segment. The form of the report is implementation-defined.
+ 4. **E4 Precedence.** Where outcomes are combined — across bounds, across the listed segments of one entry, or across entries — a breach takes precedence over not evaluable, which takes precedence over within bounds.
+ 
+ ## 6. Reliability Contracts (OpenSRM's original contribution)
+diff --git a/spec/v2/AUTHORING.md b/spec/v2/AUTHORING.md
+index be9f726..48179cd 100644
+--- a/spec/v2/AUTHORING.md
++++ b/spec/v2/AUTHORING.md
+@@ -345,11 +345,14 @@ Error magnitudes — segments, stability, calibration, audit backlog, feedback l
+ 
+ ### 4.5 `judgment_threshold` — bounds on error magnitudes
+ 
+-Some measures of decision quality are not SLOs. A segment variance, a drift bound, a calibration error, an audit backlog age and a feedback delay are *error magnitudes*: they have no population of good events, no complement and no error budget. In every standard surveyed they would be monitored metrics with thresholds. OpenSRM declares them under `spec.judgment_threshold`, an inline list on an `ai-gate` ServiceManifest or a ServiceManifestTemplate it extends (the resolved list is the template's entries followed by the manifest's, so a manifest cannot remove a threshold its template declares, and `overrides.judgment_threshold` may append entries but not remove or replace them (CORE §5.5); the ai-gate check applies after resolution). Each entry names a `type` and a closed `bounds` object; a breach is the measured value strictly exceeding any declared bound (CORE §5.5.6 E1). You may repeat a type — for instance `segments` on two dimensions; each entry is evaluated on its own, and a breach of any one is a breach (CORE §5.5.6 E1), and a breach outranks not evaluable, which outranks within bounds (CORE §5.5.6 E4). No data is reported as not evaluable — never as a pass (CORE §5.5.6 E3). (Decision 3c, opensrm-l33e.)
++Some measures of decision quality are not SLOs. A segment variance, a drift bound, a calibration error, an audit backlog age and a feedback delay are *error magnitudes*: they have no population of good events, no complement and no error budget. In every standard surveyed they would be monitored metrics with thresholds. OpenSRM declares them under `spec.judgment_threshold`, an inline list on an `ai-gate` ServiceManifest or a ServiceManifestTemplate it extends (the resolved list is the template's entries followed by the manifest's, so a manifest cannot remove a threshold its template declares, and `overrides.judgment_threshold` may append entries but not remove or replace them (CORE §5.5); the ai-gate check applies after resolution). Each entry names a `type` and a closed `bounds` object, and the entry is closed too, as are its `measurement`, `probe` and `outcome_signal` objects: a misspelled or misplaced key is a validation error rather than a field quietly ignored (CORE §5.5). A breach is the measured value strictly exceeding any declared bound (CORE §5.5.6 E1). You may repeat a type — for instance `segments` on two dimensions; each entry is evaluated on its own, and a breach of any one is a breach (CORE §5.5.6 E1), and a breach outranks not evaluable, which outranks within bounds (CORE §5.5.6 E4). No data is reported as not evaluable — never as a pass (CORE §5.5.6 E3). (Decision 3c, opensrm-l33e.)
+ 
+ ```yaml
+ judgment_threshold:
+   - type: segments
++    metric: reversal_rate
++    measurement:
++      source: lineage
+     segment_dimension: customer_tier
+     segment_values: [enterprise, smb, consumer]
+     bounds:
+@@ -795,6 +798,9 @@ Bounds on error magnitudes, declared under `judgment_threshold` (§4.5). A breac
+ ```yaml
+ judgment_threshold:
+   - type: segments
++    metric: reversal_rate
++    measurement:
++      source: lineage
+     segment_dimension: customer_tier
+     segment_values: [enterprise, smb, consumer]
+     bounds:
+@@ -812,6 +818,24 @@ customer tiers, geographies, languages, request types. On decisions
+ affecting people, this is often the judgment threshold that matters most, and
+ aggregate metrics are structurally incapable of surfacing it.
+ 
++**Choosing the rate.** `metric` says which rate must hold evenly:
++`reversal_rate`, `high_confidence_failure`, `outcomes` or `escalation`,
++each defined as for the judgment SLO of that name (`escalation` is the
++escalation rate, not the human agreement rate). Give it the same
++parameter its SLO form needs — `measurement.source` for
++`reversal_rate` (values explained in [§5.1](#51-reversal_rate)), `measurement.confidence_threshold` for
++`high_confidence_failure`, an `outcome_signal` (`source`, `window`) for
++`outcomes` — and optionally `measurement.window` (default `30d`). Do not
++confuse the two windows on an `outcomes` entry: `outcome_signal.window`
++is how long to wait for each decision's outcome, `measurement.window` is
++how far back decisions are counted. Only decisions whose outcome window
++has elapsed are counted, so make `measurement.window` comfortably longer
++than `outcome_signal.window`. If it is not longer, no decision's outcome
++window has elapsed by the time it is counted, so the entry is never
++evaluable (CORE §5.5.6 E3). One entry checks one rate; if reversals *and*
++escalations must both hold evenly across tiers, declare two entries
++(CORE §5.5.1).
++
+ **Setting the bound** means choosing `segment_dimension` where you
+ suspect performance actually varies, not where the data is easiest to
+ join. Enumerate `segment_values` explicitly — a segment absent from the
+@@ -1062,7 +1086,14 @@ over-read:
+   `additionalProperties: false` on `spec`, so a typo like `judgement_slo`
+   or `contract` (singular, v1 habit) is silently ignored rather than
+   flagged. Your block simply does nothing. This looseness is a known gap
+-  in the draft schema, tracked internally as `opensrm-vquh`.
++  in the draft schema, tracked internally as `opensrm-vquh`. The
++  exception is `judgment_threshold`: each entry, and its `measurement`,
++  `probe` and `outcome_signal` objects, is closed, so an unknown key
++  there *is* an error (CORE §5.5). The schema checks this only for entries
++  declared under `judgment_threshold` itself: `template.overrides` is not
++  validated at all, so an entry appended through
++  `overrides.judgment_threshold` is checked by your implementation, not by
++  the schema (tracked as `opensrm-0myj`).
+ - **Classical SLO bodies are not validated** — only that each item is a
+   `$ref` or carries `kind: SLO` ([§4.3](#43-slo--classical-slos)).
+   Validate them against the OpenSLO schema separately.
+diff --git a/spec/v2/examples/judgment-thresholds/all-five-types.yaml b/spec/v2/examples/judgment-thresholds/all-five-types.yaml
+index 13cf7ce..54f9296 100644
+--- a/spec/v2/examples/judgment-thresholds/all-five-types.yaml
++++ b/spec/v2/examples/judgment-thresholds/all-five-types.yaml
+@@ -15,6 +15,9 @@ spec:
+     type: ai-gate
+   judgment_threshold:
+     - type: segments
++      metric: high_confidence_failure
++      measurement:
++        confidence_threshold: 0.9
+       segment_dimension: customer_tier
+       segment_values: [enterprise, smb, consumer]
+       bounds:
+diff --git a/spec/v2/examples/judgment-thresholds/segments-two-dimensions.yaml b/spec/v2/examples/judgment-thresholds/segments-two-dimensions.yaml
+index 4be8a35..0e6de13 100644
+--- a/spec/v2/examples/judgment-thresholds/segments-two-dimensions.yaml
++++ b/spec/v2/examples/judgment-thresholds/segments-two-dimensions.yaml
+@@ -1,5 +1,5 @@
+ # Judgment thresholds — a type may repeat (CORE §5.5).
+-# Two `segments` entries on different dimensions; each entry is
++# Two `segments` entries on different dimensions and rates; each entry is
+ # evaluated independently, and a breach of either is a breach.
+ apiVersion: opensrm.nthlayer.io/v2
+ kind: ServiceManifest
+@@ -15,11 +15,20 @@ spec:
+     type: ai-gate
+   judgment_threshold:
+     - type: segments
++      metric: reversal_rate
++      measurement:
++        source: lineage
+       segment_dimension: customer_tier
+       segment_values: [enterprise, smb, consumer]
+       bounds:
+         maximum_variance_from_overall: 0.05
+     - type: segments
++      metric: outcomes
++      outcome_signal:
++        source: retro-consumer   # as on an outcomes judgment SLO
++        window: 1h               # wait this long for each decision's outcome
++      measurement:
++        window: 7d               # population window (default 30d)
+       segment_dimension: region
+       segment_values: [eu, us, apac]
+       bounds:
+diff --git a/spec/v2/examples/services/ai-gate.yaml b/spec/v2/examples/services/ai-gate.yaml
+index 7e0ea55..6b0a37a 100644
+--- a/spec/v2/examples/services/ai-gate.yaml
++++ b/spec/v2/examples/services/ai-gate.yaml
+@@ -93,10 +93,19 @@ spec:
+   judgment_threshold:
+     # Quality must not vary by customer segment.
+     - type: segments
++      metric: reversal_rate
++      measurement:
++        source: lineage
+       segment_dimension: customer_tier
+       segment_values: [enterprise, smb, consumer]
+       bounds:
+         maximum_variance_from_overall: 0.05
++    - type: segments
++      metric: escalation      # the escalation rate; takes no parameters
++      segment_dimension: customer_tier
++      segment_values: [enterprise, smb, consumer]
++      bounds:
++        maximum_variance_from_overall: 0.10
+ 
+   contracts:
+     - name: refund-decision-api
+diff --git a/spec/v2/schema.json b/spec/v2/schema.json
+index 4f8f9c1..a21e44e 100644
+--- a/spec/v2/schema.json
++++ b/spec/v2/schema.json
+@@ -363,26 +363,69 @@
+         {
+           "if": { "properties": { "type": { "const": "segments" } }, "required": ["type"] },
+           "then": {
+-            "required": ["segment_dimension", "segment_values", "bounds"],
++            "required": ["metric", "segment_dimension", "segment_values", "bounds"],
++            "additionalProperties": false,
+             "properties": {
++              "type": {},
++              "metric": { "enum": ["reversal_rate", "high_confidence_failure", "outcomes", "escalation"], "description": "The judgment rate compared across segments (opensrm-7zpz). escalation means the escalation rate, not the human agreement rate. audit_sampling is excluded: it measures sampling, not performance." },
+               "segment_dimension": { "type": "string", "minLength": 1 },
+               "segment_values": { "type": "array", "items": { "type": "string", "minLength": 1 }, "minItems": 1 },
++              "outcome_signal": {
++                "type": "object",
++                "additionalProperties": false,
++                "required": ["source", "window"],
++                "description": "For metric outcomes only: the same outcome signal the outcomes judgment SLO declares (window = how long after a decision to wait for its outcome).",
++                "properties": {
++                  "source": { "type": "string" },
++                  "window": { "$ref": "#/definitions/Duration" }
++                }
++              },
++              "measurement": {
++                "type": "object",
++                "additionalProperties": false,
++                "description": "The named metric's rate parameters. window: any metric; population window, default 30d. source: reversal_rate only (required). confidence_threshold: high_confidence_failure only (required).",
++                "properties": {
++                  "window": { "allOf": [{ "$ref": "#/definitions/Duration" }, { "not": { "pattern": "^0+(ms|s|m|h|d|w)$" }, "description": "A zero population window could never be evaluated." }] },
++                  "source": { "enum": ["lineage", "calibration_sample", "downstream_signal"] },
++                  "confidence_threshold": { "$ref": "#/definitions/Ratio" }
++                }
++              },
+               "bounds": {
+                 "type": "object",
+                 "additionalProperties": false,
+                 "required": ["maximum_variance_from_overall"],
+                 "properties": { "maximum_variance_from_overall": { "$ref": "#/definitions/Ratio" } }
+               }
+-            }
++            },
++            "allOf": [
++              {
++                "if": { "properties": { "metric": { "const": "reversal_rate" } }, "required": ["metric"] },
++                "then": { "required": ["measurement"], "properties": { "measurement": { "required": ["source"] } } },
++                "else": { "properties": { "measurement": { "properties": { "source": { "not": {}, "description": "source parameterises reversal_rate only." } } } } }
++              },
++              {
++                "if": { "properties": { "metric": { "const": "high_confidence_failure" } }, "required": ["metric"] },
++                "then": { "required": ["measurement"], "properties": { "measurement": { "required": ["confidence_threshold"] } } },
++                "else": { "properties": { "measurement": { "properties": { "confidence_threshold": { "not": {}, "description": "confidence_threshold parameterises high_confidence_failure only." } } } } }
++              },
++              {
++                "if": { "properties": { "metric": { "const": "outcomes" } }, "required": ["metric"] },
++                "then": { "required": ["outcome_signal"] },
++                "else": { "properties": { "outcome_signal": { "not": {}, "description": "outcome_signal parameterises outcomes only." } } }
++              }
++            ]
+           }
+         },
+         {
+           "if": { "properties": { "type": { "const": "stability" } }, "required": ["type"] },
+           "then": {
+             "required": ["probe", "bounds"],
++            "additionalProperties": false,
+             "properties": {
++              "type": {},
+               "probe": {
+                 "type": "object",
++                "additionalProperties": false,
+                 "required": ["frozen_input_set", "frequency"],
+                 "properties": {
+                   "frozen_input_set": { "type": "string" },
+@@ -402,9 +445,12 @@
+           "if": { "properties": { "type": { "const": "calibration" } }, "required": ["type"] },
+           "then": {
+             "required": ["measurement", "bounds"],
++            "additionalProperties": false,
+             "properties": {
++              "type": {},
+               "measurement": {
+                 "type": "object",
++                "additionalProperties": false,
+                 "required": ["bins", "window"],
+                 "properties": {
+                   "bins": { "type": "integer", "minimum": 2 },
+@@ -431,7 +477,9 @@
+           "if": { "properties": { "type": { "const": "audit_backlog" } }, "required": ["type"] },
+           "then": {
+             "required": ["bounds"],
++            "additionalProperties": false,
+             "properties": {
++              "type": {},
+               "bounds": {
+                 "type": "object",
+                 "additionalProperties": false,
+@@ -445,7 +493,9 @@
+           "if": { "properties": { "type": { "const": "feedback_latency" } }, "required": ["type"] },
+           "then": {
+             "required": ["bounds"],
++            "additionalProperties": false,
+             "properties": {
++              "type": {},
+               "bounds": {
+                 "type": "object",
+                 "additionalProperties": false,
+diff --git a/spec/v2/tests/invalid/n30-segments-threshold-missing-dimension.yaml b/spec/v2/tests/invalid/n30-segments-threshold-missing-dimension.yaml
+index 2bb82dd..0092a38 100644
+--- a/spec/v2/tests/invalid/n30-segments-threshold-missing-dimension.yaml
++++ b/spec/v2/tests/invalid/n30-segments-threshold-missing-dimension.yaml
+@@ -11,5 +11,6 @@ spec:
+     type: ai-gate
+   judgment_threshold:
+     - type: segments
++      metric: escalation
+       segment_values: [enterprise, smb]
+       bounds: { maximum_variance_from_overall: 0.05 }
+diff --git a/spec/v2/tests/invalid/n37-segments-empty-strings.yaml b/spec/v2/tests/invalid/n37-segments-empty-strings.yaml
+index 3a24445..8195433 100644
+--- a/spec/v2/tests/invalid/n37-segments-empty-strings.yaml
++++ b/spec/v2/tests/invalid/n37-segments-empty-strings.yaml
+@@ -11,6 +11,7 @@ spec:
+     type: ai-gate
+   judgment_threshold:
+     - type: segments
++      metric: escalation
+       segment_dimension: ""
+       segment_values: [enterprise, smb]
+       bounds: { maximum_variance_from_overall: 0.05 }
+diff --git a/spec/v2/tests/invalid/n38-segments-empty-value.yaml b/spec/v2/tests/invalid/n38-segments-empty-value.yaml
+index c8285af..0b081a5 100644
+--- a/spec/v2/tests/invalid/n38-segments-empty-value.yaml
++++ b/spec/v2/tests/invalid/n38-segments-empty-value.yaml
+@@ -12,6 +12,7 @@ spec:
+     type: ai-gate
+   judgment_threshold:
+     - type: segments
++      metric: escalation
+       segment_dimension: customer_tier
+       segment_values: [enterprise, ""]
+       bounds: { maximum_variance_from_overall: 0.05 }
+diff --git a/spec/v2/tests/invalid/n39-segments-threshold-unknown-bound.yaml b/spec/v2/tests/invalid/n39-segments-threshold-unknown-bound.yaml
+index 6d1d1c6..8054d9d 100644
+--- a/spec/v2/tests/invalid/n39-segments-threshold-unknown-bound.yaml
++++ b/spec/v2/tests/invalid/n39-segments-threshold-unknown-bound.yaml
+@@ -14,6 +14,7 @@ spec:
+     type: ai-gate
+   judgment_threshold:
+     - type: segments
++      metric: escalation
+       segment_dimension: customer_tier
+       segment_values: [enterprise, smb, consumer]
+       bounds:
+diff --git a/spec/v2/tests/invalid/n43-segments-threshold-empty-bounds.yaml b/spec/v2/tests/invalid/n43-segments-threshold-empty-bounds.yaml
+index 80a90c4..ee6416c 100644
+--- a/spec/v2/tests/invalid/n43-segments-threshold-empty-bounds.yaml
++++ b/spec/v2/tests/invalid/n43-segments-threshold-empty-bounds.yaml
+@@ -14,6 +14,7 @@ spec:
+     type: ai-gate
+   judgment_threshold:
+     - type: segments
++      metric: escalation
+       segment_dimension: customer_tier
+       segment_values: [enterprise, smb, consumer]
+       bounds: {}
+diff --git a/spec/v2/tests/invalid/n49-segments-threshold-missing-values.yaml b/spec/v2/tests/invalid/n49-segments-threshold-missing-values.yaml
+index 2d7290a..6a531c9 100644
+--- a/spec/v2/tests/invalid/n49-segments-threshold-missing-values.yaml
++++ b/spec/v2/tests/invalid/n49-segments-threshold-missing-values.yaml
+@@ -13,6 +13,7 @@ spec:
+     type: ai-gate
+   judgment_threshold:
+     - type: segments
++      metric: escalation
+       segment_dimension: customer_tier
+       bounds:
+         maximum_variance_from_overall: 0.05
+diff --git a/spec/v2/tests/invalid/n50-segments-threshold-empty-values.yaml b/spec/v2/tests/invalid/n50-segments-threshold-empty-values.yaml
+index f57d966..ea07e37 100644
+--- a/spec/v2/tests/invalid/n50-segments-threshold-empty-values.yaml
++++ b/spec/v2/tests/invalid/n50-segments-threshold-empty-values.yaml
+@@ -13,6 +13,7 @@ spec:
+     type: ai-gate
+   judgment_threshold:
+     - type: segments
++      metric: escalation
+       segment_dimension: customer_tier
+       segment_values: []
+       bounds:
+diff --git a/spec/v2/tests/invalid/n58-segments-threshold-variance-above-one.yaml b/spec/v2/tests/invalid/n58-segments-threshold-variance-above-one.yaml
+index f6aa8fd..9237ebf 100644
+--- a/spec/v2/tests/invalid/n58-segments-threshold-variance-above-one.yaml
++++ b/spec/v2/tests/invalid/n58-segments-threshold-variance-above-one.yaml
+@@ -13,6 +13,7 @@ spec:
+     type: ai-gate
+   judgment_threshold:
+     - type: segments
++      metric: escalation
+       segment_dimension: customer_tier
+       segment_values: [enterprise, smb, consumer]
+       bounds:
+diff --git a/spec/v2/tests/invalid/n67-segments-threshold-missing-metric.yaml b/spec/v2/tests/invalid/n67-segments-threshold-missing-metric.yaml
+new file mode 100644
+index 0000000..f6fdf57
+--- /dev/null
++++ b/spec/v2/tests/invalid/n67-segments-threshold-missing-metric.yaml
+@@ -0,0 +1,18 @@
++# MUST be rejected: a segments threshold must name the rate it compares (opensrm-7zpz).
++# One defect only: no `metric`.
++apiVersion: opensrm.nthlayer.io/v2
++kind: ServiceManifest
++metadata:
++  name: refund-approver
++spec:
++  owner:
++    group: group:default/payments
++  service:
++    name: refund-approver
++    type: ai-gate
++  judgment_threshold:
++    - type: segments
++      segment_dimension: customer_tier
++      segment_values: [enterprise, smb, consumer]
++      bounds:
++        maximum_variance_from_overall: 0.05
+diff --git a/spec/v2/tests/invalid/n68-segments-threshold-metric-audit-sampling.yaml b/spec/v2/tests/invalid/n68-segments-threshold-metric-audit-sampling.yaml
+new file mode 100644
+index 0000000..98798e3
+--- /dev/null
++++ b/spec/v2/tests/invalid/n68-segments-threshold-metric-audit-sampling.yaml
+@@ -0,0 +1,19 @@
++# MUST be rejected: audit_sampling measures sampling, not performance, so it is not a segments metric (opensrm-7zpz).
++# One defect only: `metric: audit_sampling`.
++apiVersion: opensrm.nthlayer.io/v2
++kind: ServiceManifest
++metadata:
++  name: refund-approver
++spec:
++  owner:
++    group: group:default/payments
++  service:
++    name: refund-approver
++    type: ai-gate
++  judgment_threshold:
++    - type: segments
++      metric: audit_sampling
++      segment_dimension: customer_tier
++      segment_values: [enterprise, smb, consumer]
++      bounds:
++        maximum_variance_from_overall: 0.05
+diff --git a/spec/v2/tests/invalid/n69-segments-reversal-rate-missing-measurement.yaml b/spec/v2/tests/invalid/n69-segments-reversal-rate-missing-measurement.yaml
+new file mode 100644
+index 0000000..4829eea
+--- /dev/null
++++ b/spec/v2/tests/invalid/n69-segments-reversal-rate-missing-measurement.yaml
+@@ -0,0 +1,19 @@
++# MUST be rejected: metric reversal_rate needs measurement.source, as the reversal_rate SLO does (opensrm-7zpz).
++# One defect only: no `measurement` block.
++apiVersion: opensrm.nthlayer.io/v2
++kind: ServiceManifest
++metadata:
++  name: refund-approver
++spec:
++  owner:
++    group: group:default/payments
++  service:
++    name: refund-approver
++    type: ai-gate
++  judgment_threshold:
++    - type: segments
++      metric: reversal_rate
++      segment_dimension: customer_tier
++      segment_values: [enterprise, smb, consumer]
++      bounds:
++        maximum_variance_from_overall: 0.05
+diff --git a/spec/v2/tests/invalid/n70-segments-reversal-rate-missing-source.yaml b/spec/v2/tests/invalid/n70-segments-reversal-rate-missing-source.yaml
+new file mode 100644
+index 0000000..d439688
+--- /dev/null
++++ b/spec/v2/tests/invalid/n70-segments-reversal-rate-missing-source.yaml
+@@ -0,0 +1,21 @@
++# MUST be rejected: metric reversal_rate needs measurement.source (opensrm-7zpz).
++# One defect only: `measurement` has `window` but no `source`.
++apiVersion: opensrm.nthlayer.io/v2
++kind: ServiceManifest
++metadata:
++  name: refund-approver
++spec:
++  owner:
++    group: group:default/payments
++  service:
++    name: refund-approver
++    type: ai-gate
++  judgment_threshold:
++    - type: segments
++      metric: reversal_rate
++      measurement:
++        window: 7d
++      segment_dimension: customer_tier
++      segment_values: [enterprise, smb, consumer]
++      bounds:
++        maximum_variance_from_overall: 0.05
+diff --git a/spec/v2/tests/invalid/n71-segments-hcf-missing-confidence-threshold.yaml b/spec/v2/tests/invalid/n71-segments-hcf-missing-confidence-threshold.yaml
+new file mode 100644
+index 0000000..1ce0896
+--- /dev/null
++++ b/spec/v2/tests/invalid/n71-segments-hcf-missing-confidence-threshold.yaml
+@@ -0,0 +1,21 @@
++# MUST be rejected: metric high_confidence_failure needs measurement.confidence_threshold, as the high_confidence_failure SLO does (opensrm-7zpz).
++# One defect only: no `measurement.confidence_threshold`.
++apiVersion: opensrm.nthlayer.io/v2
++kind: ServiceManifest
++metadata:
++  name: refund-approver
++spec:
++  owner:
++    group: group:default/payments
++  service:
++    name: refund-approver
++    type: ai-gate
++  judgment_threshold:
++    - type: segments
++      metric: high_confidence_failure
++      measurement:
++        window: 7d
++      segment_dimension: customer_tier
++      segment_values: [enterprise, smb, consumer]
++      bounds:
++        maximum_variance_from_overall: 0.05
+diff --git a/spec/v2/tests/invalid/n72-segments-escalation-with-source.yaml b/spec/v2/tests/invalid/n72-segments-escalation-with-source.yaml
+new file mode 100644
+index 0000000..1e53546
+--- /dev/null
++++ b/spec/v2/tests/invalid/n72-segments-escalation-with-source.yaml
+@@ -0,0 +1,21 @@
++# MUST be rejected: source parameterises reversal_rate only; on another metric it would otherwise be silently ignored (opensrm-7zpz).
++# One defect only: `metric: escalation` with `measurement.source`.
++apiVersion: opensrm.nthlayer.io/v2
++kind: ServiceManifest
++metadata:
++  name: refund-approver
++spec:
++  owner:
++    group: group:default/payments
++  service:
++    name: refund-approver
++    type: ai-gate
++  judgment_threshold:
++    - type: segments
++      metric: escalation
++      measurement:
++        source: lineage
++      segment_dimension: customer_tier
++      segment_values: [enterprise, smb, consumer]
++      bounds:
++        maximum_variance_from_overall: 0.05
+diff --git a/spec/v2/tests/invalid/n73-segments-escalation-with-confidence-threshold.yaml b/spec/v2/tests/invalid/n73-segments-escalation-with-confidence-threshold.yaml
+new file mode 100644
+index 0000000..aa6957d
+--- /dev/null
++++ b/spec/v2/tests/invalid/n73-segments-escalation-with-confidence-threshold.yaml
+@@ -0,0 +1,21 @@
++# MUST be rejected: confidence_threshold parameterises high_confidence_failure only (opensrm-7zpz).
++# One defect only: `metric: escalation` with `measurement.confidence_threshold`.
++apiVersion: opensrm.nthlayer.io/v2
++kind: ServiceManifest
++metadata:
++  name: refund-approver
++spec:
++  owner:
++    group: group:default/payments
++  service:
++    name: refund-approver
++    type: ai-gate
++  judgment_threshold:
++    - type: segments
++      metric: escalation
++      measurement:
++        confidence_threshold: 0.9
++      segment_dimension: customer_tier
++      segment_values: [enterprise, smb, consumer]
++      bounds:
++        maximum_variance_from_overall: 0.05
+diff --git a/spec/v2/tests/invalid/n74-segments-window-outside-measurement.yaml b/spec/v2/tests/invalid/n74-segments-window-outside-measurement.yaml
+new file mode 100644
+index 0000000..e905970
+--- /dev/null
++++ b/spec/v2/tests/invalid/n74-segments-window-outside-measurement.yaml
+@@ -0,0 +1,20 @@
++# MUST be rejected: threshold entries are closed (opensrm-7zpz); a window belongs under measurement, and at the entry's top level it would otherwise be silently ignored.
++# One defect only: `window: 7d` beside `metric`.
++apiVersion: opensrm.nthlayer.io/v2
++kind: ServiceManifest
++metadata:
++  name: refund-approver
++spec:
++  owner:
++    group: group:default/payments
++  service:
++    name: refund-approver
++    type: ai-gate
++  judgment_threshold:
++    - type: segments
++      metric: escalation
++      window: 7d
++      segment_dimension: customer_tier
++      segment_values: [enterprise, smb, consumer]
++      bounds:
++        maximum_variance_from_overall: 0.05
+diff --git a/spec/v2/tests/invalid/n75-segments-measurement-unknown-key.yaml b/spec/v2/tests/invalid/n75-segments-measurement-unknown-key.yaml
+new file mode 100644
+index 0000000..2b0c33f
+--- /dev/null
++++ b/spec/v2/tests/invalid/n75-segments-measurement-unknown-key.yaml
+@@ -0,0 +1,21 @@
++# MUST be rejected: segments measurement is closed (opensrm-7zpz); a misspelled key would be silently ignored.
++# One defect only: `measurement.windw`.
++apiVersion: opensrm.nthlayer.io/v2
++kind: ServiceManifest
++metadata:
++  name: refund-approver
++spec:
++  owner:
++    group: group:default/payments
++  service:
++    name: refund-approver
++    type: ai-gate
++  judgment_threshold:
++    - type: segments
++      metric: escalation
++      measurement:
++        windw: 7d
++      segment_dimension: customer_tier
++      segment_values: [enterprise, smb, consumer]
++      bounds:
++        maximum_variance_from_overall: 0.05
+diff --git a/spec/v2/tests/invalid/n76-segments-window-not-duration.yaml b/spec/v2/tests/invalid/n76-segments-window-not-duration.yaml
+new file mode 100644
+index 0000000..e941315
+--- /dev/null
++++ b/spec/v2/tests/invalid/n76-segments-window-not-duration.yaml
+@@ -0,0 +1,21 @@
++# MUST be rejected: measurement.window is a Duration (opensrm-7zpz).
++# One defect only: `window: 7 days`.
++apiVersion: opensrm.nthlayer.io/v2
++kind: ServiceManifest
++metadata:
++  name: refund-approver
++spec:
++  owner:
++    group: group:default/payments
++  service:
++    name: refund-approver
++    type: ai-gate
++  judgment_threshold:
++    - type: segments
++      metric: escalation
++      measurement:
++        window: 7 days
++      segment_dimension: customer_tier
++      segment_values: [enterprise, smb, consumer]
++      bounds:
++        maximum_variance_from_overall: 0.05
+diff --git a/spec/v2/tests/invalid/n77-stability-probe-unknown-key.yaml b/spec/v2/tests/invalid/n77-stability-probe-unknown-key.yaml
+new file mode 100644
+index 0000000..cdad43a
+--- /dev/null
++++ b/spec/v2/tests/invalid/n77-stability-probe-unknown-key.yaml
+@@ -0,0 +1,20 @@
++# MUST be rejected: the stability probe is closed (opensrm-7zpz); a misspelled key would be silently ignored.
++# One defect only: `probe.frequncy`.
++apiVersion: opensrm.nthlayer.io/v2
++kind: ServiceManifest
++metadata:
++  name: refund-approver
++spec:
++  owner:
++    group: group:default/payments
++  service:
++    name: refund-approver
++    type: ai-gate
++  judgment_threshold:
++    - type: stability
++      probe:
++        frozen_input_set: "s3://probes/refunds.jsonl"
++        frequency: daily
++        frequncy: hourly
++      bounds:
++        maximum_drift: 0.02
+diff --git a/spec/v2/tests/invalid/n78-calibration-measurement-unknown-key.yaml b/spec/v2/tests/invalid/n78-calibration-measurement-unknown-key.yaml
+new file mode 100644
+index 0000000..76e7f51
+--- /dev/null
++++ b/spec/v2/tests/invalid/n78-calibration-measurement-unknown-key.yaml
+@@ -0,0 +1,20 @@
++# MUST be rejected: calibration measurement is closed (opensrm-7zpz).
++# One defect only: `measurement.bin`.
++apiVersion: opensrm.nthlayer.io/v2
++kind: ServiceManifest
++metadata:
++  name: refund-approver
++spec:
++  owner:
++    group: group:default/payments
++  service:
++    name: refund-approver
++    type: ai-gate
++  judgment_threshold:
++    - type: calibration
++      measurement:
++        bins: 10
++        window: 30d
++        bin: 20
++      bounds:
++        maximum_expected_calibration_error: 0.05
+diff --git a/spec/v2/tests/invalid/n79-audit-backlog-unknown-key.yaml b/spec/v2/tests/invalid/n79-audit-backlog-unknown-key.yaml
+new file mode 100644
+index 0000000..d2c2c9e
+--- /dev/null
++++ b/spec/v2/tests/invalid/n79-audit-backlog-unknown-key.yaml
+@@ -0,0 +1,18 @@
++# MUST be rejected: threshold entries are closed (opensrm-7zpz); audit_backlog declares no measurement.
++# One defect only: `measurement: {window: 7d}`.
++apiVersion: opensrm.nthlayer.io/v2
++kind: ServiceManifest
++metadata:
++  name: refund-approver
++spec:
++  owner:
++    group: group:default/payments
++  service:
++    name: refund-approver
++    type: ai-gate
++  judgment_threshold:
++    - type: audit_backlog
++      measurement:
++        window: 7d
++      bounds:
++        maximum_age: 24h
+diff --git a/spec/v2/tests/invalid/n80-segments-outcomes-missing-outcome-signal.yaml b/spec/v2/tests/invalid/n80-segments-outcomes-missing-outcome-signal.yaml
+new file mode 100644
+index 0000000..9c8f998
+--- /dev/null
++++ b/spec/v2/tests/invalid/n80-segments-outcomes-missing-outcome-signal.yaml
+@@ -0,0 +1,19 @@
++# MUST be rejected: metric outcomes needs an outcome_signal, as the outcomes SLO does (opensrm-7zpz).
++# One defect only: no `outcome_signal`.
++apiVersion: opensrm.nthlayer.io/v2
++kind: ServiceManifest
++metadata:
++  name: refund-approver
++spec:
++  owner:
++    group: group:default/payments
++  service:
++    name: refund-approver
++    type: ai-gate
++  judgment_threshold:
++    - type: segments
++      metric: outcomes
++      segment_dimension: customer_tier
++      segment_values: [enterprise, smb, consumer]
++      bounds:
++        maximum_variance_from_overall: 0.05
+diff --git a/spec/v2/tests/invalid/n81-segments-outcome-signal-on-reversal-rate.yaml b/spec/v2/tests/invalid/n81-segments-outcome-signal-on-reversal-rate.yaml
+new file mode 100644
+index 0000000..10f94b4
+--- /dev/null
++++ b/spec/v2/tests/invalid/n81-segments-outcome-signal-on-reversal-rate.yaml
+@@ -0,0 +1,24 @@
++# MUST be rejected: outcome_signal parameterises outcomes only (opensrm-7zpz).
++# One defect only: `outcome_signal` with `metric: reversal_rate`.
++apiVersion: opensrm.nthlayer.io/v2
++kind: ServiceManifest
++metadata:
++  name: refund-approver
++spec:
++  owner:
++    group: group:default/payments
++  service:
++    name: refund-approver
++    type: ai-gate
++  judgment_threshold:
++    - type: segments
++      metric: reversal_rate
++      measurement:
++        source: lineage
++      outcome_signal:
++        source: retro-consumer
++        window: 1h
++      segment_dimension: customer_tier
++      segment_values: [enterprise, smb, consumer]
++      bounds:
++        maximum_variance_from_overall: 0.05
+diff --git a/spec/v2/tests/invalid/n82-segments-outcome-signal-missing-window.yaml b/spec/v2/tests/invalid/n82-segments-outcome-signal-missing-window.yaml
+new file mode 100644
+index 0000000..39a9ff0
+--- /dev/null
++++ b/spec/v2/tests/invalid/n82-segments-outcome-signal-missing-window.yaml
+@@ -0,0 +1,21 @@
++# MUST be rejected: outcome_signal needs both source and window, as the outcomes SLO's does (opensrm-7zpz).
++# One defect only: `outcome_signal` without `window`.
++apiVersion: opensrm.nthlayer.io/v2
++kind: ServiceManifest
++metadata:
++  name: refund-approver
++spec:
++  owner:
++    group: group:default/payments
++  service:
++    name: refund-approver
++    type: ai-gate
++  judgment_threshold:
++    - type: segments
++      metric: outcomes
++      outcome_signal:
++        source: retro-consumer
++      segment_dimension: customer_tier
++      segment_values: [enterprise, smb, consumer]
++      bounds:
++        maximum_variance_from_overall: 0.05
+diff --git a/spec/v2/tests/invalid/n83-segments-outcome-signal-unknown-key.yaml b/spec/v2/tests/invalid/n83-segments-outcome-signal-unknown-key.yaml
+new file mode 100644
+index 0000000..0030184
+--- /dev/null
++++ b/spec/v2/tests/invalid/n83-segments-outcome-signal-unknown-key.yaml
+@@ -0,0 +1,23 @@
++# MUST be rejected: outcome_signal is closed (opensrm-7zpz).
++# One defect only: `outcome_signal.wait`.
++apiVersion: opensrm.nthlayer.io/v2
++kind: ServiceManifest
++metadata:
++  name: refund-approver
++spec:
++  owner:
++    group: group:default/payments
++  service:
++    name: refund-approver
++    type: ai-gate
++  judgment_threshold:
++    - type: segments
++      metric: outcomes
++      outcome_signal:
++        source: retro-consumer
++        window: 1h
++        wait: 2h
++      segment_dimension: customer_tier
++      segment_values: [enterprise, smb, consumer]
++      bounds:
++        maximum_variance_from_overall: 0.05
+diff --git a/spec/v2/tests/invalid/n84-segments-zero-population-window.yaml b/spec/v2/tests/invalid/n84-segments-zero-population-window.yaml
+new file mode 100644
+index 0000000..9833c99
+--- /dev/null
++++ b/spec/v2/tests/invalid/n84-segments-zero-population-window.yaml
+@@ -0,0 +1,21 @@
++# MUST be rejected: measurement.window MUST be greater than zero (CORE §5.5.1, opensrm-7zpz).
++# One defect only: `measurement.window: 0d`.
++apiVersion: opensrm.nthlayer.io/v2
++kind: ServiceManifest
++metadata:
++  name: refund-approver
++spec:
++  owner:
++    group: group:default/payments
++  service:
++    name: refund-approver
++    type: ai-gate
++  judgment_threshold:
++    - type: segments
++      metric: escalation
++      measurement:
++        window: 0d
++      segment_dimension: customer_tier
++      segment_values: [enterprise, smb, consumer]
++      bounds:
++        maximum_variance_from_overall: 0.05
+diff --git a/spec/v2/tests/invalid/n85-stability-entry-unknown-key.yaml b/spec/v2/tests/invalid/n85-stability-entry-unknown-key.yaml
+new file mode 100644
+index 0000000..6bb964b
+--- /dev/null
++++ b/spec/v2/tests/invalid/n85-stability-entry-unknown-key.yaml
+@@ -0,0 +1,20 @@
++# MUST be rejected: threshold entries are closed (CORE §5.5, opensrm-7zpz).
++# One defect only: `window: 7d` on a stability entry.
++apiVersion: opensrm.nthlayer.io/v2
++kind: ServiceManifest
++metadata:
++  name: refund-approver
++spec:
++  owner:
++    group: group:default/payments
++  service:
++    name: refund-approver
++    type: ai-gate
++  judgment_threshold:
++    - type: stability
++      window: 7d
++      probe:
++        frozen_input_set: "s3://probes/refunds.jsonl"
++        frequency: daily
++      bounds:
++        maximum_drift: 0.02
+diff --git a/spec/v2/tests/invalid/n86-calibration-entry-unknown-key.yaml b/spec/v2/tests/invalid/n86-calibration-entry-unknown-key.yaml
+new file mode 100644
+index 0000000..465d3bb
+--- /dev/null
++++ b/spec/v2/tests/invalid/n86-calibration-entry-unknown-key.yaml
+@@ -0,0 +1,20 @@
++# MUST be rejected: threshold entries are closed (CORE §5.5, opensrm-7zpz).
++# One defect only: `bins: 10` at the entry level instead of under measurement.
++apiVersion: opensrm.nthlayer.io/v2
++kind: ServiceManifest
++metadata:
++  name: refund-approver
++spec:
++  owner:
++    group: group:default/payments
++  service:
++    name: refund-approver
++    type: ai-gate
++  judgment_threshold:
++    - type: calibration
++      bins: 10
++      measurement:
++        bins: 10
++        window: 30d
++      bounds:
++        maximum_expected_calibration_error: 0.05
+diff --git a/spec/v2/tests/invalid/n87-feedback-latency-entry-unknown-key.yaml b/spec/v2/tests/invalid/n87-feedback-latency-entry-unknown-key.yaml
+new file mode 100644
+index 0000000..f233d97
+--- /dev/null
++++ b/spec/v2/tests/invalid/n87-feedback-latency-entry-unknown-key.yaml
+@@ -0,0 +1,17 @@
++# MUST be rejected: threshold entries are closed (CORE §5.5); the feedback_latency window is fixed (§5.5.5), so a declared one would otherwise be silently ignored (opensrm-7zpz).
++# One defect only: `window: 7d` on a feedback_latency entry.
++apiVersion: opensrm.nthlayer.io/v2
++kind: ServiceManifest
++metadata:
++  name: refund-approver
++spec:
++  owner:
++    group: group:default/payments
++  service:
++    name: refund-approver
++    type: ai-gate
++  judgment_threshold:
++    - type: feedback_latency
++      window: 7d
++      bounds:
++        maximum_p50: 1h
+diff --git a/spec/v2/tests/invalid/n88-segments-hcf-missing-measurement.yaml b/spec/v2/tests/invalid/n88-segments-hcf-missing-measurement.yaml
+new file mode 100644
+index 0000000..caa0e21
+--- /dev/null
++++ b/spec/v2/tests/invalid/n88-segments-hcf-missing-measurement.yaml
+@@ -0,0 +1,19 @@
++# MUST be rejected: metric high_confidence_failure needs measurement.confidence_threshold (CORE §5.5.1, opensrm-7zpz).
++# One defect only: no `measurement` block.
++apiVersion: opensrm.nthlayer.io/v2
++kind: ServiceManifest
++metadata:
++  name: refund-approver
++spec:
++  owner:
++    group: group:default/payments
++  service:
++    name: refund-approver
++    type: ai-gate
++  judgment_threshold:
++    - type: segments
++      metric: high_confidence_failure
++      segment_dimension: customer_tier
++      segment_values: [enterprise, smb, consumer]
++      bounds:
++        maximum_variance_from_overall: 0.05
+diff --git a/spec/v2/tests/invalid/n89-segments-reversal-rate-unknown-source.yaml b/spec/v2/tests/invalid/n89-segments-reversal-rate-unknown-source.yaml
+new file mode 100644
+index 0000000..2b3dca4
+--- /dev/null
++++ b/spec/v2/tests/invalid/n89-segments-reversal-rate-unknown-source.yaml
+@@ -0,0 +1,21 @@
++# MUST be rejected: measurement.source takes the reversal_rate SLO's values: lineage, calibration_sample or downstream_signal (CORE §5.2.1, §5.5.1, opensrm-7zpz).
++# One defect only: `source: audit`.
++apiVersion: opensrm.nthlayer.io/v2
++kind: ServiceManifest
++metadata:
++  name: refund-approver
++spec:
++  owner:
++    group: group:default/payments
++  service:
++    name: refund-approver
++    type: ai-gate
++  judgment_threshold:
++    - type: segments
++      metric: reversal_rate
++      measurement:
++        source: audit
++      segment_dimension: customer_tier
++      segment_values: [enterprise, smb, consumer]
++      bounds:
++        maximum_variance_from_overall: 0.05
+diff --git a/spec/v2/tests/invalid/n90-segments-outcome-signal-missing-source.yaml b/spec/v2/tests/invalid/n90-segments-outcome-signal-missing-source.yaml
+new file mode 100644
+index 0000000..6472258
+--- /dev/null
++++ b/spec/v2/tests/invalid/n90-segments-outcome-signal-missing-source.yaml
+@@ -0,0 +1,21 @@
++# MUST be rejected: outcome_signal needs both source and window, as the outcomes SLO's does (CORE §5.2.4, §5.5.1, opensrm-7zpz).
++# One defect only: `outcome_signal` without `source`.
++apiVersion: opensrm.nthlayer.io/v2
++kind: ServiceManifest
++metadata:
++  name: refund-approver
++spec:
++  owner:
++    group: group:default/payments
++  service:
++    name: refund-approver
++    type: ai-gate
++  judgment_threshold:
++    - type: segments
++      metric: outcomes
++      outcome_signal:
++        window: 1h
++      segment_dimension: customer_tier
++      segment_values: [enterprise, smb, consumer]
++      bounds:
++        maximum_variance_from_overall: 0.05
+diff --git a/spec/v2/tests/invalid/n91-segments-confidence-threshold-above-one.yaml b/spec/v2/tests/invalid/n91-segments-confidence-threshold-above-one.yaml
+new file mode 100644
+index 0000000..8bb84ef
+--- /dev/null
++++ b/spec/v2/tests/invalid/n91-segments-confidence-threshold-above-one.yaml
+@@ -0,0 +1,21 @@
++# MUST be rejected: confidence_threshold is a ratio, as on the high_confidence_failure SLO (CORE §5.2.2, §5.5.1, opensrm-7zpz).
++# One defect only: `confidence_threshold: 1.5`.
++apiVersion: opensrm.nthlayer.io/v2
++kind: ServiceManifest
++metadata:
++  name: refund-approver
++spec:
++  owner:
++    group: group:default/payments
++  service:
++    name: refund-approver
++    type: ai-gate
++  judgment_threshold:
++    - type: segments
++      metric: high_confidence_failure
++      measurement:
++        confidence_threshold: 1.5
++      segment_dimension: customer_tier
++      segment_values: [enterprise, smb, consumer]
++      bounds:
++        maximum_variance_from_overall: 0.05
+diff --git a/spec/v2/tests/invalid/n92-segments-outcome-signal-window-not-duration.yaml b/spec/v2/tests/invalid/n92-segments-outcome-signal-window-not-duration.yaml
+new file mode 100644
+index 0000000..e6b6de5
+--- /dev/null
++++ b/spec/v2/tests/invalid/n92-segments-outcome-signal-window-not-duration.yaml
+@@ -0,0 +1,22 @@
++# MUST be rejected: outcome_signal.window is a Duration, as on the outcomes SLO (CORE §5.2.4, opensrm-7zpz).
++# One defect only: `window: 1 hour`.
++apiVersion: opensrm.nthlayer.io/v2
++kind: ServiceManifest
++metadata:
++  name: refund-approver
++spec:
++  owner:
++    group: group:default/payments
++  service:
++    name: refund-approver
++    type: ai-gate
++  judgment_threshold:
++    - type: segments
++      metric: outcomes
++      outcome_signal:
++        source: retro-consumer
++        window: 1 hour
++      segment_dimension: customer_tier
++      segment_values: [enterprise, smb, consumer]
++      bounds:
++        maximum_variance_from_overall: 0.05

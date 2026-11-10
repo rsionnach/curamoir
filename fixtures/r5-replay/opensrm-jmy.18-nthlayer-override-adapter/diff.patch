@@ -1,0 +1,1454 @@
+diff --git a/CLAUDE.md b/CLAUDE.md
+index c337e5e..b281826 100644
+--- a/CLAUDE.md
++++ b/CLAUDE.md
+@@ -7,23 +7,27 @@ Standalone HTTP sidecar — accepts override events via canonical JSON, batch JS
+ ```
+ src/nthlayer_override_adapter/
+   __init__.py     # Package marker
+-  config.py       # AdapterConfig + WebhookAdapter dataclasses; load_config() reads YAML; ConfigError raised on missing required fields, duplicate webhook_paths, or non-dict sections (privacy/otel/field_mapping/defaults/adapters list-shape); AdapterConfig.max_batch_size (default 1000, set via YAML batch.max_size; ConfigError on non-int or ≤0)
+-  metrics.py      # Prometheus counters: requests_total{endpoint, status}, emission_total{result}, validation_errors_total{reason}, collector_errors_total; emit_duration_seconds histogram
+-  response.py     # BatchResult dataclass + accepted_single / build_batch_response helpers; response shape per design doc § 3 (decision_ids in accepted, indexed rejected/duplicates)
+-  emission.py     # emit_override(event, privacy) — opens unparented gen_ai.override span via empty otel_context.Context(); applies hash_reviewer (default) / drops reason when exclude_reason; fail-open on exporter errors (logged + counted, never raised)
+-  app.py          # build_app(config) — Starlette factory; wires /healthz + /metrics + canonical + dynamic webhook routes
++  config.py       # AdapterConfig + WebhookAdapter + CoreConfig dataclasses; CoreConfig(url, timeout_seconds=5.0); AdapterConfig requires core: CoreConfig field; load_config() reads YAML; mandatory core: url: block (ConfigError if absent or malformed); ConfigError raised on missing required fields, duplicate webhook_paths, or non-dict sections (privacy/otel/field_mapping/defaults/adapters list-shape); AdapterConfig.max_batch_size (default 1000, set via YAML batch.max_size; ConfigError on non-int or ≤0)
++  metrics.py      # Prometheus counters: requests_total{endpoint, status}, emission_total{result}, validation_errors_total{reason}, collector_errors_total; emit_duration_seconds histogram; binding_total{result, reason} (nthlayer_override_binding_total — tracks core binding attempts, opensrm-jmy.18)
++  response.py     # BatchResult dataclass + BindingResult frozen dataclass (otel, core, reason fields; to_dict(); reason values: ok|core_unreachable|verdict_not_found|validation_error|core_timeout|other) + accepted_single / build_batch_response helpers; both accept optional bindings parameter (omitted when None, backward-compat); response shape per design doc § 3 (decision_ids in accepted, indexed rejected/duplicates, bindings per winner when core_client present)
++  emission.py     # apply_privacy(event, privacy) -> OverrideEvent — single privacy boundary (spec § 7); handles plaintext_reviewer (deprecated alias) and pre_redacted (preferred) flags; routes call once and pass masked event to both emit_override and bind_to_core; emit_override(event) — expects pre-masked event; opens unparented gen_ai.override span via empty otel_context.Context(); fail-open on exporter errors (logged + counted, never raised); bind_to_core(client, event, timeout_seconds) -> BindingResult (async; wraps CoreAPIClient.apply_override in asyncio.wait_for; maps HTTP status via _STATUS_TO_REASON lookup dict to BindingResult; increments binding_total)
++  app.py          # build_app(config) — Starlette factory; wires /healthz + /metrics + canonical + dynamic webhook routes; sets app.state.core_client = CoreAPIClient(base_url=config.core.url) and app.state.adapter_config = config (opensrm-jmy.18 C7)
+   cli.py          # nthlayer-override-adapter serve [--config <path>] [--host <h>] [--port <p>]; argparse-driven; exits SystemExit(2) on config-not-found or invalid YAML; --config falls back to $NTHLAYER_OVERRIDE_ADAPTER_CONFIG env var; calls _init_otel(cfg.otel_endpoint) after build_app() to initialise the OTel SDK (Wave A behaviour); registers atexit hook to force_flush(5000ms) + shutdown TracerProvider on SIGTERM/exit; logs resolved config_path so env-var users see the actual path
+   routes/
+-    canonical.py  # POST /api/v1/overrides + POST /api/v1/overrides/batch (last-in-array-wins on dup decision_id; two-pass _process_batch uses frozen _Winner(index, event) dataclass to compute winners then emits exactly one span per unique accepted decision_id; 413 on batch_too_large; _event_from_payload validates timestamp type — str or tz-aware datetime only, other types → 400)
+-    webhook.py    # Dynamic POST {webhook_path} per WebhookAdapter; handler runs map_webhook_to_override (from nthlayer-common) + emits via shared emit_override; mapper ValueError → 400
++    canonical.py  # POST /api/v1/overrides + POST /api/v1/overrides/batch; both call apply_privacy → emit_override → bind_to_core; reads core_client from app.state (skips binding + logs core_client_absent warning when absent); last-in-array-wins on dup decision_id; two-pass _process_batch uses frozen _Winner(index, event) dataclass to compute winners then emits exactly one span per unique accepted decision_id; 413 on batch_too_large; batch response includes bindings key (per winner) when core_client present; _event_from_payload validates timestamp type — str or tz-aware datetime only, other types → 400
++    webhook.py    # Dynamic POST {webhook_path} per WebhookAdapter; handler runs map_webhook_to_override (from nthlayer-common) → apply_privacy → emit_override → bind_to_core; core_client read from app.state (skips binding + warns when absent); mapper ValueError → 400
+ ```
+ 
+ ## Conventions
+ 
++- **`apply_privacy` is the single privacy boundary** (spec § 7): routes call it once to produce a masked event, then pass that masked event to both `emit_override` (OTel) and `bind_to_core` (HTTP core POST). Never apply privacy twice or inside `emit_override`.
++- **`pre_redacted` vs `plaintext_reviewer`**: `OverridePrivacyConfig.pre_redacted` is the preferred flag to skip hashing; `plaintext_reviewer` is the deprecated alias. Both are honoured by `apply_privacy` via `trust_wire = privacy.plaintext_reviewer or privacy.pre_redacted`.
+ - **Privacy at emission**, not consumer: hash_reviewer applied before `OverrideEvent.to_otel_attributes()` so plaintext reviewers never enter the OTel pipeline.
+ - **Unparented spans**: `gen_ai.override` is emitted with an empty OTel `Context()` — overrides are operator decisions not bound to any service trace. Do not "fix" this to inherit a current trace context.
+ - **Cardinality-match invariant**: response `accepted` set always equals the set of emitted-span `gen_ai.override.decision_id` values. Tests assert this explicitly in `tests/test_routes_canonical_batch.py::TestCardinalityInvariant`.
+ - **Fail-open on OTel export errors**: HTTP request still returns 201 even if export is degraded; the OTel SDK retries / buffers. `override_collector_errors_total` increments.
++- **`bind_to_core` is fail-open**: a binding failure (core unreachable, timeout, 4xx) increments `binding_total{result="failed"}` and returns a `BindingResult(core="failed")` but the HTTP 201 is still returned to the caller. `asyncio.wait_for(timeout_seconds)` enforces the sidecar's own timeout independently of CoreAPIClient internals.
++- **`core_client` absent guard**: all three route modules check `getattr(request.app.state, "core_client", None)`; when absent they log `core_client_absent` at WARNING, increment `binding_total{result="skipped", reason="no_client"}`, and skip binding. This preserves backward-compat with tests that don't wire a core client.
+ - **No auth in v1.5**: matches `nthlayer-core` posture. File a follow-up bead if a real deployment needs it.
+ - **Per-endpoint metric labels**: `_validation_response(*, endpoint, reason, detail)` is keyword-only in both `canonical.py` and `webhook.py` so rejection counters are correctly attributed per endpoint.
+ - **`_Winner` dataclass**: `_process_batch` tracks per-decision winners as a frozen `_Winner(index, event)` dataclass — not a tuple — for clarity and type-safety. Do not revert to a tuple.
+@@ -37,7 +41,7 @@ src/nthlayer_override_adapter/
+ 
+ ```bash
+ uv sync --extra dev
+-uv run pytest -q                   # full suite (70 tests)
++uv run pytest -q                   # full suite (89 tests)
+ uv run ruff check src/ tests/
+ uv run nthlayer-override-adapter serve --config <path>
+ # example config at repo root:
+diff --git a/override-adapter-config.yaml.example b/override-adapter-config.yaml.example
+index 8cf9757..1cc378a 100644
+--- a/override-adapter-config.yaml.example
++++ b/override-adapter-config.yaml.example
+@@ -19,6 +19,10 @@ adapters:
+       source_system: jira
+       service: fraud-detect
+ 
++core:
++  url: http://core:8000
++  timeout_seconds: 5.0
++
+ privacy:
+   # Reviewer hashed by default (SHA-256). Opt in to plaintext only if
+   # downstream consumers genuinely need the raw identifier.
+diff --git a/src/nthlayer_override_adapter/app.py b/src/nthlayer_override_adapter/app.py
+index e5fbca8..0c4d8cb 100644
+--- a/src/nthlayer_override_adapter/app.py
++++ b/src/nthlayer_override_adapter/app.py
+@@ -1,6 +1,7 @@
+ """Starlette app factory — wires canonical + webhook routes + health + metrics."""
+ from __future__ import annotations
+ 
++from nthlayer_common.api_client import CoreAPIClient
+ from nthlayer_common.metrics import metrics_content_type, render_metrics
+ from starlette.applications import Starlette
+ from starlette.requests import Request
+@@ -23,6 +24,8 @@ def build_app(config: AdapterConfig) -> Starlette:
+     register_webhook_routes(
+         app, adapters=config.adapters, privacy=config.privacy,
+     )
++    app.state.adapter_config = config
++    app.state.core_client = CoreAPIClient(base_url=config.core.url)
+     return app
+ 
+ 
+diff --git a/src/nthlayer_override_adapter/cli.py b/src/nthlayer_override_adapter/cli.py
+index aa365f3..960e188 100644
+--- a/src/nthlayer_override_adapter/cli.py
++++ b/src/nthlayer_override_adapter/cli.py
+@@ -2,6 +2,7 @@
+ from __future__ import annotations
+ 
+ import argparse
++import asyncio
+ import atexit
+ import os
+ import sys
+@@ -115,6 +116,19 @@ def main() -> int:
+         app, cfg = load_app(args.config)
+         # Initialise OTel SDK with the resolved endpoint from config.
+         _init_otel(cfg.otel_endpoint)
++
++        # Register atexit hook for CoreAPIClient shutdown alongside OTel teardown.
++        def _shutdown_core_client() -> None:
++            client = getattr(app.state, "core_client", None)
++            if client is None:
++                return
++            try:
++                asyncio.run(client.close())
++            except Exception:  # noqa: BLE001 — fail-soft shutdown
++                logger.warning("core_client_shutdown_error")
++
++        atexit.register(_shutdown_core_client)
++
+         logger.info(
+             "override_adapter_serving",
+             host=args.host,
+diff --git a/src/nthlayer_override_adapter/config.py b/src/nthlayer_override_adapter/config.py
+index e84aad6..0485da5 100644
+--- a/src/nthlayer_override_adapter/config.py
++++ b/src/nthlayer_override_adapter/config.py
+@@ -28,12 +28,21 @@ class WebhookAdapter:
+     defaults: dict[str, Any] = field(default_factory=dict)
+ 
+ 
++@dataclass(frozen=True)
++class CoreConfig:
++    """Core API connection settings (opensrm-jmy.18)."""
++
++    url: str
++    timeout_seconds: float = 5.0
++
++
+ @dataclass
+ class AdapterConfig:
+     """Top-level adapter config — adapters, privacy posture, OTel target, batch limits."""
+ 
+     adapters: list[WebhookAdapter]
+     privacy: OverridePrivacyConfig
++    core: CoreConfig
+     otel_endpoint: str | None = None
+     max_batch_size: int = 1000
+ 
+@@ -57,6 +66,19 @@ def load_config(path: str | Path) -> AdapterConfig:
+     if not isinstance(raw, dict):
+         raise ConfigError(f"top-level config must be a mapping, got {type(raw).__name__}")
+ 
++    core_raw = raw.get("core")
++    if core_raw is None:
++        raise ConfigError("core: block is required")
++    if not isinstance(core_raw, dict):
++        raise ConfigError("core: must be a mapping")
++    core_url = core_raw.get("url")
++    if not isinstance(core_url, str) or not core_url:
++        raise ConfigError("core.url is required and must be a non-empty string")
++    core_timeout_raw = core_raw.get("timeout_seconds", 5.0)
++    if not isinstance(core_timeout_raw, (int, float)) or core_timeout_raw <= 0:
++        raise ConfigError("core.timeout_seconds must be a positive number")
++    core_cfg = CoreConfig(url=core_url, timeout_seconds=float(core_timeout_raw))
++
+     adapters_raw = raw.get("adapters") or []
+     if not isinstance(adapters_raw, list):
+         raise ConfigError(
+@@ -88,6 +110,7 @@ def load_config(path: str | Path) -> AdapterConfig:
+     return AdapterConfig(
+         adapters=adapters,
+         privacy=privacy,
++        core=core_cfg,
+         otel_endpoint=otel_endpoint,
+         max_batch_size=max_batch_size,
+     )
+diff --git a/src/nthlayer_override_adapter/emission.py b/src/nthlayer_override_adapter/emission.py
+index a19759a..8671f7a 100644
+--- a/src/nthlayer_override_adapter/emission.py
++++ b/src/nthlayer_override_adapter/emission.py
+@@ -1,8 +1,14 @@
+ """OTel emission for override events — unparented gen_ai.override spans.
+ 
+-Privacy is applied here, at the emission boundary, not at the consumer
+-side: once the payload reaches the OTel pipeline it's observable
+-downstream, so reviewer hashing must happen before ``to_otel_attributes``.
++Privacy is applied ONCE at the route level (spec § 7): the sidecar is
++the single privacy boundary. Routes call ``apply_privacy`` to produce
++a masked copy of the event, then pass the masked event to both
++``emit_override`` (OTel span) and ``bind_to_core`` (HTTP POST to
++core). This ensures the OTel pipeline and core storage always receive
++the same redacted payload.
++
++``emit_override`` expects a pre-masked event and does NOT apply any
++further privacy transformation.
+ 
+ Rationale for unparented spans: overrides are operator decisions not
+ bound to any service trace. Treating each as a standalone span
+@@ -12,7 +18,9 @@ patterns. Do not "fix" this to inherit a trace context.
+ """
+ from __future__ import annotations
+ 
++import asyncio
+ import time
++from typing import Any
+ 
+ import structlog
+ from nthlayer_common.overrides import (
+@@ -24,10 +32,12 @@ from opentelemetry import context as otel_context
+ from opentelemetry import trace
+ 
+ from nthlayer_override_adapter.metrics import (
++    binding_total,
+     collector_errors_total,
+     emission_total,
+     emit_duration_seconds,
+ )
++from nthlayer_override_adapter.response import BindingResult
+ 
+ logger = structlog.get_logger(__name__)
+ 
+@@ -35,21 +45,53 @@ _SPAN_NAME = "gen_ai.override"
+ _TRACER_NAME = "nthlayer-override-adapter"
+ 
+ 
+-def emit_override(event: OverrideEvent, privacy: OverridePrivacyConfig) -> None:
++def apply_privacy(
++    event: OverrideEvent, privacy: OverridePrivacyConfig,
++) -> OverrideEvent:
++    """Return a privacy-masked copy of *event*.
++
++    This is the single privacy application point for the sidecar (spec § 7).
++    Routes must call this once and pass the returned masked event to both
++    ``emit_override`` and ``bind_to_core``.
++
++    Predicate matches ``nthlayer_common.overrides.ingestion._build_override``:
++    ``plaintext_reviewer or pre_redacted`` — both flags mean "trust the
++    caller's reviewer string; skip hashing". ``plaintext_reviewer`` is the
++    deprecated alias; ``pre_redacted`` is the preferred flag per spec § 7.
++    """
++    trust_wire = privacy.plaintext_reviewer or privacy.pre_redacted
++    reviewer = event.reviewer if trust_wire else hash_reviewer(event.reviewer)
++    reason = None if privacy.exclude_reason else event.reason
++    return OverrideEvent(
++        decision_id=event.decision_id,
++        service=event.service,
++        corrected_action=event.corrected_action,
++        reviewer=reviewer,
++        original_action=event.original_action,
++        reason=reason,
++        confidence_at_decision=event.confidence_at_decision,
++        source_system=event.source_system,
++        timestamp=event.timestamp,
++    )
++
++
++def emit_override(event: OverrideEvent) -> None:
+     """Emit one unparented ``gen_ai.override`` span for this override.
+ 
+-    Privacy is applied to a shallow copy of the event so the caller's
+-    instance is not mutated. Exporter failures are logged + counted but
+-    do not raise — fail-open posture matches the rest of the ecosystem
+-    (caller still treats the HTTP request as accepted).
++    Expects a pre-masked event — callers must call ``apply_privacy`` upstream
++    and pass the masked result here. This function emits the event's reviewer
++    string as-is; it does NOT apply any privacy transformation.
++
++    Exporter failures are logged + counted but do not raise — fail-open
++    posture matches the rest of the ecosystem (caller still treats the HTTP
++    request as accepted).
+     """
+     started = time.perf_counter()
+-    masked = _apply_privacy(event, privacy)
+     tracer = trace.get_tracer(_TRACER_NAME)
+     unparented_context = otel_context.Context()
+     try:
+         with tracer.start_as_current_span(_SPAN_NAME, context=unparented_context) as span:
+-            for key, value in masked.to_otel_attributes().items():
++            for key, value in event.to_otel_attributes().items():
+                 span.set_attribute(key, value)
+         emission_total.labels(result="emitted").inc()
+     except Exception as exc:  # noqa: BLE001 — fail-open is intentional
+@@ -64,23 +106,40 @@ def emit_override(event: OverrideEvent, privacy: OverridePrivacyConfig) -> None:
+         emit_duration_seconds.observe(time.perf_counter() - started)
+ 
+ 
+-def _apply_privacy(
+-    event: OverrideEvent, privacy: OverridePrivacyConfig,
+-) -> OverrideEvent:
+-    reviewer = (
+-        event.reviewer
+-        if privacy.plaintext_reviewer
+-        else hash_reviewer(event.reviewer)
+-    )
+-    reason = None if privacy.exclude_reason else event.reason
+-    return OverrideEvent(
+-        decision_id=event.decision_id,
+-        service=event.service,
+-        corrected_action=event.corrected_action,
+-        reviewer=reviewer,
+-        original_action=event.original_action,
+-        reason=reason,
+-        confidence_at_decision=event.confidence_at_decision,
+-        source_system=event.source_system,
+-        timestamp=event.timestamp,
+-    )
++_STATUS_TO_REASON: dict[int, str] = {
++    200: "ok",
++    404: "verdict_not_found",
++    409: "validation_error",
++    422: "validation_error",
++    0:   "core_unreachable",
++}
++
++
++async def bind_to_core(
++    client: Any,  # nthlayer_common.api_client.CoreAPIClient
++    event: OverrideEvent,
++    timeout_seconds: float,
++) -> BindingResult:
++    """Apply the override to core via HTTP POST; map result → BindingResult.
++
++    Wraps the CoreAPIClient call in asyncio.wait_for so the sidecar enforces
++    its own timeout regardless of CoreAPIClient's internal retry semantics.
++    Always increments nthlayer_override_binding_total.
++    """
++    payload = event.to_dict()
++    try:
++        api_result = await asyncio.wait_for(
++            client.apply_override(event.decision_id, payload),
++            timeout=timeout_seconds,
++        )
++    except asyncio.TimeoutError:
++        binding_total.labels(result="failed", reason="core_timeout").inc()
++        return BindingResult(core="failed", reason="core_timeout")
++
++    if api_result.ok:
++        binding_total.labels(result="success", reason="ok").inc()
++        return BindingResult(core="ok", reason=None)
++
++    reason = _STATUS_TO_REASON.get(api_result.status_code, "other")
++    binding_total.labels(result="failed", reason=reason).inc()
++    return BindingResult(core="failed", reason=reason)
+diff --git a/src/nthlayer_override_adapter/metrics.py b/src/nthlayer_override_adapter/metrics.py
+index a8c0d44..660dc85 100644
+--- a/src/nthlayer_override_adapter/metrics.py
++++ b/src/nthlayer_override_adapter/metrics.py
+@@ -36,3 +36,9 @@ emit_duration_seconds = Histogram(
+     "Time from HTTP receipt to OTel span emitted, seconds.",
+     buckets=(0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0),
+ )
++
++binding_total = Counter(
++    "nthlayer_override_binding_total",
++    "Override binding attempts to nthlayer-core, by result and reason (opensrm-jmy.18).",
++    ["result", "reason"],
++)
+diff --git a/src/nthlayer_override_adapter/response.py b/src/nthlayer_override_adapter/response.py
+index ee13f80..d3a8072 100644
+--- a/src/nthlayer_override_adapter/response.py
++++ b/src/nthlayer_override_adapter/response.py
+@@ -10,6 +10,27 @@ from dataclasses import dataclass, field
+ from typing import Any
+ 
+ 
++@dataclass(frozen=True)
++class BindingResult:
++    """Per-decision binding outcome (opensrm-jmy.18).
++
++    otel and core each ∈ {"ok", "failed"}.
++    reason is core-specific: present iff core == "failed",
++    None when core == "ok". Values match the bounded set in the
++    spec: ok | core_unreachable | verdict_not_found |
++    validation_error | core_timeout | other.
++    """
++    otel: str = "ok"
++    core: str = "ok"
++    reason: str | None = None
++
++    def to_dict(self) -> dict:
++        out: dict = {"otel": self.otel, "core": self.core}
++        if self.reason is not None and self.core == "failed":
++            out["reason"] = self.reason
++        return out
++
++
+ @dataclass
+ class BatchResult:
+     """Per-batch accumulator threaded through the batch route handler."""
+@@ -21,16 +42,45 @@ class BatchResult:
+     errors: list[dict[str, Any]] = field(default_factory=list)
+ 
+ 
+-def accepted_single(decision_id: str) -> dict[str, Any]:
+-    """Body for a successful single-override POST."""
+-    return {"decision_id": decision_id, "emitted_to_otel": True}
++def accepted_single(
++    decision_id: str,
++    bindings: BindingResult | None = None,
++) -> dict[str, Any]:
++    """Body for a successful single-override POST.
++
++    Backward-compatible: bindings defaults to None and is omitted from the
++    response when not provided (e.g. in tests that don't wire a core client).
++    When provided, the bindings key is a mapping from decision_id to the
++    serialised BindingResult dict.
++    """
++    out: dict[str, Any] = {
++        "accepted": [decision_id],
++        "rejected": [],
++        "duplicates": [],
++        "errors": [],
++    }
++    if bindings is not None:
++        out["bindings"] = {decision_id: bindings.to_dict()}
++    return out
++
+ 
++def build_batch_response(
++    result: BatchResult,
++    bindings: dict[str, BindingResult] | None = None,
++) -> dict[str, Any]:
++    """Final JSON body for a batch POST. Always populated keys.
+ 
+-def build_batch_response(result: BatchResult) -> dict[str, Any]:
+-    """Final JSON body for a batch POST. Always populated keys."""
+-    return {
++    Backward-compatible: if bindings is None (e.g. no core_client wired),
++    the 'bindings' key is omitted from the response.
++    When provided, bindings is keyed by decision_id (winners only; losers
++    of dedup never appear here).
++    """
++    out: dict[str, Any] = {
+         "accepted": list(result.accepted),
+         "rejected": list(result.rejected),
+         "duplicates": list(result.duplicates),
+         "errors": list(result.errors),
+     }
++    if bindings is not None:
++        out["bindings"] = {k: v.to_dict() for k, v in bindings.items()}
++    return out
+diff --git a/src/nthlayer_override_adapter/routes/canonical.py b/src/nthlayer_override_adapter/routes/canonical.py
+index f52b341..2103339 100644
+--- a/src/nthlayer_override_adapter/routes/canonical.py
++++ b/src/nthlayer_override_adapter/routes/canonical.py
+@@ -6,23 +6,28 @@ from dataclasses import dataclass
+ from datetime import datetime
+ from typing import Any
+ 
++import structlog
+ from nthlayer_common.overrides import OverrideEvent, OverridePrivacyConfig
+ from starlette.applications import Starlette
+ from starlette.requests import Request
+ from starlette.responses import JSONResponse
+ from starlette.routing import Route
+ 
+-from nthlayer_override_adapter.emission import emit_override
++from nthlayer_override_adapter.emission import apply_privacy, bind_to_core, emit_override
+ from nthlayer_override_adapter.metrics import (
++    binding_total,
+     requests_total,
+     validation_errors_total,
+ )
+ from nthlayer_override_adapter.response import (
+     BatchResult,
++    BindingResult,
+     accepted_single,
+     build_batch_response,
+ )
+ 
++logger = structlog.get_logger(__name__)
++
+ 
+ @dataclass(frozen=True)
+ class _Winner:
+@@ -50,9 +55,37 @@ def register_canonical_routes(
+                 endpoint="canonical", reason="invalid_body", detail=str(exc)
+             )
+ 
+-        emit_override(event, privacy)
++        # Spec § 7: apply privacy ONCE at the sidecar boundary.
++        # The masked event is passed to both emit_override (OTel) and
++        # bind_to_core (HTTP POST) so both sides of the boundary receive
++        # identical redacted data. Core trusts pre_redacted=True and stores
++        # the reviewer string as-is, so plaintext must never reach core.
++        masked = apply_privacy(event, privacy)
++        emit_override(masked)
+         requests_total.labels(endpoint="canonical", status="accepted").inc()
+-        return JSONResponse(accepted_single(event.decision_id), status_code=201)
++
++        # C4 (opensrm-jmy.18): bind to core after OTel emission.
++        # core_client and adapter_config are set on app.state by the app
++        # factory (C7) or by test fixtures. When core_client is absent
++        # (e.g. legacy fixture path) skip binding so existing tests still pass.
++        core_client = getattr(request.app.state, "core_client", None)
++        if core_client is not None:
++            adapter_cfg = request.app.state.adapter_config
++            binding = await bind_to_core(
++                core_client,
++                masked,
++                timeout_seconds=adapter_cfg.core.timeout_seconds,
++            )
++        else:
++            logger.warning(
++                "core_client_absent",
++                endpoint="canonical_single",
++                decision_id=event.decision_id,
++            )
++            binding_total.labels(result="skipped", reason="no_client").inc()
++            binding = None
++
++        return JSONResponse(accepted_single(event.decision_id, bindings=binding), status_code=201)
+ 
+     async def post_batch(request: Request) -> JSONResponse:
+         try:
+@@ -84,10 +117,42 @@ def register_canonical_routes(
+                 status_code=413,
+             )
+ 
+-        result = _process_batch(entries, privacy=privacy)
++        winners, result = _process_batch(entries)
++
++        # C5 (opensrm-jmy.18): emit-pass — one span per winner, then bind to core.
++        # core_client and adapter_config are set on app.state by the app factory (C7)
++        # or by test fixtures. When core_client is absent, skip binding (backward-compat).
++        core_client = getattr(request.app.state, "core_client", None)
++        if core_client is not None:
++            adapter_cfg = request.app.state.adapter_config
++            timeout_seconds = adapter_cfg.core.timeout_seconds
++        else:
++            logger.warning(
++                "core_client_absent",
++                endpoint="canonical_batch",
++                entry_count=len(entries),
++            )
++            binding_total.labels(result="skipped", reason="no_client").inc()
++            timeout_seconds = 5.0
++
++        bindings: dict[str, BindingResult] = {}
++        for decision_id, winner in winners.items():
++            # Spec § 7: apply privacy once per winner; pass masked event to
++            # both emit_override (OTel) and bind_to_core (HTTP POST to core).
++            masked = apply_privacy(winner.event, privacy)
++            emit_override(masked)
++            result.accepted.append(decision_id)
++            if core_client is not None:
++                bindings[decision_id] = await bind_to_core(
++                    core_client, masked, timeout_seconds=timeout_seconds,
++                )
++
+         status = "accepted" if result.accepted else "rejected"
+         requests_total.labels(endpoint="batch", status=status).inc()
+-        return JSONResponse(build_batch_response(result), status_code=200)
++        return JSONResponse(
++            build_batch_response(result, bindings=bindings if core_client is not None else None),
++            status_code=201,
++        )
+ 
+     app.routes.append(Route("/api/v1/overrides", post_single, methods=["POST"]))
+     app.routes.append(
+@@ -96,15 +161,18 @@ def register_canonical_routes(
+ 
+ 
+ def _process_batch(
+-    entries: list[Any], *, privacy: OverridePrivacyConfig,
+-) -> BatchResult:
++    entries: list[Any],
++) -> tuple[dict[str, _Winner], BatchResult]:
+     """Walk entries in array order. Last-in-array wins on duplicate decision_id.
+ 
+-    Two-pass: first resolve the winning entry per decision_id without
+-    emitting anything, then emit only the winners. This meets the
+-    cardinality-match invariant (one emitted span per unique accepted
+-    decision_id), which a one-pass emit-as-you-go approach would violate
+-    by emitting N spans for N occurrences of the same id.
++    Dedup-pass only: resolves the winning entry per decision_id and populates
++    rejected/duplicates in BatchResult, but does NOT emit spans or append to
++    accepted. The caller (async post_batch) owns the emit-pass so it can
++    await bind_to_core per winner.
++
++    Returns (winners, result) where:
++      - winners: decision_id → _Winner (the entry that will be emitted)
++      - result: BatchResult with rejected and duplicates populated; accepted is empty
+     """
+     result = BatchResult()
+     winners: dict[str, _Winner] = {}
+@@ -123,8 +191,6 @@ def _process_batch(
+         winners[event.decision_id] = _Winner(index=idx, event=event)
+ 
+     for decision_id, winner in winners.items():
+-        emit_override(winner.event, privacy)
+-        result.accepted.append(decision_id)
+         if decision_id in superseded:
+             result.duplicates.append(
+                 {
+@@ -133,7 +199,8 @@ def _process_batch(
+                     "discarded_indices": sorted(superseded[decision_id]),
+                 }
+             )
+-    return result
++
++    return winners, result
+ 
+ 
+ def _event_from_payload(payload: object) -> OverrideEvent:
+diff --git a/src/nthlayer_override_adapter/routes/webhook.py b/src/nthlayer_override_adapter/routes/webhook.py
+index 1fa7ff4..8a9f4f0 100644
+--- a/src/nthlayer_override_adapter/routes/webhook.py
++++ b/src/nthlayer_override_adapter/routes/webhook.py
+@@ -9,6 +9,7 @@ from __future__ import annotations
+ 
+ import json
+ 
++import structlog
+ from nthlayer_common.overrides import (
+     OverridePrivacyConfig,
+     map_webhook_to_override,
+@@ -19,13 +20,16 @@ from starlette.responses import JSONResponse
+ from starlette.routing import Route
+ 
+ from nthlayer_override_adapter.config import WebhookAdapter
+-from nthlayer_override_adapter.emission import emit_override
++from nthlayer_override_adapter.emission import apply_privacy, bind_to_core, emit_override
+ from nthlayer_override_adapter.metrics import (
++    binding_total,
+     requests_total,
+     validation_errors_total,
+ )
+ from nthlayer_override_adapter.response import accepted_single
+ 
++logger = structlog.get_logger(__name__)
++
+ 
+ def register_webhook_routes(
+     app: Starlette,
+@@ -69,9 +73,30 @@ def _make_handler(adapter: WebhookAdapter, *, privacy: OverridePrivacyConfig):
+         except ValueError as exc:
+             return _validation_response(endpoint="webhook", reason="mapper_error", detail=str(exc))
+ 
+-        emit_override(event, privacy)
++        # Spec § 7: apply privacy ONCE at the sidecar boundary.
++        # The masked event is passed to both emit_override (OTel) and
++        # bind_to_core (HTTP POST) so both sides receive identical redacted data.
++        masked = apply_privacy(event, privacy)
++        emit_override(masked)
+         requests_total.labels(endpoint="webhook", status="accepted").inc()
+-        return JSONResponse(accepted_single(event.decision_id), status_code=201)
++
++        binding = None
++        core_client = getattr(request.app.state, "core_client", None)
++        if core_client is not None:
++            timeout_seconds = request.app.state.adapter_config.core.timeout_seconds
++            binding = await bind_to_core(
++                core_client, masked, timeout_seconds=timeout_seconds,
++            )
++        else:
++            logger.warning(
++                "core_client_absent",
++                endpoint="webhook",
++                decision_id=event.decision_id,
++            )
++            binding_total.labels(result="skipped", reason="no_client").inc()
++
++        response_body = accepted_single(event.decision_id, bindings=binding)
++        return JSONResponse(response_body, status_code=201)
+ 
+     return handle
+ 
+diff --git a/tests/conftest.py b/tests/conftest.py
+index 804d5a2..6b42b45 100644
+--- a/tests/conftest.py
++++ b/tests/conftest.py
+@@ -1,6 +1,7 @@
+ from collections.abc import Iterator
+ 
+ import pytest
++from nthlayer_common.overrides import OverridePrivacyConfig
+ from opentelemetry import trace
+ from opentelemetry.sdk.trace import TracerProvider
+ from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+@@ -8,6 +9,8 @@ from opentelemetry.sdk.trace.export.in_memory_span_exporter import (
+     InMemorySpanExporter,
+ )
+ 
++from nthlayer_override_adapter.config import AdapterConfig, CoreConfig, WebhookAdapter
++
+ # Module-level exporter and provider, set once.
+ _exporter: InMemorySpanExporter | None = None
+ _provider: TracerProvider | None = None
+@@ -45,3 +48,71 @@ def span_exporter() -> InMemorySpanExporter:
+     via the autouse _reset_exporter_before_each_test fixture.
+     """
+     return _init_otel()
++
++
++@pytest.fixture
++def adapter_config() -> AdapterConfig:
++    """Minimal valid AdapterConfig for use in C4+ fixtures.
++
++    Provides a core: block so handlers can read adapter_config.core.timeout_seconds.
++    Includes a jira webhook adapter at /webhook/jira so the app_with_fake_core
++    factory registers the webhook route for C6 tests.
++    """
++    return AdapterConfig(
++        adapters=[
++            WebhookAdapter(
++                source="jira",
++                webhook_path="/webhook/jira",
++                field_mapping={
++                    "decision_id": "issue.customfield_10042",
++                    "corrected_action": "issue.resolution.name",
++                    "reviewer": "issue.assignee.emailAddress",
++                    "timestamp": "issue.updated",
++                    "reason": "issue.resolution.description",
++                },
++                defaults={"source_system": "jira", "service": "fraud-detect"},
++            )
++        ],
++        privacy=OverridePrivacyConfig(),
++        core=CoreConfig(url="http://localhost:8100", timeout_seconds=5.0),
++    )
++
++
++@pytest.fixture
++def app_with_fake_core(adapter_config: AdapterConfig):
++    """Returns a factory that builds the adapter app with a stubbed CoreAPIClient.
++
++    Usage: app = app_with_fake_core(fake_status=200)
++
++    Builds the app via build_app, then injects a fake core_client and
++    adapter_config onto app.state so the canonical single handler can call
++    bind_to_core without a real nthlayer-core instance.
++    """
++    from unittest.mock import MagicMock
++
++    from nthlayer_common.api_client import APIResult
++
++    from nthlayer_override_adapter.app import build_app
++
++    def _factory(fake_status: int = 200):
++        app = build_app(adapter_config)
++
++        fake_client = MagicMock()
++
++        async def _fake_apply(vid, payload):
++            return APIResult(
++                ok=(fake_status == 200),
++                status_code=fake_status,
++                data={"id": vid, "status": "overridden"} if fake_status == 200 else None,
++                error=None if fake_status == 200 else "err",
++                detail=None,
++            )
++
++        fake_client.apply_override = _fake_apply
++        app.state.core_client = fake_client
++        # Ensure adapter_config is reachable from app.state for the handler
++        # to read cfg.core.timeout_seconds. Idempotent if build_app already sets it.
++        app.state.adapter_config = adapter_config
++        return app
++
++    return _factory
+diff --git a/tests/fixtures/adapter_config_jira.yaml b/tests/fixtures/adapter_config_jira.yaml
+index 18d7cbe..625ef09 100644
+--- a/tests/fixtures/adapter_config_jira.yaml
++++ b/tests/fixtures/adapter_config_jira.yaml
+@@ -11,6 +11,10 @@ adapters:
+       source_system: jira
+       service: fraud-detect
+ 
++core:
++  url: http://core:8000
++  timeout_seconds: 5.0
++
+ privacy:
+   plaintext_reviewer: false
+   exclude_reason: false
+diff --git a/tests/fixtures/adapter_config_minimal.yaml b/tests/fixtures/adapter_config_minimal.yaml
+index 83937f3..a7422b4 100644
+--- a/tests/fixtures/adapter_config_minimal.yaml
++++ b/tests/fixtures/adapter_config_minimal.yaml
+@@ -1,4 +1,7 @@
+ adapters: []
++core:
++  url: http://core:8000
++  timeout_seconds: 5.0
+ privacy:
+   plaintext_reviewer: false
+   exclude_reason: false
+diff --git a/tests/test_app.py b/tests/test_app.py
+index 5bfa941..3eb44db 100644
+--- a/tests/test_app.py
++++ b/tests/test_app.py
+@@ -3,7 +3,7 @@ from nthlayer_common.overrides import OverridePrivacyConfig
+ from starlette.testclient import TestClient
+ 
+ from nthlayer_override_adapter.app import build_app
+-from nthlayer_override_adapter.config import AdapterConfig, WebhookAdapter
++from nthlayer_override_adapter.config import AdapterConfig, CoreConfig, WebhookAdapter
+ 
+ 
+ @pytest.fixture
+@@ -22,6 +22,7 @@ def adapter_config() -> AdapterConfig:
+             ),
+         ],
+         privacy=OverridePrivacyConfig(),
++        core=CoreConfig(url="http://core:8000"),
+     )
+ 
+ 
+@@ -57,3 +58,33 @@ class TestAllRoutesWired:
+     def test_webhook_present(self, client) -> None:
+         resp = client.post("/webhook/jira", json={"bad": "body"})
+         assert resp.status_code == 400
++
++
++class TestBuildAppCoreClientLifecycle:
++    """opensrm-jmy.18 C7: build_app wires CoreAPIClient onto app.state."""
++
++    def test_build_app_attaches_core_client_to_state(self, adapter_config) -> None:
++        """build_app instantiates CoreAPIClient and attaches it to app.state."""
++        from nthlayer_common.api_client import CoreAPIClient
++
++        from nthlayer_override_adapter.app import build_app
++
++        app = build_app(adapter_config)
++        assert app.state.core_client is not None
++        assert isinstance(app.state.core_client, CoreAPIClient)
++        # adapter_config must also be reachable from state for handlers
++        assert app.state.adapter_config is adapter_config
++
++    def test_build_app_core_client_base_url_matches_config(
++        self, adapter_config
++    ) -> None:
++        """CoreAPIClient.base_url reflects adapter_config.core.url."""
++        from nthlayer_override_adapter.app import build_app
++
++        app = build_app(adapter_config)
++        client = app.state.core_client
++        # CoreAPIClient stores base_url directly on the dataclass field;
++        # __post_init__ strips a trailing slash, so compare without one.
++        expected = adapter_config.core.url.rstrip("/")
++        actual = getattr(client, "base_url", None)
++        assert actual == expected
+diff --git a/tests/test_cli.py b/tests/test_cli.py
+index 0869152..2f5eb2b 100644
+--- a/tests/test_cli.py
++++ b/tests/test_cli.py
+@@ -8,7 +8,7 @@ from nthlayer_override_adapter.cli import _init_otel, build_parser, load_app
+ 
+ def _write_minimal_config(tmp_path: Path) -> Path:
+     p = tmp_path / "cfg.yaml"
+-    p.write_text("adapters: []\n")
++    p.write_text("adapters: []\ncore:\n  url: http://core:8000\n")
+     return p
+ 
+ 
+diff --git a/tests/test_config.py b/tests/test_config.py
+index 9ca2fb4..1073eac 100644
+--- a/tests/test_config.py
++++ b/tests/test_config.py
+@@ -15,14 +15,14 @@ class TestLoadMinimal:
+ 
+     def test_defaults_when_privacy_absent(self, tmp_path: Path) -> None:
+         target = tmp_path / "cfg.yaml"
+-        target.write_text("adapters: []\n")
++        target.write_text("adapters: []\ncore:\n  url: http://core:8000\n")
+         cfg = load_config(target)
+         assert cfg.privacy.plaintext_reviewer is False
+         assert cfg.privacy.exclude_reason is False
+ 
+     def test_otel_endpoint_optional(self, tmp_path: Path) -> None:
+         target = tmp_path / "cfg.yaml"
+-        target.write_text("adapters: []\n")
++        target.write_text("adapters: []\ncore:\n  url: http://core:8000\n")
+         cfg = load_config(target)
+         assert cfg.otel_endpoint is None
+ 
+@@ -51,6 +51,7 @@ class TestValidation:
+     def test_missing_source_raises(self, tmp_path: Path) -> None:
+         target = tmp_path / "bad.yaml"
+         target.write_text(
++            "core:\n  url: http://core:8000\n"
+             "adapters:\n"
+             "  - webhook_path: /x\n"
+             "    field_mapping: {decision_id: a, corrected_action: b, reviewer: c}\n"
+@@ -61,6 +62,7 @@ class TestValidation:
+     def test_missing_webhook_path_raises(self, tmp_path: Path) -> None:
+         target = tmp_path / "bad.yaml"
+         target.write_text(
++            "core:\n  url: http://core:8000\n"
+             "adapters:\n"
+             "  - source: x\n"
+             "    field_mapping: {decision_id: a, corrected_action: b, reviewer: c}\n"
+@@ -71,6 +73,7 @@ class TestValidation:
+     def test_duplicate_webhook_paths_raise(self, tmp_path: Path) -> None:
+         target = tmp_path / "bad.yaml"
+         target.write_text(
++            "core:\n  url: http://core:8000\n"
+             "adapters:\n"
+             "  - source: a\n"
+             "    webhook_path: /webhook/x\n"
+@@ -90,13 +93,14 @@ class TestValidation:
+ class TestTypeGuards:
+     def test_adapters_non_list_raises(self, tmp_path: Path) -> None:
+         target = tmp_path / "bad.yaml"
+-        target.write_text("adapters: not-a-list\n")
++        target.write_text("core:\n  url: http://core:8000\nadapters: not-a-list\n")
+         with pytest.raises(ConfigError, match=r"'adapters' must be a list"):
+             load_config(target)
+ 
+     def test_field_mapping_non_dict_raises(self, tmp_path: Path) -> None:
+         target = tmp_path / "bad.yaml"
+         target.write_text(
++            "core:\n  url: http://core:8000\n"
+             "adapters:\n"
+             "  - source: x\n"
+             "    webhook_path: /webhook/x\n"
+@@ -108,6 +112,7 @@ class TestTypeGuards:
+     def test_defaults_non_dict_raises(self, tmp_path: Path) -> None:
+         target = tmp_path / "bad.yaml"
+         target.write_text(
++            "core:\n  url: http://core:8000\n"
+             "adapters:\n"
+             "  - source: x\n"
+             "    webhook_path: /webhook/x\n"
+@@ -119,50 +124,106 @@ class TestTypeGuards:
+ 
+     def test_privacy_non_dict_raises(self, tmp_path: Path) -> None:
+         target = tmp_path / "bad.yaml"
+-        target.write_text("adapters: []\nprivacy: not-a-mapping\n")
++        target.write_text(
++            "core:\n  url: http://core:8000\nadapters: []\nprivacy: not-a-mapping\n"
++        )
+         with pytest.raises(ConfigError, match=r"'privacy' must be a mapping"):
+             load_config(target)
+ 
+     def test_otel_non_dict_raises(self, tmp_path: Path) -> None:
+         target = tmp_path / "bad.yaml"
+-        target.write_text("adapters: []\notel: not-a-mapping\n")
++        target.write_text(
++            "core:\n  url: http://core:8000\nadapters: []\notel: not-a-mapping\n"
++        )
+         with pytest.raises(ConfigError, match=r"'otel' must be a mapping"):
+             load_config(target)
+ 
+     def test_batch_non_dict_raises(self, tmp_path: Path) -> None:
+         target = tmp_path / "bad.yaml"
+-        target.write_text("adapters: []\nbatch: not-a-mapping\n")
++        target.write_text(
++            "core:\n  url: http://core:8000\nadapters: []\nbatch: not-a-mapping\n"
++        )
+         with pytest.raises(ConfigError, match=r"'batch' must be a mapping"):
+             load_config(target)
+ 
+ 
++class TestCoreConfig:
++    """opensrm-jmy.18: core: block in adapter config."""
++
++    def test_core_block_parsed(self, tmp_path: Path) -> None:
++        cfg_path = tmp_path / "cfg.yaml"
++        cfg_path.write_text(
++            "adapters: []\n"
++            "core:\n"
++            "  url: http://core:8000\n"
++            "  timeout_seconds: 7.5\n"
++        )
++        cfg = load_config(str(cfg_path))
++        assert cfg.core.url == "http://core:8000"
++        assert cfg.core.timeout_seconds == 7.5
++
++    def test_core_url_required(self, tmp_path: Path) -> None:
++        cfg_path = tmp_path / "cfg.yaml"
++        cfg_path.write_text("adapters: []\ncore:\n  timeout_seconds: 5.0\n")
++        with pytest.raises(ConfigError, match="core.url"):
++            load_config(str(cfg_path))
++
++    def test_core_timeout_defaults_to_5(self, tmp_path: Path) -> None:
++        cfg_path = tmp_path / "cfg.yaml"
++        cfg_path.write_text("adapters: []\ncore:\n  url: http://core:8000\n")
++        cfg = load_config(str(cfg_path))
++        assert cfg.core.timeout_seconds == 5.0
++
++    def test_core_timeout_must_be_positive(self, tmp_path: Path) -> None:
++        cfg_path = tmp_path / "cfg.yaml"
++        cfg_path.write_text(
++            "adapters: []\ncore:\n  url: http://core:8000\n  timeout_seconds: 0\n"
++        )
++        with pytest.raises(ConfigError, match="timeout_seconds"):
++            load_config(str(cfg_path))
++
++    def test_core_block_required(self, tmp_path: Path) -> None:
++        cfg_path = tmp_path / "cfg.yaml"
++        cfg_path.write_text("# empty config\n")
++        with pytest.raises(ConfigError, match="core"):
++            load_config(str(cfg_path))
++
++
+ class TestBatchMaxSize:
+     def test_default_when_absent(self, tmp_path: Path) -> None:
+         target = tmp_path / "cfg.yaml"
+-        target.write_text("adapters: []\n")
++        target.write_text("adapters: []\ncore:\n  url: http://core:8000\n")
+         cfg = load_config(target)
+         assert cfg.max_batch_size == 1000
+ 
+     def test_explicit_value_round_trips(self, tmp_path: Path) -> None:
+         target = tmp_path / "cfg.yaml"
+-        target.write_text("adapters: []\nbatch:\n  max_size: 500\n")
++        target.write_text(
++            "adapters: []\ncore:\n  url: http://core:8000\nbatch:\n  max_size: 500\n"
++        )
+         cfg = load_config(target)
+         assert cfg.max_batch_size == 500
+ 
+     def test_zero_raises(self, tmp_path: Path) -> None:
+         target = tmp_path / "cfg.yaml"
+-        target.write_text("adapters: []\nbatch:\n  max_size: 0\n")
++        target.write_text(
++            "adapters: []\ncore:\n  url: http://core:8000\nbatch:\n  max_size: 0\n"
++        )
+         with pytest.raises(ConfigError, match="must be positive"):
+             load_config(target)
+ 
+     def test_negative_raises(self, tmp_path: Path) -> None:
+         target = tmp_path / "cfg.yaml"
+-        target.write_text("adapters: []\nbatch:\n  max_size: -1\n")
++        target.write_text(
++            "adapters: []\ncore:\n  url: http://core:8000\nbatch:\n  max_size: -1\n"
++        )
+         with pytest.raises(ConfigError, match="must be positive"):
+             load_config(target)
+ 
+     def test_non_int_raises(self, tmp_path: Path) -> None:
+         target = tmp_path / "cfg.yaml"
+-        target.write_text("adapters: []\nbatch:\n  max_size: lots\n")
++        target.write_text(
++            "adapters: []\ncore:\n  url: http://core:8000\nbatch:\n  max_size: lots\n"
++        )
+         with pytest.raises(ConfigError, match="must be an integer"):
+             load_config(target)
+diff --git a/tests/test_emission.py b/tests/test_emission.py
+index 16fea34..785750a 100644
+--- a/tests/test_emission.py
++++ b/tests/test_emission.py
+@@ -1,3 +1,4 @@
++import pytest
+ from datetime import UTC, datetime
+ 
+ from nthlayer_common.overrides import (
+@@ -6,7 +7,7 @@ from nthlayer_common.overrides import (
+     hash_reviewer,
+ )
+ 
+-from nthlayer_override_adapter.emission import emit_override
++from nthlayer_override_adapter.emission import apply_privacy, emit_override
+ 
+ 
+ def _make_event(**overrides: object) -> OverrideEvent:
+@@ -26,50 +27,136 @@ def _make_event(**overrides: object) -> OverrideEvent:
+ 
+ class TestEmissionShape:
+     def test_emits_one_span_named_gen_ai_override(self, span_exporter) -> None:
+-        emit_override(_make_event(), OverridePrivacyConfig())
++        privacy = OverridePrivacyConfig()
++        emit_override(apply_privacy(_make_event(), privacy))
+         spans = span_exporter.get_finished_spans()
+         assert len(spans) == 1
+         assert spans[0].name == "gen_ai.override"
+ 
+     def test_span_carries_required_attributes(self, span_exporter) -> None:
+-        emit_override(_make_event(), OverridePrivacyConfig())
++        privacy = OverridePrivacyConfig()
++        emit_override(apply_privacy(_make_event(), privacy))
+         attrs = span_exporter.get_finished_spans()[0].attributes
+         assert attrs["gen_ai.override.decision_id"] == "vrd-001"
+         assert attrs["gen_ai.override.service"] == "fraud-detect"
+         assert attrs["gen_ai.override.corrected_action"] == "escalate"
+ 
+     def test_span_is_unparented(self, span_exporter) -> None:
+-        emit_override(_make_event(), OverridePrivacyConfig())
++        privacy = OverridePrivacyConfig()
++        emit_override(apply_privacy(_make_event(), privacy))
+         span = span_exporter.get_finished_spans()[0]
+         assert span.parent is None
+ 
+ 
+ class TestPrivacy:
+     def test_reviewer_hashed_by_default(self, span_exporter) -> None:
+-        emit_override(_make_event(reviewer="analyst-047"), OverridePrivacyConfig())
++        privacy = OverridePrivacyConfig()
++        emit_override(apply_privacy(_make_event(reviewer="analyst-047"), privacy))
+         attrs = span_exporter.get_finished_spans()[0].attributes
+         assert attrs["gen_ai.override.reviewer"] == hash_reviewer("analyst-047")
+ 
+     def test_reviewer_plaintext_when_opted_in(self, span_exporter) -> None:
+         privacy = OverridePrivacyConfig(plaintext_reviewer=True)
+-        emit_override(_make_event(reviewer="analyst-047"), privacy)
++        emit_override(apply_privacy(_make_event(reviewer="analyst-047"), privacy))
++        attrs = span_exporter.get_finished_spans()[0].attributes
++        assert attrs["gen_ai.override.reviewer"] == "analyst-047"
++
++    def test_reviewer_plaintext_when_pre_redacted(self, span_exporter) -> None:
++        """pre_redacted=True (preferred per spec § 7) also suppresses hashing."""
++        privacy = OverridePrivacyConfig(pre_redacted=True)
++        emit_override(apply_privacy(_make_event(reviewer="analyst-047"), privacy))
+         attrs = span_exporter.get_finished_spans()[0].attributes
+         assert attrs["gen_ai.override.reviewer"] == "analyst-047"
+ 
+     def test_reason_dropped_when_excluded(self, span_exporter) -> None:
+         privacy = OverridePrivacyConfig(exclude_reason=True)
+-        emit_override(_make_event(reason="sensitive"), privacy)
++        emit_override(apply_privacy(_make_event(reason="sensitive"), privacy))
+         attrs = span_exporter.get_finished_spans()[0].attributes
+         assert "gen_ai.override.reason" not in attrs
+ 
+ 
+ class TestOptionalFields:
+     def test_none_fields_dropped(self, span_exporter) -> None:
+-        emit_override(
++        privacy = OverridePrivacyConfig()
++        emit_override(apply_privacy(
+             _make_event(reason=None, original_action=None, source_system=None),
+-            OverridePrivacyConfig(),
+-        )
++            privacy,
++        ))
+         attrs = span_exporter.get_finished_spans()[0].attributes
+         assert "gen_ai.override.reason" not in attrs
+         assert "gen_ai.override.original_action" not in attrs
+         assert "gen_ai.override.source_system" not in attrs
++
++
++class TestBindToCore:
++    """opensrm-jmy.18: bind_to_core maps APIResult → BindingResult."""
++
++    @pytest.mark.asyncio
++    async def test_bind_to_core_success_returns_ok(self):
++        from nthlayer_override_adapter.emission import bind_to_core
++        from nthlayer_common.api_client import APIResult
++
++        class _FakeClient:
++            async def apply_override(self, vid, payload):
++                return APIResult(ok=True, status_code=200, data={"id": vid}, error=None, detail=None)
++
++        event = OverrideEvent(
++            decision_id="dec-1", service="s", corrected_action="approve",
++            reviewer="h",
++        )
++        result = await bind_to_core(_FakeClient(), event, timeout_seconds=5.0)
++        assert result.core == "ok"
++        assert result.reason is None  # spec § 5.3: reason absent when core == "ok"
++
++    @pytest.mark.asyncio
++    @pytest.mark.parametrize("status,expected_reason", [
++        (404, "verdict_not_found"),
++        (409, "validation_error"),
++        (422, "validation_error"),
++        (500, "other"),
++    ])
++    async def test_bind_to_core_status_mapping(self, status, expected_reason):
++        from nthlayer_override_adapter.emission import bind_to_core
++        from nthlayer_common.api_client import APIResult
++
++        class _FakeClient:
++            async def apply_override(self, vid, payload):
++                return APIResult(ok=False, status_code=status, data=None,
++                                 error="err", detail=None)
++
++        event = OverrideEvent(decision_id="d", service="s",
++                              corrected_action="approve", reviewer="h")
++        result = await bind_to_core(_FakeClient(), event, timeout_seconds=5.0)
++        assert result.core == "failed"
++        assert result.reason == expected_reason
++
++    @pytest.mark.asyncio
++    async def test_bind_to_core_connection_failed_returns_core_unreachable(self):
++        from nthlayer_override_adapter.emission import bind_to_core
++        from nthlayer_common.api_client import APIResult
++
++        class _FakeClient:
++            async def apply_override(self, vid, payload):
++                return APIResult(ok=False, status_code=0, data=None,
++                                 error="connection_failed", detail=None)
++
++        event = OverrideEvent(decision_id="d", service="s",
++                              corrected_action="approve", reviewer="h")
++        result = await bind_to_core(_FakeClient(), event, timeout_seconds=5.0)
++        assert result.core == "failed"
++        assert result.reason == "core_unreachable"
++
++    @pytest.mark.asyncio
++    async def test_bind_to_core_timeout_returns_core_timeout(self):
++        from nthlayer_override_adapter.emission import bind_to_core
++        import asyncio
++
++        class _SlowClient:
++            async def apply_override(self, vid, payload):
++                await asyncio.sleep(10)  # exceeds 0.05s timeout below
++
++        event = OverrideEvent(decision_id="d", service="s",
++                              corrected_action="approve", reviewer="h")
++        result = await bind_to_core(_SlowClient(), event, timeout_seconds=0.05)
++        assert result.core == "failed"
++        assert result.reason == "core_timeout"
+diff --git a/tests/test_metrics.py b/tests/test_metrics.py
+index 854042e..df355b9 100644
+--- a/tests/test_metrics.py
++++ b/tests/test_metrics.py
+@@ -23,3 +23,17 @@ class TestCounters:
+ 
+     def test_emit_duration_is_histogram(self) -> None:
+         emit_duration_seconds.observe(0.001)
++
++
++def test_binding_total_counter_exists_with_bounded_labels():
++    """opensrm-jmy.18: nthlayer_override_binding_total{result, reason}."""
++    from nthlayer_override_adapter.metrics import binding_total
++
++    binding_total.labels(result="success", reason="ok").inc()
++    for reason in ("core_unreachable", "verdict_not_found",
++                   "validation_error", "core_timeout", "other"):
++        binding_total.labels(result="failed", reason=reason).inc()
++
++    samples = list(binding_total.collect())
++    metric_names = {s.name for s in samples}
++    assert any("nthlayer_override_binding" in n for n in metric_names)
+diff --git a/tests/test_response.py b/tests/test_response.py
+index 5410223..3fb3eec 100644
+--- a/tests/test_response.py
++++ b/tests/test_response.py
+@@ -6,9 +6,30 @@ from nthlayer_override_adapter.response import (
+ 
+ 
+ class TestSingleResponse:
+-    def test_accepted_single_shape(self) -> None:
++    def test_accepted_single_shape_no_bindings(self) -> None:
+         body = accepted_single("dec_001")
+-        assert body == {"decision_id": "dec_001", "emitted_to_otel": True}
++        assert body == {
++            "accepted": ["dec_001"],
++            "rejected": [],
++            "duplicates": [],
++            "errors": [],
++        }
++        assert "bindings" not in body
++
++    def test_accepted_single_shape_with_bindings_ok(self) -> None:
++        from nthlayer_override_adapter.response import BindingResult
++        br = BindingResult(otel="ok", core="ok", reason=None)
++        body = accepted_single("dec_001", bindings=br)
++        assert body["accepted"] == ["dec_001"]
++        assert body["bindings"] == {"dec_001": {"otel": "ok", "core": "ok"}}
++        assert "reason" not in body["bindings"]["dec_001"]
++
++    def test_accepted_single_shape_with_bindings_failed(self) -> None:
++        from nthlayer_override_adapter.response import BindingResult
++        br = BindingResult(otel="ok", core="failed", reason="verdict_not_found")
++        body = accepted_single("dec_001", bindings=br)
++        assert body["bindings"]["dec_001"]["core"] == "failed"
++        assert body["bindings"]["dec_001"]["reason"] == "verdict_not_found"
+ 
+ 
+ class TestBatchResponse:
+diff --git a/tests/test_routes_canonical_batch.py b/tests/test_routes_canonical_batch.py
+index d45e574..2dd893e 100644
+--- a/tests/test_routes_canonical_batch.py
++++ b/tests/test_routes_canonical_batch.py
+@@ -30,7 +30,7 @@ class TestBatchHappyPath:
+         body = {"overrides": [_entry(f"dec-{i:04d}") for i in range(100)]}
+         resp = client.post("/api/v1/overrides/batch", json=body)
+ 
+-        assert resp.status_code == 200
++        assert resp.status_code == 201
+         data = resp.json()
+         assert len(data["accepted"]) == 100
+         assert data["accepted"][0] == "dec-0000"
+@@ -164,7 +164,64 @@ class TestBatchSizeCap:
+         }
+         resp = client.post("/api/v1/overrides/batch", json=body)
+ 
+-        assert resp.status_code == 200
++        assert resp.status_code == 201
+         data = resp.json()
+         assert data["accepted"] == []
+         assert len(data["rejected"]) == 2
++
++
++class TestBatchBindings:
++    """opensrm-jmy.18: per-id bindings in batch response."""
++
++    def test_batch_response_includes_bindings_per_accepted_id(self, app_with_fake_core):
++        from starlette.testclient import TestClient
++        client = TestClient(app_with_fake_core(fake_status=200))
++        body = {
++            "overrides": [
++                {"decision_id": "dec-1", "service": "s", "corrected_action": "approve", "reviewer": "h"},
++                {"decision_id": "dec-2", "service": "s", "corrected_action": "approve", "reviewer": "h"},
++            ]
++        }
++        resp = client.post("/api/v1/overrides/batch", json=body)
++        assert resp.status_code == 201
++        data = resp.json()
++        assert set(data["accepted"]) == {"dec-1", "dec-2"}
++        # Cardinality invariant: bindings.keys() == set(accepted)
++        assert set(data["bindings"].keys()) == set(data["accepted"])
++        for entry in data["bindings"].values():
++            assert entry["core"] == "ok"
++            assert "reason" not in entry  # core==ok → no reason
++
++    def test_batch_duplicates_only_winners_appear_in_bindings(self, app_with_fake_core):
++        from starlette.testclient import TestClient
++        client = TestClient(app_with_fake_core(fake_status=200))
++        body = {
++            "overrides": [
++                {"decision_id": "dec-1", "service": "s", "corrected_action": "reject", "reviewer": "h"},   # loser
++                {"decision_id": "dec-1", "service": "s", "corrected_action": "approve", "reviewer": "h"},  # winner (last in array)
++                {"decision_id": "dec-2", "service": "s", "corrected_action": "approve", "reviewer": "h"},
++            ]
++        }
++        resp = client.post("/api/v1/overrides/batch", json=body)
++        data = resp.json()
++        assert set(data["accepted"]) == {"dec-1", "dec-2"}
++        # Cardinality invariant holds even with duplicates: bindings is keyed by unique decision_id.
++        assert set(data["bindings"].keys()) == {"dec-1", "dec-2"}
++        # The loser is reported in duplicates. It does NOT get its own bindings entry.
++
++    def test_batch_core_failure_per_id(self, app_with_fake_core):
++        """All-fail case: both ids show core==failed in bindings."""
++        from starlette.testclient import TestClient
++        client = TestClient(app_with_fake_core(fake_status=404))
++        body = {
++            "overrides": [
++                {"decision_id": "dec-a", "service": "s", "corrected_action": "approve", "reviewer": "h"},
++                {"decision_id": "dec-b", "service": "s", "corrected_action": "approve", "reviewer": "h"},
++            ]
++        }
++        resp = client.post("/api/v1/overrides/batch", json=body)
++        data = resp.json()
++        assert set(data["bindings"].keys()) == {"dec-a", "dec-b"}
++        for entry in data["bindings"].values():
++            assert entry["core"] == "failed"
++            assert entry["reason"] == "verdict_not_found"
+diff --git a/tests/test_routes_canonical_single.py b/tests/test_routes_canonical_single.py
+index fe6f4fe..b0f2ad6 100644
+--- a/tests/test_routes_canonical_single.py
++++ b/tests/test_routes_canonical_single.py
+@@ -32,7 +32,11 @@ class TestSingleOverride:
+     def test_happy_path_201(self, client, span_exporter) -> None:
+         resp = client.post("/api/v1/overrides", json=_valid_body())
+         assert resp.status_code == 201
+-        assert resp.json() == {"decision_id": "vrd-001", "emitted_to_otel": True}
++        data = resp.json()
++        # No core_client on app.state → bindings key absent; otel emission confirmed by span.
++        assert data["accepted"] == ["vrd-001"]
++        assert data["rejected"] == []
++        assert "bindings" not in data
+         assert len(span_exporter.get_finished_spans()) == 1
+ 
+     def test_cardinality_one_response_one_span(self, client, span_exporter) -> None:
+@@ -82,3 +86,41 @@ class TestSingleOverride:
+         )
+         assert resp.status_code == 400
+         assert "timestamp" in resp.json()["detail"]
++
++
++class TestCanonicalSingleBindings:
++    """opensrm-jmy.18: single-override response carries bindings field."""
++
++    def test_single_success_response_includes_bindings(self, app_with_fake_core) -> None:
++        """app_with_fake_core fixture wires a fake CoreAPIClient that returns 200."""
++        app = app_with_fake_core(fake_status=200)
++        client = TestClient(app)
++        body = {
++            "decision_id": "dec-1",
++            "service": "fraud-detect",
++            "corrected_action": "approve",
++            "reviewer": "reviewer-hash",
++        }
++        resp = client.post("/api/v1/overrides", json=body)
++        assert resp.status_code == 201
++        data = resp.json()
++        assert data["accepted"] == ["dec-1"]
++        assert data["bindings"]["dec-1"]["otel"] == "ok"
++        assert data["bindings"]["dec-1"]["core"] == "ok"
++        assert "reason" not in data["bindings"]["dec-1"]  # core==ok → no reason
++
++    def test_single_core_failure_surfaces_in_response(self, app_with_fake_core) -> None:
++        app = app_with_fake_core(fake_status=404)
++        client = TestClient(app)
++        body = {
++            "decision_id": "dec-missing",
++            "service": "fraud-detect",
++            "corrected_action": "approve",
++            "reviewer": "reviewer-hash",
++        }
++        resp = client.post("/api/v1/overrides", json=body)
++        assert resp.status_code == 201  # unchanged HTTP status — body is truth
++        data = resp.json()
++        assert data["accepted"] == ["dec-missing"]
++        assert data["bindings"]["dec-missing"]["core"] == "failed"
++        assert data["bindings"]["dec-missing"]["reason"] == "verdict_not_found"
+diff --git a/tests/test_routes_webhook.py b/tests/test_routes_webhook.py
+index ccea9c3..a74ecc4 100644
+--- a/tests/test_routes_webhook.py
++++ b/tests/test_routes_webhook.py
+@@ -48,8 +48,8 @@ class TestJiraWebhook:
+         resp = client.post("/webhook/jira", json=JIRA_PAYLOAD)
+         assert resp.status_code == 201
+         body = resp.json()
+-        assert body["decision_id"] == "vrd-001"
+-        assert body["emitted_to_otel"] is True
++        assert body["accepted"] == ["vrd-001"]
++        assert body["rejected"] == []
+         spans = span_exporter.get_finished_spans()
+         assert len(spans) == 1
+         attrs = spans[0].attributes
+@@ -74,3 +74,43 @@ class TestEmptyAdaptersList:
+         client = TestClient(app)
+         resp = client.post("/webhook/jira", json={})
+         assert resp.status_code == 404
++
++
++class TestWebhookBindings:
++    """opensrm-jmy.18: webhook response carries bindings."""
++
++    PAYLOAD: dict = {
++        "issue": {
++            "customfield_10042": "vrd-001",
++            "resolution": {
++                "name": "escalate",
++                "description": "Model regression — escalate to senior analyst",
++            },
++            "assignee": {"emailAddress": "analyst-047@example.com"},
++            "updated": "2026-05-15T12:00:00Z",
++        },
++    }
++
++    def test_webhook_success_response_includes_bindings(self, app_with_fake_core) -> None:
++        """Webhook handler returns 201 with single-decision bindings."""
++        client = TestClient(app_with_fake_core(fake_status=200))
++        resp = client.post("/webhook/jira", json=self.PAYLOAD)
++        assert resp.status_code == 201
++        data = resp.json()
++        assert "bindings" in data
++        assert len(data["bindings"]) == 1
++        for entry in data["bindings"].values():
++            assert entry["core"] == "ok"
++            assert "reason" not in entry
++
++    def test_webhook_core_failure_surfaces_in_response(self, app_with_fake_core) -> None:
++        """Webhook handler returns 201 with failed binding when core returns 404."""
++        client = TestClient(app_with_fake_core(fake_status=404))
++        resp = client.post("/webhook/jira", json=self.PAYLOAD)
++        assert resp.status_code == 201
++        data = resp.json()
++        assert "bindings" in data
++        assert len(data["bindings"]) == 1
++        for entry in data["bindings"].values():
++            assert entry["core"] == "failed"
++            assert entry["reason"] == "verdict_not_found"

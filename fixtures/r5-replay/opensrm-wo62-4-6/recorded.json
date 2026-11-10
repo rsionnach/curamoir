@@ -1,0 +1,153 @@
+{
+ "schema_version": 1,
+ "entry": "opensrm-wo62-4-6",
+ "fidelity": "recorded",
+ "lens_order": [
+  "correctness",
+  "clarity",
+  "edge-cases",
+  "provenance",
+  "excellence"
+ ],
+ "iterations": {
+  "correctness": 1,
+  "clarity": 2,
+  "edge-cases": 1,
+  "provenance": 2
+ },
+ "rounds": [
+  {
+   "lens": "correctness",
+   "iteration": 1,
+   "recorded_iteration": null,
+   "counts": {
+    "critical": 0,
+    "important": 0,
+    "minor": 0
+   },
+   "findings": null
+  },
+  {
+   "lens": "clarity",
+   "iteration": 1,
+   "recorded_iteration": 1,
+   "counts": {
+    "critical": 0,
+    "important": 2,
+    "minor": 4
+   },
+   "findings": [
+    {
+     "lens": "clarity",
+     "severity": "IMPORTANT",
+     "path": "tests/test_service_type_agreement.py",
+     "start_line": 160,
+     "end_line": 170,
+     "claim": "The docstring opens \"The same data-plane rule\u2026\" and says an earlier version \"duplicated coverage above\". Both point at test_type_template_variable_keeps_the_authored_spelling, which this diff deleted. The reader is sent to a rule and a test that no longer exist.",
+     "evidence": null,
+     "fix": null,
+     "fingerprint": "72e7f2d874179503",
+     "verification_level": "asserted",
+     "resolves": null,
+     "regression": false,
+     "status": null,
+     "derived_from": "reviewer_transcript",
+     "extracted_by": "model",
+     "handback_sha256": "36cfd71a34c7dcba960e9dc371bfb327f51889c50da6a9c541071873a7a8188f",
+     "fix_commit": "9a5fc079042584c36de01269958501032587fdeb",
+     "reported_path": "tests/test_service_type_agreement.py",
+     "path_in_tree": true
+    },
+    {
+     "lens": "clarity",
+     "severity": "IMPORTANT",
+     "path": "tests/test_service_type_agreement.py",
+     "start_line": 73,
+     "end_line": 73,
+     "claim": "It says \"specs/parser.py passes the raw YAML value straight in\", in the present tense, for a deleted module.",
+     "evidence": null,
+     "fix": null,
+     "fingerprint": "c00c2bc72404d3ba",
+     "verification_level": "asserted",
+     "resolves": null,
+     "regression": false,
+     "status": null,
+     "derived_from": "reviewer_transcript",
+     "extracted_by": "model",
+     "handback_sha256": "36cfd71a34c7dcba960e9dc371bfb327f51889c50da6a9c541071873a7a8188f",
+     "fix_commit": "9a5fc079042584c36de01269958501032587fdeb",
+     "reported_path": "tests/test_service_type_agreement.py",
+     "path_in_tree": true
+    }
+   ]
+  },
+  {
+   "lens": "clarity",
+   "iteration": 2,
+   "recorded_iteration": 2,
+   "counts": {
+    "critical": 0,
+    "important": 0,
+    "minor": 2
+   },
+   "findings": null
+  },
+  {
+   "lens": "edge_cases",
+   "iteration": 1,
+   "recorded_iteration": 1,
+   "counts": {
+    "critical": 0,
+    "important": 0,
+    "minor": 1
+   },
+   "findings": null
+  },
+  {
+   "lens": "provenance",
+   "iteration": 1,
+   "recorded_iteration": 1,
+   "counts": {
+    "critical": 0,
+    "important": 1,
+    "minor": 1
+   },
+   "findings": [
+    {
+     "lens": "provenance",
+     "severity": "IMPORTANT",
+     "path": "tests/test_init.py",
+     "start_line": 221,
+     "end_line": 225,
+     "claim": "The ported init test cannot tell critical-api from standard-api.",
+     "evidence": null,
+     "fix": null,
+     "fingerprint": "e6df3fa12df18ed2",
+     "verification_level": "asserted",
+     "resolves": null,
+     "regression": false,
+     "status": null,
+     "derived_from": "reviewer_transcript",
+     "extracted_by": "model",
+     "handback_sha256": "752de80ebeee95604131452211d2ab983986a3edf379fd6374cc8147eb4cf511",
+     "fix_commit": "94d71b768cbcf8c1836d743730c181e778b80bdc",
+     "reported_path": "tests/test_init.py",
+     "path_in_tree": true
+    }
+   ]
+  },
+  {
+   "lens": "provenance",
+   "iteration": 2,
+   "recorded_iteration": 2,
+   "counts": {
+    "critical": 0,
+    "important": 0,
+    "minor": 0
+   },
+   "findings": null
+  }
+ ],
+ "cross_repo_findings": [],
+ "escaped": []
+}

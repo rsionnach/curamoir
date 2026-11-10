@@ -1,0 +1,4 @@
+PASS 1 (CORRECTNESS) sequential R5 review on bead opensrm-wo62.1, Checkpoint A Task 3 (floor bumps in 5 repos).
+Read your lens: ~/.claude/skills/rule-of-five-review/correctness-reviewer.md — follow it exactly.
+Read the scope: <claude-tmp>/scratchpad/wo62-gate-A2-scope.md
+Check each repo's floor string, uv.lock entry (open the full uv.lock where the diff is truncated), that the WHY comments are true (5.4.0's reason: authored_type; history lines accurate), and that the repo's own version is unchanged. Read-only; no subagents. CRITICAL / IMPORTANT / MINOR with repo:file:line and fix; verdict. Under 250 words.

@@ -1,0 +1,160 @@
+diff --git a/src/nthlayer_common/manifest/__init__.py b/src/nthlayer_common/manifest/__init__.py
+index 9e64ffe..da956e9 100644
+--- a/src/nthlayer_common/manifest/__init__.py
++++ b/src/nthlayer_common/manifest/__init__.py
+@@ -112,6 +112,7 @@ from nthlayer_common.manifest.scan import (
+     iter_manifest_files,
+     scan_manifest_files,
+ )
++from nthlayer_common.manifest.slo_series import ERROR_BUDGET_REMAINING, SloSeries
+ from nthlayer_common.manifest.threshold_series import (
+     FEEDBACK_LATENCY_WINDOW,
+     THRESHOLD_SERIES,
+@@ -189,6 +190,8 @@ __all__ = [
+     "THRESHOLD_SERIES",
+     "ThresholdSeries",
+     "FEEDBACK_LATENCY_WINDOW",
++    "ERROR_BUDGET_REMAINING",
++    "SloSeries",
+     "BreachAction",
+     "StatisticalRequirements",
+     "ProbeConfig",
+diff --git a/src/nthlayer_common/manifest/slo_series.py b/src/nthlayer_common/manifest/slo_series.py
+new file mode 100644
+index 0000000..df30c22
+--- /dev/null
++++ b/src/nthlayer_common/manifest/slo_series.py
+@@ -0,0 +1,57 @@
++"""The classical-SLO recording-rule contract (opensrm-h0at, opensrm-wo62.3).
++
++Series that nthlayer-generate writes as recording rules and nthlayer-workers
++reads back. Both sides take the name from here so the writer and the reader
++cannot drift: measure once queried ``slo:error_budget:ratio``, a series nothing
++wrote, and so read no data for every availability SLO (opensrm-h0at). The
++front door's docs/metrics-contract.md documents this table.
++
++Only the error budget lives here so far; wo62.3 moves the rest across.
++"""
++
++from __future__ import annotations
++
++from dataclasses import dataclass
++
++# PromQL double-quoted strings take Go escapes. Backslash first, so the
++# backslashes added for the other two are not themselves doubled.
++_PROMQL_ESCAPES = (("\\", "\\\\"), ('"', '\\"'), ("\n", "\\n"))
++
++
++def _promql_string(value: str) -> str:
++    for raw, escaped in _PROMQL_ESCAPES:
++        value = value.replace(raw, escaped)
++    return f'"{value}"'
++
++
++@dataclass(frozen=True)
++class SloSeries:
++    """One recording-rule output. ``labels`` are the labels generate attaches
++    to every sample; a reader may filter on any subset of them."""
++
++    metric: str
++    labels: tuple[str, ...]
++
++    def selector(self, **matchers: str) -> str:
++        """An instant-vector selector, ``metric{label="value",...}``.
++
++        Refuses a label the series does not carry: a matcher on one would
++        select nothing, and an empty result reads downstream as no data.
++        """
++        unknown = sorted(set(matchers) - set(self.labels))
++        if unknown:
++            raise ValueError(
++                f"{self.metric} has no label(s) {unknown}; it carries {list(self.labels)}"
++            )
++        if not matchers:
++            return self.metric
++        body = ",".join(f"{k}={_promql_string(v)}" for k, v in matchers.items())
++        return f"{self.metric}{{{body}}}"
++
++
++# Written once per availability-typed classical SLO. Signed: 1.0 is a full
++# budget, 0.0 is spent, negative is overspent. ``slo`` is the SLO's name and
++# ``objective`` its 0-100 target.
++ERROR_BUDGET_REMAINING = SloSeries(
++    "slo:error_budget_remaining:ratio", ("service", "slo", "objective")
++)
+diff --git a/tests/test_slo_series.py b/tests/test_slo_series.py
+new file mode 100644
+index 0000000..90e6c89
+--- /dev/null
++++ b/tests/test_slo_series.py
+@@ -0,0 +1,70 @@
++"""SloSeries: the classical-SLO recording-rule contract (opensrm-h0at).
++
++The pinned name and labels come from what nthlayer-generate writes
++(recording_rules/manifest_builder.py, `_build_availability_rules`, and its
++recording_rules goldens), not from any reader: measure's reader was the
++side that had drifted. The escaping cases come from PromQL's string-literal
++rules (Go escapes inside double quotes), not from the implementation.
++"""
++
++import dataclasses
++
++import pytest
++
++from nthlayer_common.manifest import ERROR_BUDGET_REMAINING, SloSeries
++
++
++def test_error_budget_name_is_what_generate_writes():
++    assert ERROR_BUDGET_REMAINING.metric == "slo:error_budget_remaining:ratio"
++
++
++def test_error_budget_labels_are_what_generate_attaches():
++    assert ERROR_BUDGET_REMAINING.labels == ("service", "slo", "objective")
++
++
++def test_selector_with_service_and_slo():
++    assert (
++        ERROR_BUDGET_REMAINING.selector(service="checkout", slo="checkout-availability")
++        == 'slo:error_budget_remaining:ratio{service="checkout",slo="checkout-availability"}'
++    )
++
++
++def test_selector_keeps_caller_order():
++    assert ERROR_BUDGET_REMAINING.selector(slo="a", service="b") == (
++        'slo:error_budget_remaining:ratio{slo="a",service="b"}'
++    )
++
++
++def test_selector_with_no_matchers_is_the_bare_metric():
++    assert ERROR_BUDGET_REMAINING.selector() == "slo:error_budget_remaining:ratio"
++
++
++def test_selector_refuses_a_label_the_series_does_not_carry():
++    # `name` is the SLO's field name, not the label generate writes (`slo`):
++    # filtering on it would match nothing, which reads as no data.
++    with pytest.raises(ValueError, match="name"):
++        ERROR_BUDGET_REMAINING.selector(service="checkout", name="availability")
++
++
++@pytest.mark.parametrize(
++    ("value", "literal"),
++    [
++        ('a"b', r'"a\"b"'),
++        ("a\\b", r'"a\\b"'),
++        ("a\nb", r'"a\nb"'),
++        ('\\"', r'"\\\""'),
++    ],
++)
++def test_selector_escapes_label_values(value, literal):
++    assert ERROR_BUDGET_REMAINING.selector(service=value) == (
++        f"slo:error_budget_remaining:ratio{{service={literal}}}"
++    )
++
++
++def test_series_is_immutable():
++    with pytest.raises(dataclasses.FrozenInstanceError):
++        ERROR_BUDGET_REMAINING.metric = "slo:error_budget:ratio"  # type: ignore[misc]
++
++
++def test_series_type_is_exported():
++    assert isinstance(ERROR_BUDGET_REMAINING, SloSeries)

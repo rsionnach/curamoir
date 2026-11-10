@@ -1,0 +1,4303 @@
+diff --git a/README.md b/README.md
+index 1e061e1..e7e5451 100644
+--- a/README.md
++++ b/README.md
+@@ -104,7 +104,7 @@ Run with --show-code for instrumentation examples.
+ Model failure scenarios before they happen.
+ 
+ ```bash
+-$ nthlayer simulate service.yaml --scenarios 10000
++$ nthlayer simulate service.yaml --runs 10000
+ 
+ Monte Carlo Simulation (10,000 runs)
+   SLO: availability ≥ 99.9%
+diff --git a/docs-site/architecture.md b/docs-site/architecture.md
+index 11efe33..960ce0e 100644
+--- a/docs-site/architecture.md
++++ b/docs-site/architecture.md
+@@ -112,14 +112,13 @@ NthLayer is organized into these modules:
+ |---------|---------|------------|
+ | `nthlayer apply --lint` | Validate PromQL syntax using pint | 0=valid, 1=errors |
+ | `nthlayer validate <service.yaml>` | Validate service.yaml schema | 0=valid, 1=invalid |
+-| `nthlayer verify <service.yaml>` | Verify declared metrics exist in Prometheus | 0=all exist, 1=missing |
++| `nthlayer validate-slo <service.yaml>` | Verify SLO metrics exist in Prometheus | 0=all exist, 1/2=missing |
+ 
+ ### Enforcement Commands
+ 
+ | Command | Purpose | Exit Codes |
+ |---------|---------|------------|
+-| `nthlayer check-deploy <service.yaml>` | Check error budget before deploy | 0=safe, 1=budget exhausted |
+-| `nthlayer portfolio [--format json]` | Aggregate SLO health across all services | 0=healthy, 1=warning, 2=critical |
++| `nthlayer-workers gate --service <name>` | Check error budget before deploy (ships in `nthlayer-workers`) | 0=approved/warning, 1=could not evaluate, 2=blocked |
+ 
+ ### SLO Commands
+ 
+@@ -147,10 +146,9 @@ architecture-beta
+    service plan(mdi:file-search) [nthlayer plan] in generate
+ 
+    service lint(mdi:code-tags-check) [apply with lint] in validate
+-   service verify(mdi:check-decagram) [nthlayer verify] in validate
++   service verify(mdi:check-decagram) [validate slo metrics] in validate
+ 
+-   service checkdeploy(mdi:gate) [check deploy] in enforce
+-   service portfolio(mdi:chart-box) [nthlayer portfolio] in enforce
++   service checkdeploy(mdi:gate) [workers gate] in enforce
+ 
+    plan:R --> L:apply
+    apply:R --> L:lint
+@@ -202,21 +200,12 @@ architecture-beta
+ 
+ ### Verification Flow
+ 
+-When you run `nthlayer verify`:
++When you run `nthlayer validate-slo`:
+ 
+ 1. **Extract**: Parse service.yaml for declared metrics
+ 2. **Query**: Check each metric against Prometheus API
+ 3. **Report**: Show which metrics exist vs missing
+ 
+-### Portfolio Flow
+-
+-When you run `nthlayer portfolio`:
+-
+-1. **Scan**: Find all service.yaml files in directory
+-2. **Collect**: Query Prometheus for each SLO's current value
+-3. **Aggregate**: Calculate health scores by tier
+-4. **Output**: Terminal table, JSON, or CSV
+-
+ ---
+ 
+ ## Technology Templates
+@@ -333,5 +322,5 @@ architecture-beta
+ | Stage | Command | Blocks Deploy If |
+ |-------|---------|------------------|
+ | **Lint** | `nthlayer apply --lint` | PromQL syntax errors |
+-| **Verify** | `nthlayer verify` | Declared metrics don't exist |
+-| **Budget** | `nthlayer check-deploy` | Error budget < 10% remaining |
++| **Verify** | `nthlayer validate-slo` | Declared metrics don't exist |
++| **Budget** | `nthlayer-workers gate` | Error budget below the tier's blocking threshold |
+diff --git a/docs-site/commands/alerts.md b/docs-site/commands/alerts.md
+index fecde25..34cbd3a 100644
+--- a/docs-site/commands/alerts.md
++++ b/docs-site/commands/alerts.md
+@@ -182,7 +182,7 @@ jobs:
+ 
+ ## See Also
+ 
+-- [Deployment Gates](check-deploy.md) — Error budget gates
+-- [Drift Detection](drift.md) — Trend analysis
+-- [Reliability Scorecard](scorecard.md) — Quantitative reliability scoring
++- [Deployment Gates](check-deploy.md) — Error budget gates (nthlayer-workers)
++- [Reliability Scorecard](scorecard.md) — Quantitative reliability scoring (nthlayer-workers)
++- [Drift Detection](drift.md) — Trend analysis (nthlayer-workers)
+ - [Protection Overview](../protect/index.md) — Full protection stack
+diff --git a/docs-site/commands/apply.md b/docs-site/commands/apply.md
+index eb651f0..422048d 100644
+--- a/docs-site/commands/apply.md
++++ b/docs-site/commands/apply.md
+@@ -36,7 +36,7 @@ Generated: generated/payment-api/
+ ### Push to Grafana
+ 
+ ```bash
+-nthlayer apply payment-api.yaml --push
++nthlayer apply payment-api.yaml --push-grafana
+ ```
+ 
+ Requires `NTHLAYER_GRAFANA_URL` and `NTHLAYER_GRAFANA_API_KEY` to be configured.
+diff --git a/docs-site/commands/blast-radius.md b/docs-site/commands/blast-radius.md
+index 5bbd4d8..782004d 100644
+--- a/docs-site/commands/blast-radius.md
++++ b/docs-site/commands/blast-radius.md
+@@ -1,149 +1,66 @@
+-# nthlayer blast-radius
++# blast-radius
+ 
+-Calculate the deployment blast radius for a service by analyzing its dependency graph.
++Estimate the deployment blast radius of a service from its dependency graph.
+ 
+-Understanding blast radius helps teams assess the potential impact of changes before deployment.
++!!! note "Ships in nthlayer-workers, not nthlayer-generate"
++    Blast-radius analysis queries live systems, so it lives in the runtime tier.
++    It is part of the `nthlayer-workers` package (observe module), not the
++    `nthlayer` CLI that this site otherwise documents, and has no console script
++    of its own. Run it as a Python module:
+ 
+-## Usage
++    ```bash
++    pip install nthlayer-workers
++    python -m nthlayer_workers.observe blast-radius --help
++    ```
+ 
+-```bash
+-nthlayer blast-radius <service.yaml> [options]
+-```
+-
+-## Options
+-
+-| Option | Description |
+-|--------|-------------|
+-| `--prometheus-url, -p URL` | Prometheus server URL |
+-| `--env ENVIRONMENT` | Environment name (dev, staging, prod) |
+-| `--provider {prometheus,kubernetes,backstage,all}` | Dependency provider to use (default: all) |
+-| `--k8s-namespace NAMESPACE` | Kubernetes namespace to search (default: all) |
+-| `--backstage-url URL` | Backstage catalog URL |
+-| `--depth, -d DEPTH` | Maximum depth for transitive analysis (default: 10) |
+-| `--format {table,json}` | Output format (default: table) |
+-| `--demo` | Show demo output with sample data |
+-
+-## Examples
+-
+-### Calculate Blast Radius
+-
+-```bash
+-nthlayer blast-radius checkout-service.yaml
+-```
+-
+-Output:
+-```
+-╭──────────────────────────────────────────────────────────────────────────────╮
+-│ Blast Radius Analysis: checkout-service                                       │
+-╰──────────────────────────────────────────────────────────────────────────────╯
+-
+-Impact Summary:
+-  Direct dependents:     3 services
+-  Transitive dependents: 7 services
+-  Total blast radius:    10 services
+-
+-Risk Assessment: MEDIUM
+-
+-Affected Services by Tier:
+-┌────────────────────┬──────────┬───────────┬─────────────────────────────────┐
+-│ Service            │ Tier     │ Distance  │ Impact Path                     │
+-├────────────────────┼──────────┼───────────┼─────────────────────────────────┤
+-│ web-frontend       │ critical │ 1         │ checkout → web-frontend         │
+-│ mobile-app         │ critical │ 1         │ checkout → mobile-app           │
+-│ order-service      │ standard │ 1         │ checkout → order-service        │
+-│ notification-svc   │ standard │ 2         │ checkout → order → notification │
+-│ analytics          │ low      │ 2         │ checkout → order → analytics    │
+-│ reporting          │ low      │ 3         │ ... → analytics → reporting     │
+-└────────────────────┴──────────┴───────────┴─────────────────────────────────┘
+-
+-Recommendations:
+-  • 2 critical-tier services affected - consider staged rollout
+-  • Test changes in staging with mobile-app integration
+-  • Notify platform-team (owns web-frontend)
+-```
+-
+-### Limit Analysis Depth
+-
+-```bash
+-# Only analyze direct dependencies (depth 1)
+-nthlayer blast-radius service.yaml --depth 1
+-
+-# Analyze up to 3 levels deep
+-nthlayer blast-radius service.yaml --depth 3
+-```
+-
+-### JSON Output
++## Synopsis
+ 
+ ```bash
+-nthlayer blast-radius service.yaml --format json
++python -m nthlayer_workers.observe blast-radius --service SERVICE [--prometheus-url URL]
+ ```
+ 
+-```json
+-{
+-  "service": "checkout-service",
+-  "direct_dependents": 3,
+-  "transitive_dependents": 7,
+-  "total_blast_radius": 10,
+-  "risk_level": "medium",
+-  "affected_services": [
+-    {
+-      "name": "web-frontend",
+-      "tier": "critical",
+-      "distance": 1,
+-      "path": ["checkout-service", "web-frontend"]
+-    }
+-  ]
+-}
+-```
++## Description
+ 
+-## Risk Assessment
++`blast-radius` builds a dependency graph for the service, counts the services
++that would be affected by a change to it, and assigns a risk level.
+ 
+-Risk levels are calculated based on:
++With `--prometheus-url`, the graph is discovered from Prometheus. **Without it,
++the command runs against a built-in demo graph**, not your services — useful
++for trying the command out, meaningless for a real service.
+ 
+-| Factor | Weight |
+-|--------|--------|
+-| Number of critical-tier dependents | 40% |
+-| Total blast radius size | 30% |
+-| Depth of dependency chain | 20% |
+-| Cross-team impact | 10% |
++## Options
+ 
+-### Risk Levels
++| Option | Required | Description |
++|--------|----------|-------------|
++| `--service SERVICE` | yes | Service name |
++| `--prometheus-url URL` | no | Prometheus server URL; omit to use the demo graph |
+ 
+-| Level | Description |
+-|-------|-------------|
+-| `LOW` | < 3 total dependents, no critical tier |
+-| `MEDIUM` | 3-10 dependents or 1 critical-tier service |
+-| `HIGH` | > 10 dependents or multiple critical-tier services |
+-| `CRITICAL` | Core infrastructure affecting > 50% of services |
++## Exit Codes
+ 
+-## CI/CD Integration
++| Code | Risk level |
++|------|------------|
++| 0 | `low` |
++| 1 | `medium` |
++| 2 | `high` or `critical` |
+ 
+-### Deployment Gate
++## Examples
+ 
+ ```bash
+-# Block deployment if blast radius exceeds threshold
+-BLAST_RADIUS=$(nthlayer blast-radius service.yaml --format json | jq '.total_blast_radius')
++# Real graph from Prometheus
++python -m nthlayer_workers.observe blast-radius \
++  --service checkout-service \
++  --prometheus-url http://prometheus:9090
+ 
+-if [ "$BLAST_RADIUS" -gt 20 ]; then
+-  echo "Blast radius too high ($BLAST_RADIUS services) - requires approval"
+-  exit 1
+-fi
++# Demo graph
++python -m nthlayer_workers.observe blast-radius --service checkout-service
+ ```
+ 
+-### GitHub Actions
++## Output
+ 
+-```yaml
+-- name: Check Blast Radius
+-  run: |
+-    nthlayer blast-radius service.yaml --format json > blast-radius.json
+-    RISK=$(jq -r '.risk_level' blast-radius.json)
+-    if [ "$RISK" = "critical" ]; then
+-      echo "::warning::Critical blast radius - manual approval required"
+-    fi
+-```
++A JSON object with `service`, `tier`, `risk_level`, `total_services_affected`,
++`critical_services_affected`, and `recommendation`.
+ 
+ ## See Also
+ 
+-- [nthlayer deps](./deps.md) - View service dependencies
+-- [nthlayer check-deploy](./check-deploy.md) - Deployment gates
+-- [Deployment Gates Concept](../concepts/deployment-gates.md)
++- [dependencies](./deps.md) - Raw dependency discovery
++- [Deployment Gates](./check-deploy.md) - Error budget gates
+diff --git a/docs-site/commands/check-deploy.md b/docs-site/commands/check-deploy.md
+index 6211796..32c5003 100644
+--- a/docs-site/commands/check-deploy.md
++++ b/docs-site/commands/check-deploy.md
+@@ -1,58 +1,84 @@
+ # check-deploy
+ 
+-Check if deployment should be allowed based on error budget.
++Decide whether a deployment should proceed, based on the service's error budget.
++
++!!! note "Ships in nthlayer-workers, not nthlayer-generate"
++    The deployment gate reads collected SLO state, so it lives in the runtime
++    tier. It is part of the `nthlayer-workers` package, not the `nthlayer` CLI
++    that this site otherwise documents; there is no `nthlayer check-deploy`.
++    It comes in two forms:
++
++    - `python -m nthlayer_workers.observe check-deploy` (this page) reads a
++      local assessment store. The observe module has no console script.
++    - `nthlayer-workers gate` reads from a running nthlayer-core instead
++      (see [below](#nthlayer-workers-gate)).
++
++    ```bash
++    pip install nthlayer-workers
++    python -m nthlayer_workers.observe check-deploy --help
++    ```
+ 
+ ## Synopsis
+ 
+ ```bash
+-nthlayer check-deploy <service-file> [options]
++python -m nthlayer_workers.observe check-deploy --service SERVICE [options]
+ ```
+ 
+ ## Description
+ 
+-The `check-deploy` command queries Prometheus for SLO metrics, calculates error budget consumption, and determines if deployment should proceed.
++`check-deploy` reads the service's latest `slo_status` assessments from the
++local assessment store (written by
++`python -m nthlayer_workers.observe collect --specs-dir DIR --prometheus-url URL`),
++computes the remaining error budget, and compares it with the tier's warning
++and blocking thresholds. It stores a `deploy_gate` assessment recording the
++decision and prints the result as JSON.
+ 
+-This enables **Shift Left** reliability - catching issues before they reach production by blocking deploys when error budget is exhausted.
+-
+-## Exit Codes
++A service with no `slo_status` assessments is approved by default.
+ 
+-| Code | Result | Meaning |
+-|------|--------|---------|
+-| 0 | Approved | Budget healthy, safe to deploy |
+-| 1 | Warning | Budget low, deploy with caution |
+-| 2 | Blocked | Budget exhausted, do not deploy |
++Thresholds are the tier defaults. Custom `DeploymentGate` thresholds or
++conditions in a manifest are **not** applied by this command.
+ 
+ ## Options
+ 
+-| Option | Description |
+-|--------|-------------|
+-| `--prometheus-url URL` | Prometheus server URL (or use `PROMETHEUS_URL` env var) |
+-| `--environment ENV` | Environment name (dev, staging, prod) |
+-| `--demo` | Show demo output with sample data |
++| Option | Required | Description |
++|--------|----------|-------------|
++| `--service SERVICE` | yes | Service name |
++| `--tier {critical,standard,low}` | no | Service tier; selects thresholds (default: `standard`) |
++| `--store PATH` | no | Assessment store path (default: `assessments.db`) |
++| `--decision-store PATH` | no | Also write a content-addressed decision record to this SQLite DB |
++| `--legacy-store` / `--no-legacy-store` | no | Write to the assessment store (default: enabled) |
+ 
+-## Examples
+-
+-### Basic Check
++## Exit Codes
+ 
+-```bash
+-nthlayer check-deploy services/payment-api.yaml \
+-  --prometheus-url http://prometheus:9090
++| Code | Decision | Meaning |
++|------|----------|---------|
++| 0 | APPROVED | Budget healthy, safe to deploy |
++| 1 | WARNING | Budget below the warning threshold |
++| 2 | BLOCKED | Budget below the blocking threshold, do not deploy |
++
++## Output
++
++```json
++{
++  "service": "payment-api",
++  "tier": "critical",
++  "decision": "WARNING",
++  "budget_remaining_pct": 18.4,
++  "message": "...",
++  "recommendations": ["..."]
++}
+ ```
+ 
+-### With Environment
++## Examples
+ 
+ ```bash
+-nthlayer check-deploy services/api.yaml \
+-  --prometheus-url http://prometheus:9090 \
+-  --environment prod
+-```
+-
+-### CI/CD Integration
++python -m nthlayer_workers.observe collect \
++  --specs-dir services/ \
++  --prometheus-url http://prometheus:9090
+ 
+-```bash
+-# In GitHub Actions, GitLab CI, etc.
+-nthlayer check-deploy services/api.yaml \
+-  --prometheus-url "$PROMETHEUS_URL"
++python -m nthlayer_workers.observe check-deploy \
++  --service payment-api \
++  --tier critical
+ 
+ if [ $? -eq 2 ]; then
+   echo "Deployment blocked - error budget exhausted"
+@@ -60,108 +86,31 @@ if [ $? -eq 2 ]; then
+ fi
+ ```
+ 
+-## Custom Thresholds
+-
+-Override default tier-based thresholds with a `DeploymentGate` resource:
+-
+-```yaml
+-# service.yaml
+-resources:
+-  - kind: DeploymentGate
+-    name: custom-gate
+-    spec:
+-      thresholds:
+-        warning: 30    # Warn when <30% budget remaining
+-        blocking: 5    # Block when <5% budget remaining
+-```
+-
+-## Conditional Policies
+-
+-Add time-based or context-aware conditions:
+-
+-```yaml
+-resources:
+-  - kind: DeploymentGate
+-    name: smart-gate
+-    spec:
+-      thresholds:
+-        warning: 20
+-        blocking: 10
+-
+-      conditions:
+-        # Stricter during business hours
+-        - name: business-hours
+-          when: "hour >= 9 AND hour <= 17 AND weekday"
+-          blocking: 15
+-
+-        # Complete freeze during holidays
+-        - name: holiday-freeze
+-          when: "freeze_period('2024-12-20', '2025-01-02')"
+-          blocking: 100
+-
+-      exceptions:
+-        # SRE can bypass gate
+-        - team: sre-oncall
+-          allow: always
+-```
++## nthlayer-workers gate
+ 
+-## Condition Language
++The same evaluation, backed by nthlayer-core instead of a local store. It
++fetches the service's `slo_status` assessments (and, without `--tier`, the
++tier from its manifest, falling back to `standard`) from core, and submits the
++`deploy_gate` assessment back to core.
+ 
+-The condition evaluator supports:
+-
+-### Comparisons
+-```
+-hour >= 9
+-budget_remaining < 20
+-tier == 'critical'
+-```
+-
+-### Boolean Operators
+-```
+-hour >= 9 AND hour <= 17
+-weekday OR environment == 'dev'
+-NOT freeze_period
+-```
+-
+-### Built-in Functions
+-```
+-business_hours()                           # Mon-Fri 9-17
+-weekday()                                  # Mon-Fri
+-freeze_period('2024-12-20', '2025-01-02') # Date range
++```bash
++nthlayer-workers gate --service SERVICE [--tier TIER] [--commit-sha SHA] [--core-url URL]
+ ```
+ 
+-### Available Variables
+-
+-| Variable | Description |
+-|----------|-------------|
+-| `hour` | Current hour (0-23) |
+-| `weekday` | True if Mon-Fri |
+-| `date` | Current date (YYYY-MM-DD) |
+-| `budget_remaining` | Budget remaining % |
+-| `budget_consumed` | Budget consumed % |
+-| `tier` | Service tier |
+-| `environment` | Deployment environment |
+-| `downstream_count` | Number of downstream services |
+-
+-## Environment Variables
+-
+-| Variable | Description |
+-|----------|-------------|
+-| `PROMETHEUS_URL` | Prometheus server URL |
+-| `PROMETHEUS_USERNAME` | Basic auth username |
+-| `PROMETHEUS_PASSWORD` | Basic auth password |
+-
+-## CI/CD Integrations
+-
+-See the [CI/CD integration examples](https://github.com/nthlayer/nthlayer/tree/main/examples/cicd) for:
++| Option | Required | Description |
++|--------|----------|-------------|
++| `--service SERVICE` | yes | Service name |
++| `--tier TIER` | no | Service tier (default: resolved from the manifest in core) |
++| `--commit-sha SHA` | no | Commit SHA, recorded in the `deploy_gate` assessment |
++| `--core-url URL` | no | nthlayer-core API URL (default: `http://localhost:8000`) |
+ 
+-- GitHub Actions
+-- ArgoCD (PreSync hook)
+-- GitLab CI
+-- Tekton
++Its exit codes differ from `check-deploy`'s: **0** = APPROVED or WARNING (a
++WARNING also prints a `WARNING:` line on stderr), **1** = the gate could not be
++evaluated (core unreachable, manifest or assessments unavailable), **2** =
++BLOCKED. Like `check-deploy`, it applies tier default thresholds only.
+ 
+ ## See Also
+ 
+ - [Deployment Gates Concept](../concepts/deployment-gates.md)
+-- [SLO Command](./slo.md)
+-- [Portfolio Command](./portfolio.md)
++- [drift](./drift.md) - Error-budget trend analysis
++- [portfolio](./portfolio.md) - SLO health across services
+diff --git a/docs-site/commands/config.md b/docs-site/commands/config.md
+index d4685e8..d01bc0a 100644
+--- a/docs-site/commands/config.md
++++ b/docs-site/commands/config.md
+@@ -136,9 +136,6 @@ Use different configurations for different environments:
+ # Use production profile
+ export NTHLAYER_PROFILE=production
+ nthlayer apply service.yaml
+-
+-# Or specify inline
+-nthlayer apply service.yaml --profile production
+ ```
+ 
+ ## See Also
+diff --git a/docs-site/commands/deps.md b/docs-site/commands/deps.md
+index 46c08f4..baeffb1 100644
+--- a/docs-site/commands/deps.md
++++ b/docs-site/commands/deps.md
+@@ -1,147 +1,72 @@
+-# nthlayer deps
++# Dependencies (observe `dependencies`)
+ 
+-Discover and display service dependencies from multiple sources.
++Discover a service's upstream and downstream dependencies.
+ 
+-This command queries various dependency providers (Kubernetes, Backstage, Prometheus) to build a comprehensive view of what services depend on what.
++!!! note "Ships in nthlayer-workers, not nthlayer-generate"
++    Dependency discovery queries live systems, so it lives in the runtime tier.
++    It is part of the `nthlayer-workers` package (observe module), not the
++    `nthlayer` CLI that this site otherwise documents, and has no console script
++    of its own. The subcommand is named `dependencies`. Run it as a Python module:
+ 
+-## Usage
++    ```bash
++    pip install nthlayer-workers
++    python -m nthlayer_workers.observe dependencies --help
++    ```
+ 
+-```bash
+-nthlayer deps <service.yaml> [options]
+-```
+-
+-## Options
+-
+-| Option | Description |
+-|--------|-------------|
+-| `--prometheus-url, -p URL` | Prometheus server URL |
+-| `--env ENVIRONMENT` | Environment name (dev, staging, prod) |
+-| `--provider {prometheus,kubernetes,backstage,all}` | Dependency provider to use (default: all) |
+-| `--k8s-namespace NAMESPACE` | Kubernetes namespace to search (default: all) |
+-| `--backstage-url URL` | Backstage catalog URL |
+-| `--upstream, -u` | Show only upstream dependencies (what this service calls) |
+-| `--downstream, -d` | Show only downstream dependencies (what calls this service) |
+-| `--format {table,json}` | Output format (default: table) |
+-| `--demo` | Show demo output with sample data |
+-
+-## Environment Variables
+-
+-| Variable | Description |
+-|----------|-------------|
+-| `NTHLAYER_PROMETHEUS_URL` | Default Prometheus URL |
+-| `NTHLAYER_BACKSTAGE_URL` | Default Backstage catalog URL |
+-| `KUBECONFIG` | Kubernetes configuration file |
+-
+-## Examples
+-
+-### Basic Dependency Discovery
++## Synopsis
+ 
+ ```bash
+-nthlayer deps checkout-service.yaml
++python -m nthlayer_workers.observe dependencies --service SERVICE --prometheus-url URL [options]
+ ```
+ 
+-Output:
+-```
+-╭──────────────────────────────────────────────────────────────────────────────╮
+-│ Dependencies: checkout-service                                                │
+-╰──────────────────────────────────────────────────────────────────────────────╯
+-
+-Upstream Dependencies (what checkout-service calls):
+-┌─────────────────┬──────────────┬────────────┬───────────┐
+-│ Service         │ Type         │ Provider   │ Confidence│
+-├─────────────────┼──────────────┼────────────┼───────────┤
+-│ payment-api     │ service      │ kubernetes │ 0.95      │
+-│ user-service    │ service      │ backstage  │ 0.90      │
+-│ postgres-main   │ datastore    │ kubernetes │ 0.95      │
+-│ redis-cache     │ datastore    │ prometheus │ 0.85      │
+-│ stripe          │ external     │ backstage  │ 0.90      │
+-└─────────────────┴──────────────┴────────────┴───────────┘
+-
+-Downstream Dependencies (what calls checkout-service):
+-┌─────────────────┬──────────────┬────────────┬───────────┐
+-│ Service         │ Type         │ Provider   │ Confidence│
+-├─────────────────┼──────────────┼────────────┼───────────┤
+-│ mobile-app      │ service      │ prometheus │ 0.80      │
+-│ web-frontend    │ service      │ kubernetes │ 0.95      │
+-└─────────────────┴──────────────┴────────────┴───────────┘
+-
+-Summary: 5 upstream, 2 downstream dependencies
+-```
++## Description
+ 
+-### Filter by Provider
++`dependencies` asks the configured providers for the service's dependency
++edges, prints the result as JSON, and stores it as a `dependency_graph`
++assessment in the local assessment store (see `--store`).
+ 
+-```bash
+-# Only discover from Kubernetes
+-nthlayer deps service.yaml --provider kubernetes
++Prometheus is the only provider this command configures. `--prometheus-url` is
++optional to the argument parser, but without it no provider is configured and
++the command exits 1 with `No providers configured. Use --prometheus-url.`
+ 
+-# Only discover from Backstage catalog
+-nthlayer deps service.yaml --provider backstage --backstage-url https://backstage.company.com
+-```
++## Options
+ 
+-### JSON Output for CI/CD
++| Option | Required | Description |
++|--------|----------|-------------|
++| `--service SERVICE` | yes | Service name |
++| `--prometheus-url URL` | in practice | Prometheus server URL (the only dependency provider) |
++| `--store PATH` | no | Assessment store path (default: `assessments.db`) |
++| `--decision-store PATH` | no | Also write a content-addressed decision record to this SQLite DB |
++| `--legacy-store` / `--no-legacy-store` | no | Write to the assessment store (default: enabled) |
+ 
+-```bash
+-nthlayer deps service.yaml --format json > dependencies.json
+-```
++## Exit Codes
++
++| Code | Meaning |
++|------|---------|
++| 0 | Discovery ran and the result was printed |
++| 1 | No provider configured (`--prometheus-url` missing) |
+ 
+-### Show Demo Data
++## Example
+ 
+ ```bash
+-nthlayer deps service.yaml --demo
++python -m nthlayer_workers.observe dependencies \
++  --service checkout-service \
++  --prometheus-url http://prometheus:9090
+ ```
+ 
+-## Dependency Providers
+-
+-### Kubernetes Provider
+-
+-Discovers dependencies from:
+-- Service selectors and labels
+-- ConfigMap references
+-- Environment variables pointing to other services
+-- Ingress/egress network policies
+-
+-**Confidence:** 0.95 (high - explicit configuration)
+-
+-### Backstage Provider
+-
+-Discovers dependencies from:
+-- `spec.dependsOn` in catalog entities
+-- API relationships
+-- System membership
+-
+-**Confidence:** 0.90 (high - curated catalog)
+-
+-### Prometheus Provider
+-
+-Discovers dependencies from:
+-- Metric labels showing service-to-service calls
+-- Request rate patterns between services
+-
+-**Confidence:** 0.80-0.85 (medium - inferred from metrics)
+-
+-## Dependency Types
+-
+-| Type | Description |
+-|------|-------------|
+-| `service` | Another microservice |
+-| `datastore` | Database, cache, or storage |
+-| `queue` | Message queue or event bus |
+-| `external` | External API or third-party service |
+-| `infrastructure` | Infrastructure component (e.g., Vault, Consul) |
+-
+-## Confidence Scores
++## Output
+ 
+-Dependencies are assigned confidence scores (0.0-1.0):
++A JSON object with:
+ 
+-| Range | Meaning |
+-|-------|---------|
+-| 0.90-1.0 | High confidence (explicit configuration) |
+-| 0.75-0.89 | Medium confidence (strong inference) |
+-| 0.50-0.74 | Low confidence (weak inference) |
+-| <0.50 | Very low (may be false positive) |
++| Field | Description |
++|-------|-------------|
++| `dependencies_discovered` | Total number of dependency edges found |
++| `upstream` | What this service calls: `service`, `type`, `provider` per entry |
++| `downstream` | What calls this service: `service`, `type`, `provider` per entry |
++| `providers_queried` | Providers that were asked |
++| `errors` | Provider errors, if any |
+ 
+ ## See Also
+ 
+-- [nthlayer blast-radius](./blast-radius.md) - Calculate deployment impact
+-- [nthlayer ownership](./ownership.md) - Find service owners
+-- [Architecture Overview](../architecture.md) - System architecture
++- [blast-radius](./blast-radius.md) - Impact of a change, computed over the dependency graph
++- [ownership](./ownership.md) - Who owns a service
+diff --git a/docs-site/commands/drift.md b/docs-site/commands/drift.md
+index 9a58399..fd5b3db 100644
+--- a/docs-site/commands/drift.md
++++ b/docs-site/commands/drift.md
+@@ -1,236 +1,112 @@
+ # drift
+ 
+-Analyze reliability drift for a service by detecting degradation trends over time.
++Analyze error-budget drift for a service by detecting degradation trends over time.
+ 
+-<div align="center">
+-  <img src="../assets/drift-demo.gif" alt="nthlayer drift demo" width="700">
+-</div>
++!!! note "Ships in nthlayer-workers, not nthlayer-generate"
++    Drift analysis reads live Prometheus data, so it lives in the runtime tier.
++    It is part of the `nthlayer-workers` package (observe module), not the
++    `nthlayer` CLI that this site otherwise documents, and has no console script
++    of its own. Run it as a Python module:
++
++    ```bash
++    pip install nthlayer-workers
++    python -m nthlayer_workers.observe drift --help
++    ```
+ 
+ ## Synopsis
+ 
+ ```bash
+-nthlayer drift <service-file> [options]
++python -m nthlayer_workers.observe drift --service SERVICE --prometheus-url URL [options]
+ ```
+ 
+ ## Description
+ 
+-The `drift` command queries Prometheus for historical SLO metrics, analyzes trends using linear regression, and detects patterns that indicate reliability degradation.
++`drift` queries Prometheus for the `slo:error_budget_remaining:ratio` series of
++one SLO over an analysis window, fits a linear trend, classifies the pattern,
++projects when the budget will be exhausted, and assigns a severity.
+ 
+-This enables **proactive reliability management** - identifying issues before they become incidents by detecting gradual budget erosion, sudden drops, or volatile patterns.
++The result is printed as JSON and also stored as a `drift_signal` assessment in
++the local assessment store (see `--store`).
+ 
+-## Exit Codes
++## Options
+ 
+-| Code | Severity | Meaning |
+-|------|----------|---------|
+-| 0 | None/Info | No significant drift or improving trend |
+-| 1 | Warning | Drift detected, investigate soon |
+-| 2 | Critical | Severe drift, immediate action needed |
++| Option | Required | Description |
++|--------|----------|-------------|
++| `--service SERVICE` | yes | Service name (matched against the `service` label) |
++| `--prometheus-url URL` | yes | Prometheus server URL |
++| `--tier {critical,standard,low}` | no | Service tier; selects default window and thresholds (default: `standard`) |
++| `--window WINDOW` | no | Analysis window, e.g. `30d`, `14d` (default: the tier's window) |
++| `--slo SLO` | no | SLO name (matched against the `slo` label; default: `availability`) |
++| `--store PATH` | no | Assessment store path (default: `assessments.db`) |
++| `--decision-store PATH` | no | Also write a content-addressed decision record to this SQLite DB |
++| `--legacy-store` / `--no-legacy-store` | no | Write to the assessment store (default: enabled) |
+ 
+-## Options
++## Exit Codes
+ 
+-| Option | Description |
+-|--------|-------------|
+-| `--prometheus-url URL` | Prometheus server URL (or use `NTHLAYER_PROMETHEUS_URL` env var) |
+-| `--environment ENV` | Environment name (dev, staging, prod) |
+-| `--window WINDOW` | Analysis window (e.g., `30d`, `14d`). Uses tier default if not specified |
+-| `--slo SLO` | SLO to analyze (default: `availability`) |
+-| `--format FORMAT` | Output format: `table` or `json` |
+-| `--demo` | Show demo output with sample data |
++| Code | Meaning |
++|------|---------|
++| 0 | Severity NONE or INFO |
++| 1 | Severity WARN, or the analysis failed (message on stderr) |
++| 2 | Severity CRITICAL |
+ 
+ ## Examples
+ 
+ ### Basic Analysis
+ 
+ ```bash
+-nthlayer drift services/payment-api.yaml \
++python -m nthlayer_workers.observe drift \
++  --service payment-api \
+   --prometheus-url http://prometheus:9090
+ ```
+ 
+-Output:
+-```
+-╭──────────────────────────────────────────────────────────────╮
+-│  Drift Analysis: payment-api                                 │
+-╰──────────────────────────────────────────────────────────────╯
+-
+-SLO: availability
+-Window: 30d
+-Data Range: 2024-12-09 → 2025-01-08
+-
+-┏━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━┓
+-┃ Metric               ┃         Value ┃
+-┡━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━┩
+-│ Current Budget       │        72.34% │
+-│ Trend                │   -0.523%/week│
+-│ Pattern              │ Gradual Decline│
+-│ Fit Quality (R²)     │         0.847 │
+-│ Data Points          │           720 │
+-└──────────────────────┴───────────────┘
+-
+-Projection:
+-  Days to Exhaustion   138 days
+-  Budget in 30d        70.25%
+-  Budget in 60d        68.17%
+-  Confidence           85%
+-
+-⚠ Severity: WARN
+-Error budget declining at 0.52% per week with high confidence (R²=0.85).
+-
+-Recommendation: Investigate recent changes. Common causes: increased traffic,
+-dependency degradation, or configuration drift. Run `nthlayer verify` to check
+-metric coverage.
+-```
+-
+-### JSON Output for CI/CD
++### Critical-Tier Service, Custom Window
+ 
+ ```bash
+-nthlayer drift services/api.yaml \
+-  --prometheus-url http://prometheus:9090 \
+-  --format json
++python -m nthlayer_workers.observe drift \
++  --service payment-api \
++  --tier critical \
++  --window 14d \
++  --prometheus-url http://prometheus:9090
+ ```
+ 
+-### Custom Analysis Window
++### Analyze a Specific SLO
+ 
+ ```bash
+-# Analyze last 14 days instead of tier default
+-nthlayer drift services/api.yaml \
+-  --prometheus-url http://prometheus:9090 \
+-  --window 14d
++python -m nthlayer_workers.observe drift \
++  --service payment-api \
++  --slo latency_p99 \
++  --prometheus-url http://prometheus:9090
+ ```
+ 
+-### Analyze Specific SLO
++## Output
+ 
+-```bash
+-nthlayer drift services/api.yaml \
+-  --prometheus-url http://prometheus:9090 \
+-  --slo latency_p99
+-```
++The JSON document contains `service`, `tier`, `slo`, `window`, the data range,
++`severity`, `pattern`, a `metrics` block (slope per day/week, current budget,
++R², variance, data points), a `projection` block (days until exhaustion,
++projected budget at 30/60/90 days, confidence), a `summary`, a
++`recommendation`, and the `exit_code`.
+ 
+ ## Drift Patterns
+ 
+-The analyzer classifies drift into six patterns:
+-
+ | Pattern | Description | Typical Cause |
+ |---------|-------------|---------------|
+-| **Stable** | No significant trend | Healthy service |
+-| **Gradual Decline** | Slow, steady budget erosion | Creeping technical debt |
+-| **Gradual Improvement** | Slow, steady recovery | Recent fixes taking effect |
+-| **Step Change Down** | Sudden budget drop | Incident, bad deploy |
+-| **Step Change Up** | Sudden improvement | Fix deployed, incident resolved |
+-| **Volatile** | High variance, no clear trend | Intermittent issues |
+-
+-## Tier-Based Defaults
++| `stable` | No significant trend | Healthy service |
++| `gradual_decline` | Slow, steady budget erosion | Creeping technical debt |
++| `gradual_improvement` | Slow, steady recovery | Recent fixes taking effect |
++| `step_change_down` | Sudden budget drop | Incident, bad deploy |
++| `step_change_up` | Sudden improvement | Fix deployed, incident resolved |
++| `seasonal` | Recurring pattern (detection disabled by default) | Traffic cycles |
++| `volatile` | High variance, no clear trend | Intermittent issues |
+ 
+-Default analysis windows and thresholds vary by service tier:
++## Tier Defaults
+ 
+ | Tier | Default Window | Warn Threshold | Critical Threshold |
+ |------|----------------|----------------|-------------------|
+-| Critical | 30d | -0.2%/week | -0.5%/week |
+-| Standard | 30d | -0.5%/week | -1.0%/week |
+-| Low | 14d | Disabled by default | Disabled by default |
+-
+-## Integration with check-deploy
+-
+-Combine drift analysis with deployment gates:
+-
+-```bash
+-nthlayer check-deploy services/api.yaml \
+-  --prometheus-url http://prometheus:9090 \
+-  --include-drift
+-```
+-
+-This adds drift analysis to the deployment gate check, blocking deploys if critical drift is detected.
+-
+-## Integration with portfolio
+-
+-View drift across all services:
+-
+-```bash
+-nthlayer portfolio --drift --prometheus-url http://prometheus:9090
+-```
+-
+-Output includes a drift analysis table showing trends, patterns, and exhaustion projections for each service.
+-
+-## CI/CD Integration
+-
+-### GitHub Actions
+-
+-```yaml
+-jobs:
+-  check-reliability:
+-    steps:
+-      - name: Check for Drift
+-        run: |
+-          nthlayer drift services/api.yaml \
+-            --prometheus-url ${{ secrets.PROMETHEUS_URL }} \
+-            --format json > drift-report.json
+-
+-          # Fail on critical drift
+-          if [ $? -eq 2 ]; then
+-            echo "::error::Critical drift detected - investigate before deploying"
+-            exit 1
+-          fi
+-```
+-
+-### Weekly Drift Reports
+-
+-```yaml
+-# .github/workflows/drift-report.yml
+-name: Weekly Drift Report
+-
+-on:
+-  schedule:
+-    - cron: '0 9 * * 1'  # Monday 9am
+-
+-jobs:
+-  report:
+-    runs-on: ubuntu-latest
+-    steps:
+-      - uses: actions/checkout@v4
+-
+-      - name: Generate Drift Report
+-        run: |
+-          nthlayer portfolio --drift \
+-            --prometheus-url ${{ secrets.PROMETHEUS_URL }} \
+-            --format markdown > drift-report.md
+-
+-      - name: Post to Slack
+-        uses: slackapi/slack-github-action@v1
+-        with:
+-          payload-file-path: drift-report.md
+-```
+-
+-## Environment Variables
+-
+-| Variable | Description |
+-|----------|-------------|
+-| `NTHLAYER_PROMETHEUS_URL` | Prometheus server URL |
+-| `NTHLAYER_METRICS_USER` | Basic auth username |
+-| `NTHLAYER_METRICS_PASSWORD` | Basic auth password |
+-
+-## Algorithm Details
+-
+-### Trend Calculation
+-
+-Drift uses linear regression (least squares) on time-series data:
+-
+-1. Query Prometheus for `slo:error_budget_remaining:ratio` over the analysis window
+-2. Calculate slope (budget change per week) and R² (fit quality)
+-3. Project days until budget exhaustion based on current trend
+-
+-### Severity Classification
+-
+-Priority order for severity assignment:
+-
+-1. Projected exhaustion within critical window → **CRITICAL**
+-2. Step change down detected → **CRITICAL**
+-3. Slope exceeds critical threshold → **CRITICAL**
+-4. Projected exhaustion within warn window → **WARN**
+-5. Slope exceeds warn threshold → **WARN**
+-6. Any negative slope → **INFO**
+-7. Otherwise → **NONE**
++| `critical` | 30d | -0.2%/week | -0.5%/week |
++| `standard` | 30d | -0.5%/week | -1.0%/week |
++| `low` | 14d | -1.0%/week | -2.0%/week |
+ 
+ ## See Also
+ 
+-- [Deployment Gates](./check-deploy.md) - Error budget gates
+-- [SLO Portfolio](./portfolio.md) - Organization-wide view
++- [Deployment Gates](./check-deploy.md) - Error budget gates (`nthlayer-workers gate`)
+ - [SLOs & Error Budgets](../concepts/slos.md) - Understanding SLOs
+diff --git a/docs-site/commands/environments.md b/docs-site/commands/environments.md
+index d106d90..b469f49 100644
+--- a/docs-site/commands/environments.md
++++ b/docs-site/commands/environments.md
+@@ -193,18 +193,8 @@ nthlayer plan services/payment-api.yaml --env production
+ ### With Validation Commands
+ 
+ ```bash
+-# Verify metrics exist in production Prometheus
+-nthlayer verify services/payment-api.yaml --env production
+-
+-# Check deployment gate against production SLOs
+-nthlayer check-deploy services/payment-api.yaml --env production
+-```
+-
+-### With SLO Commands
+-
+-```bash
+-# Collect SLO metrics from production
+-nthlayer slo collect services/payment-api.yaml --env production
++# Validate that SLO metrics exist, using production config
++nthlayer validate-slo services/payment-api.yaml --env production
+ ```
+ 
+ ## Best Practices
+diff --git a/docs-site/commands/generate-recording-rules.md b/docs-site/commands/generate-recording-rules.md
+index 224a1dd..e755d79 100644
+--- a/docs-site/commands/generate-recording-rules.md
++++ b/docs-site/commands/generate-recording-rules.md
+@@ -164,8 +164,8 @@ curl -X POST http://prometheus:9090/-/reload
+ ### Mimir/Cortex Ruler API
+ 
+ ```bash
+-nthlayer apply services/api.yaml --push-ruler \
+-  --ruler-url http://mimir:8080
++export MIMIR_RULER_URL=http://mimir:8080
++nthlayer apply services/api.yaml --push-ruler
+ ```
+ 
+ ## CI/CD Integration
+diff --git a/docs-site/commands/identity.md b/docs-site/commands/identity.md
+index 3372b5d..dc382b6 100644
+--- a/docs-site/commands/identity.md
++++ b/docs-site/commands/identity.md
+@@ -181,14 +181,6 @@ canonical=$(nthlayer identity resolve "$ALERT_SERVICE" | grep "Canonical" | awk
+ echo "Looking for $canonical in all systems..."
+ ```
+ 
+-### Metric Queries
+-
+-```bash
+-# Get the Prometheus-style name for queries
+-prom_name=$(nthlayer identity normalize "$SERVICE" --style prometheus)
+-curl "$PROMETHEUS_URL/api/v1/query?query=up{service=\"$prom_name\"}"
+-```
+-
+ ### Service Discovery
+ 
+ ```bash
+@@ -200,5 +192,5 @@ canonical=$(nthlayer identity resolve "$k8s_name")
+ ## See Also
+ 
+ - [nthlayer ownership](./ownership.md) - Find service owners
+-- [nthlayer deps](./deps.md) - View service dependencies
++- [dependencies](./deps.md) - View service dependencies (nthlayer-workers)
+ - [Service YAML Schema](../reference/service-yaml.md)
+diff --git a/docs-site/commands/index.md b/docs-site/commands/index.md
+index bcef83d..e8460ff 100644
+--- a/docs-site/commands/index.md
++++ b/docs-site/commands/index.md
+@@ -17,7 +17,6 @@ NthLayer provides a comprehensive CLI for managing your reliability stack.
+ 
+ | Command | Description |
+ |---------|-------------|
+-| [`nthlayer verify`](verify.md) | Verify declared metrics exist (contract verification) |
+ | [`nthlayer validate-spec`](validate-spec.md) | Validate service.yaml against OPA policies |
+ | [`nthlayer validate-metadata`](validate-metadata.md) | Validate rule metadata (labels, annotations, URLs) |
+ | [`nthlayer validate-slo`](validate-slo.md) | Validate SLO metrics exist in Prometheus |
+@@ -28,8 +27,6 @@ NthLayer provides a comprehensive CLI for managing your reliability stack.
+ 
+ | Command | Description |
+ |---------|-------------|
+-| [`nthlayer deps`](deps.md) | Show service dependencies |
+-| [`nthlayer blast-radius`](blast-radius.md) | Calculate deployment blast radius |
+ | [`nthlayer ownership`](ownership.md) | Show service ownership attribution |
+ | [`nthlayer identity`](identity.md) | Service identity resolution and management |
+ 
+@@ -38,10 +35,6 @@ NthLayer provides a comprehensive CLI for managing your reliability stack.
+ | Command | Description |
+ |---------|-------------|
+ | [`nthlayer slo`](slo.md) | SLO and error budget commands |
+-| [`nthlayer portfolio`](portfolio.md) | View org-wide SLO health |
+-| [`nthlayer check-deploy`](check-deploy.md) | Check deployment gate (error budget validation) |
+-| [`nthlayer drift`](drift.md) | Analyze reliability drift for a service |
+-| [`nthlayer scorecard`](scorecard.md) | Calculate per-service reliability scores |
+ 
+ ## Alerts & Monitoring
+ 
+@@ -53,10 +46,29 @@ NthLayer provides a comprehensive CLI for managing your reliability stack.
+ 
+ | Command | Description |
+ |---------|-------------|
+-| [`nthlayer environments`](environments.md) | List available environments |
++| [`nthlayer list-environments`](environments.md) | List available environments |
+ | `nthlayer diff-envs` | Compare configurations between environments |
+ | `nthlayer validate-env` | Validate an environment configuration |
+ 
++## Runtime Commands (nthlayer-workers)
++
++These read live system state, so they ship in the `nthlayer-workers` package
++rather than in the `nthlayer` CLI documented on the rest of this page. The
++observe commands have no console script and run as
++`python -m nthlayer_workers.observe <command>`; the core-backed gate is a
++subcommand of the `nthlayer-workers` console script.
++
++| Command | Description |
++|---------|-------------|
++| [observe `check-deploy`](check-deploy.md) | Deployment gate (error budget validation) from a local assessment store |
++| [`nthlayer-workers gate`](check-deploy.md#nthlayer-workers-gate) | Deployment gate backed by nthlayer-core |
++| [observe `verify`](verify.md) | Verify declared metrics exist (contract verification) |
++| [observe `portfolio`](portfolio.md) | View org-wide SLO health |
++| [observe `scorecard`](scorecard.md) | Per-service reliability scores |
++| [observe `drift`](drift.md) | Analyze error-budget drift for a service |
++| [observe `dependencies`](deps.md) | Discover service dependencies |
++| [observe `blast-radius`](blast-radius.md) | Estimate deployment blast radius |
++
+ ## Setup & Configuration
+ 
+ | Command | Description |
+@@ -74,19 +86,8 @@ NthLayer provides a comprehensive CLI for managing your reliability stack.
+ nthlayer apply service.yaml
+ 
+ # Validate before deployment
+-nthlayer verify service.yaml --prometheus-url http://prometheus:9090
+ nthlayer validate-slo service.yaml
+ 
+-# View dependencies
+-nthlayer deps service.yaml
+-nthlayer blast-radius service.yaml
+-
+-# Check deployment readiness
+-nthlayer check-deploy service.yaml
+-
+-# View portfolio health
+-nthlayer portfolio
+-
+ # Check SLO status
+ nthlayer slo show service.yaml
+ ```
+diff --git a/docs-site/commands/ownership.md b/docs-site/commands/ownership.md
+index c6cd847..bc5a28b 100644
+--- a/docs-site/commands/ownership.md
++++ b/docs-site/commands/ownership.md
+@@ -166,16 +166,6 @@ When multiple sources provide ownership information:
+ nthlayer ownership failing-service.yaml --format json | jq '.on_call'
+ ```
+ 
+-### Dependency Notification
+-
+-```bash
+-# Notify owners of affected services before deployment
+-for dep in $(nthlayer blast-radius service.yaml --format json | jq -r '.affected_services[].name'); do
+-  owner=$(nthlayer ownership $dep.yaml --format json | jq -r '.primary_owner.team')
+-  echo "Notifying $owner about $dep"
+-done
+-```
+-
+ ### Ownership Audit
+ 
+ ```bash
+@@ -185,6 +175,6 @@ nthlayer ownership service.yaml --format json | jq 'select(.primary_owner.confid
+ 
+ ## See Also
+ 
+-- [nthlayer deps](./deps.md) - View service dependencies
+-- [nthlayer blast-radius](./blast-radius.md) - Calculate deployment impact
++- [dependencies](./deps.md) - View service dependencies (nthlayer-workers)
++- [blast-radius](./blast-radius.md) - Calculate deployment impact (nthlayer-workers)
+ - [nthlayer identity](./identity.md) - Service identity resolution
+diff --git a/docs-site/commands/portfolio.md b/docs-site/commands/portfolio.md
+index ecb2b6f..d922785 100644
+--- a/docs-site/commands/portfolio.md
++++ b/docs-site/commands/portfolio.md
+@@ -1,159 +1,70 @@
+-# nthlayer portfolio
++# portfolio
+ 
+-View SLO health across your entire organization.
++Aggregate SLO health across every service in the assessment store.
+ 
+-## Usage
++!!! note "Ships in nthlayer-workers, not nthlayer-generate"
++    This command reads live or collected state, so it lives in the runtime tier.
++    It is part of the `nthlayer-workers` package (observe module), not the
++    `nthlayer` CLI that this site otherwise documents, and has no console script
++    of its own. Run it as a Python module:
+ 
+-```bash
+-nthlayer portfolio [options]
+-```
+-
+-## Options
+-
+-| Option | Description |
+-|--------|-------------|
+-| `--format FORMAT` | Output format: `text` (default), `json`, `csv` |
+-| `--services-dir DIR` | Directory to scan for services |
+-
+-## Example Output
+-
+-```bash
+-nthlayer portfolio
+-```
+-
+-```
+-================================================================================
+-  NthLayer SLO Portfolio
+-================================================================================
+-
+-Organization Health: 78% (14/18 services meeting SLOs)
+-
+-By Tier:
+-  Tier 1 (Critical):     83%  ████████░░░░░░░░░░░░  5/6 services
+-  Tier 2 (Standard):     75%  ███████░░░░░░░░░░░░░  6/8 services
+-  Tier 3 (Low):          75%  ███████░░░░░░░░░░░░░  3/4 services
+-
+---------------------------------------------------------------------------------
+-Services Needing Attention:
+---------------------------------------------------------------------------------
+-
+-  payment-api (Tier 1)
+-    availability: 156% budget burned - EXHAUSTED
+-    Remaining: -12.5 hours
+-
+-  search-api (Tier 2)
+-    latency-p99: 95% budget burned - WARNING
+-    Remaining: 1.2 hours
+-
+---------------------------------------------------------------------------------
+-Insights:
+---------------------------------------------------------------------------------
+-  - 2 services have no SLOs defined: legacy-api, internal-tools
+-  - payment-api has aggressive targets (99.99%) - consider 99.95%
+-
+---------------------------------------------------------------------------------
+-Total: 18 services, 16 with SLOs, 45 SLOs
+-```
+-
+-## JSON Export
+-
+-For integration with other tools:
+-
+-```bash
+-nthlayer portfolio --format json
+-```
+-
+-```json
+-{
+-  "timestamp": "2024-12-06T10:30:00Z",
+-  "total_services": 18,
+-  "services_with_slos": 16,
+-  "total_slos": 45,
+-  "healthy_services": 14,
+-  "org_health_percent": 77.78,
+-  "by_tier": [
+-    {
+-      "tier": 1,
+-      "tier_name": "Critical",
+-      "total_services": 6,
+-      "healthy_services": 5,
+-      "health_percent": 83.33
+-    }
+-  ],
+-  "services": [
+-    {
+-      "name": "payment-api",
+-      "tier": 1,
+-      "overall_status": "exhausted",
+-      "slos": [
+-        {
+-          "name": "availability",
+-          "status": "exhausted",
+-          "budget_consumed_percent": 156.0
+-        }
+-      ]
+-    }
+-  ]
+-}
+-```
+-
+-## CSV Export
++    ```bash
++    pip install nthlayer-workers
++    python -m nthlayer_workers.observe portfolio --help
++    ```
+ 
+-For spreadsheet analysis:
++## Synopsis
+ 
+ ```bash
+-nthlayer portfolio --format csv
++python -m nthlayer_workers.observe portfolio [--store PATH] [--format {table,json}]
+ ```
+ 
+-```csv
+-service,tier,slo,status,budget_consumed,budget_remaining_hours
+-payment-api,1,availability,exhausted,156.0,-12.5
+-payment-api,1,latency-p99,healthy,45.0,18.2
+-search-api,2,availability,healthy,32.0,22.1
+-search-api,2,latency-p99,warning,95.0,1.2
+-```
++## Description
+ 
+-## Health Status Levels
++`portfolio` reads `slo_status` assessments from a local assessment store, which
++`python -m nthlayer_workers.observe collect --specs-dir DIR --prometheus-url URL`
++writes (default store: `assessments.db`). With no such assessments it prints
++`No slo_status assessments found. Run 'collect' first.` and exits 0.
+ 
+-| Status | Budget Consumed | Description |
+-|--------|-----------------|-------------|
+-| **Healthy** | < 80% | On track |
+-| **Warning** | 80-100% | Approaching limit |
+-| **Critical** | 100-150% | Over budget |
+-| **Exhausted** | > 150% | Severely over budget |
++Each service gets an overall status, the worst of its SLOs' statuses
++(`HEALTHY`, `WARNING`, `CRITICAL`, `EXHAUSTED`). Services whose status is
++unknown or has no data are listed but not counted in any bucket.
+ 
+-## Scanning Multiple Directories
++## Options
+ 
+-```bash
+-nthlayer portfolio --services-dir ./services --services-dir ./legacy
+-```
++| Option | Required | Description |
++|--------|----------|-------------|
++| `--store PATH` | no | Assessment store path (default: `assessments.db`) |
++| `--format {table,json}` | no | Output format (default: `table`) |
+ 
+-Default search paths:
+-- `./services`
+-- `./examples/services`
++## Exit Codes
+ 
+-## Use Cases
++Always 0. `portfolio` reports; it does not gate.
+ 
+-### Weekly SLO Review
++## Examples
+ 
+ ```bash
+-nthlayer portfolio --format json > slo-report-$(date +%Y%m%d).json
++# Collect first, then aggregate
++python -m nthlayer_workers.observe collect \
++  --specs-dir services/ \
++  --prometheus-url http://prometheus:9090
++python -m nthlayer_workers.observe portfolio
++
++# JSON for dashboards or scripts
++python -m nthlayer_workers.observe portfolio --format json
+ ```
+ 
+-### CI/CD Gate
++## Output
+ 
+-```bash
+-# Fail if any critical service is exhausted
+-nthlayer portfolio --format json | jq -e '.services[] | select(.tier == 1 and .overall_status == "exhausted") | empty'
+-```
+-
+-### Stakeholder Reports
++Table output prints the service count, the healthy/warning/critical/exhausted
++counts, and each service with its SLOs' status and current SLI.
+ 
+-```bash
+-nthlayer portfolio --format csv > monthly-slo-report.csv
+-```
++JSON output has `total_services`, `healthy`, `warning`, `critical`,
++`exhausted`, and a `services` list; each entry has `service`,
++`overall_status`, and `slos` (`name`, `status`, `current_sli`,
++`percent_consumed`).
+ 
+ ## See Also
+ 
+-- [SLOs & Error Budgets](../concepts/slos.md) - Understanding SLOs
+-- [nthlayer slo](slo.md) - Per-service SLO commands
++- [scorecard](./scorecard.md) - Per-service score from the same data
++- [Deployment Gates](./check-deploy.md) - Gate on the same assessments
+diff --git a/docs-site/commands/recommend-metrics.md b/docs-site/commands/recommend-metrics.md
+index 3334fab..4466684 100644
+--- a/docs-site/commands/recommend-metrics.md
++++ b/docs-site/commands/recommend-metrics.md
+@@ -201,6 +201,6 @@ fi
+ 
+ ## See Also
+ 
+-- [nthlayer verify](verify.md) - Contract verification
++- [verify](verify.md) - Contract verification (nthlayer-workers)
+ - [Technology Templates](../integrations/technologies.md) - Template reference
+ - [Service Specs](../concepts/service-specs.md) - Service YAML schema
+diff --git a/docs-site/commands/scorecard.md b/docs-site/commands/scorecard.md
+index 52bf5ff..1cee503 100644
+--- a/docs-site/commands/scorecard.md
++++ b/docs-site/commands/scorecard.md
+@@ -1,254 +1,61 @@
+-# nthlayer scorecard
++# scorecard
+ 
+-Calculate per-service reliability scores with weighted components and team aggregation.
++Score each service's reliability from the assessment store.
++
++!!! note "Ships in nthlayer-workers, not nthlayer-generate"
++    This command reads live or collected state, so it lives in the runtime tier.
++    It is part of the `nthlayer-workers` package (observe module), not the
++    `nthlayer` CLI that this site otherwise documents, and has no console script
++    of its own. Run it as a Python module:
++
++    ```bash
++    pip install nthlayer-workers
++    python -m nthlayer_workers.observe scorecard --help
++    ```
+ 
+ ## Synopsis
+ 
+ ```bash
+-nthlayer scorecard [options]
++python -m nthlayer_workers.observe scorecard [--store PATH] [--format {table,json}]
+ ```
+ 
+ ## Description
+ 
+-The `scorecard` command provides quantitative reliability metrics across your organization. Each service receives a score from 0-100 based on weighted components:
++`scorecard` reads `slo_status` assessments from a local assessment store, which
++`python -m nthlayer_workers.observe collect --specs-dir DIR --prometheus-url URL`
++writes (default store: `assessments.db`). With no such assessments it prints
++`No slo_status assessments found. Run 'collect' first.` and exits 0.
+ 
+-| Component | Weight | Description |
+-|-----------|--------|-------------|
+-| **SLO Compliance** | 40% | Percentage of SLOs meeting targets |
+-| **Incident Score** | 30% | Inverse score based on incident count |
+-| **Deploy Success Rate** | 20% | Percentage of successful deployments |
+-| **Error Budget Remaining** | 10% | Percentage of budget still available |
+-
+-Scores are aggregated at the team level using tier-based weighting, ensuring critical services have proportionally higher impact on team scores.
+-
+-## Exit Codes
+-
+-| Code | Band | Score Range |
+-|------|------|-------------|
+-| 0 | Excellent/Good | 75-100 |
+-| 1 | Fair | 50-74 |
+-| 2 | Poor/Critical | 0-49 |
++The score is the share of a service's SLOs whose status is `HEALTHY`, as
++0-100. A service with three SLOs, two healthy, scores 66.7 in JSON output
++(rounded to one decimal) and shows as 67 in table output (rounded to a whole
++number). Services are listed
++highest score first.
+ 
+ ## Options
+ 
+-| Option | Description |
+-|--------|-------------|
+-| `--format FORMAT` | Output format: `table` (default), `json`, `csv` |
+-| `--path PATH` | Additional paths to search for service files |
+-| `--prometheus-url URL` | Prometheus URL for live data (or set `NTHLAYER_PROMETHEUS_URL`) |
+-| `--by-team` | Group and display scores by team |
+-| `--top N` | Number of top/bottom services to highlight (default: 5) |
+-
+-## Examples
+-
+-### Basic Scorecard
+-
+-```bash
+-nthlayer scorecard --prometheus-url http://prometheus:9090
+-```
+-
+-Output:
+-```
+-╭──────────────────────────────────────────────────────────────────────────────╮
+-│ Reliability Scorecard                                                        │
+-╰──────────────────────────────────────────────────────────────────────────────╯
+-
+-╭───────────────────────────── Organization Score ─────────────────────────────╮
+-│ ✓ 82  GOOD                                                                   │
+-╰──────────────────────────────────────────────────────────────────────────────╯
+-
+-                            Service Scores
+-┏━━━━━━━━━━━━━━━┳━━━━━━┳━━━━━━━━━━━━━━━┳━━━━━━━┳━━━━━━┳━━━━━┳━━━━━━━━┓
+-┃ Service       ┃ Tier ┃ Team          ┃ Score ┃ Band ┃ SLO ┃ Budget ┃
+-┡━━━━━━━━━━━━━━━╇━━━━━━╇━━━━━━━━━━━━━━━╇━━━━━━━╇━━━━━━╇━━━━━╇━━━━━━━━┩
+-│ payment-api   │  1   │ payments-team │    95 │ ✓    │ 2/2 │    92% │
+-│ user-service  │  1   │ platform-team │    88 │ ✓    │ 2/2 │    85% │
+-│ order-service │  1   │ commerce-team │    76 │ ✓    │ 2/2 │    68% │
+-│ search-api    │  2   │ search-team   │    62 │ !    │ 1/2 │    45% │
+-│ analytics-api │  3   │ data-eng      │    58 │ !    │ 1/2 │    32% │
+-└───────────────┴──────┴───────────────┴───────┴──────┴─────┴────────┘
+-
+-────────────────────────────────────────────────────────────────────────────────
+-Total: 5 services, 5 teams
+-```
+-
+-### Team View
+-
+-```bash
+-nthlayer scorecard --by-team
+-```
+-
+-Output:
+-```
+-╭──────────────────────────────────────────────────────────────────────────────╮
+-│ Reliability Scorecard - By Team                                              │
+-╰──────────────────────────────────────────────────────────────────────────────╯
+-
+-╭───────────────────────────── Organization Score ─────────────────────────────╮
+-│ ✓ 82  GOOD                                                                   │
+-╰──────────────────────────────────────────────────────────────────────────────╯
+-
+-                             Team Scores
+-┏━━━━━━━━━━━━━━━┳━━━━━━━┳━━━━━━┳━━━━━━━━━━┳━━━━━━━━┳━━━━━━━━┳━━━━━━━━┓
+-┃ Team          ┃ Score ┃ Band ┃ Services ┃ Tier 1 ┃ Tier 2 ┃ Tier 3 ┃
+-┡━━━━━━━━━━━━━━━╇━━━━━━━╇━━━━━━╇━━━━━━━━━━╇━━━━━━━━╇━━━━━━━━╇━━━━━━━━┩
+-│ payments-team │    95 │ ✓    │        1 │     95 │      - │      - │
+-│ platform-team │    88 │ ✓    │        2 │     88 │     82 │      - │
+-│ commerce-team │    76 │ ✓    │        1 │     76 │      - │      - │
+-│ search-team   │    62 │ !    │        1 │      - │     62 │      - │
+-│ data-eng      │    58 │ !    │        1 │      - │      - │     58 │
+-└───────────────┴───────┴──────┴──────────┴────────┴────────┴────────┘
+-```
+-
+-### JSON Export
+-
+-```bash
+-nthlayer scorecard --format json
+-```
+-
+-```json
+-{
+-  "timestamp": "2026-01-18T21:10:26.045633+00:00",
+-  "period": "30d",
+-  "summary": {
+-    "org_score": 82.0,
+-    "org_band": "good",
+-    "total_services": 5,
+-    "total_teams": 5
+-  },
+-  "services": [
+-    {
+-      "service": "payment-api",
+-      "tier": 1,
+-      "team": "payments-team",
+-      "score": 95.0,
+-      "band": "excellent",
+-      "components": {
+-        "slo_compliance": 100.0,
+-        "incident_score": 100,
+-        "deploy_success_rate": 100,
+-        "error_budget_remaining": 92
+-      }
+-    }
+-  ],
+-  "teams": [...],
+-  "rankings": {
+-    "top_services": [...],
+-    "bottom_services": [...]
+-  }
+-}
+-```
+-
+-### CSV Export
+-
+-```bash
+-nthlayer scorecard --format csv > reliability-report.csv
+-```
+-
+-```csv
+-service,tier,team,type,score,band,slo_compliance,incident_score,deploy_success_rate,error_budget_remaining
+-payment-api,1,payments-team,api,95.0,excellent,100.0,100,100,92
+-user-service,1,platform-team,api,88.0,good,100.0,90,100,85
+-```
+-
+-## Score Bands
+-
+-| Band | Score Range | Icon | Description |
+-|------|-------------|------|-------------|
+-| **Excellent** | 90-100 | ✓ (bold) | Exceptional reliability |
+-| **Good** | 75-89 | ✓ | Meeting expectations |
+-| **Fair** | 50-74 | ! | Needs attention |
+-| **Poor** | 25-49 | !! | Significant issues |
+-| **Critical** | 0-24 | ✗ | Immediate action required |
+-
+-## Tier Weighting
+-
+-Team and organization scores use tier-based weighting to ensure critical services have proportionally higher impact:
++| Option | Required | Description |
++|--------|----------|-------------|
++| `--store PATH` | no | Assessment store path (default: `assessments.db`) |
++| `--format {table,json}` | no | Output format (default: `table`) |
+ 
+-| Tier | Weight | Description |
+-|------|--------|-------------|
+-| Tier 1 (Critical) | 3x | Revenue-critical, customer-facing |
+-| Tier 2 (Standard) | 2x | Important internal services |
+-| Tier 3 (Low) | 1x | Non-critical, batch jobs |
+-
+-**Example calculation:**
+-```
+-Team with:
+-  - Tier 1 service scoring 90
+-  - Tier 2 service scoring 70
+-
+-Team Score = (90 × 3 + 70 × 2) / (3 + 2)
+-           = (270 + 140) / 5
+-           = 82
+-```
++## Exit Codes
+ 
+-## CI/CD Integration
++Always 0. `scorecard` reports; it does not gate.
+ 
+-### Deployment Gate
++## Examples
+ 
+ ```bash
+-#!/bin/bash
+-nthlayer scorecard --format json > scorecard.json
+-exit_code=$?
+-
+-if [ $exit_code -eq 2 ]; then
+-  echo "Reliability score is POOR/CRITICAL - deploy blocked"
+-  exit 1
+-fi
++python -m nthlayer_workers.observe scorecard
++python -m nthlayer_workers.observe scorecard --format json
+ ```
+ 
+-### GitHub Actions
+-
+-```yaml
+-jobs:
+-  reliability-check:
+-    steps:
+-      - name: Check Reliability Score
+-        run: |
+-          nthlayer scorecard \
+-            --prometheus-url ${{ secrets.PROMETHEUS_URL }} \
+-            --format json > scorecard.json
+-
+-          # Extract org score
+-          score=$(jq '.summary.org_score' scorecard.json)
+-          echo "Organization reliability score: $score"
+-
+-          # Fail if below threshold
+-          if (( $(echo "$score < 50" | bc -l) )); then
+-            echo "::error::Reliability score below threshold"
+-            exit 1
+-          fi
+-```
+-
+-### Weekly Reports
+-
+-```yaml
+-name: Weekly Reliability Report
+-
+-on:
+-  schedule:
+-    - cron: '0 9 * * 1'  # Monday 9am
+-
+-jobs:
+-  report:
+-    runs-on: ubuntu-latest
+-    steps:
+-      - name: Generate Scorecard
+-        run: |
+-          nthlayer scorecard \
+-            --prometheus-url ${{ secrets.PROMETHEUS_URL }} \
+-            --format csv > reliability-$(date +%Y%m%d).csv
+-```
++## Output
+ 
+-## Environment Variables
++Table output: one line per service, `<service>: <score>/100 (<status>, <n> SLOs)`.
+ 
+-| Variable | Description |
+-|----------|-------------|
+-| `NTHLAYER_PROMETHEUS_URL` | Default Prometheus URL |
++JSON output: a list of `{service, score, status, slo_count}`.
+ 
+ ## See Also
+ 
+-- [nthlayer portfolio](portfolio.md) - SLO portfolio health
+-- [nthlayer drift](drift.md) - Reliability trend analysis
+-- [Service Tiers](../concepts/tiers.md) - Understanding tier classification
+-- [SLOs & Error Budgets](../concepts/slos.md) - SLO fundamentals
++- [portfolio](./portfolio.md) - SLO health from the same data
+diff --git a/docs-site/commands/simulate.md b/docs-site/commands/simulate.md
+index 02b0a5d..c503cd2 100644
+--- a/docs-site/commands/simulate.md
++++ b/docs-site/commands/simulate.md
+@@ -237,7 +237,7 @@ nthlayer simulate services/checkout-service.yaml \
+ 
+ ## See Also
+ 
+-- [Deployment Gates](./check-deploy.md) — Error budget gates
+-- [Drift Detection](./drift.md) — Detect degradation trends
++- [Deployment Gates](./check-deploy.md) — Error budget gates (nthlayer-workers)
++- [Drift Detection](./drift.md) — Detect degradation trends (nthlayer-workers)
+ - [Validate SLO](./validate-slo.md) — Static SLO feasibility check
+-- [Blast Radius](./blast-radius.md) — Dependency impact analysis
++- [Blast Radius](./blast-radius.md) — Dependency impact analysis (nthlayer-workers)
+diff --git a/docs-site/commands/slo.md b/docs-site/commands/slo.md
+index bc4ff0c..00c2090 100644
+--- a/docs-site/commands/slo.md
++++ b/docs-site/commands/slo.md
+@@ -6,7 +6,7 @@ Query and manage SLOs for individual services.
+ 
+ ```bash
+ nthlayer slo show <service.yaml>     # Show SLO definitions
+-nthlayer slo list <service.yaml>     # List SLOs briefly
++nthlayer slo list                    # List SLOs across all services
+ nthlayer slo collect <service.yaml>  # Query live metrics from Prometheus
+ ```
+ 
+@@ -38,16 +38,11 @@ latency-p99
+ 
+ ## nthlayer slo list
+ 
+-Brief listing:
++List every SLO found in the service files under `services/` and
++`examples/services/` in the current directory. It takes no arguments.
+ 
+ ```bash
+-nthlayer slo list payment-api.yaml
+-```
+-
+-```
+-payment-api SLOs:
+-  - availability: 99.95% (30d)
+-  - latency-p99: 99.0% < 200ms (30d)
++nthlayer slo list
+ ```
+ 
+ ## nthlayer slo collect
+@@ -112,5 +107,5 @@ Error Budget = (1 - 0.9995) × 30 days × 24 hours × 60 minutes
+ 
+ ## See Also
+ 
+-- [nthlayer portfolio](portfolio.md) - Org-wide SLO view
++- [portfolio](portfolio.md) - Org-wide SLO view (nthlayer-workers)
+ - [SLOs & Error Budgets](../concepts/slos.md) - Concepts
+diff --git a/docs-site/commands/validate-metadata.md b/docs-site/commands/validate-metadata.md
+index 5620ecd..f88713e 100644
+--- a/docs-site/commands/validate-metadata.md
++++ b/docs-site/commands/validate-metadata.md
+@@ -118,8 +118,11 @@ repos:
+     hooks:
+       - id: validate-metadata
+         name: Validate alert metadata
+-        entry: nthlayer validate-metadata --strict
++        # validate-metadata takes one path; give it the directory and run
++        # once instead of passing every staged file.
++        entry: nthlayer validate-metadata generated/ --strict
+         language: system
++        pass_filenames: false
+         files: alerts\.yaml$
+ ```
+ 
+diff --git a/docs-site/commands/validate-slo.md b/docs-site/commands/validate-slo.md
+index df7d8bd..a9ebce4 100644
+--- a/docs-site/commands/validate-slo.md
++++ b/docs-site/commands/validate-slo.md
+@@ -172,15 +172,6 @@ Checks that label selectors match existing label values:
+ total_query: sum(rate(http_requests_total{service="checkout"}[5m]))
+ ```
+ 
+-## Validation vs Verification
+-
+-| Command | Purpose | When to Use |
+-|---------|---------|-------------|
+-| `validate-slo` | Check SLO metric existence | Before deploying SLO configs |
+-| `verify` | Full contract verification | Before promoting to production |
+-
+-Use `validate-slo` as a quick check during development. Use `verify` in CI/CD pipelines for comprehensive validation.
+-
+ ## CI/CD Integration
+ 
+ ### Pre-Deployment Check
+@@ -238,6 +229,6 @@ curl "$PROMETHEUS_URL/api/v1/rules" | jq '.data.groups[].rules[] | select(.name
+ 
+ ## See Also
+ 
+-- [nthlayer verify](./verify.md) - Full contract verification
+ - [nthlayer apply](./apply.md) - Generate SLO configs
++- [verify](./verify.md) - Contract verification across a specs directory (nthlayer-workers)
+ - [SLO Concepts](../concepts/slos.md) - Understanding SLOs
+diff --git a/docs-site/commands/validate-spec.md b/docs-site/commands/validate-spec.md
+index 597687c..1df2917 100644
+--- a/docs-site/commands/validate-spec.md
++++ b/docs-site/commands/validate-spec.md
+@@ -175,13 +175,16 @@ repos:
+     hooks:
+       - id: validate-specs
+         name: Validate Service Specs
+-        entry: nthlayer validate-spec
++        # validate-spec takes one path; give it the directory and run once
++        # instead of passing every staged file.
++        entry: nthlayer validate-spec services/
+         language: system
++        pass_filenames: false
+         files: services/.*\.yaml$
+ ```
+ 
+ ## See Also
+ 
+ - [Validation Overview](../validate/index.md)
+-- [Contract Verification](./verify.md)
++- [Contract Verification](./verify.md) (nthlayer-workers)
+ - [conftest Documentation](https://www.conftest.dev/)
+diff --git a/docs-site/commands/verify.md b/docs-site/commands/verify.md
+index 96afb70..b82e8f0 100644
+--- a/docs-site/commands/verify.md
++++ b/docs-site/commands/verify.md
+@@ -1,211 +1,68 @@
+-# nthlayer verify
++# verify
+ 
+-Verify that declared metrics exist in Prometheus before promoting to production.
++Verify that the metrics your SLOs declare exist in Prometheus (contract verification).
+ 
+-This implements the **Contract Verification** pattern - ensuring that metrics declared in `service.yaml` actually exist before deployment promotion.
++!!! note "Ships in nthlayer-workers, not nthlayer-generate"
++    This command reads live or collected state, so it lives in the runtime tier.
++    It is part of the `nthlayer-workers` package (observe module), not the
++    `nthlayer` CLI that this site otherwise documents, and has no console script
++    of its own. Run it as a Python module:
+ 
+-## Usage
++    ```bash
++    pip install nthlayer-workers
++    python -m nthlayer_workers.observe verify --help
++    ```
+ 
+-```bash
+-nthlayer verify <service.yaml> [options]
+-```
+-
+-## Options
+-
+-| Option | Description |
+-|--------|-------------|
+-| `--prometheus-url, -p URL` | Target Prometheus URL |
+-| `--env ENVIRONMENT` | Environment name (dev, staging, prod) |
+-| `--no-fail` | Don't fail on missing metrics (always exit 0) |
+-
+-## Environment Variables
+-
+-| Variable | Description |
+-|----------|-------------|
+-| `PROMETHEUS_URL` | Default Prometheus URL (if `--prometheus-url` not provided) |
+-| `PROMETHEUS_USERNAME` | Basic auth username |
+-| `PROMETHEUS_PASSWORD` | Basic auth password |
+-
+-## Exit Codes
+-
+-| Code | Meaning |
+-|------|---------|
+-| `0` | All metrics verified |
+-| `1` | Optional metrics missing (warning) |
+-| `2` | Critical SLO metrics missing (block promotion) |
+-
+-## Examples
+-
+-### Basic Verification
+-
+-```bash
+-nthlayer verify checkout-service.yaml --prometheus-url http://prometheus:9090
+-```
+-
+-Output:
+-```
+-╭──────────────────────────────────────────────────────────────────────────────╮
+-│ Contract Verification: checkout-service                                       │
+-╰──────────────────────────────────────────────────────────────────────────────╯
+-
+-Target: http://prometheus:9090
+-Service: checkout-service
+-
+-SLO Metrics (Critical):
+-  ✓ http_requests_total
+-  ✓ http_request_duration_seconds_bucket
+-
+-Observability Metrics (Optional):
+-  ✓ checkout_started_total
+-  ✓ checkout_completed_total
+-
+-Summary:
+-  Total: 4 metrics
+-  ✓ Verified: 4
+-
+-✓ All declared metrics verified
+-Contract verification passed - safe to promote
+-```
+-
+-### CI/CD Pipeline Integration
++## Synopsis
+ 
+ ```bash
+-# Verify against sandbox before promoting to production
+-nthlayer verify service.yaml -p $SANDBOX_PROMETHEUS_URL
+-
+-# Exit code determines pipeline gate
+-if [ $? -eq 2 ]; then
+-  echo "Critical metrics missing - blocking promotion"
+-  exit 1
+-fi
++python -m nthlayer_workers.observe verify --specs-dir DIR --prometheus-url URL [options]
+ ```
+ 
+-### Missing Metrics Output
++## Description
+ 
+-When critical metrics are missing:
++`verify` loads every OpenSRM spec (`.yaml`/`.yml`) in `--specs-dir`, extracts the
++metrics each service's SLO queries reference, and checks each against
++Prometheus. For every service with at least one declared metric it prints
+ 
+ ```
+-SLO Metrics (Critical):
+-  ✓ http_requests_total
+-  ✗ payment_processed_total ← MISSING
+-
+-Summary:
+-  Total: 4 metrics
+-  ✓ Verified: 3
+-  ✗ Critical missing: 1
+-
+-✗ Critical SLO metrics missing - blocking promotion
+-
+-Recommendations:
+-  • Ensure payment_processed_total is instrumented
+-  • Run integration tests to generate traffic before re-verifying
++<service>: <found>/<declared> metrics verified (OK|MISSING)
+ ```
+ 
+-## What Gets Verified
+-
+-### SLO Indicator Metrics (Critical)
++and stores a `verification` assessment (declared and found counts, missing
++critical and missing optional metric names) in the assessment store.
+ 
+-Metrics extracted from SLO indicator queries in `service.yaml`:
+-
+-```yaml
+-resources:
+-  - kind: SLO
+-    name: availability
+-    spec:
+-      indicators:
+-        - type: availability
+-          success_ratio:
+-            total_query: sum(rate(http_requests_total{service="checkout"}[5m]))
+-            good_query: sum(rate(http_requests_total{service="checkout",status!~"5.."}[5m]))
+-```
++If the directory contains no SLO definitions it says so on stderr and exits 0.
+ 
+-Extracts: `http_requests_total` → **Critical** (blocks promotion if missing)
+-
+-### Observability Metrics (Optional)
+-
+-Metrics declared in the Observability resource:
+-
+-```yaml
+-resources:
+-  - kind: Observability
+-    name: observability
+-    spec:
+-      metrics:
+-        - checkout_started_total
+-        - checkout_completed_total
+-```
++## Options
+ 
+-These are **Optional** (warning only if missing, doesn't block promotion)
+-
+-## Philosophy
+-
+-**"Declarative First, Verify Later"**
+-
+-| Step | Runtime Required? | Description |
+-|------|-------------------|-------------|
+-| `nthlayer apply` | No | Generate configs from declarations (Shift Left) |
+-| `nthlayer verify` | Yes | Verify contract before promotion |
+-
+-This solves the "Chicken and Egg" problem:
+-- You can generate production-ready configs without the service running
+-- You verify the contract in lower environments before promoting
+-
+-## Tekton Pipeline Example
+-
+-```yaml
+-tasks:
+-  - name: generate-configs
+-    taskRef:
+-      name: nthlayer-apply
+-    params:
+-      - name: service-file
+-        value: services/checkout-service.yaml
+-
+-  - name: deploy-to-sandbox
+-    runAfter: [generate-configs]
+-    taskRef:
+-      name: deploy
+-
+-  - name: verify-metrics
+-    runAfter: [deploy-to-sandbox]
+-    taskRef:
+-      name: nthlayer-verify
+-    params:
+-      - name: service-file
+-        value: services/checkout-service.yaml
+-      - name: prometheus-url
+-        value: $(params.sandbox-prometheus-url)
+-
+-  - name: deploy-to-production
+-    runAfter: [verify-metrics]  # Blocked if verify fails
+-    taskRef:
+-      name: deploy
+-```
++| Option | Required | Description |
++|--------|----------|-------------|
++| `--specs-dir DIR` | yes | Directory of OpenSRM spec YAMLs |
++| `--prometheus-url URL` | yes | Prometheus server URL |
++| `--store PATH` | no | Assessment store path (default: `assessments.db`) |
++| `--decision-store PATH` | no | Also write a content-addressed decision record to this SQLite DB |
++| `--legacy-store` / `--no-legacy-store` | no | Write to the assessment store (default: enabled) |
+ 
+-## GitHub Actions Example
++## Exit Codes
+ 
+-```yaml
+-jobs:
+-  verify-and-promote:
+-    steps:
+-      - name: Deploy to Staging
+-        run: kubectl apply -f generated/
++The worst result across all services:
+ 
+-      - name: Wait for Metrics
+-        run: sleep 60  # Allow time for metrics to appear
++| Code | Meaning |
++|------|---------|
++| 0 | All declared metrics found |
++| 1 | Only optional metrics missing |
++| 2 | Critical metrics missing |
+ 
+-      - name: Verify Contract
+-        run: |
+-          nthlayer verify service.yaml \
+-            --prometheus-url ${{ secrets.STAGING_PROMETHEUS_URL }}
++## Example
+ 
+-      - name: Promote to Production
+-        if: success()
+-        run: kubectl apply -f generated/ --context production
++```bash
++python -m nthlayer_workers.observe verify \
++  --specs-dir services/ \
++  --prometheus-url http://prometheus:9090
+ ```
+ 
+ ## See Also
+ 
+-- [Service YAML Schema](../reference/service-yaml.md) - Full spec reference
+-- [nthlayer apply](./apply.md) - Generate configs
+-- [CLI Reference](../reference/cli.md) - All commands
++- [validate-slo](./validate-slo.md) - Per-file SLO metric check in the `nthlayer` CLI
++- [Contracts & Assumptions](../concepts/contracts.md) - What "metric exists" means
+diff --git a/docs-site/concepts/contracts.md b/docs-site/concepts/contracts.md
+index f8277bc..9c38625 100644
+--- a/docs-site/concepts/contracts.md
++++ b/docs-site/concepts/contracts.md
+@@ -1,6 +1,6 @@
+ # Contracts & Assumptions
+ 
+-NthLayer's verification commands (`nthlayer verify`, `nthlayer check-deploy`) depend on specific contracts between your services and your observability stack. This page documents what NthLayer expects and how to ensure your services meet these requirements.
++NthLayer's verification commands (`nthlayer validate-slo`, and the runtime deployment gate `nthlayer-workers gate`) depend on specific contracts between your services and your observability stack. This page documents what NthLayer expects and how to ensure your services meet these requirements.
+ 
+ ## Metric Naming Conventions
+ 
+@@ -55,7 +55,7 @@ http_requests_total{service="checkout-api", code="200"}
+ 
+ ## What "Metric Exists" Means
+ 
+-When `nthlayer verify` checks if a metric exists, it queries Prometheus for any time series matching the metric name and service label within the last 5 minutes.
++When NthLayer checks if a metric exists, it queries Prometheus for any time series matching the metric name and service label within the last 5 minutes.
+ 
+ ### Verification Query
+ 
+@@ -129,7 +129,7 @@ Set the tenant header via environment variable:
+ 
+ ```bash
+ export MIMIR_TENANT_ID=your-tenant
+-nthlayer verify services/checkout-api.yaml
++nthlayer validate-slo services/checkout-api.yaml
+ ```
+ 
+ Or in your service.yaml:
+@@ -155,29 +155,6 @@ If your SLO metrics are computed via recording rules:
+ NthLayer can verify these, but there's a delay:
+ - Recording rules evaluate on interval (typically 1-5 minutes)
+ - New services may not have recorded metrics immediately
+-- Use `--no-fail` flag during initial rollout
+-
+-## Verification Modes
+-
+-### Strict Mode (Default)
+-
+-```bash
+-nthlayer verify services/checkout-api.yaml
+-```
+-
+-- Exit code 0: All metrics found
+-- Exit code 1: Optional metrics missing (warning)
+-- Exit code 2: Required SLO metrics missing (block)
+-
+-### Lenient Mode
+-
+-```bash
+-nthlayer verify services/checkout-api.yaml --no-fail
+-```
+-
+-- Always exit code 0
+-- Prints warnings for missing metrics
+-- Use during initial adoption or new service rollout
+ 
+ ## Troubleshooting Verification Failures
+ 
+@@ -204,7 +181,6 @@ nthlayer verify services/checkout-api.yaml --no-fail
+ 
+ 1. **Wait for scrape interval**: Prometheus scrapes every 15-60 seconds
+ 2. **Generate some traffic**: Metrics may not exist until first request
+-3. **Use --no-fail**: For new services, verify in warning mode first
+ 
+ ### Recording rule metrics not found
+ 
+diff --git a/docs-site/concepts/deployment-gates.md b/docs-site/concepts/deployment-gates.md
+index 88c221f..7c56e46 100644
+--- a/docs-site/concepts/deployment-gates.md
++++ b/docs-site/concepts/deployment-gates.md
+@@ -14,8 +14,8 @@ Traditional monitoring tells you **after** a deployment causes problems. Deploym
+ 
+ ```
+ ┌─────────────┐     ┌─────────────┐     ┌─────────────┐
+-│   CI/CD     │────▶│  NthLayer   │────▶│ Prometheus  │
+-│  Pipeline   │     │ check-deploy │     │   Query     │
++│   CI/CD     │────▶│check-deploy │────▶│     SLO     │
++│  Pipeline   │     │   / gate    │     │ assessments │
+ └─────────────┘     └─────────────┘     └─────────────┘
+                            │
+                            ▼
+@@ -27,10 +27,10 @@ Traditional monitoring tells you **after** a deployment causes problems. Deploym
+                     └─────────────┘
+ ```
+ 
+-1. **Pipeline triggers**: Your CI/CD pipeline calls `nthlayer check-deploy`
+-2. **Query SLOs**: NthLayer queries Prometheus for current SLI values
++1. **Pipeline triggers**: Your CI/CD pipeline calls `python -m nthlayer_workers.observe check-deploy` (reads a local assessment store) or `nthlayer-workers gate` (reads nthlayer-core), both from the `nthlayer-workers` package
++2. **Read SLO state**: The gate reads the service's `slo_status` assessments
+ 3. **Calculate budget**: Error budget consumption is calculated
+-4. **Return decision**: Exit code determines if deploy proceeds
++4. **Return decision**: Exit code determines if deploy proceeds — see [the command reference](../commands/check-deploy.md) for each form's codes
+ 
+ ## Default Thresholds
+ 
+@@ -38,14 +38,20 @@ Thresholds are based on service tier:
+ 
+ | Tier | Warning | Blocking |
+ |------|---------|----------|
+-| Critical | <20% remaining | <10% remaining |
+-| Standard | <20% remaining | None (advisory) |
+-| Low | <30% remaining | None (advisory) |
++| Critical | ≤20% remaining | ≤10% remaining |
++| Standard | ≤20% remaining | None (advisory) |
++| Low | ≤30% remaining | None (advisory) |
+ 
+ Critical services block deploys at 10% remaining budget. Standard and low tiers only warn.
+ 
+ ## Custom Policies
+ 
++!!! warning "Not applied by the gate commands"
++    Neither `python -m nthlayer_workers.observe check-deploy` nor
++    `nthlayer-workers gate` reads `DeploymentGate` resources today: both
++    evaluate with the tier default thresholds above. The settings below are
++    accepted in a manifest but do not change a gate decision.
++
+ Override defaults with a `DeploymentGate` resource in your `service.yaml`:
+ 
+ ```yaml
+@@ -112,8 +118,7 @@ See [examples/cicd/](https://github.com/nthlayer/nthlayer/tree/main/examples/cic
+ Test locally before integrating:
+ 
+ ```bash
+-nthlayer check-deploy services/api.yaml \
+-  --prometheus-url http://prometheus:9090
++nthlayer-workers gate --service api --core-url http://nthlayer-core:8000
+ 
+ echo "Exit code: $?"
+ ```
+@@ -138,6 +143,9 @@ High-criticality downstream services increase the gate's caution level.
+ 
+ ## Best Practices
+ 
++The threshold snippets in practices 1 and 2 are `DeploymentGate` settings,
++which the gate commands do not apply yet (see [Custom Policies](#custom-policies)).
++
+ ### 1. Start with Advisory Mode
+ 
+ Begin with warnings only, then enable blocking:
+@@ -184,16 +192,8 @@ Gates need working SLO queries to calculate budget:
+         sum(rate(http_requests_total[5m]))
+ ```
+ 
+-### 4. Test Before Production
+-
+-Use the demo mode to see gate behavior:
+-
+-```bash
+-nthlayer check-deploy services/api.yaml --demo
+-```
+-
+ ## See Also
+ 
+-- [check-deploy Command](../commands/check-deploy.md)
++- [Deployment Gate Command](../commands/check-deploy.md) (nthlayer-workers)
+ - [SLO Concepts](./slos.md)
+ - [Shift Left Philosophy](./shift-left.md)
+diff --git a/docs-site/concepts/shift-left.md b/docs-site/concepts/shift-left.md
+index a04a794..d9ecce6 100644
+--- a/docs-site/concepts/shift-left.md
++++ b/docs-site/concepts/shift-left.md
+@@ -20,55 +20,34 @@ Code → Validate → Verify → Gate → Deploy → Monitor
+ 
+ ## How NthLayer Shifts Reliability Left
+ 
+-### 1. Contract Verification (`nthlayer verify`)
++### 1. Contract Verification (`nthlayer validate-slo`)
+ 
+ Before deploying, verify that the metrics your SLOs depend on actually exist in Prometheus:
+ 
+ ```bash
+-$ nthlayer verify service.yaml --prometheus-url $PROM_URL
+-
+-Verifying metrics for payment-api...
+-
+-  ✓ http_requests_total{service="payment-api"}
+-  ✓ http_request_duration_seconds_bucket{service="payment-api"}
+-  ✗ http_requests_total{service="payment-api",status=~"5.."}  NOT FOUND
+-
+-Contract verification failed: 1 metric(s) not found
++nthlayer validate-slo service.yaml --prometheus-url $PROM_URL
+ ```
+ 
+ **Pipeline integration:**
+ ```yaml
+ # GitHub Actions
+ - name: Verify SLO Metrics
+-  run: nthlayer verify service.yaml --prometheus-url $PROM_URL
++  run: nthlayer validate-slo service.yaml --prometheus-url $PROM_URL
+   # Fails pipeline if metrics don't exist
+ ```
+ 
+-### 2. Deployment Gates (`nthlayer check-deploy`)
++### 2. Deployment Gates (`nthlayer-workers gate`)
+ 
+-Block deployments when error budget is exhausted:
++Block deployments when error budget is exhausted. The gate ships in the
++`nthlayer-workers` package and reads SLO state from a running nthlayer-core:
+ 
+ ```bash
+-$ nthlayer check-deploy service.yaml --prometheus-url $PROM_URL
+-
+-╭──────────────────────────────────────────────────────────────╮
+-│  Deployment Gate Check                                       │
+-╰──────────────────────────────────────────────────────────────╯
+-
+-  Service:       payment-api
+-  Tier:          critical
+-  Window:        30d
+-
+-  SLO Results:
+-    availability   99.87%  (target: 99.95%)   budget: 42% remaining   ⚠ WARNING
+-    latency_p99    187ms   (target: 200ms)    budget: 78% remaining   ✓ OK
+-
+-  Decision:  ⚠ PROCEED WITH CAUTION
++nthlayer-workers gate --service payment-api --core-url $NTHLAYER_CORE_URL
+ ```
+ 
+ **Exit codes:**
+-- `0` - Deploy approved
+-- `1` - Warning (budget low, but allowed)
++- `0` - Deploy approved (or approved with a warning)
++- `1` - Gate could not be evaluated
+ - `2` - Blocked (budget exhausted)
+ 
+ ### 3. PromQL Validation (`nthlayer apply --lint`)
+@@ -92,8 +71,8 @@ NthLayer automates concepts from the [Google SRE Book](https://sre.google/sre-bo
+ 
+ | SRE Concept | Manual Process | NthLayer Automation |
+ |-------------|----------------|---------------------|
+-| **Production Readiness Review** | Multi-week checklist | `nthlayer verify` in CI |
+-| **Error Budget Policy** | Spreadsheet tracking | `nthlayer check-deploy` gates |
++| **Production Readiness Review** | Multi-week checklist | `nthlayer validate-slo` in CI |
++| **Error Budget Policy** | Spreadsheet tracking | `nthlayer-workers gate` |
+ | **Release Engineering** | Manual runbooks | Generated artifacts + GitOps |
+ | **Monitoring Standards** | Wiki pages | `service.yaml` spec |
+ 
+@@ -117,12 +96,12 @@ spec:
+ 
+     - name: verify-metrics
+       taskRef:
+-        name: nthlayer-verify
++        name: nthlayer-validate-slo
+       runAfter: [generate]
+ 
+     - name: check-budget
+       taskRef:
+-        name: nthlayer-check-deploy
++        name: nthlayer-gate
+       runAfter: [verify-metrics]
+ 
+     - name: deploy
+@@ -142,20 +121,20 @@ jobs:
+       - uses: actions/checkout@v4
+ 
+       - name: Install NthLayer
+-        run: pip install nthlayer
++        run: pip install nthlayer nthlayer-workers
+ 
+       - name: Generate & Lint
+         run: nthlayer apply service.yaml --lint
+ 
+       - name: Verify Metrics Exist
+-        run: nthlayer verify service.yaml --prometheus-url $PROM_URL
++        run: nthlayer validate-slo service.yaml --prometheus-url $PROM_URL
+         env:
+           PROM_URL: ${{ secrets.PROMETHEUS_URL }}
+ 
+       - name: Check Deployment Gate
+-        run: nthlayer check-deploy service.yaml --prometheus-url $PROM_URL
++        run: nthlayer-workers gate --service payment-api --commit-sha $GITHUB_SHA --core-url $NTHLAYER_CORE_URL
+         env:
+-          PROM_URL: ${{ secrets.PROMETHEUS_URL }}
++          NTHLAYER_CORE_URL: ${{ secrets.NTHLAYER_CORE_URL }}
+ 
+       - name: Deploy
+         if: success()
+@@ -184,6 +163,7 @@ Teams using reliability shift left typically see:
+ 
+ ## See Also
+ 
+-- [Contract Verification](../commands/verify.md) - Full `verify` command reference
+-- [Deployment Gates](../commands/check-deploy.md) - Full `check-deploy` reference
++- [validate-slo](../commands/validate-slo.md) - SLO metric verification reference
++- [Contract Verification](../commands/verify.md) - `verify` across a specs directory (nthlayer-workers)
++- [Deployment Gates](../commands/check-deploy.md) - Full `nthlayer-workers gate` reference
+ - [SLO Concepts](./slos.md) - Understanding SLOs and error budgets
+diff --git a/docs-site/concepts/slos.md b/docs-site/concepts/slos.md
+index e000bc0..b6262de 100644
+--- a/docs-site/concepts/slos.md
++++ b/docs-site/concepts/slos.md
+@@ -49,15 +49,7 @@ Generated dashboards show:
+ - Error budget remaining
+ - Burn rate trends
+ 
+-### 3. Portfolio View
+-
+-See all services at once:
+-
+-```bash
+-nthlayer portfolio
+-```
+-
+-### 4. Live Queries
++### 3. Live Queries
+ 
+ Query Prometheus for real-time status:
+ 
+@@ -188,14 +180,6 @@ resources:
+       threshold_ms: 50
+ ```
+ 
+-### 4. Review Regularly
+-
+-Use the portfolio view for weekly reviews:
+-
+-```bash
+-nthlayer portfolio --format json > slo-review-$(date +%Y%m%d).json
+-```
+-
+ ## Further Reading
+ 
+ - [Google SRE Book - SLOs](https://sre.google/sre-book/service-level-objectives/)
+diff --git a/docs-site/concepts/tiers.md b/docs-site/concepts/tiers.md
+index efd9e6a..a7dad08 100644
+--- a/docs-site/concepts/tiers.md
++++ b/docs-site/concepts/tiers.md
+@@ -32,8 +32,8 @@ The question is: *What happens to the business if this service fails?*
+ | Aspect | Critical | Standard | Low |
+ |--------|----------|----------|-----|
+ | Monthly error budget | 21.6 min | 3.6 hrs | 7.2 hrs |
+-| `check-deploy` blocks at | < 10% remaining | < 5% remaining | Advisory only |
+-| `check-deploy` warns at | < 20% remaining | < 10% remaining | < 20% remaining |
++| Deployment gate blocks at | ≤ 10% remaining | Advisory only | Advisory only |
++| Deployment gate warns at | ≤ 20% remaining | ≤ 20% remaining | ≤ 30% remaining |
+ 
+ ### Alerting Thresholds
+ 
+diff --git a/docs-site/demo.md b/docs-site/demo.md
+index 2f34b1c..128301d 100644
+--- a/docs-site/demo.md
++++ b/docs-site/demo.md
+@@ -134,43 +134,6 @@ See auto-generated dashboards for 6 production services. Each dashboard includes
+ 
+ ---
+ 
+-## SLO Portfolio
+-
+-Track org-wide reliability with tier-based health scoring:
+-
+-```
+-================================================================================
+-  NthLayer SLO Portfolio
+-================================================================================
+-
+-Organization Health: 78% (14/18 services meeting SLOs)
+-
+-By Tier:
+-  Critical:  ████████░░  83% (5/6 services)
+-  Standard:  ███████░░░  75% (6/8 services)
+-  Low:       ███████░░░  75% (3/4 services)
+-
+---------------------------------------------------------------------------------
+-Services Needing Attention:
+---------------------------------------------------------------------------------
+-
+-  payment-api (Tier 1)
+-    availability: 156% budget burned - EXHAUSTED
+-    Remaining: -12.5 hours
+-
+-  search-api (Tier 2)
+-    latency-p99: 95% budget burned - WARNING
+-    Remaining: 1.2 hours
+-
+---------------------------------------------------------------------------------
+-Total: 18 services, 16 with SLOs, 45 SLOs
+-```
+-
+-!!! tip "Cross-Vendor Aggregation"
+-    **Why this matters:** NthLayer aggregates SLOs across any backend (Prometheus, Datadog, etc.) in a single, vendor-neutral portfolio.
+-
+----
+-
+ ## What Gets Generated
+ 
+ From a single `service.yaml`, NthLayer generates:
+@@ -195,9 +158,6 @@ nthlayer setup
+ 
+ # Generate configs for your service
+ nthlayer apply payment-api.yaml
+-
+-# View org-wide SLO health
+-nthlayer portfolio
+ ```
+ 
+ <div class="grid cards" markdown>
+diff --git a/docs-site/getting-started/adoption-path.md b/docs-site/getting-started/adoption-path.md
+index dd2f08e..fe2de61 100644
+--- a/docs-site/getting-started/adoption-path.md
++++ b/docs-site/getting-started/adoption-path.md
+@@ -88,7 +88,7 @@ NthLayer can be adopted incrementally. You don't need to enable all features on
+    ```yaml
+    - name: Verify metrics exist (warnings only)
+      run: |
+-       nthlayer verify services/${{ matrix.service }}.yaml --no-fail
++       nthlayer validate-slo services/${{ matrix.service }}.yaml || echo "Missing metrics (not blocking)"
+      env:
+        PROMETHEUS_URL: ${{ secrets.PROMETHEUS_URL }}
+    ```
+@@ -138,15 +138,18 @@ NthLayer can be adopted incrementally. You don't need to enable all features on
+    tier: standard  # Start here, not critical
+    ```
+ 
+-2. **Enable check-deploy in warning mode**
++2. **Enable the deployment gate in warning mode**
++
++   The gate is `nthlayer-workers gate` from the `nthlayer-workers` package. It
++   reads SLO state from a running nthlayer-core.
+ 
+    ```yaml
+    # CD pipeline
+    - name: Check deployment gate
+      run: |
+-       nthlayer check-deploy services/${{ matrix.service }}.yaml || echo "Gate warning (not blocking)"
++       nthlayer-workers gate --service ${{ matrix.service }} --core-url "$NTHLAYER_CORE_URL" || echo "Gate warning (not blocking)"
+      env:
+-       PROMETHEUS_URL: ${{ secrets.PROMETHEUS_URL }}
++       NTHLAYER_CORE_URL: ${{ secrets.NTHLAYER_CORE_URL }}
+    ```
+ 
+ 3. **Monitor for false positives**
+@@ -161,7 +164,7 @@ NthLayer can be adopted incrementally. You don't need to enable all features on
+    ```yaml
+    - name: Check deployment gate
+      run: |
+-       nthlayer check-deploy services/${{ matrix.service }}.yaml
++       nthlayer-workers gate --service ${{ matrix.service }} --core-url "$NTHLAYER_CORE_URL"
+      # Now exit code 2 will fail the pipeline
+    ```
+ 
+@@ -233,8 +236,8 @@ NthLayer can be adopted incrementally. You don't need to enable all features on
+ If adoption isn't working:
+ 
+ ### Phase 3 → Phase 2
+-- Remove `check-deploy` from CD
+-- Keep `verify --no-fail` in CI
++- Remove `nthlayer-workers gate` from CD
++- Keep `validate-slo` in CI as non-blocking
+ - Investigate why gates were problematic
+ 
+ ### Phase 2 → Phase 1
+diff --git a/docs-site/getting-started/first-service.md b/docs-site/getting-started/first-service.md
+index be1e30f..d658fbe 100644
+--- a/docs-site/getting-started/first-service.md
++++ b/docs-site/getting-started/first-service.md
+@@ -104,7 +104,7 @@ nthlayer plan payment-api.yaml
+ nthlayer apply payment-api.yaml
+ 
+ # Push dashboard to Grafana (if configured)
+-nthlayer apply payment-api.yaml --push
++nthlayer apply payment-api.yaml --push-grafana
+ ```
+ 
+ ## Next Steps
+diff --git a/docs-site/getting-started/quick-start.md b/docs-site/getting-started/quick-start.md
+index 53860b9..10b7354 100644
+--- a/docs-site/getting-started/quick-start.md
++++ b/docs-site/getting-started/quick-start.md
+@@ -76,23 +76,6 @@ Generated: generated/payment-api/
+ └── recording-rules.yaml # Prometheus rules
+ ```
+ 
+-## 5. View Your SLO Portfolio
+-
+-```bash
+-nthlayer portfolio
+-```
+-
+-```
+-================================================================================
+-  NthLayer SLO Portfolio
+-================================================================================
+-
+-Organization Health: 100% (1/1 services meeting SLOs)
+-
+-By Tier:
+-  Critical:  100%  ████████████████████  1/1 services
+-```
+-
+ ## Next Steps
+ 
+ - [Your First Service](first-service.md) - Detailed service spec guide
+diff --git a/docs-site/index.md b/docs-site/index.md
+index de2f416..c8cd611 100644
+--- a/docs-site/index.md
++++ b/docs-site/index.md
+@@ -15,10 +15,9 @@ Shift reliability left into your CI/CD pipeline. Validate before deploy, not aft
+ ┌───────────┐     ┌───────────┐     ┌───────────┐
+ │  Generate │ ──▶ │  Validate │ ──▶ │  Protect  │ ──▶ Deploy
+ └───────────┘     └───────────┘     └───────────┘
+-   apply            verify           check-deploy
+-   init             validate-spec    scorecard
+-   migrate          --lint           alerts
+-                                     portfolio
++   apply            validate-slo     alerts
++   init             validate-spec    gate (nthlayer-workers)
++   migrate          --lint
+ ```
+ 
+ | Stage | What Happens | Exit Code |
+@@ -78,8 +77,8 @@ Both formats are supported. Use `nthlayer migrate` to convert legacy files.
+ ```bash
+ # Generate → Validate → Protect → Deploy
+ nthlayer apply service.yaml --lint
+-nthlayer verify service.yaml --prometheus-url $PROM_URL
+-nthlayer check-deploy service.yaml --prometheus-url $PROM_URL
++nthlayer validate-slo service.yaml --prometheus-url $PROM_URL
++nthlayer-workers gate --service payment-api --core-url $NTHLAYER_CORE_URL
+ kubectl apply -f generated/
+ ```
+ 
+@@ -96,43 +95,20 @@ kubectl apply -f generated/
+ 
+ ### Deployment Gates
+ 
+-Block deploys when error budget is exhausted:
+-
+-![check-deploy demo](assets/check-deploy-demo.gif)
+-
+-```bash
+-nthlayer check-deploy service.yaml --prometheus-url $PROM_URL
+-# Exit code: 0=approved, 1=warning, 2=blocked
+-```
+-
+-### SLO Portfolio
+-
+-Track reliability across your entire organization:
+-
+-![portfolio demo](assets/portfolio-demo.gif)
++Block deploys when error budget is exhausted. The gate ships in the
++`nthlayer-workers` package and reads SLO state from nthlayer-core:
+ 
+ ```bash
+-nthlayer portfolio --path services/
++nthlayer-workers gate --service payment-api --core-url $NTHLAYER_CORE_URL
++# Exit code: 0=approved (or warning), 1=could not evaluate, 2=blocked
+ ```
+ 
+ ### Contract Verification
+ 
+-Verify declared metrics exist before deploy:
+-
+-![verify demo](assets/verify-demo.gif)
+-
+-```bash
+-nthlayer verify service.yaml --prometheus-url $PROM_URL
+-```
+-
+-### Reliability Scorecard
+-
+-Quantify reliability across your organization:
++Verify that the metrics your SLOs query exist before deploy:
+ 
+ ```bash
+-nthlayer scorecard --prometheus-url $PROM_URL
+-# 0-100 score per service: SLO compliance, incidents, deploys, budget
+-# Exit codes: 0=good, 1=fair, 2=poor — use in CI/CD gates
++nthlayer validate-slo service.yaml --prometheus-url $PROM_URL
+ ```
+ 
+ ### Intelligent Alerts
+@@ -166,10 +142,10 @@ jobs:
+         run: nthlayer apply services/*.yaml --lint
+ 
+       - name: Verify Metrics
+-        run: nthlayer verify services/*.yaml --prometheus-url $PROM_URL
++        run: nthlayer validate-slo services/payment-api.yaml --prometheus-url $PROM_URL
+ 
+       - name: Check Deploy Gate
+-        run: nthlayer check-deploy services/*.yaml --prometheus-url $PROM_URL
++        run: nthlayer-workers gate --service payment-api --core-url $NTHLAYER_CORE_URL
+ 
+       - name: Deploy
+         if: success()
+@@ -222,7 +198,7 @@ NthLayer automates concepts from the [Google SRE Book](https://sre.google/sre-bo
+ 
+ | SRE Concept | Manual Process | NthLayer Automation |
+ |-------------|----------------|---------------------|
+-| Production Readiness Review | Multi-week checklist | `nthlayer verify` in CI |
+-| Error Budget Policy | Spreadsheet tracking | `nthlayer check-deploy` gates |
++| Production Readiness Review | Multi-week checklist | `nthlayer validate-slo` in CI |
++| Error Budget Policy | Spreadsheet tracking | `nthlayer-workers gate` |
+ | Release Engineering | Manual runbooks | Generated artifacts + GitOps |
+ | Monitoring Standards | Wiki pages | `service.yaml` spec |
+diff --git a/docs-site/integrations/cicd.md b/docs-site/integrations/cicd.md
+index c7b8210..5f8cf1c 100644
+--- a/docs-site/integrations/cicd.md
++++ b/docs-site/integrations/cicd.md
+@@ -8,8 +8,8 @@ Integrate NthLayer into your deployment pipeline for automated reliability valid
+ ┌──────────┐    ┌──────────┐    ┌──────────┐    ┌──────────┐
+ │ Generate │ → │ Validate │ → │  Protect │ → │  Deploy  │
+ └──────────┘    └──────────┘    └──────────┘    └──────────┘
+-  apply          validate-spec   check-deploy    kubectl
+-                 verify                          argocd
++  apply          validate-spec   workers gate    kubectl
++                 validate-slo                    argocd
+                  --lint
+ ```
+ 
+@@ -51,7 +51,7 @@ Push mode is useful for initial setup or demos:
+ 
+ ```bash
+ # Push dashboards directly to Grafana
+-nthlayer apply services/*.yaml --push
++nthlayer apply services/*.yaml --push-grafana
+ 
+ # Push alert rules to Prometheus ruler API
+ nthlayer apply services/*.yaml --push-ruler
+@@ -108,7 +108,7 @@ jobs:
+ 
+       - name: Verify Metrics Exist
+         run: |
+-          nthlayer verify services/*.yaml \
++          nthlayer validate-slo services/payment-api.yaml \
+             --prometheus-url ${{ secrets.STAGING_PROMETHEUS_URL }}
+         env:
+           PROMETHEUS_USERNAME: ${{ secrets.PROMETHEUS_USERNAME }}
+@@ -120,14 +120,15 @@ jobs:
+     steps:
+       - uses: actions/checkout@v4
+ 
+-      - name: Install NthLayer
+-        run: pip install nthlayer
++      - name: Install NthLayer workers
++        run: pip install nthlayer-workers
+ 
+       - name: Check Deployment Gate
+         id: gate
+         run: |
+-          nthlayer check-deploy services/*.yaml \
+-            --prometheus-url ${{ secrets.PROD_PROMETHEUS_URL }}
++          nthlayer-workers gate --service payment-api \
++            --commit-sha ${{ github.sha }} \
++            --core-url ${{ secrets.NTHLAYER_CORE_URL }}
+           echo "exit_code=$?" >> $GITHUB_OUTPUT
+         continue-on-error: true
+ 
+@@ -153,16 +154,6 @@ jobs:
+         run: kubectl apply -f generated/
+ ```
+ 
+-### Reusable Action (Coming Soon)
+-
+-```yaml
+-- uses: nthlayer/action@v1
+-  with:
+-    command: check-deploy
+-    service-file: services/api.yaml
+-    prometheus-url: ${{ secrets.PROMETHEUS_URL }}
+-```
+-
+ ## GitLab CI
+ 
+ ```yaml
+@@ -194,15 +185,17 @@ verify:
+   extends: .nthlayer
+   stage: verify
+   script:
+-    - nthlayer verify services/*.yaml --prometheus-url $STAGING_PROMETHEUS_URL
++    - nthlayer validate-slo services/payment-api.yaml --prometheus-url $STAGING_PROMETHEUS_URL
+ 
+ gate:
+   extends: .nthlayer
+   stage: gate
++  before_script:
++    - pip install nthlayer-workers
+   script:
+     - |
+-      nthlayer check-deploy services/*.yaml \
+-        --prometheus-url $PROD_PROMETHEUS_URL
++      nthlayer-workers gate --service payment-api \
++        --core-url $NTHLAYER_CORE_URL
+       EXIT_CODE=$?
+       if [ $EXIT_CODE -eq 2 ]; then
+         echo "Deployment blocked - error budget exhausted"
+@@ -238,24 +231,15 @@ spec:
+   template:
+     spec:
+       containers:
+-        - name: check-deploy
+-          image: ghcr.io/nthlayer/nthlayer:latest
+-          command:
+-            - nthlayer
+-            - check-deploy
+-            - /config/service.yaml
+-            - --prometheus-url
+-            - $(PROMETHEUS_URL)
+-          envFrom:
+-            - secretRef:
+-                name: prometheus-credentials
+-          volumeMounts:
+-            - name: service-config
+-              mountPath: /config
+-      volumes:
+-        - name: service-config
+-          configMap:
+-            name: service-yaml
++        - name: gate
++          image: python:3.12-slim
++          command: ["sh", "-c"]
++          args:
++            - pip install nthlayer-workers &&
++              nthlayer-workers gate --service payment-api --core-url "$NTHLAYER_CORE_URL"
++          env:
++            - name: NTHLAYER_CORE_URL
++              value: http://nthlayer-core:8000
+       restartPolicy: Never
+   backoffLimit: 0
+ ```
+@@ -289,19 +273,20 @@ When the PreSync hook fails (exit code 2), ArgoCD blocks the sync.
+ apiVersion: tekton.dev/v1
+ kind: Task
+ metadata:
+-  name: nthlayer-check-deploy
++  name: nthlayer-gate
+ spec:
+   params:
+-    - name: service-file
++    - name: service
+       type: string
+-    - name: prometheus-url
++    - name: core-url
+       type: string
+   steps:
+     - name: check
+-      image: ghcr.io/nthlayer/nthlayer:latest
++      image: python:3.12-slim
+       script: |
+-        nthlayer check-deploy $(params.service-file) \
+-          --prometheus-url $(params.prometheus-url)
++        pip install nthlayer-workers
++        nthlayer-workers gate --service $(params.service) \
++          --core-url $(params.core-url)
+ 
+         EXIT_CODE=$?
+         if [ $EXIT_CODE -eq 2 ]; then
+@@ -336,12 +321,12 @@ spec:
+ 
+     - name: verify
+       taskRef:
+-        name: nthlayer-verify
++        name: nthlayer-validate-slo
+       runAfter: [generate]
+ 
+     - name: gate
+       taskRef:
+-        name: nthlayer-check-deploy
++        name: nthlayer-gate
+       runAfter: [verify]
+       params:
+         - name: service-file
+@@ -377,7 +362,7 @@ pipeline {
+         stage('Verify') {
+             steps {
+                 sh """
+-                    nthlayer verify services/*.yaml \
++                    nthlayer validate-slo services/payment-api.yaml \
+                         --prometheus-url ${PROMETHEUS_URL}
+                 """
+             }
+@@ -385,11 +370,12 @@ pipeline {
+ 
+         stage('Gate') {
+             steps {
++                sh 'pip install nthlayer-workers'
+                 script {
+                     def exitCode = sh(
+                         script: """
+-                            nthlayer check-deploy services/*.yaml \
+-                                --prometheus-url ${PROMETHEUS_URL}
++                            nthlayer-workers gate --service payment-api \
++                                --core-url ${NTHLAYER_CORE_URL}
+                         """,
+                         returnStatus: true
+                     )
+@@ -426,9 +412,9 @@ All CI/CD integrations support these environment variables:
+ ### 1. Validate Early, Protect Late
+ 
+ ```
+-commit → validate-spec → apply --lint → verify → check-deploy → deploy
+-           ↑                               ↑           ↑
+-       No Prometheus              Staging Prom   Prod Prom
++commit → validate-spec → apply --lint → validate-slo → gate → deploy
++           ↑                                     ↑           ↑
++       No Prometheus                    Staging Prom   nthlayer-core
+ ```
+ 
+ ### 2. Use Staging for Verification
+@@ -437,10 +423,10 @@ Verify metrics exist in staging before checking production gates:
+ 
+ ```yaml
+ - name: Verify in Staging
+-  run: nthlayer verify services/*.yaml --prometheus-url $STAGING_URL
++  run: nthlayer validate-slo services/payment-api.yaml --prometheus-url $STAGING_URL
+ 
+ - name: Gate in Production
+-  run: nthlayer check-deploy services/*.yaml --prometheus-url $PROD_URL
++  run: nthlayer-workers gate --service payment-api --core-url $NTHLAYER_CORE_URL
+ ```
+ 
+ ### 3. Cache NthLayer Installation
+@@ -458,6 +444,6 @@ Put validation early in your pipeline to catch issues quickly.
+ 
+ ## See Also
+ 
+-- [Deployment Gates](../commands/check-deploy.md)
+-- [Contract Verification](../commands/verify.md)
++- [Deployment Gates](../commands/check-deploy.md) (nthlayer-workers)
++- [Contract Verification](../commands/verify.md) (nthlayer-workers)
+ - [Validation Overview](../validate/index.md)
+diff --git a/docs-site/integrations/grafana.md b/docs-site/integrations/grafana.md
+index 00622e6..3ff115b 100644
+--- a/docs-site/integrations/grafana.md
++++ b/docs-site/integrations/grafana.md
+@@ -59,7 +59,7 @@ Creates `generated/payment-api/dashboard.json` - import manually to Grafana.
+ ### Auto-Push to Grafana
+ 
+ ```bash
+-nthlayer apply payment-api.yaml --push
++nthlayer apply payment-api.yaml --push-grafana
+ ```
+ 
+ Pushes directly to Grafana API.
+diff --git a/docs-site/integrations/mimir.md b/docs-site/integrations/mimir.md
+index dc23322..0099620 100644
+--- a/docs-site/integrations/mimir.md
++++ b/docs-site/integrations/mimir.md
+@@ -50,7 +50,7 @@ Pushing alerts to Mimir Ruler...
+ 
+ ```bash
+ # Push dashboards to Grafana AND alerts to Mimir
+-nthlayer apply service.yaml --push --push-ruler
++nthlayer apply service.yaml --push-grafana --push-ruler
+ ```
+ 
+ ## API Details
+diff --git a/docs-site/integrations/prometheus.md b/docs-site/integrations/prometheus.md
+index 1c6805f..5de9225 100644
+--- a/docs-site/integrations/prometheus.md
++++ b/docs-site/integrations/prometheus.md
+@@ -103,15 +103,6 @@ avg_over_time(
+ )
+ ```
+ 
+-## Metric Discovery
+-
+-NthLayer discovers available metrics to customize dashboards:
+-
+-```bash
+-# Discovers metrics matching service label
+-nthlayer plan payment-api.yaml --discover
+-```
+-
+ ## Testing Connection
+ 
+ ```bash
+diff --git a/docs-site/protect/index.md b/docs-site/protect/index.md
+index de23d6a..a32f425 100644
+--- a/docs-site/protect/index.md
++++ b/docs-site/protect/index.md
+@@ -8,14 +8,15 @@ NthLayer's protection layer enforces reliability policies in production. When er
+ 
+ | Feature | Command | What It Does |
+ |---------|---------|--------------|
+-| **Deployment Gates** | `nthlayer check-deploy` | Block deploys when budget exhausted |
+-| **Drift Detection** | `nthlayer drift` | Detect reliability degradation trends |
+-| **SLO Portfolio** | `nthlayer portfolio` | Org-wide reliability visibility |
+-| **Reliability Scorecard** | `nthlayer scorecard` | Quantitative per-service reliability scores (0-100) |
++| **Deployment Gates** | `nthlayer-workers gate` | Block deploys when budget exhausted |
++| **Drift Detection** | `python -m nthlayer_workers.observe drift` | Detect reliability degradation trends |
+ | **Intelligent Alerts** | `nthlayer alerts` | Context-aware alert evaluation and budget explanations |
+ | **Metric Recommendations** | `nthlayer recommend-metrics` | Validate instrumentation coverage |
+ | **Error Budgets** | `nthlayer slo collect` | Real-time budget consumption |
+ 
++Deployment gates and drift detection read live state, so they ship in the
++`nthlayer-workers` package rather than the `nthlayer` CLI.
++
+ ## Why Deployment Gates?
+ 
+ Traditional monitoring tells you **after** a deployment causes problems:
+@@ -36,53 +37,14 @@ Check Budget → Block/Allow → Deploy
+ 
+ ## Quick Start
+ 
+-### 1. Check Before Deploy
++### Check Before Deploy
+ 
+ ```bash
+-nthlayer check-deploy services/payment-api.yaml \
+-  --prometheus-url http://prometheus:9090
+-```
+-
+-Output:
+-```
+-╭──────────────────────────────────────────────────────────────╮
+-│  Deployment Gate: payment-api                                │
+-╰──────────────────────────────────────────────────────────────╯
+-
+-  Tier:          critical
+-  Window:        30d
+-
+-  SLO Status:
+-    availability   99.87%  (target: 99.95%)   42% remaining   ⚠ WARNING
+-    latency_p99    187ms   (target: 200ms)    78% remaining   ✓ OK
+-
+-  Decision: ⚠ PROCEED WITH CAUTION
+-  Exit code: 1
++nthlayer-workers gate --service payment-api --core-url http://nthlayer-core:8000
+ ```
+ 
+-### 2. View Portfolio Health
+-
+-```bash
+-nthlayer portfolio --path services/
+-```
+-
+-Output:
+-```
+-╭──────────────────────────────────────────────────────────────╮
+-│  NthLayer SLO Portfolio                                      │
+-╰──────────────────────────────────────────────────────────────╯
+-
+-  Organization Health: 78% (14/18 services meeting SLOs)
+-
+-  By Tier:
+-    Critical:  ████████░░  83% (5/6 services)
+-    Standard:  ███████░░░  75% (6/8 services)
+-    Low:       ███████░░░  75% (3/4 services)
+-
+-  ⚠ Services Needing Attention:
+-    payment-api    availability  156% burned  EXHAUSTED
+-    search-api     latency       95% burned   WARNING
+-```
++The gate reads the service's SLO assessments from nthlayer-core, prints its
++decision as JSON, and records a `deploy_gate` assessment.
+ 
+ ## Exit Codes
+ 
+@@ -90,8 +52,8 @@ Deployment gates use exit codes for CI/CD integration:
+ 
+ | Code | Decision | Pipeline Action |
+ |------|----------|-----------------|
+-| `0` | Approved | Deploy proceeds |
+-| `1` | Warning | Deploy with caution |
++| `0` | Approved or Warning | Deploy proceeds (a warning is printed on stderr) |
++| `1` | Not evaluated | Gate could not reach core or read state — your pipeline decides |
+ | `2` | Blocked | Fail pipeline |
+ 
+ ## Tier-Based Thresholds
+@@ -100,14 +62,20 @@ Default thresholds vary by service tier:
+ 
+ | Tier | Warning | Blocking |
+ |------|---------|----------|
+-| Critical | <20% remaining | <10% remaining |
+-| Standard | <20% remaining | None (advisory) |
+-| Low | <30% remaining | None (advisory) |
++| Critical | ≤20% remaining | ≤10% remaining |
++| Standard | ≤20% remaining | None (advisory) |
++| Low | ≤30% remaining | None (advisory) |
+ 
+ Critical services block deploys at 10% remaining budget. Lower tiers only warn.
+ 
+ ## Custom Policies
+ 
++!!! warning "Not applied by the gate commands"
++    Neither `python -m nthlayer_workers.observe check-deploy` nor
++    `nthlayer-workers gate` reads `DeploymentGate` resources today: both
++    evaluate with the tier-based thresholds above. The settings below are
++    accepted in a manifest but do not change a gate decision.
++
+ Override defaults with a `DeploymentGate` resource:
+ 
+ ```yaml
+@@ -141,8 +109,9 @@ jobs:
+     steps:
+       - name: Check Deployment Gate
+         run: |
+-          nthlayer check-deploy services/api.yaml \
+-            --prometheus-url ${{ secrets.PROMETHEUS_URL }}
++          nthlayer-workers gate --service api \
++            --commit-sha ${{ github.sha }} \
++            --core-url ${{ secrets.NTHLAYER_CORE_URL }}
+ 
+       - name: Deploy
+         if: success()  # Only if gate passed
+@@ -163,13 +132,16 @@ spec:
+     spec:
+       containers:
+         - name: check
+-          image: ghcr.io/nthlayer/nthlayer:latest
+-          command:
+-            - nthlayer
+-            - check-deploy
+-            - /config/service.yaml
+-            - --prometheus-url
+-            - $(PROMETHEUS_URL)
++          # The published nthlayer image ships the generate CLI only; the
++          # gate needs the nthlayer-workers package.
++          image: python:3.12-slim
++          command: ["sh", "-c"]
++          args:
++            - pip install nthlayer-workers &&
++              nthlayer-workers gate --service payment-api --core-url "$NTHLAYER_CORE_URL"
++          env:
++            - name: NTHLAYER_CORE_URL
++              value: http://nthlayer-core:8000
+ ```
+ 
+ ## Drift Detection
+@@ -186,24 +158,14 @@ Deployment gates check the **current** budget state. Drift detection looks at **
+ ### Analyze Drift
+ 
+ ```bash
+-nthlayer drift services/payment-api.yaml \
++python -m nthlayer_workers.observe drift \
++  --service payment-api \
+   --prometheus-url http://prometheus:9090
+ ```
+ 
+-Output:
+-```
+-╭──────────────────────────────────────────────────────────────╮
+-│  Drift Analysis: payment-api                                 │
+-╰──────────────────────────────────────────────────────────────╯
+-
+-  Current Budget:     72.34%
+-  Trend:              -0.52%/week
+-  Pattern:            Gradual Decline
+-  Days to Exhaustion: 138 days
+-
+-  ⚠ Severity: WARN
+-  Recommendation: Investigate recent changes.
+-```
++The result is printed as JSON with the severity, pattern, trend, and projected
++days to exhaustion. Exit code 0 = severity none/info, 1 = severity warn or
++the analysis failed (message on stderr), 2 = severity critical.
+ 
+ ### Drift Patterns
+ 
+@@ -214,22 +176,6 @@ Output:
+ | Volatile | High variance, no trend | Check for intermittent issues |
+ | Stable | No significant trend | Continue monitoring |
+ 
+-### Integrate with Deployment Gates
+-
+-Add drift analysis to your deployment gate check:
+-
+-```bash
+-nthlayer check-deploy services/api.yaml \
+-  --prometheus-url http://prometheus:9090 \
+-  --include-drift
+-```
+-
+-### Org-Wide Drift View
+-
+-```bash
+-nthlayer portfolio --drift --prometheus-url http://prometheus:9090
+-```
+-
+ ## The Google SRE Connection
+ 
+ NthLayer automates the [Error Budget Policy](https://sre.google/sre-book/embracing-risk/) from the Google SRE Book:
+@@ -238,21 +184,8 @@ NthLayer automates the [Error Budget Policy](https://sre.google/sre-book/embraci
+ 
+ | SRE Concept | Manual Process | NthLayer Automation |
+ |-------------|----------------|---------------------|
+-| Error Budget Policy | Spreadsheet tracking | `nthlayer check-deploy` |
++| Error Budget Policy | Spreadsheet tracking | `nthlayer-workers gate` |
+ | Release Freeze | Calendar reminders | Automatic blocking |
+-| Budget Visibility | Monthly reports | `nthlayer portfolio` |
+-
+-## Reliability Scorecard
+-
+-Quantify reliability across your organization with weighted scores:
+-
+-```bash
+-nthlayer scorecard --prometheus-url http://prometheus:9090
+-```
+-
+-Scores combine SLO compliance (40%), incident score (30%), deploy success (20%), and error budget (10%) into a 0-100 score per service. Use `--by-team` for team-level aggregation. Exit codes enable CI/CD gating: 0=good, 1=fair, 2=poor.
+-
+-See [nthlayer scorecard](../commands/scorecard.md) for full reference.
+ 
+ ## Intelligent Alerts
+ 
+@@ -273,10 +206,10 @@ See [nthlayer alerts](../commands/alerts.md) for full reference.
+ 
+ ## Next Steps
+ 
+-- [Deployment Gates](../commands/check-deploy.md) - Full command reference
+-- [Drift Detection](../commands/drift.md) - Trend analysis command
+-- [SLO Portfolio](../commands/portfolio.md) - Organization-wide view
+-- [Reliability Scorecard](../commands/scorecard.md) - Quantitative scoring
++- [Deployment Gates](../commands/check-deploy.md) - Full command reference (nthlayer-workers)
++- [Drift Detection](../commands/drift.md) - Trend analysis command (nthlayer-workers)
++- [SLO Portfolio](../commands/portfolio.md) - Organization-wide view (nthlayer-workers)
++- [Reliability Scorecard](../commands/scorecard.md) - Per-service scoring (nthlayer-workers)
+ - [Intelligent Alerts](../commands/alerts.md) - Alert evaluation and simulation
+ - [Error Budgets](../concepts/slos.md) - Understanding SLOs
+ - [CI/CD Integration](../integrations/cicd.md) - Pipeline examples
+diff --git a/docs-site/reference/cli.md b/docs-site/reference/cli.md
+index 71bc4f6..654343a 100644
+--- a/docs-site/reference/cli.md
++++ b/docs-site/reference/cli.md
+@@ -25,7 +25,7 @@ nthlayer apply <service.yaml> [options]
+ 
+ | Option | Description |
+ |--------|-------------|
+-| `--push` | Push dashboard to Grafana |
++| `--push-grafana` | Push dashboard to Grafana |
+ | `--push-ruler` | Push alerts to Mimir/Cortex Ruler API |
+ | `--output-dir DIR` | Custom output directory |
+ | `--dry-run` | Preview without writing |
+@@ -46,19 +46,6 @@ nthlayer setup [options]
+ | `--test` | Test connections only |
+ | `--skip-service` | Skip first service creation |
+ 
+-### portfolio
+-
+-View org-wide SLO health.
+-
+-```bash
+-nthlayer portfolio [options]
+-```
+-
+-| Option | Description |
+-|--------|-------------|
+-| `--format FORMAT` | Output: text, json, csv |
+-| `--services-dir DIR` | Directory to scan |
+-
+ ### slo
+ 
+ SLO management commands.
+@@ -152,25 +139,6 @@ Generate recording rules only.
+ nthlayer generate-recording-rules <service.yaml>
+ ```
+ 
+-### verify
+-
+-Verify declared metrics exist in Prometheus (contract verification).
+-
+-```bash
+-nthlayer verify <service.yaml> [options]
+-```
+-
+-| Option | Description |
+-|--------|-------------|
+-| `--prometheus-url, -p URL` | Target Prometheus URL |
+-| `--env ENVIRONMENT` | Environment name |
+-| `--no-fail` | Don't fail on missing metrics |
+-
+-Exit codes:
+-- `0` = All metrics verified
+-- `1` = Optional metrics missing (warning)
+-- `2` = Critical SLO metrics missing (block)
+-
+ ### validate-slo
+ 
+ Validate that SLO metrics exist in Prometheus.
+@@ -191,42 +159,6 @@ Exit codes:
+ - `1` = Some metrics missing
+ - `2` = Critical metrics missing
+ 
+-### deps
+-
+-Show service dependencies from multiple sources.
+-
+-```bash
+-nthlayer deps <service.yaml> [options]
+-```
+-
+-| Option | Description |
+-|--------|-------------|
+-| `--env ENVIRONMENT` | Environment name |
+-| `--format FORMAT` | Output: table, json, dot |
+-| `--depth N` | Traversal depth (default: 1) |
+-| `--providers LIST` | Providers: backstage, k8s, prometheus |
+-| `--demo` | Show demo output |
+-
+-### blast-radius
+-
+-Calculate deployment blast radius and affected services.
+-
+-```bash
+-nthlayer blast-radius <service.yaml> [options]
+-```
+-
+-| Option | Description |
+-|--------|-------------|
+-| `--env ENVIRONMENT` | Environment name |
+-| `--format FORMAT` | Output: table, json |
+-| `--depth N` | Traversal depth (default: 2) |
+-| `--demo` | Show demo output |
+-
+-Exit codes:
+-- `0` = Low risk (< 5 affected)
+-- `1` = Medium risk (5-15 affected)
+-- `2` = High risk (> 15 affected)
+-
+ ### ownership
+ 
+ Resolve service ownership from multiple sources.
+@@ -257,40 +189,23 @@ nthlayer identity <subcommand> [options]
+ | `normalize NAME` | Show normalization steps |
+ | `add-mapping ALIAS CANONICAL` | Add identity mapping |
+ 
+-### drift
+-
+-Analyze reliability drift for a service.
++### Runtime commands (nthlayer-workers)
+ 
+-```bash
+-nthlayer drift <service.yaml> [options]
+-```
++Commands that read live system state ship in the `nthlayer-workers` package,
++not in this CLI. There is no `nthlayer check-deploy`, `nthlayer verify`,
++`nthlayer portfolio`, `nthlayer scorecard`, `nthlayer drift`, `nthlayer deps`
++or `nthlayer blast-radius`; use:
+ 
+-| Option | Description |
+-|--------|-------------|
+-| `--env ENVIRONMENT` | Environment name |
+-| `--format FORMAT` | Output: table, json |
+-| `--prometheus-url URL` | Prometheus server URL |
+-| `--baseline PERIOD` | Baseline period (default: 30d) |
+-| `--demo` | Show demo output |
+-
+-### check-deploy
+-
+-Check deployment gate based on error budget.
+-
+-```bash
+-nthlayer check-deploy <service.yaml> [options]
+-```
+-
+-| Option | Description |
+-|--------|-------------|
+-| `--prometheus-url, -p URL` | Target Prometheus URL |
+-| `--env ENVIRONMENT` | Environment name |
+-| `--auto-env` | Auto-detect environment |
+-
+-Exit codes:
+-- `0` = Approved (budget healthy)
+-- `1` = Warning (budget 10-20% remaining)
+-- `2` = Blocked (budget < 10% for critical tier)
++| Command | Reference |
++|---------|-----------|
++| `python -m nthlayer_workers.observe check-deploy --service SERVICE` | [Deployment Gates](../commands/check-deploy.md) |
++| `nthlayer-workers gate --service SERVICE` | [Deployment Gates](../commands/check-deploy.md#nthlayer-workers-gate) |
++| `python -m nthlayer_workers.observe verify --specs-dir DIR --prometheus-url URL` | [verify](../commands/verify.md) |
++| `python -m nthlayer_workers.observe portfolio` | [portfolio](../commands/portfolio.md) |
++| `python -m nthlayer_workers.observe scorecard` | [scorecard](../commands/scorecard.md) |
++| `python -m nthlayer_workers.observe drift --service SERVICE --prometheus-url URL` | [drift](../commands/drift.md) |
++| `python -m nthlayer_workers.observe dependencies --service SERVICE` | [dependencies](../commands/deps.md) |
++| `python -m nthlayer_workers.observe blast-radius --service SERVICE` | [blast-radius](../commands/blast-radius.md) |
+ 
+ ### lint
+ 
+@@ -445,7 +360,7 @@ nthlayer secrets <subcommand>
+ 
+ | Variable | Description |
+ |----------|-------------|
+-| `PROMETHEUS_URL` | Prometheus server URL (for verify command) |
++| `PROMETHEUS_URL` | Prometheus server URL |
+ | `PROMETHEUS_USERNAME` | Prometheus basic auth username |
+ | `PROMETHEUS_PASSWORD` | Prometheus basic auth password |
+ | `NTHLAYER_PROMETHEUS_URL` | Prometheus server URL (legacy) |
+diff --git a/docs-site/validate/index.md b/docs-site/validate/index.md
+index 3c361e4..d368df4 100644
+--- a/docs-site/validate/index.md
++++ b/docs-site/validate/index.md
+@@ -10,7 +10,7 @@ NthLayer's validation layer ensures your reliability configuration is correct *b
+ |-------|---------|----------------|-------------|
+ | **Syntax** | `nthlayer apply --lint` | PromQL query validity | Every commit |
+ | **Policy** | `nthlayer validate-spec` | Service spec compliance | Every commit |
+-| **Contract** | `nthlayer verify` | Metrics exist in Prometheus | Before promotion |
++| **Contract** | `nthlayer validate-slo` | SLO metrics exist in Prometheus | Before promotion |
+ 
+ ## Validation Flow
+ 
+@@ -31,7 +31,7 @@ service.yaml
+          │
+          ▼
+ ┌─────────────────┐
+-│  Contract       │  nthlayer verify
++│  Contract       │  nthlayer validate-slo
+ │  Verification   │  "Do metrics exist?"
+ └────────┬────────┘
+          │
+@@ -69,13 +69,8 @@ nthlayer apply services/payment-api.yaml --lint
+ 
+ ```bash
+ # Verify against staging Prometheus
+-nthlayer verify services/payment-api.yaml \
++nthlayer validate-slo services/payment-api.yaml \
+   --prometheus-url http://prometheus:9090
+-
+-# Output:
+-# ✓ http_requests_total
+-# ✓ http_request_duration_seconds_bucket
+-# Contract verification passed
+ ```
+ 
+ ## CI/CD Integration
+@@ -95,7 +90,7 @@ jobs:
+ 
+       - name: Verify Contracts
+         run: |
+-          nthlayer verify services/*.yaml \
++          nthlayer validate-slo services/payment-api.yaml \
+             --prometheus-url ${{ secrets.STAGING_PROMETHEUS }}
+ ```
+ 
+@@ -111,6 +106,7 @@ All validation commands use consistent exit codes:
+ 
+ ## Next Steps
+ 
+-- [Contract Verification](../commands/verify.md) - Verify metrics exist
++- [Contract Verification](../commands/verify.md) - Verify declared metrics exist across a specs directory (nthlayer-workers)
++- [validate-slo](../commands/validate-slo.md) - Verify one service's SLO metrics exist
+ - [Policy Validation](../commands/validate-spec.md) - OPA/Rego policy checks
+ - [PromQL Linting](./linting.md) - Syntax and best practices
+diff --git a/docs-site/validate/linting.md b/docs-site/validate/linting.md
+index 9c55f5b..07daf01 100644
+--- a/docs-site/validate/linting.md
++++ b/docs-site/validate/linting.md
+@@ -150,7 +150,9 @@ repos:
+     hooks:
+       - id: nthlayer-lint
+         name: NthLayer PromQL Lint
+-        entry: nthlayer apply --lint
++        # apply takes one service file; pre-commit passes all staged
++        # matches at once, so loop over them.
++        entry: bash -c 'for f in "$@"; do nthlayer apply "$f" --lint || exit 1; done' --
+         language: system
+         files: services/.*\.yaml$
+ ```
+@@ -188,4 +190,4 @@ checks {
+ 
+ - [pint Documentation](https://cloudflare.github.io/pint/)
+ - [nthlayer apply](../commands/apply.md)
+-- [Contract Verification](../commands/verify.md)
++- [Contract Verification](../commands/verify.md) (nthlayer-workers)
+diff --git a/mkdocs.yml b/mkdocs.yml
+index c1da0b3..08b011f 100644
+--- a/mkdocs.yml
++++ b/mkdocs.yml
+@@ -98,7 +98,7 @@ nav:
+     - Intelligent Alerts: commands/alerts.md
+     - Metric Recommendations: commands/recommend-metrics.md
+   - Dependencies:
+-    - nthlayer deps: commands/deps.md
++    - Dependencies (observe dependencies): commands/deps.md
+     - Blast Radius: commands/blast-radius.md
+     - Ownership: commands/ownership.md
+     - Identity: commands/identity.md
+diff --git a/tests/test_docs_commands_parse.py b/tests/test_docs_commands_parse.py
+new file mode 100644
+index 0000000..0284ed7
+--- /dev/null
++++ b/tests/test_docs_commands_parse.py
+@@ -0,0 +1,778 @@
++"""Every documented `nthlayer` invocation must parse (opensrm-3ntg).
++
++opensrm-noc6 found that `docs-site/commands/init.md` documented flags the
++parser did not have, and `tests/test_init_documented_flags.py` now guards that
++one command. The sweep that bead ran over the rest of `docs-site/commands/`
++found seven documented subcommands with no subparser and eleven undefined
++flags on real ones. This file generalises the guard to every page.
++
++Direction matters, as it did in noc6: the DOCS are the fixture and the PARSER
++is the authority. Nothing here lists command names expected from the docs —
++every line in any fenced block (shell, yaml CI steps, Jenkins `sh`,
++pre-commit `entry:`) that runs the `nthlayer` (or `nthlayer-generate`)
++console script is handed to `build_parser().parse_args()`, and an argparse
++error on any of them fails the test named after its page and line.
++
++Scope: every `docs-site/**/*.md` page plus `README.md`. Lines running other
++executables — `nthlayer-workers`, `nthlayer-core`, `python -m ...`,
++`pip install nthlayer` — are not this parser's to judge and are not collected.
++
++Pipeline, per page: each fenced block (`_FENCE`) is split into logical lines
++(backslash continuations joined, comments and a `$ ` prompt dropped); `_unwrap`
++strips CI wrappers (`run:`, `script:`, `entry:`, `- `, Jenkins `sh '...'`);
++metavariables and CI templating become `PLACEHOLDER_ARG`; `_split_commands`
++lexes the line into simple commands, dropping pipes, separators and
++redirections; `_runner_stripped` removes shell keywords, env assignments and
++runner prefixes; `_strip_synopsis_markup` removes `[options]` and bracket
++syntax; and a pre-commit `entry:` gets the filenames pre-commit would append
++(`_precommit_tail`). What survives, minus the entry point, is the argv the
++parser checks.
++
++Known residual — shapes NOT recognised, so an `nthlayer` call written this
++way is silently not collected: `docker run IMAGE nthlayer ...`, `xargs
++nthlayer ...`, backtick substitution, `"$(nthlayer ...)"` inside double
++quotes (lexed as one word), `{ nthlayer ...; }` groups, Dockerfile `RUN`,
++Jenkins `sh("...")` call syntax, prompts other than `$ ` (`% `, `> `, `PS>`),
++non-breaking spaces between tokens, and indented (non-fenced) code blocks.
++A cmd.exe `^` continuation is not joined (pinned by a test; it fails loudly).
++"""
++
++from __future__ import annotations
++
++import argparse
++import re
++import shlex
++from pathlib import Path
++
++import pytest
++
++from nthlayer_generate.demo import build_parser
++
++REPO_ROOT = Path(__file__).resolve().parents[1]
++DOCS_ROOT = REPO_ROOT / "docs-site"
++
++# Measured on the opensrm-3ntg branch after widening collection to every
++# fence (yaml, groovy, unlabelled): about 250 invocations across 42 pages.
++# The floor sits well under that so ordinary docs edits do not trip it, but
++# far above zero so a broken extractor (a regex that matches nothing, a moved
++# docs dir) cannot leave this file green and vacuous.
++MIN_INVOCATIONS = 200
++
++# Every page that yields at least one invocation, measured on the opensrm-3ntg
++# branch. The total floor above has slack (a page's worth of invocations can
++# vanish under it); this does not: a page dropping out — moved, emptied, or
++# its fences no longer recognised — fails by name. To update after a
++# deliberate docs change, print
++# `sorted({page for page, _, _ in INVOCATIONS})` and paste it here.
++PAGES_WITH_INVOCATIONS = (
++    "README.md",
++    "docs-site/commands/alerts.md",
++    "docs-site/commands/apply.md",
++    "docs-site/commands/config.md",
++    "docs-site/commands/environments.md",
++    "docs-site/commands/generate-alerts.md",
++    "docs-site/commands/generate-dashboard.md",
++    "docs-site/commands/generate-loki-alerts.md",
++    "docs-site/commands/generate-recording-rules.md",
++    "docs-site/commands/generate-slo.md",
++    "docs-site/commands/identity.md",
++    "docs-site/commands/index.md",
++    "docs-site/commands/init.md",
++    "docs-site/commands/migrate.md",
++    "docs-site/commands/ownership.md",
++    "docs-site/commands/recommend-metrics.md",
++    "docs-site/commands/setup.md",
++    "docs-site/commands/simulate.md",
++    "docs-site/commands/slo.md",
++    "docs-site/commands/validate-metadata.md",
++    "docs-site/commands/validate-slo.md",
++    "docs-site/commands/validate-spec.md",
++    "docs-site/concepts/contracts.md",
++    "docs-site/concepts/opensrm.md",
++    "docs-site/concepts/service-specs.md",
++    "docs-site/concepts/shift-left.md",
++    "docs-site/concepts/slos.md",
++    "docs-site/demo.md",
++    "docs-site/getting-started/adoption-path.md",
++    "docs-site/getting-started/first-service.md",
++    "docs-site/getting-started/installation.md",
++    "docs-site/getting-started/quick-start.md",
++    "docs-site/index.md",
++    "docs-site/integrations/cicd.md",
++    "docs-site/integrations/grafana.md",
++    "docs-site/integrations/mimir.md",
++    "docs-site/integrations/prometheus.md",
++    "docs-site/protect/index.md",
++    "docs-site/reference/cli.md",
++    "docs-site/reference/service-yaml.md",
++    "docs-site/validate/index.md",
++    "docs-site/validate/linting.md",
++)
++
++# Console scripts that reach `nthlayer_generate.demo:main` (pyproject
++# [project.scripts]). Both run the same parser, so both are checked.
++ENTRY_POINTS = frozenset({"nthlayer", "nthlayer-generate"})
++
++# Any fenced block, whatever its info string: invocations also sit in yaml
++# (GitHub Actions, GitLab, pre-commit, Tekton), groovy (Jenkins) and
++# unlabelled fences. Leading indent is allowed (this site nests fences in
++# lists), as is a trailing info string (```bash title="..."). Closing follows
++# CommonMark: a bare run of the SAME character at least as long as the opening
++# one, so a ````markdown block quoting a ```bash example is not closed by it.
++_FENCE_OPEN = re.compile(r"^[ \t]*(`{3,}|~{3,})(.*)$")
++_FENCE_CLOSE = re.compile(r"^[ \t]*(`{3,}|~{3,})[ \t]*$")
++
++# CI wrappers around a command line, stripped before lexing: a yaml list item
++# (`- nthlayer ...`), a yaml key whose value is a command (`run:`, `script:`,
++# `entry:`), and Jenkins `sh '...'` / `sh "..."`.
++_LIST_ITEM = re.compile(r"^-\s+")
++_COMMAND_KEY = re.compile(r"^(run|script|entry):\s*")
++_JENKINS_SH = re.compile(r"""^sh\s+(['"])(.*)\1$""")
++
++# CI templating that stands for one value: `${{ secrets.X }}` (GitHub Actions,
++# contains spaces) and `$(params.x)` (Tekton, would lex as a subshell).
++_CI_PLACEHOLDER = re.compile(r"\$\{\{.*?\}\}|\$\((?:params|inputs|context|workspaces)\.[^)]*\)")
++
++# Shell keywords that may lead a command without being its argv[0].
++_SHELL_KEYWORDS = frozenset({"if", "then", "elif", "else", "do", "!", "time", "exec", "while", "until"})
++
++# Characters that, in a punctuation token shlex emits (punctuation_chars=True),
++# end one command and start the next. shlex groups a run of them into one
++# token — `);` in `$(nthlayer ...); do` — so a token made only of these is a
++# separator whatever its length. Each side is checked on its own, so
++# `nthlayer x | jq .` does not hand `|` and `jq` to argparse; unlike a regex
++# split, a `|` inside a quoted jq filter is left alone; and the command inside
++# `for x in $(nthlayer ...)` is collected as its own invocation.
++_SEPARATOR_CHARS = frozenset("|&;()")
++
++# Redirection operators. Everything after one, up to the next separator, is
++# the shell's (the target, a `$(date ...)` in its name), not argv.
++_REDIRECTS = frozenset({">", ">>", "<", "<<", ">&", "&>", ">|"})
++
++# `<service.yaml>`, `{show,list}` — a metavariable standing for one argument.
++# Substituted on the raw line, before lexing: shlex would otherwise read the
++# angle brackets as redirections and the `|` in `{a|b}` as a pipe. A real
++# redirection has whitespace after `<`, which this does not match.
++_PLACEHOLDER = re.compile(r"<[A-Za-z][^<>\s]*>|\{[^{}\s]+\}")
++
++# Synopsis words that stand for "any options follow" rather than an argument.
++_OPTIONS_MARKERS = frozenset({"[options]", "[OPTIONS]", "[flags]", "..."})
++
++# Stands in for a metavariable (`<service.yaml>`, `${{ secrets.X }}`) or a
++# filename pre-commit would pass: one argument whose value the docs leave open.
++PLACEHOLDER_ARG = "placeholder"
++
++
++_ENV_ASSIGNMENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=.*")
++
++# Runner options that take a separate value (`uvx --from DIST`); any runner
++# option in `--opt=value` form is skipped too.
++_RUNNER_VALUE_OPTIONS = frozenset({"--from", "--with", "--python", "--spec"})
++
++
++def _fenced_blocks(text: str) -> list[tuple[int, list[str]]]:
++    """(1-based line number of the first body line, body lines) per fence.
++
++    An unclosed fence runs to the end of the page, as in CommonMark.
++    """
++    blocks: list[tuple[int, list[str]]] = []
++    lines = text.split("\n")
++    index = 0
++    while index < len(lines):
++        opening = _FENCE_OPEN.match(lines[index].rstrip("\r"))
++        index += 1
++        if not opening:
++            continue
++        marker = opening.group(1)
++        if marker[0] == "`" and "`" in opening.group(2):
++            continue  # not a fence: CommonMark forbids backticks in its info string
++        start = index
++        while index < len(lines):
++            closing = _FENCE_CLOSE.match(lines[index].rstrip("\r"))
++            if closing and closing.group(1)[0] == marker[0] and len(closing.group(1)) >= len(marker):
++                break
++            index += 1
++        blocks.append((start + 1, lines[start:index]))
++        index += 1  # past the closing line
++    return blocks
++
++
++def _runner_stripped(argv: list[str]) -> list[str]:
++    """argv with leading shell keywords, env, sudo and a runner prefix removed.
++
++    Recognised: shell keywords (`if`, `!`, `time`, ...), `VAR=value`
++    assignments, `sudo`, `env [-flags] [VAR=value ...]`, and the runners whose
++    next token is the console script: `uv run`, `uvx`, `pipx run`, each with
++    `--opt value` (for the options in _RUNNER_VALUE_OPTIONS) or `--opt=value`
++    options. Anything else (`pip install nthlayer`,
++    `python -m nthlayer_workers.observe`) keeps its own argv[0] and is
++    therefore not collected.
++    """
++    while argv:
++        head = argv[0]
++        if head in _SHELL_KEYWORDS or head == "sudo" or _ENV_ASSIGNMENT.fullmatch(head):
++            argv = argv[1:]
++        elif head == "env":
++            argv = argv[1:]
++            while argv and argv[0].startswith("-"):
++                argv = argv[1:]
++        else:
++            break
++    for prefix_len, prefix in ((2, ["uv", "run"]), (2, ["pipx", "run"]), (1, ["uvx"])):
++        if argv[:prefix_len] == prefix:
++            argv = argv[prefix_len:]
++            while argv and argv[0].startswith("--"):
++                if "=" in argv[0]:
++                    argv = argv[1:]
++                elif argv[0] in _RUNNER_VALUE_OPTIONS:
++                    argv = argv[2:]
++                else:
++                    break
++            break
++    return argv
++
++
++def _strip_synopsis_markup(argv: list[str]) -> list[str]:
++    """Drop synopsis option markers and optional-group brackets.
++
++    Strips every leading and trailing `[`/`]` from a token, so nested groups
++    (`[--depth [N]]`) unwrap too; a token that was only brackets is dropped.
++    """
++    out: list[str] = []
++    for token in argv:
++        if token in _OPTIONS_MARKERS:
++            continue
++        # Optional-group brackets in a synopsis: `[--depth N]` → `--depth N`,
++        # so the flag inside is still checked against the parser.
++        token = token.strip("[]") if token.startswith("[") or token.endswith("]") else token
++        if not token:
++            continue
++        out.append(token)
++    return out
++
++
++class _LexError(ValueError):
++    """A documented shell line shlex cannot tokenise (e.g. an unbalanced quote)."""
++
++
++def _split_commands(line: str, line_no: int) -> list[list[str]]:
++    """One shell line as a list of simple commands' argv, redirections removed."""
++    lexer = shlex.shlex(line, posix=True, punctuation_chars=True)
++    lexer.whitespace_split = True
++    # Comments are dropped below, at token starts only: shlex's own comment
++    # handling also fires mid-word and would truncate `http://host/#anchor`.
++    lexer.commenters = ""
++    try:
++        tokens = list(lexer)
++    except ValueError as exc:
++        raise _LexError(f"line {line_no}: unparseable shell {line!r}: {exc}") from exc
++    commands: list[list[str]] = [[]]
++    redirected = False
++    for token in tokens:
++        if token.startswith("#"):
++            break
++        if token in _REDIRECTS:
++            # `2>&1` lexes as `2`, `>&`, `1`: the fd number is the shell's too.
++            if commands[-1] and commands[-1][-1].isdigit():
++                commands[-1].pop()
++            redirected = True
++        elif set(token) <= _SEPARATOR_CHARS:
++            commands.append([])
++            redirected = False
++        elif not redirected:
++            commands[-1].append(token)
++    return [argv for argv in commands if argv]
++
++
++def _unwrap(line: str) -> tuple[str, bool]:
++    """A CI line reduced to its shell command, and whether it is a pre-commit entry."""
++    line = _LIST_ITEM.sub("", line)
++    key = _COMMAND_KEY.match(line)
++    if key:
++        line = line[key.end() :]
++    jenkins = _JENKINS_SH.match(line)
++    if jenkins:
++        line = jenkins.group(2)
++    if len(line) >= 2 and line[0] == line[-1] and line[0] in "'\"":
++        line = line[1:-1]  # a quoted yaml scalar
++    return line, bool(key and key.group(1) == "entry")
++
++
++# --- pre-commit `entry:` handling -------------------------------------------
++#
++# pre-commit passes every matching staged file to `entry` in one call, so a
++# hook is checked with two filenames appended: a subcommand taking a single
++# positional must fail that check, because it fails in real use. A hook that
++# sets `pass_filenames: false` gets none, and a command inside a `bash -c`
++# entry gets none (the filenames go to bash, as "$@").
++
++_PRECOMMIT_FILES = [PLACEHOLDER_ARG, PLACEHOLDER_ARG]
++
++_PASS_FILENAMES_FALSE = re.compile(r"^\s*pass_filenames:\s*false\s*$")
++
++
++def _hook_passes_filenames(lines: list[str], entry_index: int) -> bool:
++    """False if the yaml list item holding `entry:` sets `pass_filenames: false`.
++
++    The hook's item is the nearest preceding `- ` line indented less than the
++    `entry:` key; it ends at the next line indented no deeper than that `- `.
++    """
++    entry_indent = len(lines[entry_index]) - len(lines[entry_index].lstrip())
++    start = entry_index
++    while start > 0:
++        start -= 1
++        candidate = lines[start]
++        indent = len(candidate) - len(candidate.lstrip())
++        if candidate.lstrip().startswith("- ") and indent < entry_indent:
++            break
++    item_indent = len(lines[start]) - len(lines[start].lstrip())
++    end = start + 1
++    while end < len(lines):
++        line = lines[end]
++        if line.strip() and len(line) - len(line.lstrip()) <= item_indent:
++            break
++        end += 1
++    return not any(_PASS_FILENAMES_FALSE.match(line) for line in lines[start:end])
++
++
++def _precommit_tail(lines: list[str], entry_index: int, is_entry: bool, direct: bool) -> list[str]:
++    """The filenames pre-commit appends to this command, if any."""
++    if is_entry and direct and _hook_passes_filenames(lines, entry_index):
++        return _PRECOMMIT_FILES
++    return []
++
++
++# --- end pre-commit handling -------------------------------------------------
++
++
++def _entry_point_argvs(command: str, line_no: int) -> list[tuple[list[str], bool]]:
++    """(argv after the entry point, ran directly) for each nthlayer command.
++
++    Recurses into `bash -c '...'` / `sh -c '...'` scripts; a command found
++    there is not run directly, so pre-commit's filenames do not reach it.
++    """
++    found: list[tuple[list[str], bool]] = []
++    for argv in _split_commands(command, line_no):
++        argv = _runner_stripped(argv)
++        if argv[:1] in (["bash"], ["sh"]) and argv[1:2] == ["-c"] and len(argv) > 2:
++            found.extend((inner, False) for inner, _ in _entry_point_argvs(argv[2], line_no))
++        elif argv and argv[0] in ENTRY_POINTS:
++            found.append((_strip_synopsis_markup(argv[1:]), True))
++    return found
++
++
++def extract_invocations(
++    text: str, errors: list[tuple[int, str]] | None = None
++) -> list[tuple[int, list[str]]]:
++    """(1-based line number, argv after the entry point) for each invocation.
++
++    A line shlex cannot tokenise is appended to `errors` as (line, message)
++    and skipped; with no `errors` list it raises AssertionError instead.
++    """
++    found: list[tuple[int, list[str]]] = []
++    for body_start_line, lines in _fenced_blocks(text):
++        index = 0
++        while index < len(lines):
++            line_no = body_start_line + index
++            entry_index = index  # the logical line's first physical line
++            logical = lines[index]
++            # Join backslash continuations into one logical command line.
++            while logical.rstrip().endswith("\\") and index + 1 < len(lines):
++                index += 1
++                logical = logical.rstrip()[:-1] + " " + lines[index]
++            index += 1
++            stripped = logical.strip()
++            if not stripped or stripped.startswith("#"):
++                continue
++            if stripped.startswith("$ "):
++                stripped = stripped[2:]
++            if "nthlayer" not in stripped:
++                continue
++            command, precommit_entry = _unwrap(stripped)
++            command = _CI_PLACEHOLDER.sub(PLACEHOLDER_ARG, _PLACEHOLDER.sub(PLACEHOLDER_ARG, command))
++            try:
++                argvs = _entry_point_argvs(command, line_no)
++            except _LexError as exc:
++                if errors is None:
++                    raise AssertionError(str(exc)) from exc
++                errors.append((line_no, str(exc)))
++                continue
++            for argv, direct in argvs:
++                tail = _precommit_tail(lines, entry_index, precommit_entry, direct)
++                found.append((line_no, argv + tail))
++    return found
++
++
++def _doc_pages() -> list[Path]:
++    pages = sorted(DOCS_ROOT.rglob("*.md"))
++    readme = REPO_ROOT / "README.md"
++    assert readme.is_file(), f"{readme} is missing; the README is part of this guard's scope"
++    pages.append(readme)
++    return pages
++
++
++def _all_invocations() -> tuple[list[tuple[str, int, list[str]]], list[tuple[str, int, str]]]:
++    """(invocations, unlexable lines) across every page, each tagged page:line."""
++    invocations: list[tuple[str, int, list[str]]] = []
++    unlexable: list[tuple[str, int, str]] = []
++    for page in _doc_pages():
++        label = page.relative_to(REPO_ROOT).as_posix()
++        errors: list[tuple[int, str]] = []
++        for line_no, argv in extract_invocations(page.read_text(encoding="utf-8"), errors):
++            invocations.append((label, line_no, argv))
++        unlexable.extend((label, line_no, message) for line_no, message in errors)
++    return invocations, unlexable
++
++
++INVOCATIONS, UNLEXABLE = _all_invocations()
++
++
++def test_collection_is_not_vacuous() -> None:
++    assert len(INVOCATIONS) >= MIN_INVOCATIONS, (
++        f"only {len(INVOCATIONS)} documented invocations collected; the extractor "
++        "or the docs location has probably broken"
++    )
++
++
++def _all_option_strings() -> set[str]:
++    """Every option string the parser or any (nested) subparser accepts."""
++    known: set[str] = set()
++    pending = [build_parser()]
++    while pending:
++        parser = pending.pop()
++        for action in parser._actions:  # noqa: SLF001
++            known.update(action.option_strings)
++            if isinstance(action, argparse._SubParsersAction):  # noqa: SLF001
++                pending.extend(action.choices.values())
++    return known
++
++
++def test_pages_with_invocations_matches_the_docs() -> None:
++    # The per-page test below cannot notice its own list shrinking (an empty
++    # tuple is a silent skip) or a new page joining; this equality can.
++    actual = sorted({label for label, _, _ in INVOCATIONS})
++    assert actual == list(PAGES_WITH_INVOCATIONS), (
++        "the pages yielding `nthlayer` invocations changed; if deliberate, replace "
++        "PAGES_WITH_INVOCATIONS with sorted({page for page, _, _ in INVOCATIONS}) "
++        f"— missing: {sorted(set(PAGES_WITH_INVOCATIONS) - set(actual))}, "
++        f"new: {sorted(set(actual) - set(PAGES_WITH_INVOCATIONS))}"
++    )
++
++
++@pytest.mark.parametrize("page", PAGES_WITH_INVOCATIONS)
++def test_page_still_yields_invocations(page: str) -> None:
++    assert any(label == page for label, _, _ in INVOCATIONS), (
++        f"{page} no longer yields any `nthlayer` invocation; if that is deliberate, "
++        "update PAGES_WITH_INVOCATIONS"
++    )
++
++
++def parse_error(argv: list[str], capsys: pytest.CaptureFixture[str]) -> str | None:
++    """argparse's error for argv, or None if the real parser accepts it."""
++    capsys.readouterr()  # discard anything captured before this call
++    try:
++        build_parser().parse_args(argv)
++    except SystemExit as exc:
++        if exc.code in (0, None):  # --help / --version
++            return None
++        stderr = capsys.readouterr().err
++        # `nthlayer <command> --help`, `nthlayer slo <subcommand>`: a placeholder
++        # standing for "any choice" cannot itself be a valid choice. argparse
++        # has validated every token before it, but stops there — so flags after
++        # it are checked against every flag any subcommand accepts.
++        if f"invalid choice: '{PLACEHOLDER_ARG}'" in stderr:
++            known = _all_option_strings()
++            for token in argv:
++                flag = token.split("=", 1)[0]
++                if flag.startswith("-") and len(flag) > 1 and not flag[1:].isdigit() and flag not in known:
++                    return f"{flag}: no subcommand accepts this option"
++            return None
++        lines = stderr.strip().splitlines()
++        return lines[-1] if lines else f"exit {exc.code}"
++    return None
++
++
++@pytest.mark.parametrize(
++    "argv",
++    [pytest.param(argv, id=f"{page}:{line_no}") for page, line_no, argv in INVOCATIONS]
++    # A line shlex cannot tokenise fails as its own case, named by page:line,
++    # instead of erroring every test in this module at import.
++    + [pytest.param(message, id=f"{page}:{line_no}") for page, line_no, message in UNLEXABLE],
++)
++def test_documented_invocation_parses(argv: list[str] | str, capsys: pytest.CaptureFixture[str]) -> None:
++    assert not isinstance(argv, str), argv
++    error = parse_error(argv, capsys)
++    assert error is None, f"`nthlayer {shlex.join(argv)}` is rejected by the parser: {error}"
++
++
++class TestExtraction:
++    """Positive and negative controls for the extractor the parse test trusts."""
++
++    # Shapes taken from pages on this site, not invented to suit the extractor:
++    # `$ ` prompts (concepts/shift-left.md), `\` continuations and `<...>`
++    # synopses (commands/*.md), a `|` inside a quoted jq filter and a
++    # `$(date ...)` redirect target (the pre-3ntg commands/portfolio.md), a
++    # `$(nthlayer ...)` substitution (commands/ownership.md, commands/identity.md),
++    # `[--flag VALUE] [options]` synopses (reference/cli.md), an indented
++    # fence (getting-started/adoption-path.md).
++    def test_shapes(self) -> None:
++        markdown = "\n".join(
++            [
++                "```bash",
++                "$ nthlayer apply svc.yaml",
++                "# nthlayer not-a-command",
++                "nthlayer plan <service.yaml> \\",
++                "  --env prod",
++                "uv run nthlayer lint svc.yaml | jq . > out.json",
++                "uvx --from nthlayer-generate nthlayer validate svc.yaml",
++                "pip install nthlayer",
++                "python -m nthlayer_workers.observe drift --service svc",
++                "nthlayer-workers gate --help",
++                "```",
++                "",
++                "```shell",
++                "nthlayer migrate svc.yaml --format json | jq -e '.x[] | select(.y)'",
++                "nthlayer migrate svc.yaml > report-$(date +%Y%m%d).json 2>&1",
++                "for d in $(nthlayer ownership svc.yaml --format json); do echo $d; done",
++                "```",
++                "",
++                "  ~~~console",
++                "  nthlayer-generate slo show [--format json] [options]",
++                "  ~~~",
++                "",
++                "Prose outside any fence: nthlayer apply ignored.yaml",
++            ]
++        )
++        assert extract_invocations(markdown) == [
++            (2, ["apply", "svc.yaml"]),
++            (4, ["plan", PLACEHOLDER_ARG, "--env", "prod"]),
++            (6, ["lint", "svc.yaml"]),
++            (7, ["validate", "svc.yaml"]),
++            (14, ["migrate", "svc.yaml", "--format", "json"]),
++            (15, ["migrate", "svc.yaml"]),
++            (16, ["ownership", "svc.yaml", "--format", "json"]),
++            (20, ["slo", "show", "--format", "json"]),
++        ]
++
++    # CI shapes from this site's yaml/groovy/unlabelled fences: GitHub Actions
++    # `run:` (index.md, validate/index.md), GitLab `script:` list items
++    # (integrations/cicd.md), Jenkins `sh '...'` (integrations/cicd.md),
++    # pre-commit `entry:` (validate/linting.md, commands/validate-spec.md),
++    # `${{ secrets.X }}` values (integrations/cicd.md) and Tekton
++    # `$(params.x)` (integrations/cicd.md).
++    def test_ci_wrappers_in_any_fence(self) -> None:
++        markdown = "\n".join(
++            [
++                "```yaml",
++                "      - name: Lint",
++                "        run: nthlayer apply svc.yaml --lint",
++                "  script:",
++                "    - nthlayer validate-spec services/",
++                "        entry: nthlayer validate-metadata --strict",
++                "        run: nthlayer validate-slo svc.yaml --prometheus-url ${{ secrets.PROM_URL }}",
++                "        nthlayer plan $(params.service-file) --env prod",
++                "```",
++                "",
++                "```groovy",
++                "                sh 'nthlayer lint svc.yaml'",
++                "```",
++                "",
++                "```",
++                "nthlayer migrate svc.yaml --dry-run",
++                "```",
++                "",
++                "```yaml",
++                '        run: "nthlayer apply double.yaml"',
++                "        run: 'nthlayer apply single.yaml'",
++                "```",
++            ]
++        )
++        assert extract_invocations(markdown) == [
++            (3, ["apply", "svc.yaml", "--lint"]),
++            (5, ["validate-spec", "services/"]),
++            # pre-commit appends ALL matching staged filenames to `entry`.
++            (6, ["validate-metadata", "--strict", PLACEHOLDER_ARG, PLACEHOLDER_ARG]),
++            (7, ["validate-slo", "svc.yaml", "--prometheus-url", PLACEHOLDER_ARG]),
++            (8, ["plan", PLACEHOLDER_ARG, "--env", "prod"]),
++            (12, ["lint", "svc.yaml"]),
++            (16, ["migrate", "svc.yaml", "--dry-run"]),
++            # A quoted yaml scalar is unquoted before lexing.
++            (20, ["apply", "double.yaml"]),
++            (21, ["apply", "single.yaml"]),
++        ]
++
++    # pre-commit hook shapes (validate/linting.md, commands/validate-spec.md,
++    # commands/validate-metadata.md): `entry:` gets every staged filename
++    # unless its hook sets `pass_filenames: false`; a `bash -c` loop entry is
++    # checked on the nthlayer command inside it.
++    def test_precommit_entries(self) -> None:
++        markdown = "\n".join(
++            [
++                "```yaml",
++                "repos:",
++                "  - repo: local",
++                "    hooks:",
++                "      - id: passes-files",
++                "        entry: nthlayer validate-spec",
++                "        language: system",
++                "      - id: no-files",
++                "        entry: nthlayer validate-spec services/",
++                "        pass_filenames: false",
++                "      - id: loop",
++                "        entry: bash -c 'for f in \"$@\"; do nthlayer apply \"$f\" --lint || exit 1; done' --",
++                "        language: system",
++                "```",
++            ]
++        )
++        assert extract_invocations(markdown) == [
++            (6, ["validate-spec", PLACEHOLDER_ARG, PLACEHOLDER_ARG]),
++            (9, ["validate-spec", "services/"]),
++            (12, ["apply", "$f", "--lint"]),
++        ]
++
++    # Shell keywords leading a command (adoption-path.md and cicd.md use
++    # `if [ ... ]; then` around gate calls) must not hide the invocation.
++    def test_leading_shell_keywords(self) -> None:
++        markdown = "\n".join(
++            [
++                "```bash",
++                "if nthlayer validate svc.yaml; then echo ok; fi",
++                "! nthlayer lint svc.yaml",
++                "time nthlayer apply svc.yaml",
++                "while nthlayer plan svc.yaml; do sleep 1; done",
++                "until exec nthlayer migrate svc.yaml; do :; done",
++                "```",
++            ]
++        )
++        assert extract_invocations(markdown) == [
++            (2, ["validate", "svc.yaml"]),
++            (3, ["lint", "svc.yaml"]),
++            (4, ["apply", "svc.yaml"]),
++            (5, ["plan", "svc.yaml"]),
++            (6, ["migrate", "svc.yaml"]),
++        ]
++
++    # A four-backtick fence quoting a ```bash example (CommonMark nesting, as
++    # pymdownx.superfences allows) must not be closed by the inner fence; if
++    # it were, everything after it would invert and the two ordinary fences
++    # below would be read as prose.
++    def test_longer_fence_is_not_closed_by_shorter(self) -> None:
++        markdown = "\n".join(
++            [
++                "````markdown",
++                "```bash",
++                "nthlayer apply quoted.yaml",
++                "```",
++                # Still inside the outer fence: only a run of four or more closes it.
++                "nthlayer lint between.yaml",
++                "````",
++                "",
++                "```bash",
++                "nthlayer bogus-one svc.yaml",
++                "```",
++                "",
++                "```bash",
++                "nthlayer bogus-two svc.yaml",
++                "```",
++            ]
++        )
++        assert extract_invocations(markdown) == [
++            (3, ["apply", "quoted.yaml"]),
++            (5, ["lint", "between.yaml"]),
++            (9, ["bogus-one", "svc.yaml"]),
++            (13, ["bogus-two", "svc.yaml"]),
++        ]
++
++    # CommonMark: a backtick fence's info string cannot contain a backtick, so
++    # a line like this is inline code in prose, not a fence opening.
++    def test_backtick_in_info_string_does_not_open_a_fence(self) -> None:
++        markdown = "\n".join(
++            [
++                "```nthlayer `x` is inline code",
++                "nthlayer prose-line not-in-a-fence",
++                "```bash",
++                "nthlayer lint a.yaml",
++                "```",
++            ]
++        )
++        assert extract_invocations(markdown) == [(4, ["lint", "a.yaml"])]
++
++    # Current behaviour, pinned: CRLF pages extract exactly like LF pages.
++    def test_crlf_matches_lf(self) -> None:
++        lf = "```bash\nnthlayer plan svc.yaml \\\n  --env prod\n```\n"
++        assert extract_invocations(lf.replace("\n", "\r\n")) == extract_invocations(lf) == [
++            (2, ["plan", "svc.yaml", "--env", "prod"])
++        ]
++
++    # Current behaviour, pinned: a cmd.exe `^` continuation is NOT joined. The
++    # `^` reaches argparse as an argument, so such a line fails loudly rather
++    # than being checked with its tail missing.
++    def test_caret_continuation_is_not_joined(self) -> None:
++        markdown = "```bat\nnthlayer apply svc.yaml ^\n  --lint\n```"
++        assert extract_invocations(markdown) == [(2, ["apply", "svc.yaml", "^"])]
++
++    # Runner prefixes this site's readers plausibly paste.
++    def test_more_runner_prefixes(self) -> None:
++        markdown = "\n".join(
++            [
++                "```bash",
++                "sudo nthlayer apply a.yaml",
++                "env NTHLAYER_PROFILE=prod nthlayer apply b.yaml",
++                "sudo env -i A=1 nthlayer apply c.yaml",
++                "uvx --from=nthlayer-generate nthlayer apply d.yaml",
++                "uv run --with=rich nthlayer apply e.yaml",
++                "```",
++            ]
++        )
++        assert extract_invocations(markdown) == [
++            (2, ["apply", "a.yaml"]),
++            (3, ["apply", "b.yaml"]),
++            (4, ["apply", "c.yaml"]),
++            (5, ["apply", "d.yaml"]),
++            (6, ["apply", "e.yaml"]),
++        ]
++
++    # An unbalanced quote is a broken example on one line, not a reason to
++    # error every test in the module at import.
++    def test_unlexable_line_is_recorded_not_raised(self) -> None:
++        markdown = "```bash\nnthlayer apply 'oops.yaml\nnthlayer lint ok.yaml\n```"
++        errors: list[tuple[int, str]] = []
++        assert extract_invocations(markdown, errors) == [(3, ["lint", "ok.yaml"])]
++        assert [line for line, _ in errors] == [2]
++
++
++class TestParseCheck:
++    """Controls for parse_error: it must reject what this bead removed."""
++
++    @pytest.mark.parametrize(
++        "argv",
++        [
++            ["check-deploy", "svc.yaml"],  # a documented command that never existed
++            ["apply", "svc.yaml", "--push"],  # ambiguous prefix of --push-grafana/--push-ruler
++            ["slo", "list", "svc.yaml"],  # positional on a subcommand that takes none
++            ["config", "show", "--no-such-flag"],  # undefined flag on a nested subcommand
++        ],
++    )
++    def test_rejects(self, argv: list[str], capsys: pytest.CaptureFixture[str]) -> None:
++        assert parse_error(argv, capsys) is not None
++
++    @pytest.mark.parametrize(
++        "argv",
++        [
++            [PLACEHOLDER_ARG, "--help"],  # `nthlayer <command> --help`
++            ["slo", PLACEHOLDER_ARG, PLACEHOLDER_ARG],  # `nthlayer slo <subcommand> <service.yaml>`
++            ["--version"],
++        ],
++    )
++    def test_accepts_placeholder_choices_and_help(self, argv: list[str], capsys: pytest.CaptureFixture[str]) -> None:
++        assert parse_error(argv, capsys) is None
++
++    def test_placeholder_does_not_excuse_an_unknown_flag(self, capsys: pytest.CaptureFixture[str]) -> None:
++        # `nthlayer <command> --bogus-flag`: argparse stops at the placeholder
++        # choice, so the flag must be checked separately.
++        assert parse_error([PLACEHOLDER_ARG, "--bogus-flag"], capsys) is not None
++        assert parse_error(["slo", PLACEHOLDER_ARG, "--bogus-flag=1"], capsys) is not None
++
++    def test_placeholder_does_not_excuse_a_bad_command(self, capsys: pytest.CaptureFixture[str]) -> None:
++        # The placeholder exemption covers only the choice the placeholder sits in.
++        assert parse_error(["drift", PLACEHOLDER_ARG], capsys) is not None

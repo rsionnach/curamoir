@@ -1,0 +1,5 @@
+PASS 1 (CORRECTNESS) sequential R5 review on bead opensrm-wo62.1, Checkpoint C (nthlayer-generate 3.0.0 onto nthlayer-common's manifest model).
+Read your lens: ~/.claude/skills/rule-of-five-review/correctness-reviewer.md — follow it exactly.
+Read the scope: <claude-tmp>/scratchpad/wo62-gate-C-scope.md
+Focus on src/ (38 files) first; tests second. Look for: consumers reading attributes common's model doesn't have or has with different types/units (percent vs ratio targets; dependency availability ratio in v2 vs percent elsewhere; window strings; slo_type now always set; judgment_type vs name); exception paths (common's ManifestLoadError/OpenSRMParseError/OpenSRMV2ParseError vs old except clauses); generators assuming non-empty slos; contracts.py promised_availability units; migrate's _legacy_to_srm_v1 vs the removed to_dict; validator routing (srm/v1 + v2 → manifest path, LegacyFormatWarning filter scope); judgment recording rules dispatch (judgment_type only) and threshold path.
+Focus: correctness only. Read-only; targeted test runs fine; no subagents. CRITICAL / IMPORTANT / MINOR with file:line, what's wrong, fix; verdict. Under 500 words.

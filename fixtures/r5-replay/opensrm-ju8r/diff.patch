@@ -1,0 +1,707 @@
+diff --git a/src/nthlayer_workers/correlate/summary.py b/src/nthlayer_workers/correlate/summary.py
+index 37539c1..150109e 100644
+--- a/src/nthlayer_workers/correlate/summary.py
++++ b/src/nthlayer_workers/correlate/summary.py
+@@ -151,7 +151,11 @@ def _select_sample_events(events: list[SitRepEvent], max_samples: int = 10) -> l
+ def _record_failure(error: Exception, snapshot_service: str, model: str | None = None) -> None:
+     """Record summary generation failure via logging + metrics."""
+     reason = _classify_failure(error)
+-    resolved_model = model or "default"
++    # No model means the call used nthlayer-common's default; report that
++    # model, so the provider can be derived from it (opensrm-ju8r J4).
++    from nthlayer_common.llm import DEFAULT_MODEL
++
++    resolved_model = model or DEFAULT_MODEL
+     logger.warning(
+         "correlate_summary_failed",
+         reason=reason,
+@@ -165,9 +169,11 @@ def _record_failure(error: Exception, snapshot_service: str, model: str | None =
+         pass  # metrics infra may not be configured
+     try:
+         from nthlayer_common.telemetry import emit_llm_event
++
++        from nthlayer_workers.llm_provider import provider_for_model
+         emit_llm_event(
+             model=resolved_model,
+-            provider="unknown",
++            provider=provider_for_model(resolved_model),
+             caller="correlate.generate_summary",
+             success=False,
+             error=str(error),
+diff --git a/src/nthlayer_workers/llm_provider.py b/src/nthlayer_workers/llm_provider.py
+new file mode 100644
+index 0000000..daa329c
+--- /dev/null
++++ b/src/nthlayer_workers/llm_provider.py
+@@ -0,0 +1,32 @@
++"""The provider an LLM call is reported against (opensrm-ju8r, ruling J4).
++
++OpenSRM Addendum A1 §5 P4 identifies the provider by ``gen_ai.provider.name``.
++Workers knows only the model string it called, so it derives the provider
++from that: an explicit ``provider/`` prefix wins; otherwise only the model
++families whose provider is unambiguous are mapped. Anything else is reported
++as ``"unknown"`` rather than guessed (nthlayer-common's ``_guess_provider``
++defaults to ``openai``, which would be a confident wrong answer here).
++"""
++
++from __future__ import annotations
++
++UNKNOWN_PROVIDER = "unknown"
++
++# Bare-model prefixes whose provider is not in doubt.
++_FAMILY_PREFIXES: tuple[tuple[str, str], ...] = (
++    ("claude", "anthropic"),
++    ("gpt", "openai"),
++    ("o1", "openai"),
++    ("o3", "openai"),
++)
++
++
++def provider_for_model(model: str) -> str:
++    """Return the ``gen_ai.provider.name`` value for *model*."""
++    if "/" in model:
++        prefix = model.split("/", 1)[0]
++        return prefix or UNKNOWN_PROVIDER
++    for prefix, provider in _FAMILY_PREFIXES:
++        if model.startswith(prefix):
++            return provider
++    return UNKNOWN_PROVIDER
+diff --git a/src/nthlayer_workers/measure/pipeline/router.py b/src/nthlayer_workers/measure/pipeline/router.py
+index 07263e1..7d7673b 100644
+--- a/src/nthlayer_workers/measure/pipeline/router.py
++++ b/src/nthlayer_workers/measure/pipeline/router.py
+@@ -14,7 +14,7 @@ from nthlayer_workers.measure.detection.protocol import DegradationDetector
+ from nthlayer_workers.measure.governance.engine import GovernanceEngine
+ from nthlayer_workers.measure.pipeline.evaluator import Evaluator
+ from nthlayer_workers.measure.store.protocol import ScoreStore
+-from nthlayer_workers.measure.telemetry import emit_decision_event
++from nthlayer_workers.measure.telemetry import emit_evaluation_events
+ from nthlayer_workers.measure.tiering.classifier import TierClassifier
+ from nthlayer_workers.measure.trends.tracker import TrendTracker
+ from nthlayer_workers.measure.types import QualityScore
+@@ -82,7 +82,7 @@ class PipelineRouter:
+                         auto_approved=True,
+                     )
+                     await self._store.save_score(auto_score)
+-                    emit_decision_event(auto_score, None)
++                    emit_evaluation_events(auto_score, None)
+                     continue
+ 
+                 # Model routing for non-minimal tiers (or sampled minimal)
+@@ -117,7 +117,7 @@ class PipelineRouter:
+                 )
+                 alerts = self._detector.check(window)
+ 
+-            emit_decision_event(score, alerts)
++            emit_evaluation_events(score, alerts)
+ 
+             if self._governance is not None:
+                 await self._governance.check_agent(output.agent_name)
+diff --git a/src/nthlayer_workers/measure/store/sqlite.py b/src/nthlayer_workers/measure/store/sqlite.py
+index 496c27f..c50486e 100644
+--- a/src/nthlayer_workers/measure/store/sqlite.py
++++ b/src/nthlayer_workers/measure/store/sqlite.py
+@@ -11,7 +11,7 @@ from pathlib import Path
+ 
+ from nthlayer_common.verdicts import VerdictStore as VerdictStoreBase
+ 
+-from nthlayer_workers.measure.telemetry import emit_override_event, emit_state_transition_event
++from nthlayer_workers.measure.telemetry import emit_correction_event, emit_state_transition_event
+ from nthlayer_workers.measure.types import QualityScore
+ 
+ _SCHEMA_PATH = Path(__file__).parent / "schema.sql"
+@@ -155,10 +155,10 @@ class SQLiteScoreStore:
+         verdict_id = None
+         with self._lock:
+             # Verify eval_id exists
+-            exists = self._conn.execute(
+-                "SELECT 1 FROM evaluations WHERE eval_id = ?", (eval_id,)
++            eval_row = self._conn.execute(
++                "SELECT task_id FROM evaluations WHERE eval_id = ?", (eval_id,)
+             ).fetchone()
+-            if not exists:
++            if not eval_row:
+                 raise ValueError(
+                     f"Cannot override non-existent evaluation: {eval_id}"
+                 )
+@@ -183,9 +183,11 @@ class SQLiteScoreStore:
+                         corrector,
+                     ),
+                 )
+-                emit_override_event(
++                emit_correction_event(
+                     eval_id, dim_name, original_score,
+                     corrected_score, corrector,
++                    # The evaluated task is the decision the correction is about.
++                    decision_id=eval_row["task_id"],
+                 )
+             self._conn.commit()
+ 
+diff --git a/src/nthlayer_workers/measure/telemetry.py b/src/nthlayer_workers/measure/telemetry.py
+index 1cdf429..410b385 100644
+--- a/src/nthlayer_workers/measure/telemetry.py
++++ b/src/nthlayer_workers/measure/telemetry.py
+@@ -21,47 +21,94 @@ except ImportError:
+     _HAS_OTEL = False
+ 
+ 
+-def emit_decision_event(score: QualityScore, alerts: list[Alert] | None = None) -> None:
+-    """Record an evaluation decision as a span event."""
++# OpenSRM Addendum A1 (opensrm-ju8r). Measure's scores are grader evaluations,
++# emitted as the upstream grader event (A1 §4.4). The other events here are
++# nthlayer.* implementation events: A1 does not define them, and A1 §4.0 bars
++# gen_ai.* names for anything OpenSRM-defined or our own. The calibration and
++# autonomy events only had their names changed: their attributes stay bare
++# (agent_name, from_level), unlike the namespaced grader attributes.
++GRADER_EVENT = "gen_ai.evaluation.result"
++
++
++def emit_evaluation_events(score: QualityScore, alerts: list[Alert] | None = None) -> None:
++    """Record an evaluation: one grader event per dimension, plus a summary.
++
++    Each dimension score is a ``gen_ai.evaluation.result`` about the evaluated
++    task's decision, with ``nthlayer.evaluator.kind`` ``implementation``
++    (NthLayer's evaluator, vs ``human`` in ``emit_correction_event``). Per-evaluation facts
++    (cost, alerts, dimension count) go on one ``nthlayer.evaluation.completed``
++    event instead, so they are not repeated, and summed, once per dimension.
++
++    An auto-approved output emits the summary only: no evaluator ran, so its
++    configured scores are nobody's opinion and must not reach grader
++    consumers (A1 §3).
++    """
+     if not _HAS_OTEL:
+         return
+     span = trace.get_current_span()
+-    attributes: dict[str, str | float | int | bool] = {
+-        "eval_id": score.eval_id,
+-        "agent_name": score.agent_name,
+-        "task_id": score.task_id,
+-        "confidence": score.confidence,
+-        "evaluator_model": score.evaluator_model,
+-        "dimension_count": len(score.dimensions),
++    # A1 §4.4: nthlayer.decision.id only when the decision is identifiable;
++    # some adapters leave task_id empty.
++    decision_attrs: dict[str, str] = (
++        {"nthlayer.decision.id": score.task_id} if score.task_id else {}
++    )
++    if not score.auto_approved:
++        for dimension, value in score.dimensions.items():
++            span.add_event(
++                GRADER_EVENT,
++                attributes={
++                    **decision_attrs,
++                    "gen_ai.evaluation.name": dimension,
++                    "gen_ai.evaluation.score.value": value,
++                    "nthlayer.evaluator.kind": "implementation",
++                    "gen_ai.agent.name": score.agent_name,
++                    "nthlayer.evaluation.id": score.eval_id,
++                    "nthlayer.evaluator.model": score.evaluator_model,
++                    "nthlayer.evaluator.confidence": score.confidence,
++                },
++            )
++    summary: dict[str, str | float | int | bool] = {
++        **decision_attrs,
++        "nthlayer.evaluation.id": score.eval_id,
++        "gen_ai.agent.name": score.agent_name,
++        "nthlayer.evaluation.dimension_count": len(score.dimensions),
++        "nthlayer.evaluation.auto_approved": score.auto_approved,
+     }
+     if score.cost_usd is not None:
+-        attributes["cost_usd"] = score.cost_usd
++        summary["nthlayer.evaluation.cost_usd"] = score.cost_usd
+     if alerts:
+-        attributes["alert_count"] = len(alerts)
+-    span.add_event("gen_ai.decision.evaluated", attributes=attributes)
++        summary["nthlayer.evaluation.alert_count"] = len(alerts)
++    span.add_event("nthlayer.evaluation.completed", attributes=summary)
+ 
+ 
+-def emit_override_event(
++def emit_correction_event(
+     eval_id: str,
+     dimension: str,
+     original: float,
+     corrected: float,
+     corrector: str,
++    *,
++    decision_id: str | None = None,
+ ) -> None:
+-    """Record a human override as a span event."""
++    """Record a human's corrected dimension score as a human grader evaluation.
++
++    A1 §4.4: a human's verdict on a completion is a grader evaluation with
++    ``nthlayer.evaluator.kind`` ``human``. ``decision_id`` is the evaluated
++    task; it is omitted when unknown or empty.
++    """
+     if not _HAS_OTEL:
+         return
+     span = trace.get_current_span()
+-    span.add_event(
+-        "gen_ai.override.applied",
+-        attributes={
+-            "eval_id": eval_id,
+-            "dimension": dimension,
+-            "original_score": original,
+-            "corrected_score": corrected,
+-            "corrector": corrector,
+-        },
+-    )
++    attributes: dict[str, str | float | int | bool] = {
++        "gen_ai.evaluation.name": dimension,
++        "gen_ai.evaluation.score.value": corrected,
++        "nthlayer.evaluator.kind": "human",
++        "nthlayer.evaluation.id": eval_id,
++        "nthlayer.evaluation.original_score": original,
++        "nthlayer.evaluator.actor": corrector,
++    }
++    if decision_id:
++        attributes["nthlayer.decision.id"] = decision_id
++    span.add_event(GRADER_EVENT, attributes=attributes)
+ 
+ 
+ def emit_calibration_report_event(
+@@ -92,7 +139,7 @@ def emit_calibration_report_event(
+         attributes["recall"] = recall
+     if compliant is not None:
+         attributes["reversal_rate_compliant"] = compliant
+-    span.add_event("gen_ai.calibration.report", attributes=attributes)
++    span.add_event("nthlayer.calibration.report", attributes=attributes)
+ 
+ 
+ def emit_state_transition_event(
+@@ -106,7 +153,7 @@ def emit_state_transition_event(
+         return
+     span = trace.get_current_span()
+     span.add_event(
+-        "gen_ai.agent.state.changed",
++        "nthlayer.autonomy.changed",
+         attributes={
+             "agent_name": agent_name,
+             "from_level": from_level,
+diff --git a/src/nthlayer_workers/respond/agents/base.py b/src/nthlayer_workers/respond/agents/base.py
+index eb2b280..29f4949 100644
+--- a/src/nthlayer_workers/respond/agents/base.py
++++ b/src/nthlayer_workers/respond/agents/base.py
+@@ -16,6 +16,7 @@ from nthlayer_common.telemetry import emit_llm_event
+ from nthlayer_common.verdicts import Verdict
+ from nthlayer_common.verdicts import create as verdict_create
+ 
++from nthlayer_workers.llm_provider import provider_for_model
+ from nthlayer_workers.respond.types import AgentRole, IncidentContext
+ 
+ log = structlog.get_logger(__name__)
+@@ -111,7 +112,7 @@ class AgentBase(ABC):
+         existing ``parse_response`` (which accepts a JSON string and
+         produces a dataclass result) can be reused without rewrite.
+         """
+-        provider = self._model.split("/", 1)[0] if "/" in self._model else "unknown"
++        provider = provider_for_model(self._model)
+         caller = f"respond.{self.role.value}"
+         try:
+             result = await asyncio.wait_for(
+diff --git a/tests/correlate/test_summary.py b/tests/correlate/test_summary.py
+index 858f707..367a96f 100644
+--- a/tests/correlate/test_summary.py
++++ b/tests/correlate/test_summary.py
+@@ -195,3 +195,34 @@ class TestGenerateSummary:
+             [],
+         )
+         assert result is None
++
++
++def test_failure_telemetry_derives_the_provider_from_the_model():
++    """A bare Claude model is reported as anthropic, not "unknown" (opensrm-ju8r J4)."""
++    from unittest.mock import patch
++
++    from nthlayer_workers.correlate.summary import _record_failure
++
++    with patch("nthlayer_common.telemetry.emit_llm_event") as emit:
++        _record_failure(RuntimeError("boom"), "checkout", model="claude-sonnet-4-20250514")
++
++    emit.assert_called_once()
++    assert emit.call_args.kwargs["provider"] == "anthropic"
++
++
++def test_failure_telemetry_without_a_model_reports_the_default_model():
++    """correlate's worker passes no model; the call used common's DEFAULT_MODEL."""
++    from unittest.mock import patch
++
++    from nthlayer_common.llm import DEFAULT_MODEL
++
++    from nthlayer_workers.correlate.summary import _record_failure
++    from nthlayer_workers.llm_provider import provider_for_model
++
++    with patch("nthlayer_common.telemetry.emit_llm_event") as emit:
++        _record_failure(RuntimeError("boom"), "checkout")
++
++    kwargs = emit.call_args.kwargs
++    assert kwargs["model"] == DEFAULT_MODEL
++    assert kwargs["provider"] == provider_for_model(DEFAULT_MODEL)
++    assert kwargs["provider"] != "unknown"
+diff --git a/tests/measure/test_store.py b/tests/measure/test_store.py
+index 1879dd9..a296772 100644
+--- a/tests/measure/test_store.py
++++ b/tests/measure/test_store.py
+@@ -118,3 +118,20 @@ async def test_get_overrides_filtered_by_agent(store):
+ 
+     all_overrides = await store.get_overrides(since)
+     assert len(all_overrides) == 2
++
++
++@pytest.mark.asyncio
++async def test_override_telemetry_names_the_evaluated_task(store):
++    """The human grader event carries the evaluated task as its decision id.
++
++    The store looks the task up from the evaluation (opensrm-ju8r); the
++    corrector does not supply it.
++    """
++    from unittest.mock import patch
++
++    await store.save_score(_make_score(eval_id="e1", task="task-42"))
++    with patch("nthlayer_workers.measure.store.sqlite.emit_correction_event") as emit:
++        await store.save_override("e1", {"correctness": 0.5}, "reviewer")
++
++    emit.assert_called_once()
++    assert emit.call_args.kwargs["decision_id"] == "task-42"
+diff --git a/tests/measure/test_telemetry.py b/tests/measure/test_telemetry.py
+index a4d79f9..6c853a5 100644
+--- a/tests/measure/test_telemetry.py
++++ b/tests/measure/test_telemetry.py
+@@ -1,17 +1,31 @@
+-"""Tests for OTel telemetry instrumentation."""
++"""Tests for OTel telemetry instrumentation.
++
++Event shapes follow OpenSRM Addendum A1 (opensrm-ju8r): measure's scores are
++grader evaluations, emitted as the upstream ``gen_ai.evaluation.result``
++(A1 §4.4); the rest are ``nthlayer.*`` implementation events. No ``gen_ai.``
++form of an OpenSRM-defined event is emitted (A1 §4.0).
++"""
+ 
+ from unittest.mock import MagicMock, patch
+ 
+ from nthlayer_workers.measure.detection.protocol import Alert
+ from nthlayer_workers.measure.types import QualityScore
+ 
++GRADER_EVENT = "gen_ai.evaluation.result"
++RETIRED_EVENT_NAMES = (
++    "gen_ai.decision.evaluated",
++    "gen_ai.override.applied",
++    "gen_ai.calibration.report",
++    "gen_ai.agent.state.changed",
++)
++
+ 
+ def _make_score(**kwargs) -> QualityScore:
+     defaults = dict(
+         eval_id="e1",
+         agent_name="agent-a",
+         task_id="t1",
+-        dimensions={"correctness": 0.9},
++        dimensions={"correctness": 0.9, "safety": 0.7},
+         confidence=0.85,
+         evaluator_model="test-model",
+         cost_usd=0.01,
+@@ -20,64 +34,143 @@ def _make_score(**kwargs) -> QualityScore:
+     return QualityScore(**defaults)
+ 
+ 
+-def test_emit_decision_event_with_otel():
++def _events(emit) -> list[tuple[str, dict]]:
++    """Run *emit* against a mocked current span; return (name, attributes) pairs,
++    and assert no retired event name was emitted."""
+     mock_span = MagicMock()
+     with patch("nthlayer_workers.measure.telemetry._HAS_OTEL", True), \
+          patch("nthlayer_workers.measure.telemetry.trace") as mock_trace:
+         mock_trace.get_current_span.return_value = mock_span
++        emit()
++    events = [(c.args[0], c.kwargs["attributes"]) for c in mock_span.add_event.call_args_list]
++    assert not [name for name, _ in events if name in RETIRED_EVENT_NAMES]
++    return events
++
++
++def test_evaluation_is_one_grader_event_per_dimension():
++    from nthlayer_workers.measure.telemetry import emit_evaluation_events
++
++    events = _events(lambda: emit_evaluation_events(_make_score()))
++
++    graded = {a["gen_ai.evaluation.name"]: a for n, a in events if n == GRADER_EVENT}
++    assert set(graded) == {"correctness", "safety"}
++    assert graded["correctness"]["gen_ai.evaluation.score.value"] == 0.9
++    assert graded["safety"]["gen_ai.evaluation.score.value"] == 0.7
++    for attrs in graded.values():
++        # A1 §4.4: the evaluator kind, and the decision the evaluation is about.
++        assert attrs["nthlayer.evaluator.kind"] == "implementation"
++        assert attrs["nthlayer.decision.id"] == "t1"
++        assert attrs["gen_ai.agent.name"] == "agent-a"
++        assert attrs["nthlayer.evaluation.id"] == "e1"
++        assert attrs["nthlayer.evaluator.model"] == "test-model"
++        assert attrs["nthlayer.evaluator.confidence"] == 0.85
++        # Per-evaluation facts stay off per-dimension events: summing cost
++        # over them would count it once per dimension.
++        assert "nthlayer.evaluation.cost_usd" not in attrs
++
++
++def test_evaluation_summary_carries_per_evaluation_facts():
++    from nthlayer_workers.measure.telemetry import emit_evaluation_events
++
++    alerts = [
++        Alert(agent_name="agent-a", metric_name="reversal_rate",
++              current_value=0.5, threshold=0.3, message="too high")
++    ]
++    events = _events(lambda: emit_evaluation_events(_make_score(), alerts))
++
++    (summary,) = [a for n, a in events if n == "nthlayer.evaluation.completed"]
++    assert summary["nthlayer.evaluation.id"] == "e1"
++    assert summary["nthlayer.decision.id"] == "t1"
++    assert summary["nthlayer.evaluation.dimension_count"] == 2
++    assert summary["nthlayer.evaluation.cost_usd"] == 0.01
++    assert summary["nthlayer.evaluation.alert_count"] == 1
++    assert summary["nthlayer.evaluation.auto_approved"] is False
++
++
++def test_auto_approved_output_is_not_a_grader_evaluation():
++    """No evaluator ran, so the configured scores are not anyone's opinion."""
++    from nthlayer_workers.measure.telemetry import emit_evaluation_events
++
++    score = _make_score(auto_approved=True, evaluator_model="auto-approved", cost_usd=None)
++    events = _events(lambda: emit_evaluation_events(score))
++
++    assert [n for n, _ in events] == ["nthlayer.evaluation.completed"]
++    summary = events[0][1]
++    assert summary["nthlayer.evaluation.auto_approved"] is True
++    assert "nthlayer.evaluation.cost_usd" not in summary
++    assert "nthlayer.evaluation.alert_count" not in summary
++
++
++def test_empty_task_id_is_not_emitted_as_a_decision_id():
++    """A1 §4.4: omit nthlayer.decision.id when the decision is not identifiable."""
++    from nthlayer_workers.measure.telemetry import emit_correction_event, emit_evaluation_events
+ 
+-        from nthlayer_workers.measure.telemetry import emit_decision_event
+-        score = _make_score()
+-        alerts = [
+-            Alert(agent_name="agent-a", metric_name="reversal_rate",
+-                  current_value=0.5, threshold=0.3, message="too high")
+-        ]
+-        emit_decision_event(score, alerts)
++    events = _events(lambda: emit_evaluation_events(_make_score(task_id="")))
++    events += _events(lambda: emit_correction_event("e1", "correctness", 0.9, 0.5, "r", decision_id=""))
+ 
+-        mock_span.add_event.assert_called_once()
+-        call_args = mock_span.add_event.call_args
+-        assert call_args[0][0] == "gen_ai.decision.evaluated"
+-        attrs = call_args[1]["attributes"]
+-        assert attrs["eval_id"] == "e1"
+-        assert attrs["alert_count"] == 1
++    assert events
++    assert not [n for n, a in events if "nthlayer.decision.id" in a]
++
++
++def test_evaluation_with_no_dimensions_emits_only_the_summary():
++    from nthlayer_workers.measure.telemetry import emit_evaluation_events
++
++    events = _events(lambda: emit_evaluation_events(_make_score(dimensions={})))
++
++    assert [n for n, _ in events] == ["nthlayer.evaluation.completed"]
++    assert events[0][1]["nthlayer.evaluation.dimension_count"] == 0
+ 
+ 
+ def test_noop_without_otel():
+     with patch("nthlayer_workers.measure.telemetry._HAS_OTEL", False):
+-        from nthlayer_workers.measure.telemetry import emit_decision_event
++        from nthlayer_workers.measure.telemetry import emit_evaluation_events
+         # Should not raise even with no OTel
+-        emit_decision_event(_make_score())
++        emit_evaluation_events(_make_score())
+ 
+ 
+-def test_emit_override_event():
+-    mock_span = MagicMock()
+-    with patch("nthlayer_workers.measure.telemetry._HAS_OTEL", True), \
+-         patch("nthlayer_workers.measure.telemetry.trace") as mock_trace:
+-        mock_trace.get_current_span.return_value = mock_span
++def test_human_correction_is_a_human_grader_evaluation():
++    """A1 §4.4: a human's verdict on a completion is a grader evaluation."""
++    from nthlayer_workers.measure.telemetry import emit_correction_event
+ 
+-        from nthlayer_workers.measure.telemetry import emit_override_event
+-        emit_override_event("e1", "correctness", 0.9, 0.5, "reviewer")
++    events = _events(lambda: emit_correction_event(
++        "e1", "correctness", 0.9, 0.5, "reviewer", decision_id="t1",
++    ))
+ 
+-        mock_span.add_event.assert_called_once()
+-        call_args = mock_span.add_event.call_args
+-        assert call_args[0][0] == "gen_ai.override.applied"
+-        attrs = call_args[1]["attributes"]
+-        assert attrs["eval_id"] == "e1"
+-        assert attrs["corrected_score"] == 0.5
++    (attrs,) = [a for n, a in events if n == GRADER_EVENT]
++    assert len(events) == 1
++    assert attrs["gen_ai.evaluation.name"] == "correctness"
++    assert attrs["gen_ai.evaluation.score.value"] == 0.5
++    assert attrs["nthlayer.evaluator.kind"] == "human"
++    assert attrs["nthlayer.decision.id"] == "t1"
++    assert attrs["nthlayer.evaluation.id"] == "e1"
++    assert attrs["nthlayer.evaluation.original_score"] == 0.9
++    assert attrs["nthlayer.evaluator.actor"] == "reviewer"
+ 
+ 
+-def test_emit_state_transition():
+-    mock_span = MagicMock()
+-    with patch("nthlayer_workers.measure.telemetry._HAS_OTEL", True), \
+-         patch("nthlayer_workers.measure.telemetry.trace") as mock_trace:
+-        mock_trace.get_current_span.return_value = mock_span
++def test_calibration_report_is_an_implementation_event():
++    from nthlayer_workers.measure.telemetry import emit_calibration_report_event
++
++    events = _events(lambda: emit_calibration_report_event(
++        agent_name="agent-a", window_days=30, reversal_rate=0.1,
++        false_accept_rate=None, precision=0.8, recall=None, mae=0.05,
++    ))
++
++    assert [n for n, _ in events] == ["nthlayer.calibration.report"]
++    attrs = events[0][1]
++    assert attrs["agent_name"] == "agent-a"
++    assert attrs["reversal_rate"] == 0.1
++    assert attrs["precision"] == 0.8
++    assert "recall" not in attrs
++
++
++def test_autonomy_change_is_an_implementation_event():
++    from nthlayer_workers.measure.telemetry import emit_state_transition_event
+ 
+-        from nthlayer_workers.measure.telemetry import emit_state_transition_event
+-        emit_state_transition_event("agent-a", "full", "supervised", "governance")
++    events = _events(lambda: emit_state_transition_event(
++        "agent-a", "full", "supervised", "governance",
++    ))
+ 
+-        mock_span.add_event.assert_called_once()
+-        call_args = mock_span.add_event.call_args
+-        assert call_args[0][0] == "gen_ai.agent.state.changed"
+-        attrs = call_args[1]["attributes"]
+-        assert attrs["from_level"] == "full"
+-        assert attrs["to_level"] == "supervised"
++    assert [n for n, _ in events] == ["nthlayer.autonomy.changed"]
++    attrs = events[0][1]
++    assert attrs["from_level"] == "full"
++    assert attrs["to_level"] == "supervised"
+diff --git a/tests/measure/test_tiering_integration.py b/tests/measure/test_tiering_integration.py
+index 0526551..9b1fd6a 100644
+--- a/tests/measure/test_tiering_integration.py
++++ b/tests/measure/test_tiering_integration.py
+@@ -142,3 +142,33 @@ async def test_router_without_classifier_unchanged(
+     await router.run()
+ 
+     mock_evaluator.evaluate.assert_called_once()
++
++
++@pytest.mark.asyncio
++@pytest.mark.parametrize("tier", ["minimal", "standard"], ids=["auto-approved", "evaluated"])
++async def test_router_emits_evaluation_telemetry_for_each_saved_score(
++    mock_evaluator, mock_store, mock_tracker, tier
++):
++    """Both router paths emit the A1 evaluation telemetry for the score they save (opensrm-ju8r)."""
++    from unittest.mock import patch
++
++    config = TieringConfig(
++        enabled=True, default_tier=tier, sampling_rate=0.0,
++        models={"standard": "anthropic/claude-haiku-4-20250414"},
++    )
++    classifier = TierClassifier(config, manifests={})
++
++    async def single_output():
++        yield _make_output()
++
++    adapter = AsyncMock()
++    adapter.receive = single_output
++    router = PipelineRouter(
++        adapter=adapter, evaluator=mock_evaluator, store=mock_store,
++        tracker=mock_tracker, dimensions=["correctness"], classifier=classifier,
++    )
++    with patch("nthlayer_workers.measure.pipeline.router.emit_evaluation_events") as emit:
++        await router.run()
++
++    emit.assert_called_once()
++    assert emit.call_args.args[0] is mock_store.save_score.call_args.args[0]
+diff --git a/tests/respond/test_agent_base.py b/tests/respond/test_agent_base.py
+index e0f76c2..b818adb 100644
+--- a/tests/respond/test_agent_base.py
++++ b/tests/respond/test_agent_base.py
+@@ -459,3 +459,31 @@ async def test_structured_path_emits_otel_event_on_failure(verdict_store):
+     assert kwargs["caller"] == "respond.triage"
+     # Token fields are absent on failure (no usage data available).
+     assert "input_tokens" not in kwargs or kwargs["input_tokens"] is None
++
++
++async def test_structured_path_reports_a_bare_model_s_provider(verdict_store):
++    """A bare Claude model is reported as anthropic, not "unknown" (opensrm-ju8r J4)."""
++    from nthlayer_common.llm_structured import StructuredCallResult, StructuredCallUsage
++
++    from nthlayer_workers.respond.agents.response_models import TriageResponse
++
++    canned = TriageResponse(
++        severity=2, blast_radius=[], affected_slos=[],
++        assigned_team=None, reasoning="", confidence=0.5,
++    )
++    agent = StructuredStubAgent(
++        model="claude-sonnet-4-20250514", max_tokens=100,
++        verdict_store=verdict_store, config={},
++    )
++
++    with patch(
++        "nthlayer_workers.respond.agents.base.structured_call_with_usage",
++        return_value=StructuredCallResult(
++            data=canned, usage=StructuredCallUsage(input_tokens=1, output_tokens=1),
++        ),
++    ), patch(
++        "nthlayer_workers.respond.agents.base.emit_llm_event",
++    ) as mock_emit:
++        await agent._call_model_structured("s", "u", TriageResponse)
++
++    assert mock_emit.call_args.kwargs["provider"] == "anthropic"
+diff --git a/tests/test_llm_provider.py b/tests/test_llm_provider.py
+new file mode 100644
+index 0000000..fed0b0a
+--- /dev/null
++++ b/tests/test_llm_provider.py
+@@ -0,0 +1,38 @@
++"""provider_for_model: the gen_ai.provider.name workers reports (opensrm-ju8r J4).
++
++OpenSRM Addendum A1 §5 P4 names the provider by gen_ai.provider.name, whose
++upstream well-known values include "anthropic" and "openai". Workers used to
++send the sentinel "unknown" whenever a model string carried no
++"provider/" prefix, so a bare Claude model was reported as an unknown provider.
++"""
++
++import pytest
++
++from nthlayer_workers.llm_provider import provider_for_model
++
++
++@pytest.mark.parametrize(
++    ("model", "provider"),
++    [
++        # An explicit provider/ prefix is authoritative, whatever follows.
++        ("anthropic/claude-sonnet-4-20250514", "anthropic"),
++        ("openai/gpt-4o", "openai"),
++        ("ollama/claude-lookalike", "ollama"),
++        # An empty prefix names nothing.
++        ("/claude-sonnet", "unknown"),
++        # Bare model names from the two families whose provider is unambiguous.
++        ("claude-sonnet-4-20250514", "anthropic"),
++        ("gpt-4o", "openai"),
++        ("o1-mini", "openai"),
++        ("o3", "openai"),
++        # Nothing to go on: say so rather than guess.
++        # Not normalised: unrecognised spellings are unknown, not guessed.
++        ("Claude-sonnet", "unknown"),
++        ("anthropic.claude-3-sonnet", "unknown"),
++        ("llama3", "unknown"),
++        ("default", "unknown"),
++        ("", "unknown"),
++    ],
++)
++def test_provider_for_model(model: str, provider: str) -> None:
++    assert provider_for_model(model) == provider

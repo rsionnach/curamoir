@@ -1,0 +1,272 @@
+{
+ "schema_version": 1,
+ "entry": "opensrm-wo62-2",
+ "fidelity": "recorded",
+ "lens_order": [
+  "correctness",
+  "clarity",
+  "edge-cases",
+  "provenance",
+  "excellence"
+ ],
+ "iterations": {
+  "correctness": 2,
+  "clarity": 2,
+  "edge-cases": 2,
+  "provenance": 3
+ },
+ "rounds": [
+  {
+   "lens": "correctness",
+   "iteration": 1,
+   "recorded_iteration": 1,
+   "counts": {
+    "critical": 0,
+    "important": 0,
+    "minor": 2
+   },
+   "findings": null
+  },
+  {
+   "lens": "correctness",
+   "iteration": 2,
+   "recorded_iteration": 2,
+   "counts": {
+    "critical": 0,
+    "important": 0,
+    "minor": 0
+   },
+   "findings": null
+  },
+  {
+   "lens": "clarity",
+   "iteration": 1,
+   "recorded_iteration": 1,
+   "counts": {
+    "critical": 0,
+    "important": 3,
+    "minor": 3
+   },
+   "findings": [
+    {
+     "lens": "clarity",
+     "severity": "IMPORTANT",
+     "path": "src/nthlayer_generate/recording_rules/manifest_builder.py",
+     "start_line": 96,
+     "end_line": 96,
+     "claim": "the comment reads \"Window-correct threshold quantiles: 30-day range queries\u2026\". The group holds `:pXX_within_bound_30d` fraction rules, not quantiles.",
+     "evidence": null,
+     "fix": null,
+     "fingerprint": "e8c3e9380f9abc52",
+     "verification_level": "asserted",
+     "resolves": null,
+     "regression": false,
+     "status": null,
+     "derived_from": "reviewer_transcript",
+     "extracted_by": "model",
+     "handback_sha256": "6911d855a71deb24234d8096183c10a830e97258c308e02e03cad3fb804fd533",
+     "fix_commit": "84ad33d9505e4d00384c37aa84b2fc12f1b69e18",
+     "reported_path": "src/nthlayer_generate/recording_rules/manifest_builder.py",
+     "path_in_tree": true
+    },
+    {
+     "lens": "clarity",
+     "severity": "IMPORTANT",
+     "path": "src/nthlayer_generate/recording_rules/manifest_builder.py",
+     "start_line": 401,
+     "end_line": 401,
+     "claim": "the docstring of `_build_judgment_threshold_rules` reads \"The 30-day quantiles are built separately, by `_build_judgment_threshold_window_rules`\".",
+     "evidence": null,
+     "fix": null,
+     "fingerprint": "eb3dce84eab970af",
+     "verification_level": "asserted",
+     "resolves": null,
+     "regression": false,
+     "status": null,
+     "derived_from": "reviewer_transcript",
+     "extracted_by": "model",
+     "handback_sha256": "6911d855a71deb24234d8096183c10a830e97258c308e02e03cad3fb804fd533",
+     "fix_commit": "84ad33d9505e4d00384c37aa84b2fc12f1b69e18",
+     "reported_path": "src/nthlayer_generate/recording_rules/manifest_builder.py",
+     "path_in_tree": true
+    },
+    {
+     "lens": "clarity",
+     "severity": "IMPORTANT",
+     "path": "tests/test_recording_rules_thresholds.py",
+     "start_line": 3,
+     "end_line": 3,
+     "claim": "the module docstring reads \"the window-correct feedback-latency quantiles (`:p50_within_bound_30d` / \u2026)\". It contradicts the test docstring at line 141 (\"The fraction of arrivals within the bound, not a quantile\").",
+     "evidence": null,
+     "fix": null,
+     "fingerprint": "731f4d864b4fb48d",
+     "verification_level": "asserted",
+     "resolves": null,
+     "regression": false,
+     "status": null,
+     "derived_from": "reviewer_transcript",
+     "extracted_by": "model",
+     "handback_sha256": "6911d855a71deb24234d8096183c10a830e97258c308e02e03cad3fb804fd533",
+     "fix_commit": "84ad33d9505e4d00384c37aa84b2fc12f1b69e18",
+     "reported_path": "tests/test_recording_rules_thresholds.py",
+     "path_in_tree": true
+    }
+   ]
+  },
+  {
+   "lens": "clarity",
+   "iteration": 2,
+   "recorded_iteration": 2,
+   "counts": {
+    "critical": 0,
+    "important": 0,
+    "minor": 3
+   },
+   "findings": null
+  },
+  {
+   "lens": "edge_cases",
+   "iteration": 1,
+   "recorded_iteration": 1,
+   "counts": {
+    "critical": 0,
+    "important": 1,
+    "minor": 2
+   },
+   "findings": [
+    {
+     "lens": "edge_cases",
+     "severity": "IMPORTANT",
+     "path": "src/nthlayer_generate/recording_rules/manifest_builder.py",
+     "start_line": 733,
+     "end_line": 733,
+     "claim": "Duration bounds of 1,000,000 s or more (about 11.6 days) can never match a real bucket.",
+     "evidence": null,
+     "fix": null,
+     "fingerprint": "258105813ee87bed",
+     "verification_level": "asserted",
+     "resolves": null,
+     "regression": false,
+     "status": null,
+     "derived_from": "reviewer_transcript",
+     "extracted_by": "model",
+     "handback_sha256": "a70fea1b7ae3d97ee57f2e7c6a8d093b93566556bc64e47fa6a3cf48fa31f088",
+     "fix_commit": "e8c274ca6c9af2f2062f61a7f1c42b1ab3bc37eb",
+     "reported_path": "src/nthlayer_generate/recording_rules/manifest_builder.py",
+     "path_in_tree": true
+    }
+   ]
+  },
+  {
+   "lens": "edge_cases",
+   "iteration": 2,
+   "recorded_iteration": 2,
+   "counts": {
+    "critical": 0,
+    "important": 0,
+    "minor": 1
+   },
+   "findings": null
+  },
+  {
+   "lens": "provenance",
+   "iteration": 1,
+   "recorded_iteration": 1,
+   "counts": {
+    "critical": 1,
+    "important": 1,
+    "minor": 0
+   },
+   "findings": [
+    {
+     "lens": "provenance",
+     "severity": "CRITICAL",
+     "path": "src/nthlayer_generate/generators/alerts.py",
+     "start_line": 134,
+     "end_line": 134,
+     "claim": "I replaced if threshold_alerts and not deps: with if False: and every test stayed GREEN (targeted and golden)",
+     "evidence": null,
+     "fix": null,
+     "fingerprint": "cb834be9a08f5eb4",
+     "verification_level": "asserted",
+     "resolves": null,
+     "regression": false,
+     "status": null,
+     "derived_from": "reviewer_transcript",
+     "extracted_by": "model",
+     "handback_sha256": "d3e8a69aa95ae29ce699c1e7920a1c69223ece080d8691bd6fd75c6f14e3c5f5",
+     "fix_commit": "5a032cf465006cdfaba04027045c95a3637d0f99",
+     "reported_path": "src/nthlayer_generate/generators/alerts.py",
+     "path_in_tree": true
+    },
+    {
+     "lens": "provenance",
+     "severity": "IMPORTANT",
+     "path": null,
+     "start_line": null,
+     "end_line": null,
+     "claim": "Two behaviours go red only in the goldens, which are regenerated from current output",
+     "evidence": null,
+     "fix": null,
+     "fingerprint": "9a598257204680fe",
+     "verification_level": "asserted",
+     "resolves": null,
+     "regression": false,
+     "status": null,
+     "derived_from": "reviewer_transcript",
+     "extracted_by": "model",
+     "handback_sha256": "d3e8a69aa95ae29ce699c1e7920a1c69223ece080d8691bd6fd75c6f14e3c5f5",
+     "fix_commit": "5a032cf465006cdfaba04027045c95a3637d0f99",
+     "reported_path": null,
+     "path_in_tree": false
+    }
+   ]
+  },
+  {
+   "lens": "provenance",
+   "iteration": 2,
+   "recorded_iteration": 2,
+   "counts": {
+    "critical": 1,
+    "important": 0,
+    "minor": 2
+   },
+   "findings": [
+    {
+     "lens": "provenance",
+     "severity": "CRITICAL",
+     "path": "src/nthlayer_generate/generators/alerts.py",
+     "start_line": 138,
+     "end_line": 160,
+     "claim": "when a manifest declares both, the dependency alerts can be dropped from the result and the written file with no test or golden going red",
+     "evidence": null,
+     "fix": null,
+     "fingerprint": "403cced412a15b9e",
+     "verification_level": "asserted",
+     "resolves": null,
+     "regression": false,
+     "status": null,
+     "derived_from": "reviewer_transcript",
+     "extracted_by": "model",
+     "handback_sha256": "dd5f0550ff11e0d691ebbeaabf075c92d2ab93507fc75c458575cd9a1d5e9d53",
+     "fix_commit": "c0dfdfc9c80849a77fbd1dae5a6f95508e377ffe",
+     "reported_path": "src/nthlayer_generate/generators/alerts.py",
+     "path_in_tree": true
+    }
+   ]
+  },
+  {
+   "lens": "provenance",
+   "iteration": 3,
+   "recorded_iteration": 3,
+   "counts": {
+    "critical": 0,
+    "important": 0,
+    "minor": 4
+   },
+   "findings": null
+  }
+ ],
+ "cross_repo_findings": [],
+ "escaped": []
+}

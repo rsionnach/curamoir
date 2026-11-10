@@ -1,0 +1,39 @@
+diff --git a/pyproject.toml b/pyproject.toml
+index 612a07b..62a5f52 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -14,7 +14,7 @@ dependencies = [
+     # tests/test_dependency_declarations.py and
+     # tests/smoke/test_resolved_dependencies.py; see CLAUDE.md hard rule 16
+     # for why both are needed [opensrm-p3bm].
+-    "nthlayer-common>=2.1.2,<3.0.0",
++    "nthlayer-common>=3.0.0,<4.0.0",
+     "starlette>=0.40",
+     "uvicorn>=0.30",
+     "opentelemetry-api>=1.28",
+diff --git a/tests/smoke/test_resolved_dependencies.py b/tests/smoke/test_resolved_dependencies.py
+index f295724..3849292 100644
+--- a/tests/smoke/test_resolved_dependencies.py
++++ b/tests/smoke/test_resolved_dependencies.py
+@@ -43,7 +43,7 @@ FRONT_DOOR = "nthlayer"
+ # fails if a sibling appears in the metadata without an entry here — so adding a
+ # dependency forces someone to state its expected major rather than quietly
+ # leaving it unguarded.
+-EXPECTED_MAJORS = {"nthlayer-common": 2}
++EXPECTED_MAJORS = {"nthlayer-common": 3}
+ 
+ 
+ def _sibling_requirements() -> dict[str, Requirement]:
+diff --git a/uv.lock b/uv.lock
+index 2c6a381..39f4bb5 100644
+--- a/uv.lock
++++ b/uv.lock
+@@ -913,7 +913,7 @@ wheels = [
+ 
+ [[package]]
+ name = "nthlayer-common"
+-version = "2.1.2"
++version = "3.0.0"
+ source = { editable = "../nthlayer-common" }
+ dependencies = [
+     { name = "anthropic" },

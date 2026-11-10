@@ -1,0 +1,1538 @@
+diff --git a/pyproject.toml b/pyproject.toml
+index 50908f9..e0b089e 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -24,6 +24,7 @@ dependencies = [
+     # tests; declared as a top-level production dep.
+     "python-multipart>=0.0.18",
+     "ruamel.yaml>=0.18",
++    "textual>=1.0",
+ ]
+ 
+ [project.scripts]
+diff --git a/src/nthlayer_workers/learn/_interactive.py b/src/nthlayer_workers/learn/_interactive.py
+new file mode 100644
+index 0000000..58a10ed
+--- /dev/null
++++ b/src/nthlayer_workers/learn/_interactive.py
+@@ -0,0 +1,162 @@
++"""Pure-logic walkthrough state machine for the interactive TUI (jmy.22).
++
++No Textual import here. The Textual screen in _interactive_app.py is a
++thin wrapper over these primitives so the state-transition logic is
++testable without Textual fixtures.
++"""
++from __future__ import annotations
++
++import dataclasses
++from copy import deepcopy
++from dataclasses import dataclass, field
++from typing import Any
++
++import yaml
++
++from nthlayer_workers.learn.recommendations import (
++    Recommendation,
++    SpecRecommendation,
++)
++
++
++@dataclass
++class WalkthroughState:
++    """In-flight state of the interactive walkthrough.
++
++    Tracks which recs the operator has decided on, any inline
++    modifications to proposed_value, and the cursor position. The plan
++    itself is held read-only (deep-copied at construction) so modify
++    operations don't mutate the source.
++    """
++    plan: SpecRecommendation
++    index: int = 0
++    accepted_ids: set[str] = field(default_factory=set)
++    rejected_ids: set[str] = field(default_factory=set)
++    modified_values: dict[str, Any] = field(default_factory=dict)
++    last_error: str | None = None  # last modify parse error message; cleared on next action
++
++    @classmethod
++    def for_plan(cls, plan: SpecRecommendation) -> "WalkthroughState":
++        return cls(plan=deepcopy(plan))
++
++    @property
++    def total(self) -> int:
++        return len(self.plan.recommendations)
++
++    @property
++    def current(self) -> Recommendation | None:
++        if not self.plan.recommendations or self.index < 0 or self.index >= self.total:
++            return None
++        return self.plan.recommendations[self.index]
++
++    @property
++    def progress(self) -> str:
++        if self.total == 0:
++            return "[empty plan]"
++        return f"[{self.index + 1} of {self.total}]"
++
++
++def accept(state: WalkthroughState) -> WalkthroughState:
++    """Mark current rec accepted; advance to next."""
++    rec = state.current
++    if rec is None:
++        return state
++    state.accepted_ids.add(rec.id)
++    state.rejected_ids.discard(rec.id)
++    state.last_error = None
++    return _advance(state)
++
++
++def reject(state: WalkthroughState) -> WalkthroughState:
++    """Mark current rec rejected; advance to next.
++
++    Also drops any prior modification of this rec — `modified_values`
++    tracks state that only matters for accepted recs. Keeping a stale
++    entry would resurrect the modification if a future change iterated
++    `modified_values` directly (today `finalize` gates on `accepted_ids`
++    so the leak is invisible, but the invariant is worth keeping clean).
++    """
++    rec = state.current
++    if rec is None:
++        return state
++    state.rejected_ids.add(rec.id)
++    state.accepted_ids.discard(rec.id)
++    state.modified_values.pop(rec.id, None)
++    state.last_error = None
++    return _advance(state)
++
++
++def modify(state: WalkthroughState, new_value_yaml: str) -> WalkthroughState:
++    """Parse new_value_yaml; if valid, store modification + auto-accept the rec.
++
++    Modify implies accept (operator wouldn't edit a rec they were going to
++    reject). On parse failure, state is unchanged except for last_error
++    which the screen renders.
++
++    Empty or whitespace-only input is rejected: ``yaml.safe_load("")``
++    legally returns ``None``, but silently overwriting proposed_value
++    with None when the operator pressed Enter accidentally is a footgun
++    (opensrm-jmy.22 P3 R5). Treat None and bare strings as a parse error.
++    """
++    rec = state.current
++    if rec is None:
++        return state
++    if not new_value_yaml or not new_value_yaml.strip():
++        state.last_error = (
++            "modify requires a non-empty value; press Esc to cancel"
++        )
++        return state
++    try:
++        parsed = yaml.safe_load(new_value_yaml)
++    except yaml.YAMLError as exc:
++        state.last_error = f"YAML parse error: {exc}"
++        return state
++    if parsed is None:
++        state.last_error = (
++            "modify requires a non-null value; press Esc to cancel"
++        )
++        return state
++    state.modified_values[rec.id] = parsed
++    state.accepted_ids.add(rec.id)
++    state.rejected_ids.discard(rec.id)
++    state.last_error = None
++    return _advance(state)
++
++
++def next_rec(state: WalkthroughState) -> WalkthroughState:
++    state.last_error = None
++    return _advance(state)
++
++
++def prev_rec(state: WalkthroughState) -> WalkthroughState:
++    state.last_error = None
++    if state.index > 0:
++        state.index -= 1
++    return state
++
++
++def _advance(state: WalkthroughState) -> WalkthroughState:
++    """Bump index by one, clamping at total (final position == done)."""
++    if state.index < state.total:
++        state.index += 1
++    return state
++
++
++def finalize(state: WalkthroughState) -> SpecRecommendation:
++    """Return a new SpecRecommendation with only accepted recs and any
++    modifications applied. Original plan is untouched.
++
++    Recommendations preserve original plan order (NOT acceptance order).
++    """
++    new_recs = []
++    for rec in state.plan.recommendations:
++        if rec.id not in state.accepted_ids:
++            continue
++        if rec.id in state.modified_values:
++            new_rec = dataclasses.replace(
++                rec, proposed_value=state.modified_values[rec.id],
++            )
++        else:
++            new_rec = rec
++        new_recs.append(new_rec)
++    return dataclasses.replace(state.plan, recommendations=new_recs)
+diff --git a/src/nthlayer_workers/learn/_interactive_app.py b/src/nthlayer_workers/learn/_interactive_app.py
+new file mode 100644
+index 0000000..d2bf65a
+--- /dev/null
++++ b/src/nthlayer_workers/learn/_interactive_app.py
+@@ -0,0 +1,230 @@
++"""Textual carousel TUI for interactively walking SpecRecommendation
++items (jmy.22).
++
++Thin wrapper: state lives in _interactive.WalkthroughState; every key
++binding maps to a pure transition function from that module. Run via
++``run_walkthrough(plan) -> SpecRecommendation`` which constructs the
++app, runs it, and returns the finalized plan.
++"""
++from __future__ import annotations
++
++import dataclasses
++from pathlib import Path
++
++import structlog
++import yaml
++from textual.app import App, ComposeResult
++from textual.binding import Binding
++from textual.widgets import Input, Static
++
++from nthlayer_workers.learn._apply import resolve_manifest_path
++from nthlayer_workers.learn._interactive import (
++    WalkthroughState,
++    accept,
++    finalize,
++    modify,
++    next_rec,
++    prev_rec,
++    reject,
++)
++from nthlayer_workers.learn._preview import build_preview
++from nthlayer_workers.learn.recommendations import SpecRecommendation
++
++log = structlog.get_logger(__name__)
++
++
++class InteractiveWalkthroughApp(App[SpecRecommendation]):
++    """Textual app for walking a SpecRecommendation plan rec-by-rec."""
++
++    BINDINGS = [
++        Binding("a", "accept", "Accept"),
++        Binding("r", "reject", "Reject"),
++        Binding("m", "modify", "Modify"),
++        Binding("n", "next", "Next"),
++        Binding("p", "prev", "Prev"),
++        Binding("q", "quit", "Quit & apply"),
++    ]
++
++    CSS = """
++    #header { dock: top; height: 3; }
++    #diff   { padding: 1 2; }
++    #footer { dock: bottom; height: 1; }
++    #error  { dock: bottom; height: 1; color: red; }
++    Input   { dock: bottom; height: 3; }
++    """
++
++    def __init__(
++        self,
++        plan: SpecRecommendation,
++        specs_dir: str | None = None,
++    ) -> None:
++        super().__init__()
++        self._state = WalkthroughState.for_plan(plan)
++        self._specs_dir = specs_dir  # for build_preview's manifest lookup
++        self._modify_mode = False
++
++    def compose(self) -> ComposeResult:
++        yield Static(id="header", markup=False)
++        yield Static(id="diff", markup=False)
++        yield Static(id="error", markup=False)
++        # Modify input added/removed dynamically; placeholder via mount/remove
++
++    def on_mount(self) -> None:
++        self._refresh()
++
++    def _refresh(self) -> None:
++        rec = self._state.current
++        header = self.query_one("#header", Static)
++        diff = self.query_one("#diff", Static)
++        error = self.query_one("#error", Static)
++        if rec is None:
++            header.update(f"Done {self._state.progress}")
++            diff.update(self._summary())
++        else:
++            header.update(
++                f"{self._state.progress}  {rec.id}  type={rec.type}  "
++                f"service={rec.service}"
++            )
++            diff.update(self._render_diff(rec))
++        error.update(self._state.last_error or "")
++
++    def _render_diff(self, rec) -> str:
++        """Use build_preview when specs_dir is available; otherwise
++        render a minimal current→proposed block from rec fields alone."""
++        if self._specs_dir:
++            try:
++                m_path = resolve_manifest_path(rec.service, Path(self._specs_dir))
++                if m_path:
++                    preview = build_preview(
++                        manifest_path=str(m_path),
++                        rec=rec,
++                        manifest_current_value=rec.current_value,
++                    )
++                    if preview:
++                        return f"{preview}\nRationale: {rec.rationale}"
++            except Exception as exc:
++                # Preview failed (manifest unreadable, path resolution edge
++                # case, etc.) — fall through to the simple block. Log so
++                # operators investigating a missing rich diff have a trace.
++                log.warning(
++                    "interactive_preview_failed",
++                    rec_id=rec.id,
++                    service=rec.service,
++                    error=str(exc),
++                )
++        # Fallback: simple current → proposed block. When rec.field is
++        # None (legitimate for placeholder recs like add_deploy_gate with
++        # no breached SLO), key the YAML block by rec.type so the operator
++        # still sees the proposed value rather than an empty diff
++        # (opensrm-jmy.22 P1 R5).
++        key = rec.field if rec.field else rec.type
++        cur = (
++            yaml.safe_dump({key: rec.current_value}, sort_keys=False)
++            if rec.current_value is not None
++            else ""
++        )
++        prop = yaml.safe_dump({key: rec.proposed_value}, sort_keys=False)
++        return (
++            f"--- current ---\n{cur}\n"
++            f"+++ proposed +++\n{prop}\n\n"
++            f"Rationale: {rec.rationale}"
++        )
++
++    def _summary(self) -> str:
++        return (
++            f"Accepted: {len(self._state.accepted_ids)}\n"
++            f"Rejected: {len(self._state.rejected_ids)}\n"
++            "Press q to apply accepted set."
++        )
++
++    # --- Actions ---
++
++    def action_accept(self) -> None:
++        if self._modify_mode:
++            return
++        self._state = accept(self._state)
++        self._refresh()
++
++    def action_reject(self) -> None:
++        if self._modify_mode:
++            return
++        self._state = reject(self._state)
++        self._refresh()
++
++    def action_modify(self) -> None:
++        if self._modify_mode:
++            return
++        rec = self._state.current
++        if rec is None:
++            return
++        self._modify_mode = True
++        # Prefill with current proposed_value as YAML
++        prefill = yaml.safe_dump(rec.proposed_value, sort_keys=False).strip()
++        inp = Input(
++            value=prefill,
++            id="modify-input",
++            placeholder="YAML; Enter to confirm, Esc to cancel",
++        )
++        self.mount(inp)
++        inp.focus()
++
++    def action_next(self) -> None:
++        if self._modify_mode:
++            return
++        self._state = next_rec(self._state)
++        self._refresh()
++
++    def action_prev(self) -> None:
++        if self._modify_mode:
++            return
++        self._state = prev_rec(self._state)
++        self._refresh()
++
++    def action_quit(self) -> None:
++        if self._modify_mode:
++            return
++        self.exit(finalize(self._state))
++
++    def on_input_submitted(self, event: Input.Submitted) -> None:
++        if event.input.id != "modify-input":
++            return
++        self._state = modify(self._state, event.value)
++        # If the parse failed, last_error is set; stay in modify mode so
++        # operator can correct the value. Otherwise exit modify mode.
++        if self._state.last_error is None:
++            self._modify_mode = False
++            event.input.remove()
++        self._refresh()
++
++    def on_key(self, event) -> None:
++        # Esc cancels modify
++        if self._modify_mode and event.key == "escape":
++            try:
++                self.query_one("#modify-input", Input).remove()
++            except Exception:
++                pass
++            self._modify_mode = False
++            self._state.last_error = None
++            self._refresh()
++
++
++def run_walkthrough(
++    plan: SpecRecommendation,
++    specs_dir: str | None = None,
++) -> SpecRecommendation:
++    """Run the interactive walkthrough synchronously; return the
++    finalized plan (only accepted recs, with any modifications applied).
++    """
++    app = InteractiveWalkthroughApp(plan, specs_dir=specs_dir)
++    result = app.run()
++    if result is not None:
++        return result
++    # App.run returned None — Ctrl+C, SIGTERM, or some Textual abort path.
++    # All operator decisions are lost; downstream apply will no-op.
++    # Log so the silent path is traceable (opensrm-jmy.22 P3 R5).
++    log.warning(
++        "interactive_aborted_returning_empty_plan",
++        incident=plan.incident,
++        original_rec_count=len(plan.recommendations),
++    )
++    return dataclasses.replace(plan, recommendations=[])
+diff --git a/src/nthlayer_workers/learn/cli.py b/src/nthlayer_workers/learn/cli.py
+index 1f31e58..4f4bfa3 100644
+--- a/src/nthlayer_workers/learn/cli.py
++++ b/src/nthlayer_workers/learn/cli.py
+@@ -176,6 +176,8 @@ def _add_recommendations_subcommand(subparsers) -> None:
+                     help="For --output: include preview field per recommendation")
+     p.add_argument("--json", action="store_true",
+                     help="Emit a single structured JSON document to stdout at end-of-run (requires --apply-to)")
++    p.add_argument("--interactive", action="store_true",
++                    help="Walk recommendations in a TUI (a/r/m/n/p/q). Requires --apply-to or --output.")
+ 
+     selection_group = p.add_mutually_exclusive_group()
+     selection_group.add_argument(
+@@ -201,6 +203,10 @@ def _cmd_recommendations(args: argparse.Namespace) -> None:
+         raise SystemExit("error: --json requires --apply-to")
+     if (args.include or args.exclude) and not args.apply_to:
+         raise SystemExit("error: --include/--exclude requires --apply-to")
++    if args.interactive and not (args.apply_to or args.output):
++        raise SystemExit("error: --interactive requires --apply-to or --output")
++    if args.interactive and args.json:
++        raise SystemExit("error: --interactive and --json are mutually exclusive")
+ 
+     # Resolve input source
+     if args.from_path:
+@@ -241,6 +247,14 @@ def _cmd_recommendations(args: argparse.Namespace) -> None:
+             drop = set(requested)
+             plan.recommendations = [r for r in plan.recommendations if r.id not in drop]
+ 
++    # --interactive: walk the (post-filter) plan in a TUI; user decides
++    # accept/reject/modify per rec. Returns a new plan containing only
++    # accepted recs (with any modifications applied). Runs BEFORE
++    # --output so the snapshot reflects the operator's final selection.
++    if args.interactive:
++        from nthlayer_workers.learn._interactive_app import run_walkthrough
++        plan = run_walkthrough(plan, specs_dir=args.apply_to)
++
+     # --output: write plan to file (post-filter so it reflects the
+     # effective plan, opensrm-jmy.24 P3 R5).
+     if args.output:
+diff --git a/tests/learn/test_cli_recommendations.py b/tests/learn/test_cli_recommendations.py
+index d769e73..020ecd0 100644
+--- a/tests/learn/test_cli_recommendations.py
++++ b/tests/learn/test_cli_recommendations.py
+@@ -1435,3 +1435,370 @@ class TestIncludeExcludeFlags:
+             ])
+         assert exc.value.code == 2
+         assert "not found in plan" in capsys.readouterr().err
++
++
++class TestInteractiveFlag:
++    """opensrm-jmy.22: --interactive launches the TUI walkthrough.
++
++    Contract:
++      - --interactive requires --apply-to or --output (pre-flight error).
++      - --interactive and --json are mutually exclusive (pre-flight error).
++      - After the --include/--exclude filter, dispatch calls
++        run_walkthrough(plan, specs_dir=args.apply_to) from
++        nthlayer_workers.learn._interactive_app; the returned plan flows
++        into --output / --apply-to / --pr as the effective plan.
++    """
++
++    @staticmethod
++    def _seed_specs_dir(tmp_path):
++        specs_dir = tmp_path / "specs"
++        specs_dir.mkdir()
++        (specs_dir / "fraud-detect.yaml").write_text(
++            "metadata:\n  name: fraud-detect\n"
++            "spec:\n  slos:\n    judgment:\n      target: 95.0\n"
++        )
++        return specs_dir
++
++    @staticmethod
++    def _build_single_rec_plan(tmp_path, *, incident: str = "inc-jmy22"):
++        from nthlayer_workers.learn.recommendations import (
++            SpecRecommendation, Recommendation,
++        )
++        from datetime import datetime, timezone
++
++        plan = SpecRecommendation(
++            incident=incident,
++            generated_by="nthlayer-learn",
++            generated_at=datetime(2026, 5, 29, tzinfo=timezone.utc),
++            confidence=0.7,
++            recommendations=[
++                Recommendation(
++                    id="rec-aaaaaaaaaaaa",
++                    service="fraud-detect",
++                    type="tighten_slo",
++                    rationale="test",
++                    field="spec.slos.judgment.target",
++                    current_value=95.0,
++                    proposed_value=98.5,
++                ),
++            ],
++        )
++        plan_in = tmp_path / "in.yaml"
++        plan_in.write_text(plan.to_yaml())
++        return plan_in
++
++    @staticmethod
++    def _build_multi_rec_plan(tmp_path, *, incident: str = "inc-jmy22-multi"):
++        """Two recommendations with distinct rec ids ('rec-A' / 'rec-B')."""
++        from nthlayer_workers.learn.recommendations import (
++            SpecRecommendation, Recommendation,
++        )
++        from datetime import datetime, timezone
++
++        plan = SpecRecommendation(
++            incident=incident,
++            generated_by="nthlayer-learn",
++            generated_at=datetime(2026, 5, 29, tzinfo=timezone.utc),
++            confidence=0.7,
++            recommendations=[
++                Recommendation(
++                    id="rec-A",
++                    service="fraud-detect",
++                    type="tighten_slo",
++                    rationale="test",
++                    field="spec.slos.judgment.target",
++                    current_value=95.0,
++                    proposed_value=98.5,
++                ),
++                Recommendation(
++                    id="rec-B",
++                    service="fraud-detect",
++                    type="add_deploy_gate",
++                    rationale="test",
++                    field="spec.gates.judgment_quality",
++                    current_value=None,
++                    proposed_value={"block_on": "judgment_quality"},
++                ),
++            ],
++        )
++        plan_in = tmp_path / "in.yaml"
++        plan_in.write_text(plan.to_yaml())
++        return plan_in
++
++    def test_interactive_requires_apply_to_or_output(self, tmp_path):
++        from nthlayer_workers.learn.cli import main
++
++        plan_in = self._build_single_rec_plan(tmp_path)
++        with pytest.raises(SystemExit) as exc:
++            main([
++                "recommendations",
++                "--from", str(plan_in),
++                "--interactive",
++            ])
++        msg = str(exc.value.code) if exc.value.code is not None else ""
++        assert "requires --apply-to or --output" in msg
++
++    def test_interactive_and_json_mutually_exclusive(self, tmp_path):
++        from nthlayer_workers.learn.cli import main
++
++        specs_dir = self._seed_specs_dir(tmp_path)
++        plan_in = self._build_single_rec_plan(tmp_path)
++        with pytest.raises(SystemExit) as exc:
++            main([
++                "recommendations",
++                "--from", str(plan_in),
++                "--apply-to", str(specs_dir),
++                "--interactive",
++                "--json",
++            ])
++        msg = str(exc.value.code) if exc.value.code is not None else ""
++        assert "mutually exclusive" in msg
++
++    @staticmethod
++    def _install_fake_walkthrough(monkeypatch, fake_walkthrough):
++        """Install a fake _interactive_app module to bypass textual import.
++
++        cli.py does ``from ._interactive_app import run_walkthrough`` inside
++        _cmd_recommendations. We replace the module in sys.modules so the
++        lazy import inside the CLI returns our fake without ever loading
++        textual.
++        """
++        import sys
++        import types
++
++        fake_module = types.ModuleType("nthlayer_workers.learn._interactive_app")
++        fake_module.run_walkthrough = fake_walkthrough
++        monkeypatch.setitem(
++            sys.modules,
++            "nthlayer_workers.learn._interactive_app",
++            fake_module,
++        )
++
++    def test_interactive_with_apply_to_runs_walkthrough(
++        self, tmp_path, monkeypatch,
++    ):
++        """Stub run_walkthrough → empty plan; no recs applied to manifest."""
++        from nthlayer_workers.learn.cli import main
++        from nthlayer_workers.learn.recommendations import SpecRecommendation
++        from datetime import datetime, timezone
++
++        specs_dir = self._seed_specs_dir(tmp_path)
++        plan_in = self._build_single_rec_plan(tmp_path)
++        manifest_before = (specs_dir / "fraud-detect.yaml").read_text()
++
++        def fake_walkthrough(plan, specs_dir=None):
++            # Operator "rejected all": return a plan with zero recs.
++            return SpecRecommendation(
++                incident=plan.incident,
++                generated_by=plan.generated_by,
++                generated_at=datetime(2026, 5, 29, tzinfo=timezone.utc),
++                confidence=0.0,
++                recommendations=[],
++            )
++
++        self._install_fake_walkthrough(monkeypatch, fake_walkthrough)
++
++        # Empty effective plan → clean no-op exit 0.
++        main([
++            "recommendations",
++            "--from", str(plan_in),
++            "--apply-to", str(specs_dir),
++            "--interactive",
++        ])
++
++        # Manifest unchanged.
++        assert (specs_dir / "fraud-detect.yaml").read_text() == manifest_before
++
++    def test_interactive_with_output_writes_post_walkthrough_plan(
++        self, tmp_path, monkeypatch,
++    ):
++        """Stub run_walkthrough → 1-rec plan; --output reflects that plan."""
++        from nthlayer_workers.learn.cli import main
++        from nthlayer_workers.learn.recommendations import (
++            SpecRecommendation, Recommendation, parse_plan_file,
++        )
++        from datetime import datetime, timezone
++
++        plan_in = self._build_single_rec_plan(tmp_path)
++        out_path = tmp_path / "post.yaml"
++
++        def fake_walkthrough(plan, specs_dir=None):
++            return SpecRecommendation(
++                incident=plan.incident,
++                generated_by=plan.generated_by,
++                generated_at=datetime(2026, 5, 29, tzinfo=timezone.utc),
++                confidence=0.7,
++                recommendations=[
++                    Recommendation(
++                        id="rec-postwalk",
++                        service="fraud-detect",
++                        type="tighten_slo",
++                        rationale="kept by operator",
++                        field="spec.slos.judgment.target",
++                        current_value=95.0,
++                        proposed_value=99.5,
++                    ),
++                ],
++            )
++
++        self._install_fake_walkthrough(monkeypatch, fake_walkthrough)
++
++        main([
++            "recommendations",
++            "--from", str(plan_in),
++            "--output", str(out_path),
++            "--interactive",
++        ])
++
++        saved = parse_plan_file(out_path)
++        assert len(saved.recommendations) == 1
++        assert saved.recommendations[0].id == "rec-postwalk"
++        assert saved.recommendations[0].proposed_value == 99.5
++
++    def test_interactive_with_include_passes_post_filter_plan_to_walkthrough(
++        self, tmp_path, monkeypatch,
++    ):
++        """--include rec-A runs before walkthrough; rec-B is filtered out."""
++        from nthlayer_workers.learn.cli import main
++        from nthlayer_workers.learn.recommendations import SpecRecommendation
++        from datetime import datetime, timezone
++
++        specs_dir = self._seed_specs_dir(tmp_path)
++        plan_in = self._build_multi_rec_plan(tmp_path)
++        captured: dict = {}
++
++        def fake_walkthrough(plan, specs_dir=None):
++            captured["plan"] = plan
++            # Return empty so apply is a clean no-op.
++            return SpecRecommendation(
++                incident=plan.incident,
++                generated_by=plan.generated_by,
++                generated_at=datetime(2026, 5, 29, tzinfo=timezone.utc),
++                confidence=0.0,
++                recommendations=[],
++            )
++
++        self._install_fake_walkthrough(monkeypatch, fake_walkthrough)
++
++        main([
++            "recommendations",
++            "--from", str(plan_in),
++            "--apply-to", str(specs_dir),
++            "--include", "rec-A",
++            "--interactive",
++        ])
++
++        assert "plan" in captured
++        captured_ids = [r.id for r in captured["plan"].recommendations]
++        assert captured_ids == ["rec-A"]
++
++    def test_interactive_with_output_and_apply_to_both_reflect_walkthrough(
++        self, tmp_path, monkeypatch,
++    ):
++        """jmy.22 P3 R5: --interactive + --output + --apply-to → both the
++        snapshot file AND the manifest reflect the post-walkthrough plan.
++        """
++        from nthlayer_workers.learn.cli import main
++        from nthlayer_workers.learn.recommendations import (
++            SpecRecommendation, Recommendation, parse_plan_file,
++        )
++        from datetime import datetime, timezone
++
++        specs_dir = tmp_path / "specs"
++        specs_dir.mkdir()
++        (specs_dir / "fraud-detect.yaml").write_text(
++            "metadata:\n  name: fraud-detect\n"
++            "spec:\n  slos:\n    judgment:\n      target: 95.0\n"
++        )
++        plan = SpecRecommendation(
++            incident="inc-jmy22-combo", generated_by="nthlayer-learn",
++            generated_at=datetime(2026, 5, 29, tzinfo=timezone.utc),
++            confidence=0.7,
++            recommendations=[
++                Recommendation(
++                    id="rec-combo-a", service="fraud-detect",
++                    type="tighten_slo", rationale="x",
++                    field="spec.slos.judgment.target",
++                    current_value=95.0, proposed_value=98.5,
++                ),
++                Recommendation(
++                    id="rec-combo-b", service="fraud-detect",
++                    type="tighten_slo", rationale="y",
++                    field="spec.slos.other.target",
++                    current_value=99.0, proposed_value=99.5,
++                ),
++            ],
++        )
++        plan_in = tmp_path / "in.yaml"
++        plan_in.write_text(plan.to_yaml())
++        plan_out = tmp_path / "snapshot.yaml"
++
++        # Walkthrough accepts only rec-combo-a (rejects b).
++        def fake_walkthrough(plan_in_arg, specs_dir=None):
++            kept = [
++                r for r in plan_in_arg.recommendations if r.id == "rec-combo-a"
++            ]
++            from dataclasses import replace
++            return replace(plan_in_arg, recommendations=kept)
++        self._install_fake_walkthrough(monkeypatch, fake_walkthrough)
++
++        try:
++            main([
++                "recommendations",
++                "--from", str(plan_in),
++                "--apply-to", str(specs_dir),
++                "--output", str(plan_out),
++                "--interactive",
++            ])
++        except SystemExit:
++            pass
++
++        # Snapshot has only rec-combo-a.
++        snap = parse_plan_file(plan_out)
++        assert [r.id for r in snap.recommendations] == ["rec-combo-a"]
++        # Manifest's judgment target updated (a applied); other.target absent.
++        manifest_text = (specs_dir / "fraud-detect.yaml").read_text()
++        assert "target: 98.5" in manifest_text
++        assert "other" not in manifest_text
++
++
++class TestRunWalkthroughAbort:
++    """jmy.22 P3 R5: run_walkthrough handles app.run() returning None
++    (Ctrl+C / SIGTERM / Textual abort) by logging + returning empty plan.
++    """
++
++    def test_run_walkthrough_none_returns_empty_plan(self, monkeypatch, caplog):
++        import logging
++        from nthlayer_workers.learn._interactive_app import run_walkthrough
++        from nthlayer_workers.learn.recommendations import (
++            SpecRecommendation, Recommendation,
++        )
++        from datetime import datetime, timezone
++
++        plan = SpecRecommendation(
++            incident="inc-abort", generated_by="nthlayer-learn",
++            generated_at=datetime(2026, 5, 29, tzinfo=timezone.utc),
++            confidence=0.7,
++            recommendations=[
++                Recommendation(
++                    id="rec-abort", service="svc", type="tighten_slo",
++                    rationale="x",
++                    field="spec.slos.x.target",
++                    current_value=95.0, proposed_value=98.5,
++                ),
++            ],
++        )
++
++        # Patch App.run to return None (simulating abort).
++        from nthlayer_workers.learn import _interactive_app as iapp
++        class FakeApp:
++            def __init__(self, *a, **kw): pass
++            def run(self):
++                return None
++        monkeypatch.setattr(iapp, "InteractiveWalkthroughApp", FakeApp)
++
++        caplog.set_level(logging.WARNING)
++        result = run_walkthrough(plan)
++        assert result.recommendations == []
++        # Source plan untouched.
++        assert len(plan.recommendations) == 1
+diff --git a/tests/learn/test_interactive.py b/tests/learn/test_interactive.py
+new file mode 100644
+index 0000000..702f40b
+--- /dev/null
++++ b/tests/learn/test_interactive.py
+@@ -0,0 +1,576 @@
++"""Unit tests for the interactive TUI walkthrough pure logic (opensrm-jmy.22).
++
++These tests target the pure-logic module nthlayer_workers.learn._interactive
++(no Textual dependency). Each test exercises a single state-transition
++function so the eventual Textual app is a thin shell over a well-covered
++state machine.
++"""
++from __future__ import annotations
++
++import dataclasses
++from datetime import datetime, timezone
++
++
++# ---------------------------------------------------------------------------
++# Fixtures / helpers
++# ---------------------------------------------------------------------------
++
++
++def _build_single_rec_plan(*, rec_id: str = "rec-aaaaaaaaaaaa",
++                           proposed_value=98.5,
++                           field: str = "spec.slos.judgment.target"):
++    """Build a SpecRecommendation with one Recommendation."""
++    from nthlayer_workers.learn.recommendations import (
++        SpecRecommendation, Recommendation,
++    )
++
++    return SpecRecommendation(
++        incident="inc-jmy22",
++        generated_by="nthlayer-learn",
++        generated_at=datetime(2026, 5, 29, tzinfo=timezone.utc),
++        confidence=0.7,
++        recommendations=[
++            Recommendation(
++                id=rec_id,
++                service="fraud-detect",
++                type="tighten_slo",
++                rationale="test rationale",
++                field=field,
++                current_value=95.0,
++                proposed_value=proposed_value,
++            ),
++        ],
++    )
++
++
++def _build_multi_rec_plan(rec_ids=("rec-a", "rec-b", "rec-c")):
++    """Build a SpecRecommendation with N recommendations sharing one service."""
++    from nthlayer_workers.learn.recommendations import (
++        SpecRecommendation, Recommendation,
++    )
++
++    return SpecRecommendation(
++        incident="inc-jmy22-multi",
++        generated_by="nthlayer-learn",
++        generated_at=datetime(2026, 5, 29, tzinfo=timezone.utc),
++        confidence=0.7,
++        recommendations=[
++            Recommendation(
++                id=rid,
++                service="fraud-detect",
++                type="tighten_slo",
++                rationale=f"rationale for {rid}",
++                field=f"spec.slos.{rid}.target",
++                current_value=95.0,
++                proposed_value=98.5,
++            )
++            for rid in rec_ids
++        ],
++    )
++
++
++def _build_empty_plan():
++    from nthlayer_workers.learn.recommendations import SpecRecommendation
++
++    return SpecRecommendation(
++        incident="inc-empty",
++        generated_by="nthlayer-learn",
++        generated_at=datetime(2026, 5, 29, tzinfo=timezone.utc),
++        confidence=0.0,
++        recommendations=[],
++    )
++
++
++# ---------------------------------------------------------------------------
++# TestWalkthroughState — construction + read-only properties
++# ---------------------------------------------------------------------------
++
++
++class TestWalkthroughState:
++    def test_for_plan_deep_copies(self):
++        from nthlayer_workers.learn._interactive import WalkthroughState
++
++        plan = _build_single_rec_plan()
++        original_rationale = plan.recommendations[0].rationale
++
++        state = WalkthroughState.for_plan(plan)
++        state.plan.recommendations[0].rationale = "mutated"
++
++        assert plan.recommendations[0].rationale == original_rationale
++
++    def test_empty_plan_total_is_zero(self):
++        from nthlayer_workers.learn._interactive import WalkthroughState
++
++        plan = _build_empty_plan()
++        state = WalkthroughState.for_plan(plan)
++
++        assert state.total == 0
++        assert state.current is None
++        assert state.progress == "[empty plan]"
++
++    def test_progress_string_format(self):
++        from nthlayer_workers.learn._interactive import (
++            WalkthroughState, accept,
++        )
++
++        plan = _build_multi_rec_plan()
++        state = WalkthroughState.for_plan(plan)
++
++        assert state.progress == "[1 of 3]"
++
++        state = accept(state)
++        assert state.progress == "[2 of 3]"
++
++    def test_current_is_none_at_end(self):
++        from nthlayer_workers.learn._interactive import (
++            WalkthroughState, accept,
++        )
++
++        plan = _build_single_rec_plan()
++        state = WalkthroughState.for_plan(plan)
++        state = accept(state)
++
++        assert state.current is None
++
++
++# ---------------------------------------------------------------------------
++# TestAccept
++# ---------------------------------------------------------------------------
++
++
++class TestAccept:
++    def test_accept_adds_to_accepted_ids(self):
++        from nthlayer_workers.learn._interactive import (
++            WalkthroughState, accept,
++        )
++
++        plan = _build_single_rec_plan(rec_id="rec-accept-1")
++        state = WalkthroughState.for_plan(plan)
++        state = accept(state)
++
++        assert "rec-accept-1" in state.accepted_ids
++        assert "rec-accept-1" not in state.rejected_ids
++
++    def test_accept_advances_index(self):
++        from nthlayer_workers.learn._interactive import (
++            WalkthroughState, accept,
++        )
++
++        plan = _build_multi_rec_plan()
++        state = WalkthroughState.for_plan(plan)
++        assert state.index == 0
++
++        state = accept(state)
++        assert state.index == 1
++
++    def test_accept_after_reject_swaps_buckets(self):
++        from nthlayer_workers.learn._interactive import (
++            WalkthroughState, accept, reject, prev_rec,
++        )
++
++        plan = _build_single_rec_plan(rec_id="rec-swap")
++        state = WalkthroughState.for_plan(plan)
++        state = reject(state)
++        state = prev_rec(state)
++        state = accept(state)
++
++        assert "rec-swap" in state.accepted_ids
++        assert "rec-swap" not in state.rejected_ids
++
++
++# ---------------------------------------------------------------------------
++# TestReject
++# ---------------------------------------------------------------------------
++
++
++class TestReject:
++    def test_reject_adds_to_rejected_ids(self):
++        from nthlayer_workers.learn._interactive import (
++            WalkthroughState, reject,
++        )
++
++        plan = _build_single_rec_plan(rec_id="rec-reject-1")
++        state = WalkthroughState.for_plan(plan)
++        state = reject(state)
++
++        assert "rec-reject-1" in state.rejected_ids
++        assert "rec-reject-1" not in state.accepted_ids
++
++    def test_reject_clears_accepted(self):
++        from nthlayer_workers.learn._interactive import (
++            WalkthroughState, accept, reject, prev_rec,
++        )
++
++        plan = _build_single_rec_plan(rec_id="rec-flip")
++        state = WalkthroughState.for_plan(plan)
++        state = accept(state)
++        state = prev_rec(state)
++        state = reject(state)
++
++        assert "rec-flip" in state.rejected_ids
++        assert "rec-flip" not in state.accepted_ids
++
++
++# ---------------------------------------------------------------------------
++# TestModify
++# ---------------------------------------------------------------------------
++
++
++class TestModify:
++    def test_modify_scalar_yaml_stores_parsed_value(self):
++        from nthlayer_workers.learn._interactive import (
++            WalkthroughState, modify,
++        )
++
++        plan = _build_single_rec_plan(rec_id="rec-mod-scalar",
++                                      proposed_value=98.5)
++        state = WalkthroughState.for_plan(plan)
++        state = modify(state, "99.0")
++
++        assert state.modified_values["rec-mod-scalar"] == 99.0
++        # Crucially: a float, not the string "99.0".
++        assert isinstance(state.modified_values["rec-mod-scalar"], float)
++
++    def test_modify_dict_yaml_stores_parsed_dict(self):
++        from nthlayer_workers.learn._interactive import (
++            WalkthroughState, modify,
++        )
++
++        plan = _build_single_rec_plan(
++            rec_id="rec-mod-dict",
++            proposed_value={"name": "svc-y", "type": "unknown"},
++        )
++        state = WalkthroughState.for_plan(plan)
++        state = modify(state, "name: svc-z\ntype: api\n")
++
++        assert state.modified_values["rec-mod-dict"] == {
++            "name": "svc-z",
++            "type": "api",
++        }
++
++    def test_modify_invalid_yaml_keeps_state_unchanged_sets_error(self):
++        from nthlayer_workers.learn._interactive import (
++            WalkthroughState, modify,
++        )
++
++        plan = _build_single_rec_plan(rec_id="rec-mod-bad")
++        state = WalkthroughState.for_plan(plan)
++        before_index = state.index
++        state = modify(state, "[unbalanced")
++
++        assert state.last_error is not None
++        assert "YAML parse error" in state.last_error
++        assert state.modified_values == {}
++        assert state.accepted_ids == set()
++        assert state.index == before_index
++
++    def test_modify_auto_accepts(self):
++        from nthlayer_workers.learn._interactive import (
++            WalkthroughState, modify,
++        )
++
++        plan = _build_single_rec_plan(rec_id="rec-mod-auto")
++        state = WalkthroughState.for_plan(plan)
++        state = modify(state, "99.0")
++
++        assert "rec-mod-auto" in state.accepted_ids
++
++    def test_modify_clears_last_error_on_success(self):
++        from nthlayer_workers.learn._interactive import (
++            WalkthroughState, modify, prev_rec,
++        )
++
++        plan = _build_single_rec_plan(rec_id="rec-mod-clear")
++        state = WalkthroughState.for_plan(plan)
++        state = modify(state, "[unbalanced")
++        assert state.last_error is not None
++
++        # Bad modify keeps index unchanged; rewind to ensure the same rec
++        # is current, then a good modify should clear last_error.
++        state = prev_rec(state)
++        state = modify(state, "99.0")
++
++        assert state.last_error is None
++
++
++# ---------------------------------------------------------------------------
++# TestNavigation
++# ---------------------------------------------------------------------------
++
++
++class TestNavigation:
++    def test_next_advances_index(self):
++        from nthlayer_workers.learn._interactive import (
++            WalkthroughState, next_rec,
++        )
++
++        plan = _build_multi_rec_plan()
++        state = WalkthroughState.for_plan(plan)
++        state = next_rec(state)
++
++        assert state.index == 1
++
++    def test_next_caps_at_total(self):
++        from nthlayer_workers.learn._interactive import (
++            WalkthroughState, next_rec,
++        )
++
++        plan = _build_multi_rec_plan(rec_ids=("rec-a", "rec-b"))
++        state = WalkthroughState.for_plan(plan)
++        for _ in range(5):
++            state = next_rec(state)
++
++        assert state.index == state.total == 2
++
++    def test_prev_decrements_index(self):
++        from nthlayer_workers.learn._interactive import (
++            WalkthroughState, next_rec, prev_rec,
++        )
++
++        plan = _build_multi_rec_plan()
++        state = WalkthroughState.for_plan(plan)
++        state = next_rec(state)
++        state = prev_rec(state)
++
++        assert state.index == 0
++
++    def test_prev_floors_at_zero(self):
++        from nthlayer_workers.learn._interactive import (
++            WalkthroughState, prev_rec,
++        )
++
++        plan = _build_multi_rec_plan()
++        state = WalkthroughState.for_plan(plan)
++        state = prev_rec(state)
++
++        assert state.index == 0
++
++    def test_next_clears_last_error(self):
++        from nthlayer_workers.learn._interactive import (
++            WalkthroughState, modify, next_rec,
++        )
++
++        plan = _build_multi_rec_plan()
++        state = WalkthroughState.for_plan(plan)
++        state = modify(state, "[unbalanced")
++        assert state.last_error is not None
++
++        state = next_rec(state)
++        assert state.last_error is None
++
++
++# ---------------------------------------------------------------------------
++# TestFinalize
++# ---------------------------------------------------------------------------
++
++
++class TestFinalize:
++    def test_finalize_keeps_only_accepted(self):
++        from nthlayer_workers.learn._interactive import (
++            WalkthroughState, accept, reject, finalize,
++        )
++
++        plan = _build_multi_rec_plan(rec_ids=("rec-a", "rec-b", "rec-c"))
++        state = WalkthroughState.for_plan(plan)
++        state = accept(state)   # rec-a
++        state = reject(state)   # rec-b
++        state = accept(state)   # rec-c
++
++        result = finalize(state)
++        ids = [r.id for r in result.recommendations]
++        assert ids == ["rec-a", "rec-c"]
++
++    def test_finalize_applies_modifications(self):
++        from nthlayer_workers.learn._interactive import (
++            WalkthroughState, modify, finalize,
++        )
++
++        plan = _build_single_rec_plan(rec_id="rec-mod-apply",
++                                      proposed_value=98.5)
++        state = WalkthroughState.for_plan(plan)
++        state = modify(state, "99.5")
++
++        result = finalize(state)
++        assert len(result.recommendations) == 1
++        assert result.recommendations[0].proposed_value == 99.5
++
++    def test_finalize_preserves_plan_order_not_acceptance_order(self):
++        from nthlayer_workers.learn._interactive import (
++            WalkthroughState, accept, next_rec, prev_rec, finalize,
++        )
++
++        plan = _build_multi_rec_plan(rec_ids=("rec-a", "rec-b", "rec-c"))
++        state = WalkthroughState.for_plan(plan)
++
++        # Navigate to rec-c, accept it first.
++        state = next_rec(state)   # → rec-b
++        state = next_rec(state)   # → rec-c
++        state = accept(state)     # accepts rec-c, index advances to 3
++
++        # Rewind to rec-a, accept it second.
++        state = prev_rec(state)   # → 2
++        state = prev_rec(state)   # → 1
++        state = prev_rec(state)   # → 0
++        state = accept(state)     # accepts rec-a
++
++        result = finalize(state)
++        ids = [r.id for r in result.recommendations]
++        # Plan order preserved even though rec-c was accepted first.
++        assert ids == ["rec-a", "rec-c"]
++
++    def test_finalize_empty_when_all_rejected(self):
++        from nthlayer_workers.learn._interactive import (
++            WalkthroughState, reject, finalize,
++        )
++
++        plan = _build_multi_rec_plan(rec_ids=("rec-a", "rec-b"))
++        state = WalkthroughState.for_plan(plan)
++        state = reject(state)
++        state = reject(state)
++
++        result = finalize(state)
++        assert result.recommendations == []
++
++    def test_finalize_does_not_mutate_source_plan(self):
++        from nthlayer_workers.learn._interactive import (
++            WalkthroughState, accept, modify, prev_rec, finalize,
++        )
++
++        plan = _build_multi_rec_plan(rec_ids=("rec-a", "rec-b"))
++        original_count = len(plan.recommendations)
++        original_proposed_values = [r.proposed_value for r in plan.recommendations]
++
++        state = WalkthroughState.for_plan(plan)
++        state = accept(state)               # rec-a accepted, index=1
++        state = modify(state, "42.0")       # rec-b modified
++        # Rewind so we can re-modify if needed — but here we just finalize.
++        _ = finalize(state)
++        # Also exercise rewind to ensure source plan is untouched in either path.
++        state = prev_rec(state)
++        _ = finalize(state)
++
++        assert len(plan.recommendations) == original_count
++        assert [r.proposed_value for r in plan.recommendations] == original_proposed_values
++
++
++# ---------------------------------------------------------------------------
++# jmy.22 P1 R5: _render_diff fallback when rec.field is None
++# ---------------------------------------------------------------------------
++
++
++class TestRenderDiffWithNoFieldPath:
++    """jmy.22 P1 R5: a Recommendation with field=None (legitimate for
++    placeholder recs) must still display proposed_value in the diff
++    fallback. Previously the YAML block was keyed by rec.field and
++    rendered empty when field was None.
++    """
++
++    def test_render_diff_uses_type_as_key_when_field_is_none(self):
++        from nthlayer_workers.learn._interactive_app import InteractiveWalkthroughApp
++
++        plan = _build_multi_rec_plan(rec_ids=("rec-a",))
++        # Mutate the rec to drop field (simulating a placeholder add_deploy_gate
++        # or any future rec type that legitimately has field=None).
++        plan.recommendations[0] = dataclasses.replace(
++            plan.recommendations[0],
++            field=None,
++            current_value=None,
++            proposed_value={"action": "block", "service": "fraud-detect"},
++        )
++
++        app = InteractiveWalkthroughApp(plan, specs_dir=None)
++        diff = app._render_diff(app._state.current)
++
++        # proposed_value must be rendered somewhere in the diff text;
++        # rec.type is used as the YAML key when field is None.
++        assert "action" in diff
++        assert "block" in diff
++        assert "+++ proposed +++" in diff
++
++
++# ---------------------------------------------------------------------------
++# jmy.22 P3 R5: edge cases — empty modify, dangling state, abort path
++# ---------------------------------------------------------------------------
++
++
++class TestModifyEmptyInputs:
++    """jmy.22 P3 R5: empty/whitespace YAML must not silently overwrite
++    proposed_value with None. Operator who pressed Enter accidentally
++    keeps their original proposed_value and sees a clear error.
++    """
++
++    def test_modify_empty_string_does_not_overwrite_with_none(self):
++        from nthlayer_workers.learn._interactive import (
++            WalkthroughState, modify,
++        )
++        plan = _build_multi_rec_plan(rec_ids=("rec-a",))
++        original = plan.recommendations[0].proposed_value
++        state = WalkthroughState.for_plan(plan)
++        state = modify(state, "")
++        assert state.last_error and "non-empty" in state.last_error
++        assert state.modified_values == {}
++        assert state.accepted_ids == set()
++        # Original proposed value untouched on the source plan.
++        assert plan.recommendations[0].proposed_value == original
++
++    def test_modify_whitespace_only_does_not_overwrite_with_none(self):
++        from nthlayer_workers.learn._interactive import (
++            WalkthroughState, modify,
++        )
++        plan = _build_multi_rec_plan(rec_ids=("rec-a",))
++        state = WalkthroughState.for_plan(plan)
++        state = modify(state, "   \n  \t  ")
++        assert state.last_error and "non-empty" in state.last_error
++        assert state.modified_values == {}
++        assert state.accepted_ids == set()
++
++    def test_modify_yaml_null_keyword_does_not_overwrite_with_none(self):
++        """A bare 'null' or '~' parses to None — same footgun shape, same
++        guard."""
++        from nthlayer_workers.learn._interactive import (
++            WalkthroughState, modify,
++        )
++        plan = _build_multi_rec_plan(rec_ids=("rec-a",))
++        state = WalkthroughState.for_plan(plan)
++        state = modify(state, "null")
++        assert state.last_error and "non-null" in state.last_error
++        assert state.modified_values == {}
++
++
++class TestModifyRejectInteraction:
++    """jmy.22 P3 R5: reject clears any prior modification on the same rec
++    so modified_values doesn't carry stale entries."""
++
++    def test_modify_then_reject_same_rec_drops_modification(self):
++        from nthlayer_workers.learn._interactive import (
++            WalkthroughState, modify, prev_rec, reject,
++        )
++        plan = _build_multi_rec_plan(rec_ids=("rec-a", "rec-b"))
++        state = WalkthroughState.for_plan(plan)
++        state = modify(state, "42.0")
++        assert "rec-a" in state.modified_values
++        # Rewind to rec-a and reject it.
++        state = prev_rec(state)
++        state = reject(state)
++        assert "rec-a" not in state.modified_values
++        assert "rec-a" in state.rejected_ids
++        assert "rec-a" not in state.accepted_ids
++
++
++class TestNavigationFromDoneState:
++    """jmy.22 P3 R5: prev_rec from done-state (index == total) must
++    return to the last rec so the operator can revisit it."""
++
++    def test_prev_from_done_state_returns_to_last_rec(self):
++        from nthlayer_workers.learn._interactive import (
++            WalkthroughState, accept, prev_rec,
++        )
++        plan = _build_multi_rec_plan(rec_ids=("rec-a", "rec-b"))
++        state = WalkthroughState.for_plan(plan)
++        state = accept(state)   # rec-a, index=1
++        state = accept(state)   # rec-b, index=2 (== total, done)
++        assert state.current is None
++        state = prev_rec(state)
++        assert state.index == 1
++        assert state.current is not None
++        assert state.current.id == "rec-b"
+diff --git a/uv.lock b/uv.lock
+index f9a2043..9c01072 100644
+--- a/uv.lock
++++ b/uv.lock
+@@ -631,6 +631,18 @@ wheels = [
+     { url = "https://files.pythonhosted.org/packages/67/8a/a342b2f0251f3dac4ca17618265d93bf244a2a4d089126e81e4c1056ac50/jiter-0.13.0-graalpy312-graalpy250_312_native-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:7bb00b6d26db67a05fe3e12c76edc75f32077fb51deed13822dc648fa373bc19", size = 343768, upload-time = "2026-02-02T12:37:55.055Z" },
+ ]
+ 
++[[package]]
++name = "linkify-it-py"
++version = "2.1.0"
++source = { registry = "https://pypi.org/simple" }
++dependencies = [
++    { name = "uc-micro-py" },
++]
++sdist = { url = "https://files.pythonhosted.org/packages/2e/c9/06ea13676ef354f0af6169587ae292d3e2406e212876a413bf9eece4eb23/linkify_it_py-2.1.0.tar.gz", hash = "sha256:43360231720999c10e9328dc3691160e27a718e280673d444c38d7d3aaa3b98b", size = 29158, upload-time = "2026-03-01T07:48:47.683Z" }
++wheels = [
++    { url = "https://files.pythonhosted.org/packages/b4/de/88b3be5c31b22333b3ca2f6ff1de4e863d8fe45aaea7485f591970ec1d3e/linkify_it_py-2.1.0-py3-none-any.whl", hash = "sha256:0d252c1594ecba2ecedc444053db5d3a9b7ec1b0dd929c8f1d74dce89f86c05e", size = 19878, upload-time = "2026-03-01T07:48:46.098Z" },
++]
++
+ [[package]]
+ name = "markdown-it-py"
+ version = "4.0.0"
+@@ -643,6 +655,11 @@ wheels = [
+     { url = "https://files.pythonhosted.org/packages/94/54/e7d793b573f298e1c9013b8c4dade17d481164aa517d1d7148619c2cedbf/markdown_it_py-4.0.0-py3-none-any.whl", hash = "sha256:87327c59b172c5011896038353a81343b6754500a08cd7a4973bb48c6d578147", size = 87321, upload-time = "2025-08-11T12:57:51.923Z" },
+ ]
+ 
++[package.optional-dependencies]
++linkify = [
++    { name = "linkify-it-py" },
++]
++
+ [[package]]
+ name = "markupsafe"
+ version = "3.0.3"
+@@ -717,6 +734,18 @@ wheels = [
+     { url = "https://files.pythonhosted.org/packages/70/bc/6f1c2f612465f5fa89b95bead1f44dcb607670fd42891d8fdcd5d039f4f4/markupsafe-3.0.3-cp314-cp314t-win_arm64.whl", hash = "sha256:32001d6a8fc98c8cb5c947787c5d08b0a50663d139f1305bac5885d98d9b40fa", size = 14146, upload-time = "2025-09-27T18:37:28.327Z" },
+ ]
+ 
++[[package]]
++name = "mdit-py-plugins"
++version = "0.6.1"
++source = { registry = "https://pypi.org/simple" }
++dependencies = [
++    { name = "markdown-it-py" },
++]
++sdist = { url = "https://files.pythonhosted.org/packages/59/fc/f8d0863f8862f25602c0404d75568e89fb6b4109804645e5cdfb1be5cf56/mdit_py_plugins-0.6.1.tar.gz", hash = "sha256:a2bca0f039f39dbd35fb74ae1b5f998608c437463371f0ff7f49a19a17a114d0", size = 56114, upload-time = "2026-05-13T09:03:38.91Z" }
++wheels = [
++    { url = "https://files.pythonhosted.org/packages/a5/69/6da5581c6a7fede7dc261bf4e67d6adca4196f176b43288b55b3db395b6e/mdit_py_plugins-0.6.1-py3-none-any.whl", hash = "sha256:214c82fb2ac524472ab6a5bcab1de80f73b50443e187f401bfd77efbc7c6481d", size = 66663, upload-time = "2026-05-13T09:03:37.76Z" },
++]
++
+ [[package]]
+ name = "mdurl"
+ version = "0.1.2"
+@@ -900,6 +929,7 @@ dependencies = [
+     { name = "scipy" },
+     { name = "starlette" },
+     { name = "structlog" },
++    { name = "textual" },
+     { name = "uvicorn" },
+ ]
+ 
+@@ -926,6 +956,7 @@ requires-dist = [
+     { name = "scipy", specifier = ">=1.11" },
+     { name = "starlette", specifier = ">=0.40" },
+     { name = "structlog", specifier = ">=24.1.0" },
++    { name = "textual", specifier = ">=1.0" },
+     { name = "uvicorn", specifier = ">=0.30" },
+ ]
+ provides-extras = ["dev"]
+@@ -1062,6 +1093,15 @@ wheels = [
+     { url = "https://files.pythonhosted.org/packages/1f/5f/32170240e7cb5dfd78a68b82047a598c77b810d2e3083ce8317d4f67df7a/pagerduty-6.2.1-py3-none-any.whl", hash = "sha256:38433bf2ec9bd74b2deffef2f9b0e88b897f4d9785646b776c53d88f279e948f", size = 55580, upload-time = "2026-03-03T22:24:10.115Z" },
+ ]
+ 
++[[package]]
++name = "platformdirs"
++version = "4.10.0"
++source = { registry = "https://pypi.org/simple" }
++sdist = { url = "https://files.pythonhosted.org/packages/d7/47/e4501f49c178ae1d9f4a75073fda4204f52647993f075a9db4d14930e0c5/platformdirs-4.10.0.tar.gz", hash = "sha256:31e761a6a0ca04faf7353ea759bdba55652be214725111e5aac52dfa29d4bef7", size = 31224, upload-time = "2026-05-28T03:32:53.587Z" }
++wheels = [
++    { url = "https://files.pythonhosted.org/packages/81/e6/cd9575ac904136b3cbf7aa7ee819ef86eedb7274e46f230e94ea4342e729/platformdirs-4.10.0-py3-none-any.whl", hash = "sha256:fb516cdb12eb0d857d0cd85a7c57cea4d060bee4578d6cf5a14dfdf8cbf8784a", size = 22743, upload-time = "2026-05-28T03:32:52.175Z" },
++]
++
+ [[package]]
+ name = "pluggy"
+ version = "1.6.0"
+@@ -1592,6 +1632,23 @@ wheels = [
+     { url = "https://files.pythonhosted.org/packages/d7/c1/eb8f9debc45d3b7918a32ab756658a0904732f75e555402972246b0b8e71/tenacity-9.1.4-py3-none-any.whl", hash = "sha256:6095a360c919085f28c6527de529e76a06ad89b23659fa881ae0649b867a9d55", size = 28926, upload-time = "2026-02-07T10:45:32.24Z" },
+ ]
+ 
++[[package]]
++name = "textual"
++version = "8.2.7"
++source = { registry = "https://pypi.org/simple" }
++dependencies = [
++    { name = "markdown-it-py", extra = ["linkify"] },
++    { name = "mdit-py-plugins" },
++    { name = "platformdirs" },
++    { name = "pygments" },
++    { name = "rich" },
++    { name = "typing-extensions" },
++]
++sdist = { url = "https://files.pythonhosted.org/packages/9b/7a/c519db0aba5024f86e71e9631810bfdd6866ed2c8695bd7fa34b90e7ef59/textual-8.2.7.tar.gz", hash = "sha256:658f568ff81e30ed43890c3e07520390e5cf1b4763822006e060656b0a88f105", size = 1859249, upload-time = "2026-05-19T10:52:49.531Z" }
++wheels = [
++    { url = "https://files.pythonhosted.org/packages/a8/f5/c1e18bc0707300a0e90204343abbf7d7acd6fb7ebe03a6d4893b99a234b8/textual-8.2.7-py3-none-any.whl", hash = "sha256:4caaa13a90bc4cf9c6c862c067ccd34fe84e9c161710a2a907a8026313b6bd73", size = 731129, upload-time = "2026-05-19T10:52:51.773Z" },
++]
++
+ [[package]]
+ name = "tqdm"
+ version = "4.67.3"
+@@ -1640,6 +1697,15 @@ wheels = [
+     { url = "https://files.pythonhosted.org/packages/dc/9b/47798a6c91d8bdb567fe2698fe81e0c6b7cb7ef4d13da4114b41d239f65d/typing_inspection-0.4.2-py3-none-any.whl", hash = "sha256:4ed1cacbdc298c220f1bd249ed5287caa16f34d44ef4e9c3d0cbad5b521545e7", size = 14611, upload-time = "2025-10-01T02:14:40.154Z" },
+ ]
+ 
++[[package]]
++name = "uc-micro-py"
++version = "2.0.0"
++source = { registry = "https://pypi.org/simple" }
++sdist = { url = "https://files.pythonhosted.org/packages/78/67/9a363818028526e2d4579334460df777115bdec1bb77c08f9db88f6389f2/uc_micro_py-2.0.0.tar.gz", hash = "sha256:c53691e495c8db60e16ffc4861a35469b0ba0821fe409a8a7a0a71864d33a811", size = 6611, upload-time = "2026-03-01T06:31:27.526Z" }
++wheels = [
++    { url = "https://files.pythonhosted.org/packages/61/73/d21edf5b204d1467e06500080a50f79d49ef2b997c79123a536d4a17d97c/uc_micro_py-2.0.0-py3-none-any.whl", hash = "sha256:3603a3859af53e5a39bc7677713c78ea6589ff188d70f4fee165db88e22b242c", size = 6383, upload-time = "2026-03-01T06:31:26.257Z" },
++]
++
+ [[package]]
+ name = "urllib3"
+ version = "2.6.3"

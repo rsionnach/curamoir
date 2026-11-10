@@ -1,0 +1,186 @@
+{
+ "schema_version": 1,
+ "entry": "opensrm-7zpz-core",
+ "fidelity": "recorded",
+ "lens_order": [
+  "correctness",
+  "clarity",
+  "edge-cases",
+  "provenance",
+  "excellence"
+ ],
+ "iterations": {
+  "correctness": 1,
+  "clarity": 2,
+  "edge-cases": 2,
+  "provenance": 2
+ },
+ "rounds": [
+  {
+   "lens": "correctness",
+   "iteration": 1,
+   "recorded_iteration": 1,
+   "counts": {
+    "critical": 0,
+    "important": 0,
+    "minor": 0
+   },
+   "findings": null
+  },
+  {
+   "lens": "clarity",
+   "iteration": 1,
+   "recorded_iteration": 1,
+   "counts": {
+    "critical": 0,
+    "important": 2,
+    "minor": 3
+   },
+   "findings": [
+    {
+     "lens": "clarity",
+     "severity": "IMPORTANT",
+     "path": "src/nthlayer_core/_openapi/paths_other.py",
+     "start_line": null,
+     "end_line": null,
+     "claim": "Migration path is missing from the OpenAPI doc.",
+     "evidence": null,
+     "fix": null,
+     "fingerprint": "23b4e1255ff488d6",
+     "verification_level": "asserted",
+     "resolves": null,
+     "regression": false,
+     "status": null,
+     "derived_from": "reviewer_transcript",
+     "extracted_by": "model",
+     "handback_sha256": "370ddd5ed03e824ab2221fcc9401bf74be653710b20ff58d2c57574820379fff",
+     "fix_commit": null,
+     "reported_path": "src/nthlayer_core/_openapi/paths_other.py",
+     "path_in_tree": true
+    },
+    {
+     "lens": "clarity",
+     "severity": "IMPORTANT",
+     "path": "src/nthlayer_core/catalogue.py",
+     "start_line": null,
+     "end_line": null,
+     "claim": "The catalogue.py comment overpromises.",
+     "evidence": null,
+     "fix": null,
+     "fingerprint": "0137d96cbd83e0fb",
+     "verification_level": "asserted",
+     "resolves": null,
+     "regression": false,
+     "status": null,
+     "derived_from": "reviewer_transcript",
+     "extracted_by": "model",
+     "handback_sha256": "370ddd5ed03e824ab2221fcc9401bf74be653710b20ff58d2c57574820379fff",
+     "fix_commit": null,
+     "reported_path": "catalogue.py",
+     "path_in_tree": true
+    }
+   ]
+  },
+  {
+   "lens": "clarity",
+   "iteration": 2,
+   "recorded_iteration": 2,
+   "counts": {
+    "critical": 0,
+    "important": 0,
+    "minor": 0
+   },
+   "findings": null
+  },
+  {
+   "lens": "edge_cases",
+   "iteration": 1,
+   "recorded_iteration": 1,
+   "counts": {
+    "critical": 0,
+    "important": 1,
+    "minor": 2
+   },
+   "findings": [
+    {
+     "lens": "edge_cases",
+     "severity": "IMPORTANT",
+     "path": "src/nthlayer_core/catalogue.py",
+     "start_line": 160,
+     "end_line": 167,
+     "claim": "The closed item schemas can drift from common's emitter, and no test fails when they do.",
+     "evidence": null,
+     "fix": null,
+     "fingerprint": "9297dcc2d07d0f83",
+     "verification_level": "asserted",
+     "resolves": null,
+     "regression": false,
+     "status": null,
+     "derived_from": "reviewer_transcript",
+     "extracted_by": "model",
+     "handback_sha256": "6464313477fbf678723af0835ab9d944e942ec473eae1362295458fa46786531",
+     "fix_commit": null,
+     "reported_path": "catalogue.py",
+     "path_in_tree": true
+    }
+   ]
+  },
+  {
+   "lens": "edge_cases",
+   "iteration": 2,
+   "recorded_iteration": 2,
+   "counts": {
+    "critical": 0,
+    "important": 0,
+    "minor": 0
+   },
+   "findings": null
+  },
+  {
+   "lens": "provenance",
+   "iteration": 1,
+   "recorded_iteration": 1,
+   "counts": {
+    "critical": 1,
+    "important": 0,
+    "minor": 2
+   },
+   "findings": [
+    {
+     "lens": "provenance",
+     "severity": "CRITICAL",
+     "path": "src/nthlayer_core/_openapi/paths_other.py",
+     "start_line": null,
+     "end_line": null,
+     "claim": "The published segments schema has untested constraints.",
+     "evidence": null,
+     "fix": null,
+     "fingerprint": "49b019aa66edcdc0",
+     "verification_level": "asserted",
+     "resolves": null,
+     "regression": false,
+     "status": null,
+     "derived_from": "reviewer_transcript",
+     "extracted_by": "model",
+     "handback_sha256": "5c55ca66f90cdb2978948c32bc272fcfd95d4a685d0196112d602126b07b19ca",
+     "fix_commit": null,
+     "reported_path": "src/nthlayer_core/_openapi/paths_other.py",
+     "path_in_tree": true
+    }
+   ]
+  },
+  {
+   "lens": "provenance",
+   "iteration": 2,
+   "recorded_iteration": 2,
+   "counts": {
+    "critical": 0,
+    "important": 0,
+    "minor": 0
+   },
+   "findings": null
+  }
+ ],
+ "cross_repo_findings": [],
+ "escaped": []
+}

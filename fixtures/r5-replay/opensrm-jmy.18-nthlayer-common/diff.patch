@@ -1,0 +1,371 @@
+diff --git a/CLAUDE.md b/CLAUDE.md
+index af53055..3895d8c 100644
+--- a/CLAUDE.md
++++ b/CLAUDE.md
+@@ -33,7 +33,7 @@ src/nthlayer_common/
+     prompts.py           # load_prompt, render_user_prompt, validate_response
+     parsing.py           # Shared parsing utilities
+     explanation.py       # BudgetExplanation dataclass + format_explanation() (table/json/markdown); shared across observe/respond
+-    api_client.py        # CoreAPIClient — async httpx client for nthlayer-core API; APIResult(ok, status_code, data, error, detail); never raises on API errors; endpoints: health, verdicts (submit/get/get_verdicts/get_ancestors/get_descendants/resolve_outcome), assessments (submit/get_assessments), cases (create/get/get_cases/acquire_lease/release_lease/resolve_case), change-freezes, heartbeats, manifests (get_manifests/get_manifest), component-state, monitoring
++    api_client.py        # CoreAPIClient — async httpx client for nthlayer-core API; APIResult(ok, status_code, data, error, detail); never raises on API errors; endpoints: health, verdicts (submit/get/get_verdicts/get_ancestors/get_descendants/resolve_outcome/apply_override), assessments (submit/get_assessments), cases (create/get/get_cases/acquire_lease/release_lease/resolve_case), change-freezes, heartbeats, manifests (get_manifests/get_manifest), component-state, monitoring
+     cloudevents.py       # CloudEvents v1.0 envelope helpers — wrap_verdict, wrap_assessment, parse_cloudevent, validate_cloudevent; type taxonomy frozen from v1.5 onwards (spec: NTHLAYER-TELEMETRY-ENVELOPE-v1 §3); ASSESSMENT_KINDS (public): {slo_status, judgment_slo_evaluation, burn_rate, drift_signal, portfolio_status, deploy_gate, dependency_graph, correlation_snapshot, topology_drift, contract_divergence, retrospective, calibration_signal}
+     metrics.py           # Self-observability Prometheus metrics — cycle_duration_seconds, verdicts_written_total, assessments_written_total, heartbeats_emitted_total, llm_calls_total, errors_total, api_requests_total (labels: method/route/status — route=URL template, never raw path), store_size_bytes, wal_size_bytes, stuck_action_requests; render_metrics(), metrics_content_type(); canonical import: from nthlayer_common.metrics import ...; spec: NTHLAYER-COMMON-v1 §7.3
+     telemetry.py         # OTel telemetry emission — emit_llm_event(*, model, provider, caller, ...) emits "nthlayer.llm.call" span event with gen_ai.* attributes; graceful no-op when OTel SDK not configured or no active recording span; is_otel_available() → bool; canonical import: from nthlayer_common.telemetry import emit_llm_event; spec: NTHLAYER-COMMON-v1 §3.4, §7
+@@ -77,8 +77,8 @@ src/nthlayer_common/
+         serialise.py     # to_dict/to_json/from_dict/from_json — datetime↔ISO strings via dataclasses.asdict; to_dict renames timestamp→created_at and verdict_type→type (HTTP-canonical wire names for POST /verdicts); from_dict accepts both wire-canonical (type, created_at) and legacy internal names (verdict_type, timestamp) for compat with data written before opensrm-saun.1.2; field precedence: created_at canonical, explicit None falls back to legacy timestamp, empty string is malformed; round-trips v1.5 fields (verdict_type, pipeline_latency_ms, chain_depth, parent_ids, service, cost_currency)
+     overrides/
+         __init__.py      # Re-exports: OverrideEvent, OverridePrivacyConfig, apply_override_to_verdict, hash_reviewer, map_webhook_to_override; canonical import: from nthlayer_common.overrides import OverrideEvent
+-        models.py        # OverrideEvent (gen_ai.override canonical form; required: decision_id/service/corrected_action/reviewer; tz-aware timestamp enforced; empty-string optional fields reason/original_action/source_system normalised to None in __post_init__ so benign upstream "" vs absent shifts don't flip idempotent replays into conflict, opensrm-jmy.11; is_high_confidence_failure property; to_otel_attributes() drops None); OverridePrivacyConfig (plaintext_reviewer=False, exclude_reason=False); hash_reviewer() SHA-256 hex (GDPR pseudonymisation baseline, not anonymisation — reversible by enumeration); map_webhook_to_override() dotted-path adapter (coerces string confidence, rejects naive timestamps, required-field guard uses `is None` so explicit JSON null surfaces while empty-string falls through to OverrideEvent's canonical "is required" message, opensrm-jmy.11); _resolve_path returns _ABSENT sentinel (distinguishes payload `{"x": null}` from absent key — silently collapsing the two would mask malformed webhooks and disable HCF accounting); HIGH_CONFIDENCE_THRESHOLD=0.85
+-        ingestion.py     # apply_override_to_verdict(store, event, *, privacy=None) -> Verdict | None — binds OverrideEvent to verdict store by decision_id; allowlist _OPEN_FOR_OVERRIDE={"pending"} (catches partial/confirmed/superseded/expired and unrecognised future statuses); idempotent on same-content re-apply (spec §4 scenario 11); returns None on unmatched ID (logs override_unmatched_decision_id) / non-pending status / audit-trail conflict / TOCTOU race with concurrent delete (KeyError on update_outcome → logs override_lost_race_to_concurrent_delete) / CAS miss when another writer transitioned the verdict between our read and update (OutcomeStatusMismatch on update_outcome → logs override_lost_race_to_concurrent_writer, opensrm-jmy.11); first-writer-wins semantic enforced by store-level compare-and-swap via update_outcome(expected_status=current_status); event.timestamp recorded on Override but never compared; reviewer hashed by default
++        models.py        # OverrideEvent (gen_ai.override canonical form; required: decision_id/service/corrected_action/reviewer; tz-aware timestamp enforced; empty-string optional fields reason/original_action/source_system normalised to None in __post_init__ so benign upstream "" vs absent shifts don't flip idempotent replays into conflict, opensrm-jmy.11; is_high_confidence_failure property; to_otel_attributes() drops None; to_dict() canonical JSON-serialisable wire dict for POST /verdicts/{id}/override — drops None optionals, timestamp ISO 8601 with offset, distinct from to_otel_attributes, opensrm-jmy.18); OverridePrivacyConfig (pre_redacted=False, plaintext_reviewer=False [DEPRECATED alias for pre_redacted — will be removed in v2; both trigger same predicate: trust_wire = plaintext_reviewer or pre_redacted], exclude_reason=False); hash_reviewer() SHA-256 hex (GDPR pseudonymisation baseline, not anonymisation — reversible by enumeration); map_webhook_to_override() dotted-path adapter (coerces string confidence, rejects naive timestamps, required-field guard uses `is None` so explicit JSON null surfaces while empty-string falls through to OverrideEvent's canonical "is required" message, opensrm-jmy.11); _resolve_path returns _ABSENT sentinel (distinguishes payload `{"x": null}` from absent key — silently collapsing the two would mask malformed webhooks and disable HCF accounting); HIGH_CONFIDENCE_THRESHOLD=0.85
++        ingestion.py     # apply_override_to_verdict(store, event, *, privacy=None) -> Verdict | None — binds OverrideEvent to verdict store by decision_id; allowlist _OPEN_FOR_OVERRIDE={"pending"} (catches partial/confirmed/superseded/expired and unrecognised future statuses); idempotent on same-content re-apply (spec §4 scenario 11); returns None on unmatched ID (logs override_unmatched_decision_id) / non-pending status / audit-trail conflict / TOCTOU race with concurrent delete (KeyError on update_outcome → logs override_lost_race_to_concurrent_delete) / CAS miss when another writer transitioned the verdict between our read and update (OutcomeStatusMismatch on update_outcome → logs override_lost_race_to_concurrent_writer, opensrm-jmy.11); first-writer-wins semantic enforced by store-level compare-and-swap via update_outcome(expected_status=current_status); event.timestamp recorded on Override but never compared; reviewer hashed by default; _build_override predicate: trust_wire = privacy.plaintext_reviewer or privacy.pre_redacted (opensrm-jmy.18)
+     governance_bridge/
+         __init__.py      # Re-exports: SIGNAL_VERSION, AutonomyChangeSignal, AutonomyChangeTrigger, PolicyRecommendationSignal, PolicyRecommendation, IncidentOpenedSignal, PolicyUpdatedSignal, AutonomyRestoreRequest, EmitResult, GovernanceBridgeEmitter; canonical import: from nthlayer_common.governance_bridge import GovernanceBridgeEmitter (opensrm-jmy.5, spec § 5)
+         models.py        # Signal schemas (all dataclasses, version="v1"); outbound (NthLayer → governance): AutonomyChangeSignal + AutonomyChangeTrigger, PolicyRecommendationSignal + PolicyRecommendation, IncidentOpenedSignal; inbound (governance → NthLayer, delivered via the adapter sidecar): PolicyUpdatedSignal, AutonomyRestoreRequest; every signal has signal_type (init=False, prevents forging), service, timestamp (tz-aware enforced); to_payload() emits the wire dict per spec § 5 (signal_type → "type" on the wire, optional fields dropped when None); receivers dedup on (type, service, timestamp) per spec principle 3
+@@ -126,7 +126,7 @@ tests/
+     test_v1_to_v2_migration.py   # 14 tests (3 classes): TestConvertShape (8 — apiVersion+kind / owner / labels / classical-SLO ratio / judgment-SLO emission / dependency criticality / non-v1 + missing-name rejection), TestRoundTripThroughV2Parser (2 — classical + judgment), TestDemoSpecsRoundTrip (4 — every demo spec under nthlayer/demo/specs/ converts and parses); total test count: 758
+     test_llm_stub.py             # 26 tests for NTHLAYER_LLM_STUB=canned: role detection, all 4 agent shapes, structured callers, env-var variants, name-collision guard
+     test_target_validation.py    # 17 tests (5 classes) pinning SLO target convention (opensrm-5fff.1): TestPercentageRange (99.9/99.99/50%/98.5/99% clean — canonical percentage passes silently), TestRatioWarns (0.999/0.5/0.985/0.015 → warn with "ratio" + suggested *100 correction, both classical and judgment), TestEdgeCases (target==1.0 silent; 0/negative/above-100 skipped), TestMixedManifests (one clean + one dirty warns once; warning names service), TestRealDemoSpecs (fraud-detect.yaml loads with 0 TargetConventionWarnings post-migration — regression guard)
+-    test_overrides.py            # opensrm-jmy.4: spec §4 scenarios 1/5/6/7/8/10/11; scenarios 2/3/4/9 deferred to opensrm-jmy.7; TestOverrideEvent (required-field validation, confidence range [0.0,1.0], naive-timestamp rejection, HCF threshold 0.86=yes/0.85=no, to_otel_attributes None-drop); TestPrivacy (hash_reviewer stable SHA-256, default-hashes reviewer, plaintext opt-in, exclude_reason); TestApplyOverride (native OTel event updates verdict, unknown decision_id→None, HCF signal preserved on Override, idempotent reapplication, conflicting-content rejection on already-overridden, terminal-status block confirmed/superseded/expired, partial-status block); TestWebhookMapping (Jira dotted-path field map, missing required path raises ValueError, naive ISO timestamp rejected, stringified confidence coerced, defaults fill absent fields)
++    test_overrides.py            # opensrm-jmy.4: spec §4 scenarios 1/5/6/7/8/10/11; scenarios 2/3/4/9 deferred to opensrm-jmy.7; TestOverrideEvent (required-field validation, confidence range [0.0,1.0], naive-timestamp rejection, HCF threshold 0.86=yes/0.85=no, to_otel_attributes None-drop, to_dict_canonical_wire_shape [opensrm-jmy.18], to_dict_drops_none_optional_fields); TestPrivacy (hash_reviewer stable SHA-256, default-hashes reviewer, plaintext opt-in, exclude_reason); TestPreRedactedFlag (3 tests, opensrm-jmy.18: pre_redacted skips hashing, plaintext_reviewer alias, both-flags-together); TestApplyOverride (native OTel event updates verdict, unknown decision_id→None, HCF signal preserved on Override, idempotent reapplication, conflicting-content rejection on already-overridden, terminal-status block confirmed/superseded/expired, partial-status block); TestWebhookMapping (Jira dotted-path field map, missing required path raises ValueError, naive ISO timestamp rejected, stringified confidence coerced, defaults fill absent fields)
+     test_outcomes.py             # opensrm-jmy.1 spec § 1 — 22 tests (3 classes): TestOutcomesModel (FailureCost cost/category validation, DecisionValue currency pattern, RevenueAttribution attribution/signal validation, VolumeEstimate non-negative, Outcomes construction); TestOutcomesParser (no_outcomes_block_yields_none, full_outcomes_round_trip with revenue+volume, missing_decision_value_rejected, invalid_currency_rejected); TestComputeFinancialImpact (metric_path_per_service_breach_count, spec_estimate_fallback, no_outcomes_returns_none, blast_radius_unmatched_returns_none, blast_radius_dict_shape_supported, no_specs_dir_returns_none, empty_blast_radius_returns_none, duplicate_manifest_deduped, no_duration_and_no_breaches_returns_none, multi_service_metric_path_per_service_attribution) — exercises compute_financial_impact and estimate_decisions_in_window from nthlayer_common.outcomes plus Outcomes/DecisionValue/FailureCost from nthlayer_common.manifest.models
+     smoke/
+         __init__.py      # Package marker
+@@ -281,7 +281,7 @@ A load-time validator in `nthlayer_common.manifest.target_validation` flags targ
+ 
+ **Identity:** `IdentityResolver` (7-strategy), `normalize_service_name()`, `OwnershipResolver`
+ 
+-**HTTP Clients:** `BaseHTTPClient(base_url, *, timeout=30.0, max_retries=3, backoff_factor=2.0, circuit_failure_threshold=5, circuit_recovery_timeout=60)` — async httpx base with tenacity retry + circuit breaker; retryable statuses: 408, 429, 500, 502, 503, 504; override `_headers()` and `_auth_tuple()` to customise; `is_retryable_status(code)` helper exported. `MimirRulerProvider(ruler_url, *, tenant_id, api_key, username, password, timeout=30.0, user_agent, max_retries=3, backoff_factor=2.0)` — canonical in `clients.mimir`; `push_rules(namespace, rules_yaml)` → `RulerPushResult(success, namespace, status_code, message, groups_pushed)`; also `delete_rules()`, `list_rules()`, `health_check()`. Other clients: `CortexClient`, `PagerDutyClient`, `SlackAPIClient`. `CoreAPIClient(base_url="http://localhost:8000", max_retries=3, initial_backoff=1.0, max_backoff=30.0, timeout=30.0)` (`api_client.py`) — async httpx client for nthlayer-core API; returns `APIResult(ok, status_code, data, error, detail)`, never raises; transient codes (502, 503, 504, 429) retried with exponential backoff; connection errors (ConnectError, ConnectTimeout, OSError) reset httpx client before retry; timeout errors retried without client reset; 4xx returned immediately; all retries exhausted → `status_code=0, error="connection_failed"`; canonical import: `from nthlayer_common.api_client import CoreAPIClient`. Full endpoint coverage: `health()`; verdicts: `submit_verdict`, `get_verdict`, `get_verdicts(*, service, verdict_type, created_after, created_before, limit=100)`, `get_ancestors(id, max_hops?)`, `get_descendants(id)`, `resolve_outcome(id, outcome)`; assessments: `submit_assessment`, `get_assessments(*, service, kind, limit=100)`; cases: `create_case`, `get_case`, `get_cases(*, state, priority, service, limit=100)`, `acquire_lease(case_id, holder, expires_at)`, `release_lease(case_id)`, `resolve_case(case_id, resolution_id)`; change-freezes: `create_change_freeze`, `get_active_freezes`, `lift_change_freeze(name, lifted_by)`; heartbeats: `heartbeat(component, instance_id, state?)`, `get_heartbeats(threshold=30)`; manifests: `get_manifests()`, `get_manifest(service)`; component-state: `put_component_state(component, state)`, `get_component_state(component)`; monitoring: `get_stuck_action_requests(threshold=60)`.
++**HTTP Clients:** `BaseHTTPClient(base_url, *, timeout=30.0, max_retries=3, backoff_factor=2.0, circuit_failure_threshold=5, circuit_recovery_timeout=60)` — async httpx base with tenacity retry + circuit breaker; retryable statuses: 408, 429, 500, 502, 503, 504; override `_headers()` and `_auth_tuple()` to customise; `is_retryable_status(code)` helper exported. `MimirRulerProvider(ruler_url, *, tenant_id, api_key, username, password, timeout=30.0, user_agent, max_retries=3, backoff_factor=2.0)` — canonical in `clients.mimir`; `push_rules(namespace, rules_yaml)` → `RulerPushResult(success, namespace, status_code, message, groups_pushed)`; also `delete_rules()`, `list_rules()`, `health_check()`. Other clients: `CortexClient`, `PagerDutyClient`, `SlackAPIClient`. `CoreAPIClient(base_url="http://localhost:8000", max_retries=3, initial_backoff=1.0, max_backoff=30.0, timeout=30.0)` (`api_client.py`) — async httpx client for nthlayer-core API; returns `APIResult(ok, status_code, data, error, detail)`, never raises; transient codes (502, 503, 504, 429) retried with exponential backoff; connection errors (ConnectError, ConnectTimeout, OSError) reset httpx client before retry; timeout errors retried without client reset; 4xx returned immediately; all retries exhausted → `status_code=0, error="connection_failed"`; canonical import: `from nthlayer_common.api_client import CoreAPIClient`. Full endpoint coverage: `health()`; verdicts: `submit_verdict`, `get_verdict`, `get_verdicts(*, service, verdict_type, created_after, created_before, limit=100)`, `get_ancestors(id, max_hops?)`, `get_descendants(id)`, `resolve_outcome(id, outcome)`, `apply_override(verdict_id, payload) -> APIResult` — POST /verdicts/{id}/override (opensrm-jmy.18); 200=applied/idempotent, 404=verdict_not_found, 409=conflict, 422=validation_error, 0=connection_failed; does not raise; assessments: `submit_assessment`, `get_assessments(*, service, kind, limit=100)`; cases: `create_case`, `get_case`, `get_cases(*, state, priority, service, limit=100)`, `acquire_lease(case_id, holder, expires_at)`, `release_lease(case_id)`, `resolve_case(case_id, resolution_id)`; change-freezes: `create_change_freeze`, `get_active_freezes`, `lift_change_freeze(name, lifted_by)`; heartbeats: `heartbeat(component, instance_id, state?)`, `get_heartbeats(threshold=30)`; manifests: `get_manifests()`, `get_manifest(service)`; component-state: `put_component_state(component, state)`, `get_component_state(component)`; monitoring: `get_stuck_action_requests(threshold=60)`.
+ 
+ **Slack:** `SlackNotifier` (`slack.py` — Block Kit webhook, fail-open); `SlackWebClient` (`slack_web.py` — Web API: `post_message`, `update_message`, `verify_signature`; lazy httpx client, fail-open)
+ 
+@@ -313,8 +313,8 @@ A load-time validator in `nthlayer_common.manifest.target_validation` flags targ
+ - **Serialisation:** `to_dict/to_json/from_dict/from_json` — dataclasses.asdict + datetime↔ISO strings; `to_dict` renames `timestamp`→`created_at` and `verdict_type`→`type` at the wire boundary (HTTP-canonical names for nthlayer-core POST /verdicts); `from_dict` accepts both wire-canonical (`type`, `created_at`) and legacy internal names (`verdict_type`, `timestamp`) for round-trip compat with data written before opensrm-saun.1.2; round-trips all v1.5 fields (verdict_type, pipeline_latency_ms, chain_depth, parent_ids, service, cost_currency)
+ 
+ **Overrides (`nthlayer_common.overrides`):** Human override ingestion — canonical OTel gen_ai.override event schema, privacy controls, and verdict binding (opensrm-jmy.4, spec §4). Canonical import: `from nthlayer_common.overrides import OverrideEvent`.
+-- `OverrideEvent` — required: `decision_id`, `service`, `corrected_action`, `reviewer`; optional: `original_action`, `reason`, `confidence_at_decision` (float 0.0–1.0), `source_system`, `timestamp` (tz-aware, default utcnow); `is_high_confidence_failure` property (confidence > 0.85); `to_otel_attributes()` → gen_ai.override.* attr dict (None-valued fields dropped); `__post_init__` normalises empty strings on optional fields (`reason`, `original_action`, `source_system`) to None so a benign upstream switch from omitting → sending `""` does not flip an idempotent replay into `override_conflicts_with_existing` (opensrm-jmy.11)
+-- `OverridePrivacyConfig(plaintext_reviewer=False, exclude_reason=False)` — spec §4 GDPR baseline; SHA-256 hash is pseudonymisation not anonymisation (reversible by enumeration); operators needing stronger privacy should pre-hash with per-deployment HMAC
++- `OverrideEvent` — required: `decision_id`, `service`, `corrected_action`, `reviewer`; optional: `original_action`, `reason`, `confidence_at_decision` (float 0.0–1.0), `source_system`, `timestamp` (tz-aware, default utcnow); `is_high_confidence_failure` property (confidence > 0.85); `to_otel_attributes()` → gen_ai.override.* attr dict (None-valued fields dropped); `to_dict()` → canonical JSON-serialisable wire dict for `POST /verdicts/{id}/override` (opensrm-jmy.18) — drops None optionals, timestamp as ISO 8601 with offset, distinct from `to_otel_attributes()`; `__post_init__` normalises empty strings on optional fields (`reason`, `original_action`, `source_system`) to None so a benign upstream switch from omitting → sending `""` does not flip an idempotent replay into `override_conflicts_with_existing` (opensrm-jmy.11)
++- `OverridePrivacyConfig(pre_redacted=False, plaintext_reviewer=False, exclude_reason=False)` — `pre_redacted`: trust the wire, skip reviewer hashing (opensrm-jmy.18; set by nthlayer-core handler which applies privacy at boundary); `plaintext_reviewer`: DEPRECATED alias for `pre_redacted`, will be removed in v2; both trigger identical `_build_override` predicate (`trust_wire = plaintext_reviewer or pre_redacted`); spec §4 GDPR baseline; SHA-256 hash is pseudonymisation not anonymisation (reversible by enumeration); operators needing stronger privacy should pre-hash with per-deployment HMAC
+ - `hash_reviewer(reviewer) -> str` — stable SHA-256 hex
+ - `map_webhook_to_override(payload, mapping, *, defaults=None) -> OverrideEvent` — generic dotted-path adapter for arbitrary webhook shapes (Jira, Slack, etc.); coerces string confidence; rejects naive timestamps; required-field guard uses `is None` (not falsy) so explicit JSON null on a required field surfaces as "could not be resolved to a non-null value" while `""` falls through to OverrideEvent's clearer "is required" message (opensrm-jmy.11); `_resolve_path` returns an `_ABSENT` sentinel so `{"x": null}` is distinguishable from an absent key (silent collapse would mask malformed webhooks)
+ - `apply_override_to_verdict(store, event, *, privacy=None) -> Verdict | None` — binds OverrideEvent to verdict by decision_id; idempotent on same-content re-apply; returns None on unmatched ID / terminal status (confirmed/superseded/expired/partial/any unknown future status) / audit-trail conflict / TOCTOU race with concurrent delete (KeyError) / CAS miss when a concurrent writer transitioned the verdict between our read and update (OutcomeStatusMismatch, opensrm-jmy.11); enforces first-writer-wins via store-level compare-and-swap (`update_outcome(expected_status=current_status)`); logs structured warnings on every None-return path
+diff --git a/src/nthlayer_common/api_client.py b/src/nthlayer_common/api_client.py
+index d8e5c4d..4be5b15 100644
+--- a/src/nthlayer_common/api_client.py
++++ b/src/nthlayer_common/api_client.py
+@@ -201,6 +201,26 @@ class CoreAPIClient:
+     async def resolve_outcome(self, verdict_id: str, outcome: dict) -> APIResult:
+         return await self._request("POST", f"/verdicts/{verdict_id}/outcome", json=outcome)
+ 
++    async def apply_override(
++        self,
++        verdict_id: str,
++        payload: dict,
++    ) -> APIResult:
++        """Apply an operator override to a verdict (opensrm-jmy.18).
++
++        Calls POST /verdicts/{verdict_id}/override on the core API.
++
++        Status code mapping (interpret via result.status_code, not result.ok):
++            200 - applied (including idempotent re-apply)
++            404 - verdict_not_found (no record or concurrent delete)
++            409 - conflict (existing override differs OR CAS miss)
++            422 - validation_error (terminal status block or schema failure)
++            0   - connection failed (transport layer; result.error populated)
++
++        Does not raise; check result.ok and result.status_code.
++        """
++        return await self._request("POST", f"/verdicts/{verdict_id}/override", json=payload)
++
+     # -- Assessments --
+ 
+     async def submit_assessment(self, assessment: dict) -> APIResult:
+diff --git a/src/nthlayer_common/overrides/ingestion.py b/src/nthlayer_common/overrides/ingestion.py
+index ae9d5c7..57b4e81 100644
+--- a/src/nthlayer_common/overrides/ingestion.py
++++ b/src/nthlayer_common/overrides/ingestion.py
+@@ -32,11 +32,8 @@ _OPEN_FOR_OVERRIDE = frozenset({"pending"})
+ def _build_override(
+     event: OverrideEvent, privacy: OverridePrivacyConfig,
+ ) -> Override:
+-    reviewer = (
+-        event.reviewer
+-        if privacy.plaintext_reviewer
+-        else hash_reviewer(event.reviewer)
+-    )
++    trust_wire = privacy.plaintext_reviewer or privacy.pre_redacted
++    reviewer = event.reviewer if trust_wire else hash_reviewer(event.reviewer)
+     return Override(
+         by=reviewer,
+         at=event.timestamp,
+diff --git a/src/nthlayer_common/overrides/models.py b/src/nthlayer_common/overrides/models.py
+index f1eb5bd..830f52d 100644
+--- a/src/nthlayer_common/overrides/models.py
++++ b/src/nthlayer_common/overrides/models.py
+@@ -30,14 +30,22 @@ def hash_reviewer(reviewer: str) -> str:
+ 
+ @dataclass
+ class OverridePrivacyConfig:
+-    """Privacy posture for override ingestion.
+-
+-    Defaults are the spec § 4 GDPR-safe baseline: reviewer hashed,
+-    reason stored. Operators opt in to plaintext / opt out of reason
+-    storage explicitly.
++    """Privacy policy for override processing.
++
++    Attributes:
++        pre_redacted: trust the wire; no further redaction. Set this when
++            the caller (e.g. nthlayer-override-adapter) has already applied
++            privacy policy at its boundary and the values arriving here are
++            already in their final form. opensrm-jmy.18.
++        plaintext_reviewer: alias for pre_redacted. DEPRECATED — use
++            pre_redacted instead. Will be removed in v2. Both flags trigger
++            the same code path in nthlayer_common.overrides.ingestion._build_override.
++        exclude_reason: drop the reason field from the resulting Override.
++            Independent of pre_redacted (a pre-redacted payload may still
++            have a reason that the caller decided to keep).
+     """
+-
+-    plaintext_reviewer: bool = False
++    pre_redacted: bool = False
++    plaintext_reviewer: bool = False  # deprecated alias for pre_redacted
+     exclude_reason: bool = False
+ 
+ 
+@@ -120,6 +128,34 @@ class OverrideEvent:
+                 attrs[otel_key] = value
+         return attrs
+ 
++    def to_dict(self) -> dict:
++        """Canonical JSON-serializable dict for the HTTP wire (opensrm-jmy.18).
++
++        Distinct from to_otel_attributes (which prefixes keys with
++        gen_ai.override.*). Used by nthlayer-override-adapter when
++        POSTing to POST /verdicts/{id}/override.
++
++        None-valued optional fields are dropped (the receiver's
++        OverrideEvent dataclass defaults will fill them back in).
++        timestamp is ISO 8601 with offset.
++        """
++        out: dict = {
++            "decision_id": self.decision_id,
++            "service": self.service,
++            "corrected_action": self.corrected_action,
++            "reviewer": self.reviewer,
++            "timestamp": self.timestamp.isoformat(),
++        }
++        if self.original_action is not None:
++            out["original_action"] = self.original_action
++        if self.reason is not None:
++            out["reason"] = self.reason
++        if self.confidence_at_decision is not None:
++            out["confidence_at_decision"] = self.confidence_at_decision
++        if self.source_system is not None:
++            out["source_system"] = self.source_system
++        return out
++
+ 
+ _ABSENT: Any = object()
+ """Sentinel returned by ``_resolve_path`` when a dotted path doesn't resolve.
+diff --git a/tests/test_api_client.py b/tests/test_api_client.py
+index 84bc290..427adae 100644
+--- a/tests/test_api_client.py
++++ b/tests/test_api_client.py
+@@ -6,6 +6,7 @@ without requiring a running core process.
+ 
+ from __future__ import annotations
+ 
++import json
+ from unittest.mock import AsyncMock, patch
+ 
+ import httpx
+@@ -241,6 +242,56 @@ class TestManifestMethods:
+             mock.assert_called_once_with("GET", "/manifests/fraud-detect")
+ 
+ 
++class TestApplyOverride:
++    """opensrm-jmy.18: CoreAPIClient.apply_override happy path + status mapping."""
++
++    @pytest.mark.asyncio
++    async def test_apply_override_success(self) -> None:
++        async def handler(request: httpx.Request) -> httpx.Response:
++            assert request.method == "POST"
++            assert request.url.path == "/verdicts/dec-1/override"
++            assert json.loads(request.content) == {"reviewer": "h", "service": "s"}
++            return httpx.Response(200, json={"id": "dec-1", "status": "overridden"})
++
++        transport = httpx.MockTransport(handler)
++        api = CoreAPIClient(base_url="http://test", max_retries=0)
++        api._client = httpx.AsyncClient(transport=transport, base_url="http://test")
++        result = await api.apply_override("dec-1", {"reviewer": "h", "service": "s"})
++
++        assert result.ok is True
++        assert result.status_code == 200
++        assert result.data == {"id": "dec-1", "status": "overridden"}
++        await api.close()
++
++    @pytest.mark.asyncio
++    async def test_apply_override_404_returned_as_apiresult(self) -> None:
++        async def handler(request: httpx.Request) -> httpx.Response:
++            return httpx.Response(404, json={"error": "verdict_not_found"})
++
++        transport = httpx.MockTransport(handler)
++        api = CoreAPIClient(base_url="http://test", max_retries=0)
++        api._client = httpx.AsyncClient(transport=transport, base_url="http://test")
++        result = await api.apply_override("dec-missing", {"reviewer": "h"})
++
++        assert result.ok is False
++        assert result.status_code == 404
++        await api.close()
++
++    @pytest.mark.asyncio
++    async def test_apply_override_connection_failed(self) -> None:
++        async def handler(request: httpx.Request) -> httpx.Response:
++            raise httpx.ConnectError("simulated")
++
++        transport = httpx.MockTransport(handler)
++        api = CoreAPIClient(base_url="http://test", max_retries=0)
++        api._client = httpx.AsyncClient(transport=transport, base_url="http://test")
++        result = await api.apply_override("dec-1", {"reviewer": "h"})
++
++        assert result.ok is False
++        assert result.status_code == 0
++        await api.close()
++
++
+ class TestContextManager:
+     @pytest.mark.asyncio
+     async def test_async_context_manager(self):
+diff --git a/tests/test_overrides.py b/tests/test_overrides.py
+index 383f5c2..a57f285 100644
+--- a/tests/test_overrides.py
++++ b/tests/test_overrides.py
+@@ -54,6 +54,10 @@ def _verdict(
+     )
+ 
+ 
++def _make_pending_verdict(decision_id: str) -> "Verdict":
++    return _verdict(vid=decision_id, service="fraud-detect")
++
++
+ def _event(**overrides: object) -> OverrideEvent:
+     base: dict[str, object] = {
+         "decision_id": "vrd-test-1",
+@@ -106,6 +110,48 @@ class TestOverrideEvent:
+         assert "gen_ai.override.reason" not in attrs
+         assert "gen_ai.override.confidence_at_decision" not in attrs
+ 
++    def test_to_dict_canonical_wire_shape(self) -> None:
++        """opensrm-jmy.18: to_dict produces a JSON-serializable canonical dict."""
++        event = OverrideEvent(
++            decision_id="dec-1",
++            service="fraud-detect",
++            corrected_action="approve",
++            reviewer="reviewer-hash",
++            original_action="reject",
++            reason="false positive",
++            confidence_at_decision=0.92,
++            source_system="slack-adapter",
++            timestamp=datetime(2026, 5, 20, 10, 33, 0, tzinfo=timezone.utc),
++        )
++        body = event.to_dict()
++        assert body == {
++            "decision_id": "dec-1",
++            "service": "fraud-detect",
++            "corrected_action": "approve",
++            "reviewer": "reviewer-hash",
++            "original_action": "reject",
++            "reason": "false positive",
++            "confidence_at_decision": 0.92,
++            "source_system": "slack-adapter",
++            "timestamp": "2026-05-20T10:33:00+00:00",
++        }
++        import json
++        assert json.dumps(body)  # raises on non-serialisable
++
++    def test_to_dict_drops_none_optional_fields(self) -> None:
++        event = OverrideEvent(
++            decision_id="dec-2",
++            service="fraud-detect",
++            corrected_action="approve",
++            reviewer="reviewer-hash",
++        )
++        body = event.to_dict()
++        assert "original_action" not in body
++        assert "reason" not in body
++        assert "confidence_at_decision" not in body
++        assert "source_system" not in body
++        assert "timestamp" in body  # timestamp is always present (default utcnow)
++
+ 
+ # ---------------------------------------------------------------------------
+ # Privacy
+@@ -520,6 +566,66 @@ class TestJmy11EmptyStringRequiredField:
+             )
+ 
+ 
++class TestPreRedactedFlag:
++    """opensrm-jmy.18: pre_redacted flag with plaintext_reviewer as deprecated alias."""
++
++    def test_pre_redacted_true_skips_reviewer_hashing(self) -> None:
++        event = OverrideEvent(
++            decision_id="dec-1",
++            service="fraud-detect",
++            corrected_action="approve",
++            reviewer="already-hashed-hex",
++        )
++        privacy = OverridePrivacyConfig(pre_redacted=True)
++        store = MemoryStore()
++        store.put(_make_pending_verdict("dec-1"))
++
++        result = apply_override_to_verdict(store, event, privacy=privacy)
++
++        assert result is not None
++        assert result.outcome.override.by == "already-hashed-hex"
++
++    def test_plaintext_reviewer_remains_an_alias(self) -> None:
++        event = OverrideEvent(
++            decision_id="dec-2",
++            service="fraud-detect",
++            corrected_action="approve",
++            reviewer="already-hashed-hex",
++        )
++        store_a = MemoryStore()
++        store_a.put(_make_pending_verdict("dec-2"))
++        store_b = MemoryStore()
++        store_b.put(_make_pending_verdict("dec-2"))
++
++        r_pre = apply_override_to_verdict(
++            store_a, event, privacy=OverridePrivacyConfig(pre_redacted=True),
++        )
++        r_plain = apply_override_to_verdict(
++            store_b, event, privacy=OverridePrivacyConfig(plaintext_reviewer=True),
++        )
++
++        assert r_pre is not None and r_plain is not None
++        assert r_pre.outcome.override.by == r_plain.outcome.override.by == "already-hashed-hex"
++
++    def test_both_flags_set_together_behaves_identically(self) -> None:
++        event = OverrideEvent(
++            decision_id="dec-3",
++            service="fraud-detect",
++            corrected_action="approve",
++            reviewer="already-hashed-hex",
++        )
++        store = MemoryStore()
++        store.put(_make_pending_verdict("dec-3"))
++
++        result = apply_override_to_verdict(
++            store, event,
++            privacy=OverridePrivacyConfig(pre_redacted=True, plaintext_reviewer=True),
++        )
++
++        assert result is not None
++        assert result.outcome.override.by == "already-hashed-hex"
++
++
+ class TestJmy11EmptyStringOptionalNormalisation:
+     """Empty-string optional fields normalise to None on OverrideEvent."""
+ 

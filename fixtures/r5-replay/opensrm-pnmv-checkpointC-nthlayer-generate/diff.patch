@@ -1,0 +1,373 @@
+diff --git a/pyproject.toml b/pyproject.toml
+index c0f2cca..c77a602 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -48,10 +48,12 @@ dependencies = [
+     # is_valid_service_type from nthlayer_common.manifest.models, which landed
+     # in 2.0.0 (opensrm-ih0v). The >=0.1.5 floor before it claimed a
+     # compatibility that no longer existed.
+-    # WHY 5.2.0 (opensrm-g35i): the version this repo is now built and tested
+-    # against (rule 10: the floor is the installed sibling). Bump it on
+-    # every nthlayer-common minor release: the floor guard fails until you do.
+-    "nthlayer-common>=5.2.0,<6.0.0",
++    # WHY 5.3.0 (opensrm-pnmv): `nthlayer migrate-manifest` converts opensrm/v1
++    # manifests via nthlayer_common.manifest.opensrm_v1 (added in 5.3.0), and
++    # this is the version the repo is built and tested against (rule 10: the
++    # floor is the installed sibling). Bump it on every nthlayer-common minor
++    # release: the floor guard fails until you do.
++    "nthlayer-common>=5.3.0,<6.0.0",
+     "grafana-foundation-sdk>=0.0.11",
+     "pydantic>=2.7.0,<3.0.0",
+     "pydantic-settings>=2.2.1,<3.0.0",
+diff --git a/src/nthlayer_generate/cli/migrate_manifest.py b/src/nthlayer_generate/cli/migrate_manifest.py
+index 862ccb4..a422748 100644
+--- a/src/nthlayer_generate/cli/migrate_manifest.py
++++ b/src/nthlayer_generate/cli/migrate_manifest.py
+@@ -1,10 +1,11 @@
+-"""CLI command for migrating srm/v1 manifests to opensrm.nthlayer.io/v2.
++"""CLI command for migrating srm/v1 and opensrm/v1 manifests to opensrm.nthlayer.io/v2.
+ 
+ Usage::
+ 
+     nthlayer migrate-manifest service.yaml
+     nthlayer migrate-manifest service.yaml --output service.v2.yaml
+     nthlayer migrate-manifest service.yaml --dry-run
++    nthlayer migrate-manifest service.yaml --allow-lossy --service-type api
+ 
+ Acceptance (opensrm-b22.2): converts every demo spec; output round-trips
+ through the v2 parser without loss of canonical fields.
+@@ -17,10 +18,14 @@ from pathlib import Path
+ from typing import Any
+ 
+ import yaml
++from nthlayer_common.manifest.opensrm_v1 import (
++    convert_opensrm_v1_to_v2,
++    is_opensrm_v1_format,
++)
+ from nthlayer_common.manifest.parser.v2 import OpenSRMV2ParseError, parse_opensrm_v2
+ from nthlayer_common.manifest.v1_compat import convert_v1_to_v2
+ 
+-from nthlayer_generate.cli.ux import console, error, header, success
++from nthlayer_generate.cli.ux import console, error, header, success, warning
+ 
+ 
+ def register_migrate_manifest_parser(
+@@ -29,9 +34,9 @@ def register_migrate_manifest_parser(
+     """Register the migrate-manifest command parser."""
+     p = subparsers.add_parser(
+         "migrate-manifest",
+-        help="Migrate an srm/v1 manifest to opensrm.nthlayer.io/v2",
++        help="Migrate an srm/v1 or opensrm/v1 manifest to opensrm.nthlayer.io/v2",
+     )
+-    p.add_argument("manifest", help="Path to srm/v1 manifest YAML")
++    p.add_argument("manifest", help="Path to srm/v1 or opensrm/v1 manifest YAML")
+     p.add_argument(
+         "--output",
+         "-o",
+@@ -47,6 +52,18 @@ def register_migrate_manifest_parser(
+         action="store_true",
+         help="Overwrite an existing output file",
+     )
++    p.add_argument(
++        "--allow-lossy",
++        action="store_true",
++        help=(
++            "Write the v2 manifest even though some opensrm/v1 fields have no v2 "
++            "equivalent (they are listed)"
++        ),
++    )
++    p.add_argument(
++        "--service-type",
++        help="spec.service.type to use when an opensrm/v1 manifest has no spec.type",
++    )
+ 
+ 
+ def handle_migrate_manifest_command(args: argparse.Namespace) -> int:
+@@ -55,6 +72,8 @@ def handle_migrate_manifest_command(args: argparse.Namespace) -> int:
+         output_path=getattr(args, "output", None),
+         dry_run=getattr(args, "dry_run", False),
+         force=getattr(args, "force", False),
++        allow_lossy=getattr(args, "allow_lossy", False),
++        service_type=getattr(args, "service_type", None),
+     )
+ 
+ 
+@@ -63,8 +82,13 @@ def migrate_manifest_command(
+     output_path: str | None = None,
+     dry_run: bool = False,
+     force: bool = False,
++    allow_lossy: bool = False,
++    service_type: str | None = None,
+ ) -> int:
+-    """Convert an srm/v1 manifest to opensrm.nthlayer.io/v2 and verify round-trip.
++    """Convert an srm/v1 or opensrm/v1 manifest to opensrm.nthlayer.io/v2 and verify round-trip.
++
++    An opensrm/v1 manifest with fields that have no v2 equivalent is refused
++    unless ``allow_lossy``; fields converted under an assumption only warn.
+ 
+     Returns 0 on success, 1 on error.
+     """
+@@ -75,36 +99,62 @@ def migrate_manifest_command(
+ 
+     try:
+         with open(in_path) as f:
+-            v1_data = yaml.safe_load(f)
++            data = yaml.safe_load(f)
+     except yaml.YAMLError as exc:
+         error(f"Invalid YAML in {manifest_path}: {exc}")
+         return 1
+ 
+-    if not isinstance(v1_data, dict):
++    if not isinstance(data, dict):
+         error(f"Manifest is not a YAML object: {manifest_path}")
+         return 1
+ 
+-    if v1_data.get("apiVersion") == "opensrm.nthlayer.io/v2":
++    if data.get("apiVersion") == "opensrm.nthlayer.io/v2":
+         success(f"{in_path.name} is already opensrm.nthlayer.io/v2 — no migration needed.")
+         return 0
+ 
+-    try:
+-        v2_data = convert_v1_to_v2(v1_data)
+-    except ValueError as exc:
+-        error(f"Cannot convert {manifest_path}: {exc}")
++    api_version = data.get("apiVersion")
++    if is_opensrm_v1_format(data):
++        source = "opensrm/v1"
++        try:
++            result = convert_opensrm_v1_to_v2(data, service_type=service_type)
++        except ValueError as exc:
++            error(f"Cannot convert {manifest_path}: {exc}")
++            return 1
++        for field in result.unmapped:
++            if field.kind == "dropped":
++                warning(f"Not migrated: {field.path} — {field.reason}")
++            else:
++                warning(f"Converted with an assumption: {field.path} — {field.reason} (check it)")
++        if result.lossy and not allow_lossy:
++            dropped = sum(1 for f in result.unmapped if f.kind == "dropped")
++            error(
++                f"{dropped} field(s) in {manifest_path} have no v2 equivalent; "
++                "nothing written. Re-run with --allow-lossy to write the v2 manifest without them."
++            )
++            return 1
++        v2_data = result.manifest
++    elif api_version == "srm/v1":
++        source = "srm/v1"
++        try:
++            v2_data = convert_v1_to_v2(data)
++        except ValueError as exc:
++            error(f"Cannot convert {manifest_path}: {exc}")
++            return 1
++    else:
++        error(f"Cannot convert {manifest_path}: apiVersion {api_version!r} is not srm/v1 or opensrm/v1")
+         return 1
+ 
+     # Round-trip verification: the converted manifest must parse via the
+     # v2 parser. If parsing fails, the migration produced bad output —
+     # surface that loudly rather than writing a broken file.
+     try:
+-        parse_opensrm_v2(v2_data)
++        parse_opensrm_v2(v2_data, base_dir=in_path.parent)
+     except OpenSRMV2ParseError as exc:
+         error(f"Converted manifest fails v2 parse: {exc}")
+         return 1
+ 
+     yaml_text = (
+-        "# OpenSRM v2 manifest (migrated from srm/v1)\n"
++        f"# OpenSRM v2 manifest (migrated from {source})\n"
+         f"# Source: {in_path.name}\n"
+         "# Generated by `nthlayer migrate-manifest`.\n\n"
+         + yaml.safe_dump(v2_data, default_flow_style=False, sort_keys=False)
+@@ -121,8 +171,29 @@ def migrate_manifest_command(
+         error(f"Output file exists: {out_path} — use --force to overwrite")
+         return 1
+ 
++    _warn_relative_refs(v2_data, in_path, out_path)
++
+     out_path.parent.mkdir(parents=True, exist_ok=True)
+     out_path.write_text(yaml_text)
+ 
+     success(f"Migrated {in_path.name} → {out_path}")
+     return 0
++
++
++def _warn_relative_refs(v2_data: dict[str, Any], in_path: Path, out_path: Path) -> None:
++    """Warn when a relative openslo $ref will resolve differently from the output.
++
++    The refs were resolved (and verified) against the input's directory; the
++    written manifest keeps them verbatim, so a different output directory
++    changes what they point at.
++    """
++    if out_path.parent.resolve() == in_path.parent.resolve():
++        return
++    slos = (v2_data.get("spec") or {}).get("slo")
++    for item in slos if isinstance(slos, list) else []:
++        ref = item.get("$ref") if isinstance(item, dict) else None
++        if isinstance(ref, str) and "://" not in ref and not Path(ref).is_absolute():
++            warning(
++                f"openslo $ref {ref!r} is relative and now resolves against {out_path.parent}, "
++                f"not {in_path.parent}; copy the file or fix the path"
++            )
+diff --git a/tests/test_cli_migrate_manifest.py b/tests/test_cli_migrate_manifest.py
+index d55caca..314e06e 100644
+--- a/tests/test_cli_migrate_manifest.py
++++ b/tests/test_cli_migrate_manifest.py
+@@ -224,3 +224,144 @@ class TestAiGateJudgmentThresholds:
+         rc = migrate_manifest_command(str(in_file), output_path=str(out))
+         assert rc == 1
+         assert not out.exists()
++
++
++class TestOpensrmV1:
++    """opensrm/v1 -> v2 (opensrm-pnmv).
++
++    Fixtures follow opensrm/spec/v1/schema.json and the spec's
++    opensrm/examples/*.yaml (api-minimal, ai-gate-minimal), not the converter.
++    """
++
++    @staticmethod
++    def _doc(**spec) -> dict:
++        return {
++            "apiVersion": "opensrm/v1",
++            "kind": "ServiceReliabilityManifest",
++            "metadata": {"name": "my-service", "team": "platform", "tier": "standard"},
++            "spec": {
++                "type": "api",
++                "slos": {"availability": {"target": 0.999, "window": "30d"}},
++                **spec,
++            },
++        }
++
++    def _write(self, tmp_path, doc=None, **spec) -> Path:
++        p = tmp_path / "svc.yaml"
++        p.write_text(yaml.safe_dump(doc if doc is not None else self._doc(**spec)))
++        return p
++
++    @staticmethod
++    def _run(*args, **kwargs) -> int:
++        from nthlayer_generate.cli.migrate_manifest import migrate_manifest_command
++
++        return migrate_manifest_command(*args, **kwargs)
++
++    @staticmethod
++    def _capture_warnings(monkeypatch) -> list[str]:
++        from nthlayer_generate.cli import migrate_manifest
++
++        calls: list[str] = []
++        monkeypatch.setattr(migrate_manifest, "warning", calls.append)
++        return calls
++
++    def test_lossless_converts(self, tmp_path):
++        p = self._write(tmp_path)
++        assert self._run(str(p)) == 0
++        out = yaml.safe_load((tmp_path / "svc.v2.yaml").read_text())
++        assert out["apiVersion"] == "opensrm.nthlayer.io/v2"
++
++    def test_lossy_refuses_without_the_flag(self, tmp_path):
++        p = self._write(tmp_path, deployment={"gates": {}})
++        assert self._run(str(p)) == 1
++        assert not (tmp_path / "svc.v2.yaml").exists()
++
++    def test_lossy_writes_with_the_flag(self, tmp_path):
++        p = self._write(tmp_path, deployment={"gates": {}})
++        assert self._run(str(p), allow_lossy=True) == 0
++        out = yaml.safe_load((tmp_path / "svc.v2.yaml").read_text())
++        assert "deployment" not in out["spec"]
++
++    def test_dropped_field_is_warned_with_path(self, tmp_path, monkeypatch):
++        calls = self._capture_warnings(monkeypatch)
++        p = self._write(tmp_path, deployment={"gates": {}})
++        assert self._run(str(p), allow_lossy=True) == 0
++        assert any(c.startswith("Not migrated: spec.deployment") for c in calls)
++
++    def test_missing_type_needs_service_type(self, tmp_path):
++        doc = self._doc()
++        del doc["spec"]["type"]
++        p = self._write(tmp_path, doc)
++        assert self._run(str(p)) == 1
++        assert self._run(str(p), service_type="api") == 0
++
++    def test_unconvertible_document_returns_1(self, tmp_path):
++        doc = self._doc()
++        doc["metadata"]["tier"] = "gold"
++        p = self._write(tmp_path, doc)
++        assert self._run(str(p), allow_lossy=True) == 1
++        assert not (tmp_path / "svc.v2.yaml").exists()
++
++    def test_assumed_only_field_does_not_refuse(self, tmp_path, monkeypatch):
++        """ai-gate calibration declares no bins in v1; the assumption is
++        reported but is not loss, so no --allow-lossy is needed."""
++        calls = self._capture_warnings(monkeypatch)
++        doc = self._doc(
++            type="ai-gate",
++            slos={
++                "availability": {"target": 0.999, "window": "30d"},
++                "judgment": {"calibration": {"target": 0.10, "window": "30d"}},
++            },
++        )
++        p = self._write(tmp_path, doc)
++        assert self._run(str(p)) == 0
++        out = yaml.safe_load((tmp_path / "svc.v2.yaml").read_text())
++        assert out["spec"]["judgment_threshold"][0]["type"] == "calibration"
++        assumed = [c for c in calls if c.startswith("Converted with an assumption:")]
++        assert len(assumed) == 1
++        assert "spec.slos.judgment.calibration" in assumed[0]
++        assert not any(c.startswith("Not migrated:") for c in calls)
++
++    def _with_openslo_ref(self, tmp_path) -> Path:
++        # An OpenSLO document of the shape the converter's own v2 output uses
++        # for inline SLOs (apiVersion openslo/v1, kind SLO).
++        (tmp_path / "extra-slo.yaml").write_text(
++            yaml.safe_dump(
++                {
++                    "apiVersion": "openslo/v1",
++                    "kind": "SLO",
++                    "metadata": {"name": "my-service-availability"},
++                    "spec": {
++                        "service": "my-service",
++                        "timeWindow": [{"duration": "30d", "isRolling": True}],
++                        "objectives": [{"displayName": "99.9% availability", "target": 0.999}],
++                    },
++                }
++            )
++        )
++        doc = self._doc(slos={"openslo": [{"path": "extra-slo.yaml"}]})
++        return self._write(tmp_path, doc)
++
++    def test_relative_ref_warns_when_output_moves(self, tmp_path, monkeypatch):
++        calls = self._capture_warnings(monkeypatch)
++        p = self._with_openslo_ref(tmp_path)
++        out = tmp_path / "elsewhere" / "svc.v2.yaml"
++        assert self._run(str(p), output_path=str(out)) == 0
++        assert out.exists()
++        refs = [c for c in calls if "extra-slo.yaml" in c]
++        assert len(refs) == 1
++
++    def test_relative_ref_silent_when_output_beside_input(self, tmp_path, monkeypatch):
++        calls = self._capture_warnings(monkeypatch)
++        p = self._with_openslo_ref(tmp_path)
++        assert self._run(str(p)) == 0
++        assert (tmp_path / "svc.v2.yaml").exists()
++        assert not [c for c in calls if "extra-slo.yaml" in c]
++
++    def test_flags_are_wired(self):
++        from nthlayer_generate.demo import build_parser
++
++        args = build_parser().parse_args(
++            ["migrate-manifest", "x.yaml", "--allow-lossy", "--service-type", "api"]
++        )
++        assert (args.allow_lossy, args.service_type) == (True, "api")
+diff --git a/uv.lock b/uv.lock
+index 2412c54..1543ae2 100644
+--- a/uv.lock
++++ b/uv.lock
+@@ -1374,7 +1374,7 @@ wheels = [
+ 
+ [[package]]
+ name = "nthlayer-common"
+-version = "5.2.0"
++version = "5.3.0"
+ source = { editable = "../nthlayer-common" }
+ dependencies = [
+     { name = "anthropic" },

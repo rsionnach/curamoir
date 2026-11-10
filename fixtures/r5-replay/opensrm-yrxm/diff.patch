@@ -1,0 +1,79 @@
+diff --git a/src/nthlayer_common/telemetry.py b/src/nthlayer_common/telemetry.py
+index 27042ec..e35bb27 100644
+--- a/src/nthlayer_common/telemetry.py
++++ b/src/nthlayer_common/telemetry.py
+@@ -55,8 +55,11 @@ def emit_llm_event(
+         caller: The calling component/module (e.g., "measure.evaluator").
+         input_tokens: Number of input tokens.
+         output_tokens: Number of output tokens.
+-        cached_tokens: Cached input tokens (Anthropic prompt caching).
+-        reasoning_tokens: Reasoning/thinking tokens.
++        cached_tokens: Cache-read input tokens (e.g. Anthropic's
++            ``cache_read_input_tokens``), not cache writes; emitted as
++            gen_ai.usage.cache_read.input_tokens.
++        reasoning_tokens: Reasoning/thinking tokens; emitted as
++            gen_ai.usage.reasoning.output_tokens.
+         verdict_id: The verdict being produced, if applicable.
+         duration_ms: Wall-clock time of the call in milliseconds.
+         success: Whether the call succeeded.
+@@ -73,7 +76,8 @@ def emit_llm_event(
+ 
+     attributes: dict[str, Any] = {
+         "gen_ai.request.model": model,
+-        "gen_ai.system": provider,
++        # Addendum A1 §5 P4: gen_ai.system MUST NOT be emitted (dropped from the upstream registry).
++        "gen_ai.provider.name": provider,
+         "nthlayer.llm.caller": caller,
+     }
+ 
+@@ -82,9 +86,9 @@ def emit_llm_event(
+     if output_tokens is not None:
+         attributes["gen_ai.usage.output_tokens"] = output_tokens
+     if cached_tokens is not None:
+-        attributes["gen_ai.usage.cached_tokens"] = cached_tokens
++        attributes["gen_ai.usage.cache_read.input_tokens"] = cached_tokens
+     if reasoning_tokens is not None:
+-        attributes["gen_ai.usage.reasoning_tokens"] = reasoning_tokens
++        attributes["gen_ai.usage.reasoning.output_tokens"] = reasoning_tokens
+     if verdict_id is not None:
+         attributes["nthlayer.llm.caller_verdict_cid"] = verdict_id
+     if duration_ms is not None:
+diff --git a/tests/test_telemetry.py b/tests/test_telemetry.py
+index bba2b13..5cd0b22 100644
+--- a/tests/test_telemetry.py
++++ b/tests/test_telemetry.py
+@@ -32,7 +32,9 @@ class TestEmitLLMEvent:
+         assert call_args[0][0] == "nthlayer.llm.call"
+         attrs = call_args[1]["attributes"]
+         assert attrs["gen_ai.request.model"] == "claude-sonnet-4-20250514"
+-        assert attrs["gen_ai.system"] == "anthropic"
++        # Addendum A1 §5 P4: gen_ai.provider.name, never the retired gen_ai.system.
++        assert attrs["gen_ai.provider.name"] == "anthropic"
++        assert "gen_ai.system" not in attrs
+         assert attrs["nthlayer.llm.caller"] == "measure.evaluator"
+         assert attrs["gen_ai.usage.input_tokens"] == 500
+         assert attrs["gen_ai.usage.output_tokens"] == 200
+@@ -57,8 +59,12 @@ class TestEmitLLMEvent:
+         )
+ 
+         attrs = mock_span.add_event.call_args[1]["attributes"]
+-        assert attrs["gen_ai.usage.cached_tokens"] == 300
+-        assert attrs["gen_ai.usage.reasoning_tokens"] == 100
++        # Upstream names: cache_read per A1 §6.7, reasoning.output per
++        # profiles/claude-platform.md (Cost row); the old names must be gone.
++        assert attrs["gen_ai.usage.cache_read.input_tokens"] == 300
++        assert "gen_ai.usage.cached_tokens" not in attrs
++        assert attrs["gen_ai.usage.reasoning.output_tokens"] == 100
++        assert "gen_ai.usage.reasoning_tokens" not in attrs
+         assert attrs["nthlayer.llm.caller_verdict_cid"] == "vrd-test-001"
+         assert attrs["nthlayer.llm.duration_ms"] == 2500
+ 
+@@ -117,6 +123,7 @@ class TestEmitLLMEvent:
+         attrs = mock_span.add_event.call_args[1]["attributes"]
+         assert "gen_ai.usage.input_tokens" not in attrs
+         assert "gen_ai.usage.output_tokens" not in attrs
+-        assert "gen_ai.usage.cached_tokens" not in attrs
++        assert "gen_ai.usage.cache_read.input_tokens" not in attrs
++        assert "gen_ai.usage.reasoning.output_tokens" not in attrs
+         assert "nthlayer.llm.caller_verdict_cid" not in attrs
+         assert "nthlayer.llm.duration_ms" not in attrs

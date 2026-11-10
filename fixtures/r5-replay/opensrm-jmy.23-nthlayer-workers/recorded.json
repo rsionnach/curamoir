@@ -1,0 +1,39 @@
+{
+ "schema_version": 1,
+ "entry": "opensrm-jmy.23-nthlayer-workers",
+ "fidelity": "counts_only",
+ "lens_order": [
+  "correctness",
+  "clarity",
+  "edge-cases",
+  "excellence"
+ ],
+ "iterations": {
+  "edge-cases": 1,
+  "excellence": 1
+ },
+ "rounds": [
+  {
+   "lens": "edge_cases",
+   "iteration": 1,
+   "recorded_iteration": 1,
+   "counts": {
+    "critical": 0,
+    "important": 2,
+    "minor": 1
+   },
+   "findings": null
+  },
+  {
+   "lens": "excellence",
+   "iteration": 1,
+   "recorded_iteration": 1,
+   "counts": {
+    "minor": 2
+   },
+   "findings": null
+  }
+ ],
+ "cross_repo_findings": [],
+ "escaped": []
+}

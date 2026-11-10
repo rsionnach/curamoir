@@ -1,0 +1,142 @@
+diff --git a/src/nthlayer_generate/demo.py b/src/nthlayer_generate/demo.py
+index f939aa6..b55768f 100644
+--- a/src/nthlayer_generate/demo.py
++++ b/src/nthlayer_generate/demo.py
+@@ -11,6 +11,7 @@ from __future__ import annotations
+ 
+ import argparse
+ import asyncio
++import logging
+ import os
+ import sys
+ from importlib.metadata import version as get_version
+@@ -51,6 +52,7 @@ from nthlayer_generate.cli.validate_spec import (
+     handle_validate_spec_command,
+     register_validate_spec_parser,
+ )
++from nthlayer_generate.logging import configure_logging
+ from nthlayer_generate.providers.grafana import GrafanaProvider, GrafanaProviderError
+ 
+ # Version from package metadata (single source of truth: pyproject.toml)
+@@ -875,6 +877,13 @@ def main(argv: Sequence[str] | None = None) -> None:
+     parser = build_parser()
+     args = parser.parse_args(argv)
+ 
++    # Logs go to stderr, so a command's stdout carries only its output: plan
++    # --format json and apply --output json were unparseable while structlog's
++    # default logger printed debug events to stdout (opensrm-iiay). Left alone
++    # when the caller already configured structlog (tests, embedding code).
++    if not structlog.is_configured():
++        configure_logging(logging.INFO if getattr(args, "verbose", False) else logging.WARNING)
++
+     # Show version with banner
+     if args.version:
+         print_banner()
+diff --git a/src/nthlayer_generate/logging.py b/src/nthlayer_generate/logging.py
+index 7f020a6..de8d22a 100644
+--- a/src/nthlayer_generate/logging.py
++++ b/src/nthlayer_generate/logging.py
+@@ -1,29 +1,37 @@
+ import logging
++import sys
+ from typing import Any
+ 
+ import structlog
+ 
+ 
+ def configure_logging(level: int | str = logging.INFO) -> None:
+-    """Configure structlog/standard logging bridge."""
++    """Route structlog through stdlib logging to stderr, human-readable.
+ 
+-    timestamper = structlog.processors.TimeStamper(fmt="iso", utc=True)
++    The CLI calls this at startup (demo.main) so that stdout carries only a
++    command's output (opensrm-iiay). Rendering matches what users saw before,
++    when structlog's default logger printed to stdout: a console line with the
++    message's %-style arguments filled in. Colour only on a terminal.
++    """
++
++    timestamper = structlog.processors.TimeStamper(fmt="%Y-%m-%d %H:%M:%S")
+ 
+     structlog.configure(
+         processors=[
+             structlog.contextvars.merge_contextvars,
++            structlog.stdlib.PositionalArgumentsFormatter(),
+             structlog.processors.add_log_level,
+             timestamper,
+             structlog.processors.StackInfoRenderer(),
+             structlog.processors.format_exc_info,
+-            structlog.processors.JSONRenderer(),
++            structlog.dev.ConsoleRenderer(colors=sys.stderr.isatty()),
+         ],
+         logger_factory=structlog.stdlib.LoggerFactory(),
+         wrapper_class=structlog.stdlib.BoundLogger,
+         cache_logger_on_first_use=True,
+     )
+ 
+-    logging.basicConfig(level=level, format="%(message)s")
++    logging.basicConfig(level=level, format="%(message)s", stream=sys.stderr)
+ 
+ 
+ def bind_context(**kwargs: Any) -> structlog.stdlib.BoundLogger:
+diff --git a/tests/smoke/test_json_stdout.py b/tests/smoke/test_json_stdout.py
+new file mode 100644
+index 0000000..06ade1f
+--- /dev/null
++++ b/tests/smoke/test_json_stdout.py
+@@ -0,0 +1,56 @@
++"""plan/apply JSON output: stdout carries the JSON and nothing else (opensrm-iiay).
++
++Run as a subprocess on purpose. tests/conftest.py configures structlog at
++WARNING, so an in-process test cannot see what a real `nthlayer` run writes:
++before this bead the CLI never configured logging, and structlog's default
++logger printed debug events (alert_template_loader_init, ...) to stdout ahead
++of the JSON. These also stand in for the legacy quiet-mode tests deferred
++from opensrm-wo62.4.22, which asserted the same contract one layer down.
++
++payment-api.yaml has a postgres dependency, so plan and apply reach the alert
++template loader that logged; api-minimal.yaml has none.
++"""
++
++from __future__ import annotations
++
++import json
++from pathlib import Path
++
++import pytest
++from _helpers import PROJECT_ROOT, run_nthlayer
++
++pytestmark = pytest.mark.smoke
++
++SERVICES = PROJECT_ROOT / "examples" / "services"
++WITH_DEPENDENCY = str(SERVICES / "payment-api.yaml")
++WITHOUT_DEPENDENCY = str(SERVICES / "api-minimal.yaml")
++
++
++def _json_stdout(*args: str) -> object:
++    result = run_nthlayer(*args)
++    assert result.exit_code == 0, result
++    try:
++        return json.loads(result.stdout)
++    except json.JSONDecodeError as exc:
++        pytest.fail(f"stdout is not JSON ({exc}):\n{result.stdout[:600]}")
++
++
++@pytest.mark.parametrize("verbose", [(), ("-v",)], ids=["default", "verbose"])
++@pytest.mark.parametrize(
++    "manifest", [WITH_DEPENDENCY, WITHOUT_DEPENDENCY], ids=lambda m: Path(m).name
++)
++def test_plan_json_stdout_is_only_json(manifest: str, verbose: tuple[str, ...]) -> None:
++    plan = _json_stdout("plan", manifest, "--format", "json", *verbose)
++    if manifest == WITH_DEPENDENCY:
++        # The dependency is what reaches the alert template loader.
++        assert "alerts" in json.dumps(plan), plan
++
++
++@pytest.mark.parametrize(
++    "manifest", [WITH_DEPENDENCY, WITHOUT_DEPENDENCY], ids=lambda m: Path(m).name
++)
++def test_apply_json_stdout_is_only_json(manifest: str, tmp_path: Path) -> None:
++    # A real apply into tmp_path: --dry-run delegates to plan and ignores
++    # --output json altogether (opensrm-wlt1).
++    result = _json_stdout("apply", manifest, "--output", "json", "--output-dir", str(tmp_path))
++    assert isinstance(result, dict) and not result.get("errors"), result

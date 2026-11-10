@@ -1,0 +1,12 @@
+PASS 1 (CORRECTNESS) sequential R5 review on bead opensrm-g35i (housekeeping across six repos).
+
+Read ~/.claude/skills/rule-of-five-review/correctness-reviewer.md and apply it. Read-only.
+
+Diffs (repo: base..head), all under <workspace>/:
+nthlayer-common 182219d..329ef16; nthlayer-workers c632b77..5cbbbe1; nthlayer-core f0325cf..8c60fd5; nthlayer-bench 6f0eab0..39ca1f9; nthlayer-generate a28bd44..e4807c6; nthlayer-override-adapter 15d11f7..6fe3a81. Use `git -C <repo> diff <base>..<head>`.
+
+Bead: (1) core/bench/generate/adapter bump `nthlayer-common>=5.0.0,<6.0.0` → `>=5.2.0,<6.0.0` (rule 10: floor = installed sibling; common 5.2.0 is on PyPI) and relock. (2) In all six, release-please-config.json gains an extra-files entry `{"type":"toml","path":"uv.lock","jsonpath":"$.package[?(@.name.value==='<package-name>')].version"}` so release PRs bump uv.lock's own [[package]] version along with pyproject (previously every uv sync after a release dirtied uv.lock). The `.value` is needed because release-please's toml-edit parser wraps every value as {start,end,value}; verified locally with release-please 17.11.2's GenericToml on all six real locks: exactly one line changed each. The repos use googleapis/release-please-action@v5.
+
+Check: each jsonpath names the right package (== that repo's package-name); JSON validity and that no other config changed; commit types (deps: → patch release in the four consumers; build: hidden → no release in common/workers) match release-please config changelog-sections and intent; lock diffs touch only the self-version and nthlayer-common (no unrelated upgrades); WHY comments accurate; does the action@v5 bundle a release-please version whose GenericToml behaves the same (check the action's package/lock if you can, e.g. via `gh api repos/googleapis/release-please-action/contents/package.json?ref=v5` — report if you can't confirm); is there any risk release-please's python strategy ALSO touches uv.lock and conflicts. Note anything a clarity or edge-case reviewer would flag too, labelled as such (this small gate folds those lenses into one read; the supervisor will run provenance separately).
+
+Report: CRITICAL / IMPORTANT / MINOR with repo:file:line, under 350 words.

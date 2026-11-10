@@ -1,0 +1,97 @@
+diff --git a/pyproject.toml b/pyproject.toml
+index 5e79842..7dc280a 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -9,6 +9,12 @@ description = "NthLayer - The Missing Layer of Reliability"
+ readme = "README.md"
+ requires-python = ">=3.11"
+ dependencies = [
++    # WHY 5.0.0 (opensrm-7zpz, opensrm-1rnr): for `nthlayer migrate-manifest`,
++    # nthlayer-common 5.0.0's srm/v1 lift rejects judgment-threshold keys it
++    # would otherwise drop and honours feedback_latency `unit` ({target: 60,
++    # unit: m} now migrates to 60m, not 60s); v2 threshold entries are closed.
++    # See nthlayer-common/docs/upgrading-5.0.md.
++    #
+     # WHY 4.0.0 (opensrm-tnz3, opensrm-l33e): nthlayer-common 4.0.0 moved
+     # judgment error magnitudes out of SLOs into JudgmentThreshold. For
+     # `nthlayer migrate-manifest` (the one place this package calls common's
+@@ -42,7 +48,7 @@ dependencies = [
+     # is_valid_service_type from nthlayer_common.manifest.models, which landed
+     # in 2.0.0 (opensrm-ih0v). The >=0.1.5 floor before it claimed a
+     # compatibility that no longer existed.
+-    "nthlayer-common>=4.0.0,<5.0.0",
++    "nthlayer-common>=5.0.0,<6.0.0",
+     "grafana-foundation-sdk>=0.0.11",
+     "pydantic>=2.7.0,<3.0.0",
+     "pydantic-settings>=2.2.1,<3.0.0",
+diff --git a/tests/release-smoke/test_resolved_dependencies.py b/tests/release-smoke/test_resolved_dependencies.py
+index eb4c2fa..d5f9f90 100644
+--- a/tests/release-smoke/test_resolved_dependencies.py
++++ b/tests/release-smoke/test_resolved_dependencies.py
+@@ -55,7 +55,7 @@ FRONT_DOOR = "nthlayer"
+ # fails if a sibling appears in the metadata without an entry here — so adding a
+ # dependency forces someone to state its expected major rather than quietly
+ # leaving it unguarded.
+-EXPECTED_MAJORS = {"nthlayer-common": 4}
++EXPECTED_MAJORS = {"nthlayer-common": 5}
+ 
+ 
+ def _sibling_requirements() -> dict[str, Requirement]:
+diff --git a/tests/test_dependency_declarations.py b/tests/test_dependency_declarations.py
+index 07e0167..55e2632 100644
+--- a/tests/test_dependency_declarations.py
++++ b/tests/test_dependency_declarations.py
+@@ -244,3 +244,31 @@ def test_bounding_operators_match_packaging_behaviour(spec, bounded):
+ 
+     assert predicate is bounded
+     assert (UNBOUNDED_PROBE in specifier) is not bounded
++
++
++@pytest.mark.parametrize("name", SIBLINGS)
++def test_declared_ceiling_is_exactly_the_next_major(name):
++    """The ceiling must exclude the first release of the NEXT major, and nothing more.
++
++    test_declared_range_has_an_upper_bound only asks that SOME bound exists, so
++    a ceiling two majors up (`<N+2.0.0` while N.x is under test) passes it
++    (measured: suite stays green) and admits all of major N+1, which nothing
++    here has run. Mirror image of the floor
++    test: the floor admits nothing below the tested version, this admits nothing
++    above its major. Like the floor, it must be bumped deliberately when the
++    sibling's major advances.
++    """
++    specifier = _siblings()[name].specifier
++    installed = Version(version(name))
++
++    ceilings = [s.version for s in specifier if s.operator == "<"]
++    assert len(ceilings) == 1, (
++        f"'{name}{specifier}' declares {len(ceilings)} '<' bounds; this guard "
++        f"reads exactly one"
++    )
++    expected = Version(f"{installed.major + 1}.0.0")
++    assert Version(ceilings[0]) == expected, (
++        f"{name} ceiling is declared '<{ceilings[0]}' but the installed version "
++        f"is {installed}, so the ceiling must be '<{expected}'. A wider ceiling "
++        f"publishes a major nothing here has run."
++    )
+diff --git a/uv.lock b/uv.lock
+index d652ec5..894974a 100644
+--- a/uv.lock
++++ b/uv.lock
+@@ -1374,7 +1374,7 @@ wheels = [
+ 
+ [[package]]
+ name = "nthlayer-common"
+-version = "4.0.0"
++version = "5.0.0"
+ source = { editable = "../nthlayer-common" }
+ dependencies = [
+     { name = "anthropic" },
+@@ -1418,7 +1418,7 @@ provides-extras = ["dev"]
+ 
+ [[package]]
+ name = "nthlayer-generate"
+-version = "2.0.4"
++version = "2.0.5"
+ source = { editable = "." }
+ dependencies = [
+     { name = "cachetools" },

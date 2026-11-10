@@ -1,0 +1,100 @@
+diff --git a/pyproject.toml b/pyproject.toml
+index c438e7d..6192489 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -14,7 +14,7 @@ dependencies = [
+     # tests/test_dependency_declarations.py and
+     # tests/smoke/test_resolved_dependencies.py; see CLAUDE.md hard rule 16
+     # for why both are needed [opensrm-p3bm].
+-    "nthlayer-common>=3.0.0,<4.0.0",
++    "nthlayer-common>=4.0.0,<5.0.0",
+     "starlette>=0.40",
+     "uvicorn>=0.30",
+     "opentelemetry-api>=1.28",
+diff --git a/tests/smoke/test_resolved_dependencies.py b/tests/smoke/test_resolved_dependencies.py
+index 3849292..d781bc5 100644
+--- a/tests/smoke/test_resolved_dependencies.py
++++ b/tests/smoke/test_resolved_dependencies.py
+@@ -43,7 +43,7 @@ FRONT_DOOR = "nthlayer"
+ # fails if a sibling appears in the metadata without an entry here — so adding a
+ # dependency forces someone to state its expected major rather than quietly
+ # leaving it unguarded.
+-EXPECTED_MAJORS = {"nthlayer-common": 3}
++EXPECTED_MAJORS = {"nthlayer-common": 4}
+ 
+ 
+ def _sibling_requirements() -> dict[str, Requirement]:
+diff --git a/tests/test_dependency_declarations.py b/tests/test_dependency_declarations.py
+index c222cdf..c0a9003 100644
+--- a/tests/test_dependency_declarations.py
++++ b/tests/test_dependency_declarations.py
+@@ -236,3 +236,30 @@ def test_bounding_operators_match_packaging_behaviour(spec, bounded):
+ 
+     assert predicate is bounded
+     assert (UNBOUNDED_PROBE in specifier) is not bounded
++
++
++@pytest.mark.parametrize("name", SIBLINGS)
++def test_declared_ceiling_is_exactly_the_next_major(name):
++    """The ceiling must exclude the first release of the NEXT major, and nothing more.
++
++    test_declared_range_has_an_upper_bound only asks that SOME bound exists, so
++    `<6.0.0` while 4.x is under test passes it (measured: suite stays green) and
++    admits all of major 5, which nothing here has run. Mirror image of the floor
++    test: the floor admits nothing below the tested version, this admits nothing
++    above its major. Like the floor, it must be bumped deliberately when the
++    sibling's major advances.
++    """
++    specifier = _siblings()[name].specifier
++    installed = Version(version(name))
++
++    ceilings = [s.version for s in specifier if s.operator == "<"]
++    assert len(ceilings) == 1, (
++        f"'{name}{specifier}' declares {len(ceilings)} '<' bounds; this guard "
++        f"reads exactly one"
++    )
++    expected = Version(f"{installed.major + 1}.0.0")
++    assert Version(ceilings[0]) == expected, (
++        f"{name} ceiling is declared '<{ceilings[0]}' but the installed version "
++        f"is {installed}, so the ceiling must be '<{expected}'. A wider ceiling "
++        f"publishes a major nothing here has run."
++    )
+diff --git a/uv.lock b/uv.lock
+index 39f4bb5..00381d1 100644
+--- a/uv.lock
++++ b/uv.lock
+@@ -913,7 +913,7 @@ wheels = [
+ 
+ [[package]]
+ name = "nthlayer-common"
+-version = "3.0.0"
++version = "4.0.0"
+ source = { editable = "../nthlayer-common" }
+ dependencies = [
+     { name = "anthropic" },
+@@ -935,14 +935,14 @@ dependencies = [
+ [package.metadata]
+ requires-dist = [
+     { name = "anthropic", specifier = ">=0.40" },
+-    { name = "cachetools", specifier = ">=5.3.0,<7.0.0" },
++    { name = "cachetools", specifier = ">=5.3.0,<8.0.0" },
+     { name = "circuitbreaker", specifier = ">=2.0.0,<3.0.0" },
+     { name = "httpx", specifier = ">=0.27" },
+     { name = "instructor", specifier = ">=1.5" },
+     { name = "jsonschema", marker = "extra == 'dev'", specifier = ">=4.21" },
+     { name = "openai", specifier = ">=1.50" },
+     { name = "opentelemetry-api", specifier = ">=1.28" },
+-    { name = "pagerduty", specifier = ">=6.0.0,<7.0.0" },
++    { name = "pagerduty", specifier = ">=6.0.0,<8.0.0" },
+     { name = "prometheus-client", specifier = ">=0.21" },
+     { name = "pydantic", specifier = ">=2.7.0,<3.0.0" },
+     { name = "pygments", specifier = ">=2.20.0" },
+@@ -957,7 +957,7 @@ provides-extras = ["dev"]
+ 
+ [[package]]
+ name = "nthlayer-override-adapter"
+-version = "0.2.0"
++version = "0.2.2"
+ source = { editable = "." }
+ dependencies = [
+     { name = "nthlayer-common" },
