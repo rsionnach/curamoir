@@ -436,8 +436,8 @@ def test_the_60_minute_stop_lets_curamoir_write_its_ledger_line():
     SIGKILL runs no code, so it is only the fallback."""
     second = flat(step(prompt(), 2))
 
-    assert ("send it SIGTERM first, which lets cúramóir write the run's ledger line, and "
-            "only if it has not exited a minute later, SIGKILL cúramóir itself, not only "
+    assert "send it SIGTERM first, which lets cúramóir write the run's ledger line" in second
+    assert ("only if it has not exited a minute later, SIGKILL cúramóir itself, not only "
             "uvx") in second
 
 
@@ -449,8 +449,11 @@ def test_a_sigkill_reaches_curamoir_itself_not_only_uvx():
     pkill, unlike the BSD one, does not leave out its own ancestors)."""
     second, third = flat(step(prompt(), 2)), flat(step(prompt(), 3))
 
-    assert "`pkill -KILL -f 'curamoir run swee[p]'`" in second
-    assert "`pkill -KILL -f 'curamoir state pus[h]'`" in third
+    for signal_name in ("TERM", "KILL"):  # the SIGTERM too: a copy of it unbracketed
+        assert f"`pkill -{signal_name} -f 'curamoir run swee[p]'`" in second
+        assert f"`pkill -{signal_name} -f 'curamoir state pus[h]'`" in third
+    assert "Run each as its own command, exactly as written" in second
+    assert not re.search(r"pkill -\w+ -f 'curamoir (run sweep|state push)'", prompt())
     for pattern, command in (("curamoir run swee[p]", "curamoir run sweep"),
                              ("curamoir state pus[h]", "curamoir state push")):
         assert re.search(pattern, f"uvx --from x {command}")  # matches the process
