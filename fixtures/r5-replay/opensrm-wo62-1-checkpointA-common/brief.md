@@ -1,0 +1,5 @@
+PASS 1 (CORRECTNESS) sequential R5 review on bead opensrm-wo62.1 (Checkpoint A, nthlayer-common).
+Read your lens: ~/.claude/skills/rule-of-five-review/correctness-reviewer.md — follow it exactly.
+Read the scope: <claude-tmp>/scratchpad/wo62-gate-A-scope.md
+Check every path that constructs or copies a ReliabilityManifest (parsers v1/v2/legacy, opensrm_v1 converter, v1_compat, dataclasses.replace callers, any from_dict/to_dict) for the value of authored_type, and that equality/hash/repr of the dataclass changing doesn't break any caller in this repo or in the consumers (grep nthlayer-core, -workers, -bench, -override-adapter, -generate src for ReliabilityManifest equality or field iteration).
+Focus: correctness only. Read-only; no subagents. CRITICAL / IMPORTANT / MINOR with file:line and fix; verdict. Under 350 words.

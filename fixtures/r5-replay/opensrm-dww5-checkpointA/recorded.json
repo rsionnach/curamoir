@@ -1,0 +1,153 @@
+{
+ "schema_version": 1,
+ "entry": "opensrm-dww5-checkpointA",
+ "fidelity": "recorded",
+ "lens_order": [
+  "correctness",
+  "clarity",
+  "edge-cases",
+  "provenance",
+  "excellence"
+ ],
+ "iterations": {
+  "correctness": 1,
+  "clarity": 2,
+  "edge-cases": 2,
+  "provenance": 1
+ },
+ "rounds": [
+  {
+   "lens": "correctness",
+   "iteration": 1,
+   "recorded_iteration": null,
+   "counts": {
+    "critical": 0,
+    "important": 0,
+    "minor": 0
+   },
+   "findings": null
+  },
+  {
+   "lens": "clarity",
+   "iteration": 1,
+   "recorded_iteration": null,
+   "counts": {
+    "critical": 0,
+    "important": 1,
+    "minor": 3
+   },
+   "findings": [
+    {
+     "lens": "clarity",
+     "severity": "IMPORTANT",
+     "path": "docs/upgrading-5.0.md",
+     "start_line": 143,
+     "end_line": 143,
+     "claim": "The inserted parenthetical lands between \"instead\" and \"of\", so the sentence now reads ...naming nthlayer-generate migrate-manifest, instead (the bare nthlayer script is ambiguous ...; opensrm-dww5) and then continues on the next line with of \"service.name is required\". The reader hits a parenthesis in the middle of \"instead of\". The line is also far wider than its neighbours, which wrap at about 80 columns.",
+     "evidence": null,
+     "fix": null,
+     "fingerprint": "a8fc2d5e26a40257",
+     "verification_level": "asserted",
+     "resolves": null,
+     "regression": false,
+     "status": null,
+     "derived_from": "reviewer_transcript",
+     "extracted_by": "model",
+     "handback_sha256": "ef8a3fb87a8ffc406c9c02a2ada1b67bef34eceab9538ced74b2936eaee0bf00",
+     "fix_commit": "d779a6ac0b42921577ff91432be9cbd1fe875fa8",
+     "reported_path": "docs/upgrading-5.0.md",
+     "path_in_tree": true
+    }
+   ]
+  },
+  {
+   "lens": "clarity",
+   "iteration": 2,
+   "recorded_iteration": 2,
+   "counts": {
+    "critical": 0,
+    "important": 0,
+    "minor": 2
+   },
+   "findings": null
+  },
+  {
+   "lens": "edge_cases",
+   "iteration": 1,
+   "recorded_iteration": null,
+   "counts": {
+    "critical": 0,
+    "important": 2,
+    "minor": 2
+   },
+   "findings": [
+    {
+     "lens": "edge_cases",
+     "severity": "IMPORTANT",
+     "path": "src/nthlayer_common/manifest/parser/loader.py",
+     "start_line": 92,
+     "end_line": 92,
+     "claim": "The path is not shell-quoted in the printed command.",
+     "evidence": null,
+     "fix": null,
+     "fingerprint": "87ce2093fd964360",
+     "verification_level": "asserted",
+     "resolves": null,
+     "regression": false,
+     "status": null,
+     "derived_from": "reviewer_transcript",
+     "extracted_by": "model",
+     "handback_sha256": "dea69b8478b959b85ae7c0a964928a07eff542a31ed004370b83b4fda9bf707f",
+     "fix_commit": "f5c368761c6db8171cd672c9cebded5a46fd61e4",
+     "reported_path": "nthlayer-common-dww5/src/nthlayer_common/manifest/parser/loader.py",
+     "path_in_tree": true
+    },
+    {
+     "lens": "edge_cases",
+     "severity": "IMPORTANT",
+     "path": null,
+     "start_line": null,
+     "end_line": null,
+     "claim": "The trailing parenthetical is glued to the path.",
+     "evidence": null,
+     "fix": null,
+     "fingerprint": "d7c83207f7e6ca32",
+     "verification_level": "asserted",
+     "resolves": null,
+     "regression": false,
+     "status": null,
+     "derived_from": "reviewer_transcript",
+     "extracted_by": "model",
+     "handback_sha256": "dea69b8478b959b85ae7c0a964928a07eff542a31ed004370b83b4fda9bf707f",
+     "fix_commit": "f5c368761c6db8171cd672c9cebded5a46fd61e4",
+     "reported_path": null,
+     "path_in_tree": false
+    }
+   ]
+  },
+  {
+   "lens": "edge_cases",
+   "iteration": 2,
+   "recorded_iteration": 2,
+   "counts": {
+    "critical": 0,
+    "important": 0,
+    "minor": 2
+   },
+   "findings": null
+  },
+  {
+   "lens": "provenance",
+   "iteration": 1,
+   "recorded_iteration": null,
+   "counts": {
+    "critical": 0,
+    "important": 0,
+    "minor": 2
+   },
+   "findings": null
+  }
+ ],
+ "cross_repo_findings": [],
+ "escaped": []
+}

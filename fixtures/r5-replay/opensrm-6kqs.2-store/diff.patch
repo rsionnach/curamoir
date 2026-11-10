@@ -1,0 +1,909 @@
+diff --git a/.github/workflows/release.yml b/.github/workflows/release.yml
+index 1951495..32e1acb 100644
+--- a/.github/workflows/release.yml
++++ b/.github/workflows/release.yml
+@@ -4,6 +4,9 @@ name: Release meta-package to PyPI
+ # repo's historical v0.1.0a* tags (which were the legacy generator releases,
+ # now superseded by nthlayer-generate's v1.0.0+ tags). The meta-package is
+ # the only thing this repo publishes to PyPI.
++#
++# corpus-v* tags (R5 replay corpus releases, CLAUDE.md rule 4) are deliberately
++# not matched: they carry release assets only and must publish nothing.
+ 
+ on:
+   push:
+diff --git a/CLAUDE.md b/CLAUDE.md
+index d0741eb..96bedec 100644
+--- a/CLAUDE.md
++++ b/CLAUDE.md
+@@ -173,8 +173,9 @@ examples, generator-specific scripts.
+     repo (`meta.json`, `brief.md`, `diff.patch`, `recorded.json`), with a
+     fidelity (recorded / derived / counts_only) and `blocking_findings`,
+     and with `--bundles` one synthetic git bundle per repo plus
+-    `bundles.json`, published as release assets on
+-    `rsionnach/curamoir-replay-corpus`, never committed. Reads reviewer
++    `bundles.json`. The bundles are release assets on this repo under a
++    `corpus-v*` tag (rule 4), never committed; `bundles.json` is copied
++    beside the entries, in cúramóir's `fixtures/r5-replay/`. Reads reviewer
+     reports and their extractions from the private archive
+     `.claude/r5-handbacks/`; only findings and briefs leave it. Standard
+     library and git only. Tests: `test/test_r5_corpus.py`, on the runner's
+@@ -274,6 +275,13 @@ hub with implementation drift.
+    - `v0.1.0a*` — legacy generator releases (historical).
+    - `meta-v*` — PyPI meta-package releases. Triggers `release.yml`.
+    - Sub-package `v*` tags live in their own repos.
++   - `corpus-v*` — R5 replay corpus releases: the synthetic per-repo
++     bundles `scripts/r5_corpus.py --bundles DIR --release-tag corpus-vN`
++     writes, as release assets (opensrm-6kqs.2). One release per corpus
++     version, never edited after publication (a changed corpus is a new
++     N), created with `--latest=false` so the meta-package stays the latest
++     release. No workflow runs on it, which
++     `test/test_r5_corpus.py::test_no_workflow_runs_on_a_corpus_tag` checks.
+ 
+    Do not push a tag in the wrong namespace.
+ 
+diff --git a/docs/superpowers/specs/2026-11-03-r5-gate-v2-nthlayer-spec.md b/docs/superpowers/specs/2026-11-03-r5-gate-v2-nthlayer-spec.md
+index 3b508bf..7573ae5 100644
+--- a/docs/superpowers/specs/2026-11-03-r5-gate-v2-nthlayer-spec.md
++++ b/docs/superpowers/specs/2026-11-03-r5-gate-v2-nthlayer-spec.md
+@@ -1,6 +1,6 @@
+ # R5 Gate v2 — NthLayer specification
+ 
+-**Status:** v1.2, 2026-11-09. Supersedes the 3 November hand-off and every inline amendment since, including the 9 November corpus-fidelity paragraph, which is folded into Phase A bead 2 below. From here, a change is a dated entry in §8, made in this file and mirrored in the cúramóir spec in the same pass.
++**Status:** v1.3, 2026-11-10. Supersedes the 3 November hand-off and every inline amendment since, including the 9 November corpus-fidelity paragraph, which is folded into Phase A bead 2 below. From here, a change is a dated entry in §8, made in this file and mirrored in the cúramóir spec in the same pass.
+ **Scope:** NthLayer's part of the move to the batched R5 gate: the baseline and corpus now (Phase A), a skill-level batched gate only if cúramóir's Epic 5 is far off (Phase B), and the hand-over (Phase D). The mechanism is specified in cúramóir's `docs/r5-gate-v2-curamoir-spec.md`.
+ **Binds:** `docs/r5-gate.md` (the versioned gate description, `opensrm-xf73`), `r5-supervise`, `epic-executor` stage 2, the lens templates in `~/.claude/skills/rule-of-five-review/`, the ecosystem root's `.claude/hooks/r5-lock.sh`, `r5-parallel-block.sh` and `r5-state.json`, `scripts/r5_baseline.py` and `scripts/r5_corpus.py`. No file under any member repository's `src/`, `spec/` or `tests/`.
+ 
+@@ -11,7 +11,7 @@
+ | # | Assumption | Discharged by |
+ |---|---|---|
+ | A1 | The lens templates can emit `R5-FINDINGS:` on the last line without losing review quality. The bridge in cúramóir already parses that line; the NthLayer templates have not been changed yet. | Phase A bead 3, with a dry run over three recorded entries before and after. |
+-| A2 | ~~Synthetic per-repo bundles come out small enough for a corpus store without LFS.~~ Discharged 2026-11-09: 116 MB in total, opensrm 112 MB; bundles are release assets on the corpus repository (§6). | Done. |
++| A2 | ~~Synthetic per-repo bundles come out small enough for a corpus store without LFS.~~ Discharged 2026-11-09: 122 MB in total, opensrm 112 MB; bundles are release assets on this repository under `corpus-v*` (§6). | Done. |
+ | A3 | ~~Surviving transcripts yield briefs that can be isolated verbatim.~~ Discharged 2026-11-09: reviewer prompts for 87 entries, bead descriptions for 44. | Done. |
+ | A4 | Phase B's parallel dispatch from the main thread works with the existing `r5-parallel-block.sh` once rekeyed; Claude Code's 20-subagent limit is never reached (five reviewers at most). | Phase B bead 1 and 6, if Phase B runs. |
+ | A5 | `cleanupPeriodDays` has been raised so the next twenty gates' reviewer outputs survive for the shadow period. | You, today; `/curamoir:doctor` will warn once the `harness` principle for it exists. |
+@@ -23,7 +23,7 @@ The gate described in `docs/r5-gate.md` runs four blocking lenses one at a time,
+ 
+ **Done (Phase A beads 1 and 8).** The baseline is published in `docs/r5-gate.md` from `scripts/r5_baseline.py`, with the 274-versus-152 discrepancy explained, and its fixtures are synthetic. Over the record, provenance produced 56 of the 81 first-review CRITICALs; clarity none in 478 findings. The "nine CRITICALs from correctness and edge-cases" was a 20-bead sample.
+ 
+-**In progress (Phase A bead 2).** The corpus. The archives hold severity counts, not findings, so every entry carries a fidelity (§6). As built: 131 entries over 65 beads; 18 recorded entries (16 beads) with 83 blocking findings, 14 of them without a path and 23 without a range because the report gave none; 0 derived; 113 counts_only, 12 with no blocking finding. The planned floor was not met and is dropped; the recall acceptance for Phase B is the ten-gate shadow period, and the corpus is a regression test. Entries are one per gate record and repository; bundles are release assets on the corpus repository.
++**In progress (Phase A bead 2).** The corpus. The archives hold severity counts, not findings, so every entry carries a fidelity (§6). As built: 131 entries over 65 beads; 18 recorded entries (16 beads) with 83 blocking findings, 14 of them without a path and 23 without a range because the report gave none; 0 derived; 113 counts_only, 12 with no blocking finding. The planned floor was not met and is dropped; the recall acceptance for Phase B is the ten-gate shadow period, and the corpus is a regression test. Entries are one per gate record and repository; bundles are release assets on this repository under the `corpus-v*` tag namespace.
+ 
+ **Next (Phase A beads 3 to 7).** The finding schema in the templates, the round record, round 0, the tree-keyed verdict, and the first amendment of the gate description, all with dispatch still sequential.
+ 
+@@ -53,7 +53,7 @@ Seven beads under `opensrm-6kqs`, in this order; beads 1 and 8 are closed. Each
+    - *Fidelity is provenance.* `recorded`: findings extracted from the reviewer's own report in the session transcript, by a cheap-tier extraction subagent, from the report text only, claim near-verbatim, path present in the report, range from line references or null, `extracted_by: model`, accepted only where every blocking iteration's extracted CRITICAL and IMPORTANT counts equal the archive's. `derived`: path and range from the lens's fix-commit hunks, claim from the commit's severity bullet, one-to-one only. `counts_only`: severity counts, lens order, iteration count and `sequential_steps`, nothing finer. `verification_level` is `asserted` at every fidelity. `blocking_findings` is an integer; 0 is a clean entry at whichever fidelity confirmed it.
+    - *Before extraction, the irreversible step.* The raw reviewer reports for every bead with a surviving transcript are copied to the private archive at the ecosystem root, beside the state files, with their hashes recorded. They never enter a repository.
+    - *Multi-repo records.* A record spanning repositories is one entry per repository, grouped by `record`; findings are assigned by path; unassignable ones are listed under `cross_repo_findings` in each sub-entry and excluded from that entry's recall; a sub-entry's own `sequential_steps` is null, since the archive cannot split it without guessing, and `record_sequential_steps` is carried on every sub-entry and counted once per record in the aggregate step ratio. `<part>` is the archive record stem's suffix after the bead id; `-<repo>` is appended only when a record spans several repositories.
+-   - *Bundles.* One synthetic bundle per repository (every base and head tree the corpus needs as synthetic commits via `git commit-tree`; tree SHAs exact, commit SHAs synthetic, originals in `meta.json`), published as release assets on the `curamoir-replay-corpus` repository with a `bundles.json` manifest in its git content, never committed to any repository (measured 116 MB in total, opensrm 112 MB, over GitHub's 100 MB file limit); each entry records the bundle's sha256.
++   - *Bundles.* One synthetic bundle per repository (every base and head tree the corpus needs as synthetic commits via `git commit-tree`; tree SHAs exact, commit SHAs synthetic, originals in `meta.json`), published as release assets on this repository (`rsionnach/nthlayer`) under a `corpus-v*` tag, one release per corpus version, never edited after publication; the namespace is added to the front door's disjoint-tag rule and `release.yml` must ignore it. Committed to no repository (measured 122 MB in total, opensrm 112 MB, over GitHub's 100 MB file limit). The corpus PR to cúramóir carries `fixtures/r5-replay/bundles.json` with each bundle's release tag, asset URL, sha256 and size; each entry's `meta.json` records its bundle's sha256.
+    - *Briefs.* By `brief_source`: the reviewer prompt isolated verbatim from the transcript, else the bead's description and acceptance from `bd`, else a plan document already in the repository, else none. The corpus PR lists the transcript-derived briefs for a human to skim once before merge.
+    - *No floor.* The corpus is a regression test. Report entry and bead counts per fidelity, bundle sizes, and `brief_source` counts.
+    - *One archive, two figures.* Re-run `r5_baseline.py` over the snapshot the corpus was built from, so the baseline's bead count, record count and 991-step total and the corpus's counts are from the same archive; publish both with dates and reconcile the difference (A6).
+@@ -164,12 +164,15 @@ This section is word for word the same in both specs. A change to it is a dated
+ **Replay corpus.** The unit is a gate record and a repository: one bead, one repo, one checkpoint, one `BASE..HEAD`, which is what the gate itself runs on (R5-R8). A bead with checkpoints or spanning several repos has one entry per record and repo, grouped by `record`. An entry's directory is the archive record's stem, so `<part>` is whatever suffix the record carried after the bead id (a checkpoint such as `checkpointA`, or the repository the record was named for); `-<repo>` is appended only when one record spans several repositories, so that its sub-entries differ. Bundles live outside the plugin repository, because `claude plugin marketplace add` clones it and because fetching commits from the source repositories is not durable once squash-merged branches are garbage-collected.
+ 
+ ```
+-<corpus store>                                 the curamoir-replay-corpus repository: its git content is bundles.json (per repo: sha256, size, release tag,
+-                                               download URL) and the bundles themselves are release assets on it, one release per corpus version. Measured
+-                                               2026-11-09: the synthetic bundles total 116 MB and opensrm's alone is 112 MB, over GitHub's 100 MB in-repo
+-                                               file limit, so they are not committed to any repository. Never the plugin repo.
++<corpus store>                                 release assets on rsionnach/nthlayer under the corpus-v* tag namespace (added to the front door's disjoint
++                                               tag-namespace rule), one release per corpus version; a release is never edited, a new version is a new tag.
++                                               Measured 2026-11-09: the synthetic bundles total 122 MB and opensrm's alone is 112 MB, over GitHub's 100 MB
++                                               in-repo file limit, so they are committed to no repository; a clone never downloads a release asset. No
++                                               dedicated repository.
+   <repo>.bundle (release asset)                one synthetic bundle per repo holding every base and head tree the corpus needs as synthetic commits
+                                                (tree SHAs exact, commit SHAs synthetic, built with git commit-tree); each entry records its sha256
++fixtures/r5-replay/bundles.json                in the plugin repo beside the entries: per repo the release tag, asset URL, sha256 and size; the harness reads
++                                               this and nothing from the nthlayer repository's git content
+ 
+ fixtures/r5-replay/<bead>[-<repo>][-<part>]/   in the plugin repo, light files only: one entry per gate record AND per repo
+   meta.json        bead, record (archive stem), record_repos, repo, part, base, head (original SHAs), synthetic_base, synthetic_head, tree_sha,
+@@ -225,6 +228,7 @@ fixtures/r5-replay/<bead>[-<repo>][-<part>]/   in the plugin repo, light files o
+ 
+ A change to this file after v1.0 is one dated line here, the edit it names, and the same change in the cúramóir spec when it touches §6 or a shared decision. Both agents are told in the same message. Nothing is edited in place without a line here.
+ 
++- **v1.3, 2026-11-10.** Corpus store corrected: no dedicated repository. Bundles are release assets on this repository under `corpus-v*`; `bundles.json` goes to cúramóir with the entries. Bundle total corrected to the measured 122 MB.
+ - **v1.2, 2026-11-09.** From the cúramóir agent's review of v1.1: A6 and a bead-2 rule to re-run the baseline over the corpus's archive snapshot so the 63-bead and 65-bead figures are reconciled with dates.
+ - **v1.1, 2026-11-09.** From this agent's review of v1.0 against the built corpus: §1 states the built corpus (131 entries, 18 recorded, 0 derived, 113 counts_only) in place of the bead-level count; bead 2's closed-when no longer requires a path and range the report never gave; `<part>` defined; a multi-repo sub-entry's `sequential_steps` is null with `record_sequential_steps` counted once per record; bundles are release assets on the corpus repository (116 MB total, opensrm 112 MB); A2 and A3 discharged. Mirrored in the cúramóir spec's §11 and §13.
+ - **v1.0, 2026-11-09.** Consolidates the 3 November hand-off and the amendments of 5, 7 and 9 November, including the agent's corpus-fidelity paragraph, into one text. New against the amended text: §0 assumptions; the baseline stated from the full record; Phase A bead 1 and 8 marked closed and bead 7 part-done; bead 2 restated with every settled rule (fidelity as provenance with `blocking_findings`, private archive first, multi-repo split, per-repo synthetic bundles in a separate store, briefs by source, no floor); the step ratio made an aggregate; re-raises keep the higher severity (from the cúramóir bridge's implementation); the ecosystem-root hooks noted as unversioned by design.
+diff --git a/scripts/r5_corpus.py b/scripts/r5_corpus.py
+index 5a999cd..10047bc 100644
+--- a/scripts/r5_corpus.py
++++ b/scripts/r5_corpus.py
+@@ -31,8 +31,13 @@ files:
+ With ``--bundles``, the heavy part: one git bundle per repo holding each
+ entry's base and head trees as two synthetic commits (tree SHAs exact, commit
+ SHAs synthetic and deterministic), and ``bundles.json`` (repo, sha256, size,
+-release tag, URL). The bundles are release assets on CORPUS_REPO, whose git
+-content is bundles.json; they are never committed.
++release tag, URL), written to --bundles and, beside the entries, to --out.
++The bundles are release assets on CORPUS_REPO under the --release-tag
++``corpus-v<N>`` (one release per corpus version, never edited after
++publication); they are never committed, and the harness needs nothing of that
++repo's git content. A rebuild under a tag that the manifest in --bundles or
++beside the entries in --out already names must reproduce its bundles byte for
++byte; a changed corpus is a new N.
+ 
+ Fidelity is provenance (FIDELITIES), decided once per record, never an
+ exclusion; ``blocking_findings`` (an integer, null when the archive's
+@@ -61,7 +66,7 @@ conversation around them never does. Without it no entry is recorded.
+ Standard library only (and git), like r5_baseline.py, which it imports.
+ 
+ Usage:
+-    python3 scripts/r5_corpus.py --out DIR [--bundles DIR] [--archive-dir DIR]
++    python3 scripts/r5_corpus.py --out DIR [--bundles DIR --release-tag corpus-vN] [--archive-dir DIR]
+         [--workspace DIR] [--private-dir DIR] [--no-bd]
+ 
+ Exit codes: 0 corpus written · 2 any one of these: a usage error, a record
+@@ -96,9 +101,12 @@ SCHEMA_VERSION = 1
+ FIDELITIES = ("recorded", "derived", "counts_only")
+ BRIEF_SOURCES = ("reviewer_prompt", "bead", "plan_doc", "none")
+ BLOCKING = r5_baseline.LENS_ORDER[:4]  # the blocking roster; excellence is advisory
+-BUNDLE_TAG = "v1"  # one release per corpus version on the corpus repository
++# One release per corpus version, in the front door's corpus-v* tag namespace
++# (its CLAUDE.md rule 4); no workflow there runs on it. --release-tag names the
++# version, corpus-v<N>.
++TAG_PREFIX = "corpus-v"
+ BD_TIMEOUT_S = 60
+-CORPUS_REPO = "rsionnach/curamoir-replay-corpus"
++CORPUS_REPO = "rsionnach/nthlayer"
+ BUNDLE_URL = "https://github.com/" + CORPUS_REPO + "/releases/download/{tag}/{name}"
+ 
+ # Synthetic commits are fixed in identity and time, so the same trees give the
+@@ -850,18 +858,19 @@ CLEAN_GIT_ENV = {"GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1", "G
+                  "GIT_CONFIG_PARAMETERS": ""}
+ 
+ 
+-def previous_assets(out: Path) -> set[str]:
+-    """The bundles a previous run's bundles.json lists in ``out``. Refuses an
+-    --bundles holding any other *.bundle, rather than overwrite or delete a
+-    file this script did not write (as --out refuses foreign entries)."""
++def previous_assets(out: Path) -> tuple[set[str], dict]:
++    """The bundles a previous run's bundles.json lists in ``out``, and that
++    manifest ({} when there is none). Refuses an --bundles holding any other
++    *.bundle, rather than overwrite or delete a file this script did not write
++    (as --out refuses foreign entries)."""
+     if not out.exists():
+-        return set()
++        return set(), {}
+     if not out.is_dir():
+         raise CorpusError(f"--bundles {out} is not a directory")
+     manifest = out / "bundles.json"
+     try:
+-        listed = {b["asset"] for b in json.loads(manifest.read_text(encoding="utf-8"))["bundles"]} \
+-            if manifest.is_file() else set()
++        prior = json.loads(manifest.read_text(encoding="utf-8")) if manifest.is_file() else {"bundles": []}
++        listed = {b["asset"] for b in prior["bundles"]}
+     except (OSError, UnicodeDecodeError, json.JSONDecodeError, KeyError, TypeError) as exc:
+         raise CorpusError(f"{manifest}: unreadable ({exc}); choose another --bundles") from exc
+     # Only plain bundle names: a listed "../x" or absolute path would be
+@@ -874,16 +883,53 @@ def previous_assets(out: Path) -> set[str]:
+         raise CorpusError(f"{out} holds bundles bundles.json does not list: {foreign[:3]} (an earlier run"
+                           " interrupted before writing bundles.json leaves these); choose another --bundles,"
+                           " or remove them if they are that run's")
+-    return listed
++    return listed, prior if manifest.is_file() else {}
+ 
+ 
+-def write_bundles(entries: list[dict], workspace: Path, out: Path) -> None:
++def check_release_tag(tag: str) -> int:
++    """N, when ``tag`` is corpus-v<N> with N a positive integer and no leading zero."""
++    number = tag[len(TAG_PREFIX):] if isinstance(tag, str) else ""
++    if not (number and tag.startswith(TAG_PREFIX) and number.isdigit() and number.isascii() and number[0] != "0"):
++        raise CorpusError(f"--release-tag {tag!r} is not {TAG_PREFIX}<N> (CLAUDE.md rule 4)")
++    return int(number)
++
++
++def write_bundles(entries: list[dict], workspace: Path, out: Path, release_tag: str,
++                  published: dict | None = None) -> None:
+     """One bundle per repo: each entry's base and head trees as a synthetic
+     two-commit history under refs/r5/<entry>/{base,head}, and bundles.json,
+-    the manifest the corpus repository commits. Fills each meta's ``bundle``
+-    and synthetic commits."""
+-    previous = previous_assets(out)  # refuses a foreign --bundles before writing anything
++    the manifest write_entries copies beside the entries. Fills each meta's
++    ``bundle`` and synthetic commits. The bundles are built in a staging
++    directory and moved into ``out`` only once they agree with every manifest
++    known for ``release_tag``: the one in ``out`` and ``published``, the one
++    beside the entries (which, unlike --bundles, is committed and so outlives
++    a temporary build directory). A published release is never edited."""
++    check_release_tag(release_tag)
++    previous, prior = previous_assets(out)  # refuses a foreign --bundles before writing anything
+     out.mkdir(parents=True, exist_ok=True)
++    for leftover in out.glob(STAGING_PREFIX + "*"):  # a killed run's; ours by name
++        shutil.rmtree(leftover, ignore_errors=True)
++    priors = [m for m in (prior, published or {}) if m]
++    for known in priors:  # before minutes of packing, not after
++        try:
++            known_n = check_release_tag(known.get("release_tag"))
++        except CorpusError:
++            raise CorpusError(f"a manifest in {out} or --out names no {TAG_PREFIX}<N> release tag"
++                              f" ({known.get('release_tag')!r}); choose another directory") from None
++        # A known manifest at a later N means this tag is published and behind
++        # it: an old command replayed, not a new version.
++        if known_n > check_release_tag(release_tag):
++            raise CorpusError(f"a manifest already names {known['release_tag']}, later than {release_tag};"
++                              " a published release is never rebuilt, so give a new --release-tag")
++    with tempfile.TemporaryDirectory(dir=out, prefix=STAGING_PREFIX) as staging:
++        _write_bundles(entries, workspace, out, Path(staging), release_tag, previous, priors)
++
++
++STAGING_PREFIX = ".staging-"
++
++
++def _write_bundles(entries: list[dict], workspace: Path, out: Path, staging: Path, release_tag: str,
++                   previous: set[str], priors: list[dict]) -> None:
+     manifest: list[dict] = []
+     by_repo: dict[str, list[dict]] = {}
+     for e in entries:
+@@ -909,7 +955,7 @@ def write_bundles(entries: list[dict], workspace: Path, out: Path) -> None:
+                 git(scratch, "update-ref", f"refs/r5/{meta['entry']}/head", head_commit, isolated=True)
+                 meta["synthetic_base"], meta["synthetic_head"] = base_commit, head_commit
+                 meta["bundle"] = {"repo": repo_name}
+-            target = out / f"{repo_name}.bundle"
++            target = staging / f"{repo_name}.bundle"
+             # One pack thread: a threaded delta search orders objects
+             # differently run to run, and the published sha256 must hold.
+             git(scratch, *PACK_CONFIG, "bundle", "create", "-q", str(target.resolve()), "--all",
+@@ -918,15 +964,28 @@ def write_bundles(entries: list[dict], workspace: Path, out: Path) -> None:
+         for e in group:
+             e["meta"]["bundle"]["sha256"] = digest
+         manifest.append({"repo": repo_name, "asset": target.name, "sha256": digest,
+-                         "size": target.stat().st_size, "release_tag": BUNDLE_TAG,
+-                         "url": BUNDLE_URL.format(tag=BUNDLE_TAG, name=target.name),
++                         "size": target.stat().st_size, "release_tag": release_tag,
++                         "url": BUNDLE_URL.format(tag=release_tag, name=target.name),
+                          "git_version": git(source, "--version").strip()})
++    now = {b["asset"]: b["sha256"] for b in manifest}
++    for prior in priors:
++        if prior.get("release_tag") != release_tag:
++            continue
++        was = {b.get("asset"): b.get("sha256") for b in prior.get("bundles", [])}
++        if was != now:
++            changed = sorted(a for a in set(was) | set(now) if was.get(a) != now.get(a))
++            raise CorpusError(f"a manifest already names {release_tag} with other bundles ({changed[:3]});"
++                              " a release is never edited, so give a changed corpus a new --release-tag"
++                              " (or, if an interrupted run left --bundles half-written, remove it and rebuild)")
++    for staged in staging.glob("*.bundle"):
++        os.replace(staged, out / staged.name)
+     listed = {b["asset"] for b in manifest}
+     for stale in previous - listed:
+         (out / stale).unlink(missing_ok=True)  # a repo no longer in the corpus
+-    # The corpus repository's git content: the bundles are its release assets.
++    # The bundles themselves are release assets; the harness reads this manifest
++    # from beside the entries, never from the front door's git content.
+     (out / "bundles.json").write_text(json.dumps(
+-        {"schema_version": SCHEMA_VERSION, "repository": CORPUS_REPO, "release_tag": BUNDLE_TAG,
++        {"schema_version": SCHEMA_VERSION, "repository": CORPUS_REPO, "release_tag": release_tag,
+          "bundles": manifest}, indent=1) + "\n", encoding="utf-8")
+ 
+ 
+@@ -1012,10 +1071,47 @@ def previous_entries(out: Path) -> list[Path]:
+     return names
+ 
+ 
+-def write_entries(entries: list[dict], out: Path) -> None:
+-    """Write every entry, replacing the entries a previous run left."""
++# --bundles and --out must differ, since the manifest is copied from one to the
++# other. main refuses that before writing anything, but it can only compare
++# directories that exist; two spellings of one directory that did not exist
++# before this run (./c and ./C on a case-insensitive disk) surface in write_entries.
++SAME_DIRECTORY = "--bundles and --out are the same directory; give the bundles their own"
++
++
++def previous_manifest(out: Path) -> dict:
++    """The bundles.json in --out ({} when there is none). Refuses one this
++    script did not write, since every run replaces or removes it."""
++    manifest = out / "bundles.json"
++    if manifest.is_symlink() or (manifest.exists() and not manifest.is_file()):
++        raise CorpusError(f"{manifest} is not a manifest this script wrote; choose another --out")
++    if manifest.is_file():
++        try:
++            found = json.loads(manifest.read_text(encoding="utf-8"))
++            ours = (found.get("repository") == CORPUS_REPO and isinstance(found.get("bundles"), list)
++                    and all(isinstance(b, dict) for b in found["bundles"]))
++            check_release_tag(found.get("release_tag", ""))
++        except (OSError, UnicodeDecodeError, json.JSONDecodeError, AttributeError, CorpusError):
++            ours = False
++        if not ours:
++            raise CorpusError(f"{manifest} is not a manifest this script wrote; choose another --out")
++        return found
++    return {}
++
++
++def write_entries(entries: list[dict], out: Path, bundles: Path | None = None) -> None:
++    """Write every entry, replacing the entries a previous run left, and with
++    --bundles the manifest beside them (spec section 6: bundles.json in
++    fixtures/r5-replay/, so the harness needs only that directory and the
++    release). Without --bundles there is no manifest; main refuses that
++    run when --out already holds one."""
+     olds = previous_entries(out)
+     out.mkdir(parents=True, exist_ok=True)
++    manifest = out / "bundles.json"
++    if bundles is not None:  # before any entry is removed, so a refusal here loses nothing
++        try:
++            shutil.copyfile(bundles / "bundles.json", manifest)
++        except shutil.SameFileError:  # see SAME_DIRECTORY
++            raise CorpusError(SAME_DIRECTORY) from None
+     for old in olds:
+         shutil.rmtree(old)
+     for e in entries:
+@@ -1065,6 +1161,7 @@ def main(argv: list[str] | None = None) -> int:
+     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+     parser.add_argument("--out", type=Path, required=True)
+     parser.add_argument("--bundles", type=Path)
++    parser.add_argument("--release-tag", help="with --bundles: the corpus-v<N> release they go to")
+     parser.add_argument("--archive-dir", type=Path, default=r5_baseline.DEFAULT_ARCHIVE_DIR)
+     parser.add_argument("--workspace", type=Path, default=DEFAULT_WORKSPACE)
+     parser.add_argument("--private-dir", type=Path)
+@@ -1074,12 +1171,27 @@ def main(argv: list[str] | None = None) -> int:
+     try:
+         entries = build(args.archive_dir, args.workspace,
+                         PrivateArchive(private_dir if private_dir.is_dir() else None), not args.no_bd)
+-        previous_entries(args.out)  # refuse a foreign --out before writing anything
+-        if args.bundles:
+-            previous_assets(args.bundles)  # likewise for --bundles
++        # Every refusal main can make comes before the first write; SAME_DIRECTORY
++        # names the one it cannot.
++        previous_entries(args.out)  # a foreign --out
++        published = previous_manifest(args.out)  # or a foreign manifest in it
++        if args.release_tag is not None and not args.bundles:
++            raise CorpusError("--release-tag names the release --bundles go to; give --bundles too")
++        if published and not args.bundles:
++            # It is the committed record of a published release, and the only
++            # one a fresh --bundles is checked against; never drop it quietly.
++            raise CorpusError(f"{args.out / 'bundles.json'} records {published['release_tag']}; rebuild with"
++                              " --bundles and --release-tag, or remove it yourself if that is intended")
+         if args.bundles:
+-            write_bundles(entries, args.workspace, args.bundles)
+-        write_entries(entries, args.out)
++            if args.release_tag is None:  # check_release_tag would refuse too; this says why
++                raise CorpusError("--bundles needs --release-tag corpus-v<N>, the release the bundles go to")
++            check_release_tag(args.release_tag)
++            previous_assets(args.bundles)  # a foreign --bundles
++            if args.bundles.resolve() == args.out.resolve() or (
++                    args.bundles.is_dir() and args.out.is_dir() and os.path.samefile(args.bundles, args.out)):
++                raise CorpusError(SAME_DIRECTORY)
++            write_bundles(entries, args.workspace, args.bundles, args.release_tag, published)
++        write_entries(entries, args.out, args.bundles)
+     except (CorpusError, r5_baseline.RecordError) as exc:
+         print(f"r5-corpus: {exc}", file=sys.stderr)
+         return 2
+diff --git a/test/test_r5_corpus.py b/test/test_r5_corpus.py
+index 2d9392f..3eac3f4 100644
+--- a/test/test_r5_corpus.py
++++ b/test/test_r5_corpus.py
+@@ -12,6 +12,7 @@ Run: uv run --no-project --with pytest pytest -q test/test_r5_corpus.py
+ 
+ from __future__ import annotations
+ 
++import fnmatch
+ import hashlib
+ import importlib.util
+ import json
+@@ -22,6 +23,7 @@ from pathlib import Path
+ import pytest
+ 
+ HERE = Path(__file__).resolve().parent
++TAG = "corpus-v1"
+ sys.path.insert(0, str(HERE.parent / "scripts"))
+ _spec = importlib.util.spec_from_file_location("r5_corpus", HERE.parent / "scripts" / "r5_corpus.py")
+ assert _spec and _spec.loader
+@@ -393,7 +395,7 @@ def test_a_bundle_carries_each_entry_s_exact_trees_and_is_reproducible(workspace
+     write_record(ws, "lll", record("opensrm-lll", {"demo": {"base": workspace["base"], "head": workspace["head"]}},
+                                    [("correctness", {"critical": 0, "important": 0, "minor": 0}, None)]))
+     entries = list(build(ws).values())
+-    r5_corpus.write_bundles(entries, ws, tmp_path / "b1")
++    r5_corpus.write_bundles(entries, ws, tmp_path / "b1", TAG)
+     meta = entries[0]["meta"]
+     bundle = tmp_path / "b1" / "demo.bundle"
+     assert meta["bundle"]["sha256"] == hashlib.sha256(bundle.read_bytes()).hexdigest()
+@@ -413,7 +415,7 @@ def test_a_bundle_carries_each_entry_s_exact_trees_and_is_reproducible(workspace
+     assert run(clone, "diff", "refs/r5/opensrm-lll/base", "refs/r5/opensrm-lll/head") == \
+         run(workspace["repo"], "diff", workspace["base"], workspace["head"])
+     again = list(build(ws).values())
+-    r5_corpus.write_bundles(again, ws, tmp_path / "b2")
++    r5_corpus.write_bundles(again, ws, tmp_path / "b2", TAG)
+     assert again[0]["meta"]["synthetic_head"] == meta["synthetic_head"]
+ 
+ 
+@@ -599,7 +601,7 @@ def test_two_builds_give_byte_identical_bundles(workspace, tmp_path):
+     digests = []
+     for n in (1, 2):
+         entries = list(build(ws).values())
+-        r5_corpus.write_bundles(entries, ws, tmp_path / f"b{n}")
++        r5_corpus.write_bundles(entries, ws, tmp_path / f"b{n}", TAG)
+         digests.append(hashlib.sha256((tmp_path / f"b{n}" / "demo.bundle").read_bytes()).hexdigest())
+     assert digests[0] == digests[1]
+ 
+@@ -671,7 +673,7 @@ def test_the_bundle_is_packed_single_threaded(workspace, tmp_path, monkeypatch):
+     entries = list(build(ws).values())
+     calls, real = [], r5_corpus.git
+     monkeypatch.setattr(r5_corpus, "git", lambda repo, *a, **k: (calls.append(a), real(repo, *a, **k))[1])
+-    r5_corpus.write_bundles(entries, ws, tmp_path / "b")
++    r5_corpus.write_bundles(entries, ws, tmp_path / "b", TAG)
+     (bundle,) = [a for a in calls if "bundle" in a]
+     assert bundle[:2] == ("-c", "pack.threads=1")
+     assert set(r5_corpus.PACK_CONFIG) <= set(bundle)
+@@ -687,13 +689,13 @@ def test_the_caller_s_git_config_does_not_change_the_bundle(workspace, tmp_path,
+     write_record(ws, "vvv", record("opensrm-vvv", {"demo": {"base": base, "head": head}},
+                                    [("correctness", {"critical": 0, "important": 0, "minor": 0}, None)]))
+     entries = list(build(ws).values())
+-    r5_corpus.write_bundles(entries, ws, tmp_path / "plain")
++    r5_corpus.write_bundles(entries, ws, tmp_path / "plain", TAG)
+     # A key PACK_CONFIG does not pin, so only the isolation keeps it out.
+     for key, value in {"GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "core.bigFileThreshold",
+                        "GIT_CONFIG_VALUE_0": "1"}.items():
+         monkeypatch.setenv(key, value)
+     again = list(build(ws).values())
+-    r5_corpus.write_bundles(again, ws, tmp_path / "configured")
++    r5_corpus.write_bundles(again, ws, tmp_path / "configured", TAG)
+     assert (tmp_path / "plain" / "demo.bundle").read_bytes() == (tmp_path / "configured" / "demo.bundle").read_bytes()
+     manifest = json.loads((tmp_path / "configured" / "bundles.json").read_text())
+     assert manifest["bundles"][0]["git_version"].startswith("git version")
+@@ -706,7 +708,7 @@ def test_a_foreign_out_is_refused_before_any_bundle_is_written(workspace, tmp_pa
+     out, bundles = tmp_path / "out", tmp_path / "bundles"
+     out.mkdir()
+     (out / "opensrm-www").write_text("a file, not an entry\n")
+-    assert r5_corpus.main(["--out", str(out), "--bundles", str(bundles), "--archive-dir",
++    assert r5_corpus.main(["--out", str(out), "--bundles", str(bundles), "--release-tag", TAG, "--archive-dir",
+                            str(ws / ".claude"), "--workspace", str(ws), "--no-bd"]) == 2
+     assert not bundles.exists()
+     assert (out / "opensrm-www").read_text() == "a file, not an entry\n"
+@@ -755,12 +757,12 @@ def test_a_config_reaching_commit_tree_does_not_change_the_bundle(workspace, tmp
+     write_record(ws, "yyy", record("opensrm-yyy", {"demo": {"base": workspace["base"], "head": workspace["head"]}},
+                                    [("correctness", {"critical": 0, "important": 0, "minor": 0}, None)]))
+     entries = list(build(ws).values())
+-    r5_corpus.write_bundles(entries, ws, tmp_path / "plain")
++    r5_corpus.write_bundles(entries, ws, tmp_path / "plain", TAG)
+     for key, value in {"GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "i18n.commitEncoding",
+                        "GIT_CONFIG_VALUE_0": "ISO-8859-1", "GIT_DIR": str(workspace["repo"] / ".git")}.items():
+         monkeypatch.setenv(key, value)
+     again = list(build(ws).values())
+-    r5_corpus.write_bundles(again, ws, tmp_path / "configured")
++    r5_corpus.write_bundles(again, ws, tmp_path / "configured", TAG)
+     assert again[0]["meta"]["synthetic_head"] == entries[0]["meta"]["synthetic_head"]
+     assert (tmp_path / "plain" / "demo.bundle").read_bytes() == (tmp_path / "configured" / "demo.bundle").read_bytes()
+     assert not run(workspace["repo"], "for-each-ref", "refs/r5")  # nothing written to the caller's repo
+@@ -772,7 +774,7 @@ def test_an_out_that_is_a_file_is_refused_before_bundles(workspace, tmp_path):
+                                    [("correctness", {"critical": 0, "important": 0, "minor": 0}, None)]))
+     out, bundles = tmp_path / "out", tmp_path / "bundles"
+     out.write_text("a file\n")
+-    assert r5_corpus.main(["--out", str(out), "--bundles", str(bundles), "--archive-dir",
++    assert r5_corpus.main(["--out", str(out), "--bundles", str(bundles), "--release-tag", TAG, "--archive-dir",
+                            str(ws / ".claude"), "--workspace", str(ws), "--no-bd"]) == 2
+     assert not bundles.exists()
+ 
+@@ -798,7 +800,7 @@ def test_bundles_that_is_a_file_is_refused(workspace, tmp_path):
+     write_record(ws, "abc", record("opensrm-abc", {"demo": {"base": workspace["base"], "head": workspace["head"]}},
+                                    [("correctness", {"critical": 0, "important": 0, "minor": 0}, None)]))
+     (tmp_path / "bundles").write_text("a file\n")
+-    assert r5_corpus.main(["--out", str(tmp_path / "out"), "--bundles", str(tmp_path / "bundles"),
++    assert r5_corpus.main(["--out", str(tmp_path / "out"), "--bundles", str(tmp_path / "bundles"), "--release-tag", TAG,
+                            "--archive-dir", str(ws / ".claude"), "--workspace", str(ws), "--no-bd"]) == 2
+     assert not (tmp_path / "out").exists()
+ 
+@@ -895,7 +897,7 @@ def test_the_caller_s_global_git_config_does_not_change_the_bundle(workspace, tm
+     head = commit(repo, {"big.py": big.replace("line 2500 ", "line 2500 changed ")}, "big change")
+     write_record(ws, "gcf", record("opensrm-gcf", {"demo": {"base": base, "head": head}},
+                                    [("correctness", {"critical": 0, "important": 0, "minor": 0}, None)]))
+-    r5_corpus.write_bundles(list(build(ws).values()), ws, tmp_path / "plain")
++    r5_corpus.write_bundles(list(build(ws).values()), ws, tmp_path / "plain", TAG)
+     home = tmp_path / "home"
+     (home / ".config" / "git").mkdir(parents=True)
+     hostile = "[core]\n\tbigFileThreshold = 1\n"
+@@ -903,7 +905,7 @@ def test_the_caller_s_global_git_config_does_not_change_the_bundle(workspace, tm
+     (home / ".config" / "git" / "config").write_text(hostile)
+     monkeypatch.setenv("HOME", str(home))
+     monkeypatch.setenv("XDG_CONFIG_HOME", str(home / ".config"))
+-    r5_corpus.write_bundles(list(build(ws).values()), ws, tmp_path / "configured")
++    r5_corpus.write_bundles(list(build(ws).values()), ws, tmp_path / "configured", TAG)
+     assert (tmp_path / "plain" / "demo.bundle").read_bytes() == (tmp_path / "configured" / "demo.bundle").read_bytes()
+ 
+ 
+@@ -1038,8 +1040,8 @@ def test_a_stale_bundle_is_removed_with_its_repo(workspace, tmp_path):
+     out = tmp_path / "b"
+     out.mkdir()
+     (out / "old-repo.bundle").write_bytes(b"stale")
+-    (out / "bundles.json").write_text(json.dumps({"bundles": [{"asset": "old-repo.bundle"}]}))
+-    r5_corpus.write_bundles(list(build(ws).values()), ws, out)
++    (out / "bundles.json").write_text(json.dumps({"release_tag": TAG, "bundles": [{"asset": "old-repo.bundle"}]}))
++    r5_corpus.write_bundles(list(build(ws).values()), ws, out, "corpus-v2")
+     assert sorted(p.name for p in out.iterdir()) == ["bundles.json", "demo.bundle"]
+ 
+ 
+@@ -1051,9 +1053,9 @@ def test_a_bundle_this_script_did_not_list_is_refused_untouched(workspace, tmp_p
+     out.mkdir()
+     (out / "my-backup.bundle").write_bytes(b"mine")
+     with pytest.raises(r5_corpus.CorpusError):
+-        r5_corpus.write_bundles(list(build(ws).values()), ws, out)
++        r5_corpus.write_bundles(list(build(ws).values()), ws, out, TAG)
+     assert (out / "my-backup.bundle").read_bytes() == b"mine"
+-    assert r5_corpus.main(["--out", str(tmp_path / "out"), "--bundles", str(out), "--archive-dir",
++    assert r5_corpus.main(["--out", str(tmp_path / "out"), "--bundles", str(out), "--release-tag", TAG, "--archive-dir",
+                            str(ws / ".claude"), "--workspace", str(ws), "--no-bd"]) == 2
+     assert not (tmp_path / "out").exists()
+ 
+@@ -1168,7 +1170,7 @@ def test_the_summary_counts_unknown_blocking_counts_cross_repo_once_and_derived(
+     (private / "briefs").mkdir()
+     (private / "briefs" / "xrp.md").write_text("Review the diff.\n")
+     (private / "briefs" / "index.json").write_text(json.dumps({"xrp": {}}))
+-    assert r5_corpus.main(["--out", str(tmp_path / "out"), "--bundles", str(tmp_path / "b"),
++    assert r5_corpus.main(["--out", str(tmp_path / "out"), "--bundles", str(tmp_path / "b"), "--release-tag", TAG,
+                            "--archive-dir", str(ws / ".claude"),
+                            "--workspace", str(ws), "--private-dir", str(tmp_path / "p"), "--no-bd"]) == 0
+     summary = json.loads(capsys.readouterr().out)
+@@ -1208,10 +1210,10 @@ def test_each_manifest_item_carries_the_release_tag(workspace, tmp_path):
+     ws = workspace["ws"]
+     write_record(ws, "tag", record("opensrm-tag", {"demo": {"base": workspace["base"], "head": workspace["head"]}},
+                                    [("correctness", {"critical": 0, "important": 0, "minor": 0}, None)]))
+-    r5_corpus.write_bundles(list(build(ws).values()), ws, tmp_path / "b")
++    r5_corpus.write_bundles(list(build(ws).values()), ws, tmp_path / "b", TAG)
+     manifest = json.loads((tmp_path / "b" / "bundles.json").read_text())
+-    assert [i["release_tag"] for i in manifest["bundles"]] == [manifest["release_tag"]] == [r5_corpus.BUNDLE_TAG]
+-    assert manifest["repository"] == "rsionnach/curamoir-replay-corpus"  # spec v1.1 section 6
++    assert [i["release_tag"] for i in manifest["bundles"]] == [manifest["release_tag"]] == [TAG]
++    assert manifest["repository"] == "rsionnach/nthlayer"  # spec v1.3: front-door release assets
+ 
+ 
+ 
+@@ -1236,3 +1238,356 @@ def test_a_worktree_two_record_repos_share_names_neither(tmp_path):
+     w = r5_corpus.Workspace(ws)
+     assert w.repo_of("alpha-third", {"alpha": {}, "alpha-wt": {}}) is None
+     assert w.repo_of("alpha-third", {"alpha": {}, "beta": {}}) == "alpha"
++
++
++
++def test_the_manifest_goes_beside_the_entries_and_only_with_bundles(workspace, tmp_path):
++    ws = workspace["ws"]
++    write_record(ws, "mfs", record("opensrm-mfs", {"demo": {"base": workspace["base"], "head": workspace["head"]}},
++                                   [("correctness", {"critical": 0, "important": 0, "minor": 0}, None)]))
++    out, bundles = tmp_path / "out", tmp_path / "b"
++    args = ["--out", str(out), "--archive-dir", str(ws / ".claude"), "--workspace", str(ws), "--no-bd"]
++    assert r5_corpus.main(args + ["--bundles", str(bundles), "--release-tag", TAG]) == 0
++    assert (out / "bundles.json").read_bytes() == (bundles / "bundles.json").read_bytes()
++    # A later run without --bundles would drop the committed record of a
++    # published release, which a fresh --bundles is checked against: refused.
++    kept = (out / "bundles.json").read_bytes()
++    assert r5_corpus.main(args) == 2
++    assert (out / "bundles.json").read_bytes() == kept
++    # One directory for both is refused before anything is written.
++    before = {f.name: f.read_bytes() for f in bundles.iterdir()}
++    assert r5_corpus.main(["--out", str(bundles)] + args[2:] + ["--bundles", str(bundles), "--release-tag", TAG]) == 2
++    assert {f.name: f.read_bytes() for f in bundles.iterdir()} == before
++
++
++def _workflow_triggers(text):
++    """The `on:` triggers of a workflow, as {event: {key: [values]}}, read with
++    the standard library: flow (`[a, b]`) and block (`- a`) lists alike, and the
++    scalar and list forms of `on:` itself."""
++    lines = [_strip_comment(line) for line in text.splitlines()]
++    i = next(n for n, line in enumerate(lines) if line.startswith(("on:", '"on":', "'on':")))
++    inline = lines[i].split(":", 1)[1].strip()
++    if inline:
++        assert not inline.startswith("{"), "a flow-mapping on: is not read here; write it as a block"
++        return {e: {} for e in _flow(inline)}
++    events, event_indent, event, key = {}, {}, None, None
++    for body in lines[i + 1:]:
++        if not body.strip():
++            continue
++        indent = len(body) - len(body.lstrip())
++        if indent == 0 and not body.startswith("- "):
++            break  # the next top-level key; a column-0 "- " is still an on: item
++        item = body.strip()
++        if event is None or indent <= event_indent[event]:
++            event = item[2:] if item.startswith("- ") else item  # a block-sequence on:
++            event = event.split(":", 1)[0].strip()
++            events[event], event_indent[event] = {}, indent
++            key = None
++            continue
++        if item.startswith("- ") and key is not None:
++            events[event][key].append(item[2:].strip().strip("'\""))
++        else:
++            assert ":" in item, f"unread on: line {item!r}"
++            key, value = (part.strip() for part in item.split(":", 1))
++            key = key.strip("'\"")
++            events[event][key] = _flow(value) if value else []
++    # An unrecognised shape must fail the guard, not pass it with odd names.
++    assert events and all(e.replace("_", "").isalpha() and e.islower() for e in events), sorted(events)
++    return events
++
++
++def _strip_comment(line):
++    # A comment is a whole-line `#` or a ` #` after a value; a `#` with no space
++    # before it is part of the value, as in YAML.
++    if line.lstrip().startswith("#"):
++        return ""
++    return line.split(" #")[0].rstrip()
++
++
++def _flow(value):
++    return [v.strip().strip("'\"") for v in value.strip("[]").split(",") if v.strip()]
++
++
++def test_workflow_trigger_parse_reads_every_list_form():
++    assert _workflow_triggers("on: release\n") == {"release": {}}
++    assert _workflow_triggers("on: [push, pull_request]\n") == {"push": {}, "pull_request": {}}
++    assert _workflow_triggers("on:\n  - push\n  - release\njobs:\n") == {"push": {}, "release": {}}
++    assert _workflow_triggers("on:\n- push\n- release\njobs:\n") == {"push": {}, "release": {}}
++    with pytest.raises(AssertionError):
++        _workflow_triggers("on:\njobs:\n")
++    assert _workflow_triggers("on:\n  push:\n    'tags': [a]\n") == {"push": {"tags": ["a"]}}
++    with pytest.raises(AssertionError):
++        _workflow_triggers("on:\n  push:\n    tags:\n      [a]\n")
++    assert _workflow_triggers("on:\n  push:\n# note\n    branches: [main]\n  release:\njobs:\n") == {
++        "push": {"branches": ["main"]}, "release": {}}
++    with pytest.raises(AssertionError):
++        _workflow_triggers("on: {push: {tags: [x]}}\n")
++    assert _workflow_triggers("on:\n  push:\n    tags: ['corpus-v*', \"x\"]\njobs:\n") == {
++        "push": {"tags": ["corpus-v*", "x"]}}
++    assert _workflow_triggers("on:\n  push:\n    tags:\n      - 'meta-v*'  # c\n  workflow_dispatch:\n") == {
++        "push": {"tags": ["meta-v*"]}, "workflow_dispatch": {}}
++
++
++CORPUS_TAGS = ("corpus-v1", "corpus-v2", "corpus-v10", "corpus-v123")
++
++
++def _corpus_tag_firings(text):
++    """The triggers in a workflow that a corpus-v<N> release would start. A
++    `release` trigger fires on any release, a `create` on any new tag, an
++    unfiltered push on any tag, and a tag filter on a matching one."""
++    fires = []
++    for event, keys in _workflow_triggers(text).items():
++        if event in ("release", "create"):
++            fires.append(event)
++        if event != "push":
++            continue
++        patterns = keys.get("tags", []) + keys.get("tags-ignore", [])
++        assert not [p for p in patterns if "+" in p]  # fnmatch has no `+` quantifier; GitHub's filters do
++        assert not [p for p in patterns if p.startswith("!")]  # nor does it model a `!` negation
++        for tag in CORPUS_TAGS:
++            if "tags" in keys and any(fnmatch.fnmatch(tag, p) for p in keys["tags"]):
++                fires.append("push.tags")
++            if "tags-ignore" in keys and not any(fnmatch.fnmatch(tag, p) for p in keys["tags-ignore"]):
++                fires.append("push.tags-ignore")
++        if not {"branches", "branches-ignore", "tags", "tags-ignore"} & set(keys):
++            fires.append("push")  # unfiltered: runs on every tag
++    return sorted(set(fires))
++
++
++# GitHub Actions `on:` shapes (the workflow syntax reference), each with what a
++# corpus-v<N> release would start.
++@pytest.mark.parametrize("text,fires", [
++    ("on:\n  release:\n    types: [published]\n", ["release"]),
++    ("on: create\n", ["create"]),
++    ("on: push\n", ["push"]),
++    ("on:\n  push:\n    paths: ['docs/**']\n", ["push"]),  # path filters are not applied to tags
++    ("on:\n  push:\n    tags: [corpus-v*]\n", ["push.tags"]),
++    ("on:\n  push:\n    tags:\n      - '*-v*'\n", ["push.tags"]),
++    ("on:\n  push:\n    tags: ['**']\n", ["push.tags"]),
++    ("on:\n  push:\n    tags-ignore: [meta-v*]\n", ["push.tags-ignore"]),
++    ("on:\n  push:\n    tags-ignore: [corpus-v*]\n", []),
++    ("on:\n  push:\n    tags: [meta-v*]\n", []),
++    ("on:\n  push:\n    branches: [main]\n  pull_request:\n", []),
++])
++def test_corpus_tag_firings_read_each_trigger(text, fires):
++    assert _corpus_tag_firings(text) == fires
++
++
++@pytest.mark.parametrize("pattern", ["'!corpus-v1'", "'[a-z]+-v*'"])
++def test_corpus_tag_firings_refuse_a_pattern_fnmatch_cannot_model(pattern):
++    with pytest.raises(AssertionError):
++        _corpus_tag_firings(f"on:\n  push:\n    tags: [{pattern}]\n")
++
++
++def test_no_workflow_runs_on_a_corpus_tag():
++    # corpus-v* releases carry assets only (CLAUDE.md rule 4).
++    workflows = sorted((HERE.parent / ".github" / "workflows").glob("*.y*ml"))
++    assert workflows
++    assert {wf.name: _corpus_tag_firings(wf.read_text()) for wf in workflows} == {wf.name: [] for wf in workflows}
++    release = _workflow_triggers((HERE.parent / ".github" / "workflows" / "release.yml").read_text())
++    assert release["push"]["tags"] == ["meta-v*"]  # the parse sees release.yml's filter
++
++
++@pytest.mark.parametrize("tag", ["corpus-v0", "corpus-v01", "corpus-v", "corpus-v1a", "meta-v1", "release-12", "corpus-x12", "corpus-v١", 1, None])
++def test_a_release_tag_outside_corpus_v_n_is_refused(tag):
++    with pytest.raises(r5_corpus.CorpusError):
++        r5_corpus.check_release_tag(tag)
++
++
++def test_bundles_need_a_release_tag(workspace, tmp_path):
++    ws = workspace["ws"]
++    write_record(ws, "rt", record("opensrm-rt", {"demo": {"base": workspace["base"], "head": workspace["head"]}},
++                                  [("correctness", {"critical": 0, "important": 0, "minor": 0}, None)]))
++    args = ["--out", str(tmp_path / "out"), "--archive-dir", str(ws / ".claude"), "--workspace", str(ws), "--no-bd",
++            "--bundles", str(tmp_path / "b")]
++    assert r5_corpus.main(args) == 2
++    assert r5_corpus.main(args + ["--release-tag", "corpus-v01"]) == 2
++    assert not (tmp_path / "b").exists() and not (tmp_path / "out").exists()
++    assert r5_corpus.main(args + ["--release-tag", "corpus-v2"]) == 0
++    manifest = json.loads((tmp_path / "out" / "bundles.json").read_text())
++    assert manifest["release_tag"] == "corpus-v2"
++    assert {b["url"].split("/")[-2] for b in manifest["bundles"]} == {"corpus-v2"}
++
++
++def test_a_built_release_is_never_rebuilt_with_other_bundles(workspace, tmp_path):
++    ws = workspace["ws"]
++    rng = {"demo": {"base": workspace["base"], "head": workspace["head"]}}
++    write_record(ws, "v1", record("opensrm-v1", rng, [("correctness", {"critical": 0, "important": 0, "minor": 0}, None)]))
++    out = tmp_path / "b"
++    r5_corpus.write_bundles(list(build(ws).values()), ws, out, TAG)
++    before = {f.name: f.read_bytes() for f in out.iterdir()}
++    # The same corpus under the same tag rebuilds byte for byte, so it passes.
++    r5_corpus.write_bundles(list(build(ws).values()), ws, out, TAG)
++    assert {f.name: f.read_bytes() for f in out.iterdir()} == before
++    # A changed corpus under that tag is refused, and leaves the built one as it was.
++    write_record(ws, "v2", record("opensrm-v2", {"demo": {"base": workspace["fix"], "head": workspace["head"]}},
++                                  [("correctness", {"critical": 0, "important": 0, "minor": 0}, None)]))
++    with pytest.raises(r5_corpus.CorpusError):
++        r5_corpus.write_bundles(list(build(ws).values()), ws, out, TAG)
++    assert {f.name: f.read_bytes() for f in out.iterdir()} == before
++    # Under a new tag it builds.
++    r5_corpus.write_bundles(list(build(ws).values()), ws, out, "corpus-v2")
++    assert json.loads((out / "bundles.json").read_text())["release_tag"] == "corpus-v2"
++
++
++@pytest.mark.parametrize("content", [
++    # Each is a manifest write_bundles writes ({schema_version, repository,
++    # release_tag, bundles}) with one thing wrong.
++    '{"repository": "someone/else", "release_tag": "corpus-v1", "bundles": []}',
++    '{"repository": "rsionnach/nthlayer", "release_tag": "corpus-v1", "bundles": {}}',
++    '{"repository": "rsionnach/nthlayer", "release_tag": "corpus-v1"}',
++    '{"repository": "rsionnach/nthlayer", "release_tag": "v1", "bundles": []}',
++    '{"repository": "rsionnach/nthlayer", "bundles": []}',
++    "not json", "[]"])
++def test_a_foreign_manifest_in_out_is_refused(workspace, tmp_path, content):
++    ws = workspace["ws"]
++    write_record(ws, "fm", record("opensrm-fm", {"demo": {"base": workspace["base"], "head": workspace["head"]}},
++                                  [("correctness", {"critical": 0, "important": 0, "minor": 0}, None)]))
++    out = tmp_path / "out"
++    out.mkdir()
++    (out / "bundles.json").write_text(content)
++    assert r5_corpus.main(["--out", str(out), "--archive-dir", str(ws / ".claude"), "--workspace", str(ws),
++                           "--no-bd", "--bundles", str(tmp_path / "b"), "--release-tag", TAG]) == 2
++    assert (out / "bundles.json").read_text() == content and not list(out.glob("opensrm-*"))
++    assert not (tmp_path / "b").exists()  # refused before anything is written
++
++
++def test_two_spellings_of_one_existing_directory_are_refused(workspace, tmp_path):
++    ws = workspace["ws"]
++    write_record(ws, "sd", record("opensrm-sd", {"demo": {"base": workspace["base"], "head": workspace["head"]}},
++                                  [("correctness", {"critical": 0, "important": 0, "minor": 0}, None)]))
++    real = tmp_path / "real"
++    real.mkdir()
++    (tmp_path / "link").symlink_to(real)
++    assert r5_corpus.main(["--out", str(real), "--bundles", str(tmp_path / "link"), "--release-tag", TAG,
++                           "--archive-dir", str(ws / ".claude"), "--workspace", str(ws), "--no-bd"]) == 2
++    assert list(real.iterdir()) == []
++
++
++def test_a_same_file_manifest_copy_is_refused_before_entries_go(workspace, tmp_path, monkeypatch):
++    out = tmp_path / "out"
++    entry = out / "opensrm-old"
++    entry.mkdir(parents=True)
++    monkeypatch.setattr(r5_corpus, "previous_entries", lambda _: [entry])
++    def same(*_):
++        raise r5_corpus.shutil.SameFileError("same")
++    monkeypatch.setattr(r5_corpus.shutil, "copyfile", same)
++    with pytest.raises(r5_corpus.CorpusError):
++        r5_corpus.write_entries([], out, tmp_path / "b")
++    assert entry.is_dir()
++
++
++def test_a_fresh_build_cannot_republish_the_tag_the_entries_name(workspace, tmp_path):
++    # --bundles is never committed, so the manifest beside the entries is what
++    # remembers a published tag.
++    ws = workspace["ws"]
++    write_record(ws, "pub", record("opensrm-pub", {"demo": {"base": workspace["base"], "head": workspace["head"]}},
++                                   [("correctness", {"critical": 0, "important": 0, "minor": 0}, None)]))
++    out = tmp_path / "out"
++    base = ["--out", str(out), "--archive-dir", str(ws / ".claude"), "--workspace", str(ws), "--no-bd"]
++    assert r5_corpus.main(base + ["--bundles", str(tmp_path / "b1"), "--release-tag", TAG]) == 0
++    # The same corpus into a fresh --bundles reproduces the published bundles.
++    assert r5_corpus.main(base + ["--bundles", str(tmp_path / "b2"), "--release-tag", TAG]) == 0
++    published = (out / "bundles.json").read_bytes()
++    write_record(ws, "pub2", record("opensrm-pub2", {"demo": {"base": workspace["fix"], "head": workspace["head"]}},
++                                    [("correctness", {"critical": 0, "important": 0, "minor": 0}, None)]))
++    assert r5_corpus.main(base + ["--bundles", str(tmp_path / "b3"), "--release-tag", TAG]) == 2
++    assert (out / "bundles.json").read_bytes() == published
++    assert not list((tmp_path / "b3").glob("*.bundle"))
++    assert r5_corpus.main(base + ["--bundles", str(tmp_path / "b4"), "--release-tag", "corpus-v2"]) == 0
++
++
++def test_a_release_tag_without_bundles_is_refused(workspace, tmp_path):
++    ws = workspace["ws"]
++    write_record(ws, "nb", record("opensrm-nb", {"demo": {"base": workspace["base"], "head": workspace["head"]}},
++                                  [("correctness", {"critical": 0, "important": 0, "minor": 0}, None)]))
++    assert r5_corpus.main(["--out", str(tmp_path / "out"), "--archive-dir", str(ws / ".claude"),
++                           "--workspace", str(ws), "--no-bd", "--release-tag", TAG]) == 2
++    assert not (tmp_path / "out").exists()
++
++
++def test_a_killed_runs_staging_directory_is_cleared(workspace, tmp_path):
++    ws = workspace["ws"]
++    write_record(ws, "st", record("opensrm-st", {"demo": {"base": workspace["base"], "head": workspace["head"]}},
++                                  [("correctness", {"critical": 0, "important": 0, "minor": 0}, None)]))
++    out = tmp_path / "b"
++    (out / ".staging-killed").mkdir(parents=True)
++    (out / ".staging-killed" / "demo.bundle").write_bytes(b"partial")
++    r5_corpus.write_bundles(list(build(ws).values()), ws, out, TAG)
++    assert not list(out.glob(".staging-*"))
++
++
++def test_an_older_tag_than_a_known_manifest_is_refused(workspace, tmp_path):
++    ws = workspace["ws"]
++    write_record(ws, "old", record("opensrm-old", {"demo": {"base": workspace["base"], "head": workspace["head"]}},
++                                   [("correctness", {"critical": 0, "important": 0, "minor": 0}, None)]))
++    out = tmp_path / "out"
++    base = ["--out", str(out), "--archive-dir", str(ws / ".claude"), "--workspace", str(ws), "--no-bd"]
++    assert r5_corpus.main(base + ["--bundles", str(tmp_path / "b1"), "--release-tag", "corpus-v2"]) == 0
++    committed = (out / "bundles.json").read_bytes()
++    # An old command replayed into a fresh --bundles, against the committed v2.
++    assert r5_corpus.main(base + ["--bundles", str(tmp_path / "b2"), "--release-tag", "corpus-v1"]) == 2
++    assert (out / "bundles.json").read_bytes() == committed
++    assert not list((tmp_path / "b2").glob("*.bundle"))
++    # And against a --bundles manifest at a later N.
++    with pytest.raises(r5_corpus.CorpusError):
++        r5_corpus.write_bundles(list(build(ws).values()), ws, tmp_path / "b1", "corpus-v1")
++
++
++@pytest.mark.parametrize("manifest", [
++    {"repository": "rsionnach/nthlayer", "release_tag": "corpus-v1", "bundles": ["x"]},
++    {"repository": "rsionnach/nthlayer", "release_tag": "v1", "bundles": []},
++    {"repository": "rsionnach/nthlayer", "release_tag": 1, "bundles": []},
++])
++def test_a_malformed_out_manifest_is_refused_not_a_traceback(workspace, tmp_path, manifest):
++    ws = workspace["ws"]
++    write_record(ws, "mal", record("opensrm-mal", {"demo": {"base": workspace["base"], "head": workspace["head"]}},
++                                   [("correctness", {"critical": 0, "important": 0, "minor": 0}, None)]))
++    out = tmp_path / "out"
++    out.mkdir()
++    (out / "bundles.json").write_text(json.dumps(manifest))
++    assert r5_corpus.main(["--out", str(out), "--archive-dir", str(ws / ".claude"), "--workspace", str(ws),
++                           "--no-bd", "--bundles", str(tmp_path / "b"), "--release-tag", TAG]) == 2
++
++
++@pytest.mark.parametrize("kind", ["symlink", "directory"])
++def test_a_manifest_that_is_not_a_plain_file_is_refused(workspace, tmp_path, kind):
++    ws = workspace["ws"]
++    write_record(ws, "nf", record("opensrm-nf", {"demo": {"base": workspace["base"], "head": workspace["head"]}},
++                                  [("correctness", {"critical": 0, "important": 0, "minor": 0}, None)]))
++    out, target = tmp_path / "out", tmp_path / "elsewhere.json"
++    out.mkdir()
++    good = json.dumps({"repository": "rsionnach/nthlayer", "release_tag": TAG, "bundles": []})
++    target.write_text(good)
++    if kind == "symlink":
++        (out / "bundles.json").symlink_to(target)
++    else:
++        (out / "bundles.json").mkdir()
++    assert r5_corpus.main(["--out", str(out), "--archive-dir", str(ws / ".claude"), "--workspace", str(ws),
++                           "--no-bd", "--bundles", str(tmp_path / "b"), "--release-tag", TAG]) == 2
++    assert target.read_text() == good and not (tmp_path / "b").exists()
++
++
++def test_two_case_spellings_of_one_directory_are_refused(workspace, tmp_path):
++    real = tmp_path / "real"
++    real.mkdir()
++    if not (tmp_path / "REAL").exists():
++        pytest.skip("case-sensitive filesystem: ./real and ./REAL are two directories")
++    ws = workspace["ws"]
++    write_record(ws, "cs", record("opensrm-cs", {"demo": {"base": workspace["base"], "head": workspace["head"]}},
++                                  [("correctness", {"critical": 0, "important": 0, "minor": 0}, None)]))
++    assert r5_corpus.main(["--out", str(real), "--bundles", str(tmp_path / "REAL"), "--release-tag", TAG,
++                           "--archive-dir", str(ws / ".claude"), "--workspace", str(ws), "--no-bd"]) == 2
++    assert list(real.iterdir()) == []
++
++
++def test_one_new_directory_for_both_is_refused_before_it_is_created(workspace, tmp_path):
++    # samefile needs both to exist; a directory neither run had made is caught
++    # by comparing resolved paths, before write_bundles creates it.
++    ws = workspace["ws"]
++    write_record(ws, "nd", record("opensrm-nd", {"demo": {"base": workspace["base"], "head": workspace["head"]}},
++                                  [("correctness", {"critical": 0, "important": 0, "minor": 0}, None)]))
++    d = tmp_path / "d"
++    assert r5_corpus.main(["--out", str(d), "--bundles", str(d), "--release-tag", TAG,
++                           "--archive-dir", str(ws / ".claude"), "--workspace", str(ws), "--no-bd"]) == 2
++    assert not d.exists()

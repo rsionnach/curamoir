@@ -1,0 +1,258 @@
+diff --git a/src/nthlayer_common/manifest/models.py b/src/nthlayer_common/manifest/models.py
+index bd3a980..bb3ed8c 100644
+--- a/src/nthlayer_common/manifest/models.py
++++ b/src/nthlayer_common/manifest/models.py
+@@ -510,6 +510,9 @@ class SLODefinition:
+     indicator_query: str | None = None  # Single PromQL or composed ratio
+     total_query: str | None = None  # OpenSLO ratio metric: total source
+     good_query: str | None = None  # OpenSLO ratio metric: good source
++    # OpenSLO ratio metric: bad source. OpenSLO takes good or bad, never both
++    # (opensrm-zo0o); with bad, the good count is total - bad.
++    bad_query: str | None = None
+ 
+     # Metadata
+     description: str | None = None
+diff --git a/src/nthlayer_common/manifest/openslo/parser.py b/src/nthlayer_common/manifest/openslo/parser.py
+index 338467e..0d7cc41 100644
+--- a/src/nthlayer_common/manifest/openslo/parser.py
++++ b/src/nthlayer_common/manifest/openslo/parser.py
+@@ -127,15 +127,25 @@ def _parse_openslo_document(data: dict[str, Any]) -> SLODefinition:
+     indicator_query = None
+     total_query = None
+     good_query = None
++    bad_query = None
+ 
+     # ratioMetric indicator (most common)
+     ratio = indicator_spec.get("ratioMetric")
+     if ratio:
++        # OpenSLO v1: total plus exactly one of good or bad. With both, the
++        # numerator is ambiguous, so refuse rather than pick one.
++        if "good" in ratio and "bad" in ratio:
++            raise OpenSLOParseError(
++                f"OpenSLO '{name}': ratioMetric has both good and bad; "
++                "OpenSLO allows one of them"
++            )
+         total_source = ratio.get("total", {}).get("metricSource", {})
+         good_source = ratio.get("good", {}).get("metricSource", {})
++        bad_source = ratio.get("bad", {}).get("metricSource", {})
+ 
+         total_query = _extract_query(total_source)
+         good_query = _extract_query(good_source)
++        bad_query = _extract_query(bad_source)
+ 
+         # Compose indicator_query from total and good
+         if total_query and good_query:
+@@ -196,6 +206,7 @@ def _parse_openslo_document(data: dict[str, Any]) -> SLODefinition:
+         indicator_query=indicator_query,
+         total_query=total_query,
+         good_query=good_query,
++        bad_query=bad_query,
+         description=description,
+     )
+ 
+diff --git a/src/nthlayer_common/manifest/parser/loader.py b/src/nthlayer_common/manifest/parser/loader.py
+index 6787958..3bdf488 100644
+--- a/src/nthlayer_common/manifest/parser/loader.py
++++ b/src/nthlayer_common/manifest/parser/loader.py
+@@ -244,6 +244,24 @@ def is_manifest_file(file_path: str | Path) -> bool:
+ # =============================================================================
+ 
+ 
++def _legacy_success_ratio(spec: dict[str, Any]) -> tuple[str | None, str | None]:
++    """``(good_query, total_query)`` from the first plural ``indicators[]``
++    entry with a ``success_ratio``, else ``(None, None)`` (opensrm-zo0o).
++
++    The SLO's own good/total, which the loader used to drop: only each
++    entry's ``type`` was read. The singular ``indicator`` carries one
++    ``query`` instead, kept as ``indicator_query``.
++    """
++    indicators = spec.get("indicators")
++    if not isinstance(indicators, list):
++        return None, None
++    for entry in indicators:
++        ratio = entry.get("success_ratio") if isinstance(entry, dict) else None
++        if isinstance(ratio, dict):
++            return ratio.get("good_query"), ratio.get("total_query")
++    return None, None
++
++
+ def _legacy_threshold_ms(name: str, spec: dict[str, Any]) -> float | None:
+     """The first declared latency threshold in *spec*, in milliseconds, or None.
+ 
+@@ -427,6 +445,7 @@ def _extract_slos_from_resources(
+         # legacy ai-gate manifest's judgment SLOs load as classical, and
+         # nthlayer-generate silently drops their judgment recording rules.
+         judgment_type, measurement, statistical_requirements = judgment_slo_fields(name, window)
++        good_query, total_query = _legacy_success_ratio(spec)
+ 
+         slo = SLODefinition(
+             name=name,
+@@ -437,6 +456,8 @@ def _extract_slos_from_resources(
+             percentile=spec.get("percentile"),
+             threshold_ms=_legacy_threshold_ms(name, spec),
+             indicator_query=spec.get("indicator", {}).get("query"),
++            good_query=good_query,
++            total_query=total_query,
+             description=spec.get("description"),
+             judgment_type=judgment_type,
+             measurement=measurement,
+diff --git a/src/nthlayer_common/manifest/slo_series.py b/src/nthlayer_common/manifest/slo_series.py
+index 50ab984..b70877a 100644
+--- a/src/nthlayer_common/manifest/slo_series.py
++++ b/src/nthlayer_common/manifest/slo_series.py
+@@ -5,12 +5,13 @@ reads back. Both sides take the name from here so the writer and the reader
+ cannot drift: measure and correlate once queried ``slo:error_budget:ratio``, a
+ series nothing wrote, so measure read no data for every availability SLO
+ (opensrm-h0at). The front door's docs/metrics-contract.md documents these
+-series; until opensrm-h0at's front-door change lands it still shows the old
+-name.
++series.
+ 
+-Only the error budget lives here so far. wo62.3 moves across the other
+-classical-SLO recording rules generate writes (availability, latency,
+-error rate, throughput).
++Only the error budget lives here, and by ruling Z1 (opensrm-zo0o) it is the
++one classical series both sides need: every classical SLO is good/total
++against its objective, so generate is to write this budget for each, and
++measure to evaluate every classical SLO from it. Until zo0o's generate and
++workers changes land, only availability SLOs have one.
+ """
+ 
+ from __future__ import annotations
+diff --git a/tests/test_slo_good_total.py b/tests/test_slo_good_total.py
+new file mode 100644
+index 0000000..cc6e428
+--- /dev/null
++++ b/tests/test_slo_good_total.py
+@@ -0,0 +1,131 @@
++"""The parsers keep an SLO's own good/total (and bad) queries (opensrm-zo0o).
++
++Ruling Z1 (Rob, 2026-11-03): every classical SLO is good/total against its
++objective, as OpenSLO defines it, so nthlayer-generate can write an error
++budget for each from the SLO's own queries. That needs the parsers to keep
++them. Two shapes were dropped:
++
++- OpenSLO v1's ``ratioMetric`` takes ``total`` and exactly one of ``good``
++  or ``bad`` (OpenSLO v1 spec, "Ratio Metric": "good" and "bad" are
++  mutually exclusive). The ``bad`` form was read as no indicator at all.
++- The legacy format's plural ``indicators[]`` carries a ``success_ratio``
++  with ``total_query`` and ``good_query`` (the shape of
++  nthlayer-generate/examples/services/analytics-stream.yaml); only the
++  entry's ``type`` was read.
++"""
++
++from __future__ import annotations
++
++from pathlib import Path
++
++import pytest
++
++from nthlayer_common.manifest import load_manifest
++from nthlayer_common.manifest.openslo.parser import OpenSLOParseError, parse_openslo_slos
++
++TOTAL = 'sum(rate(http_requests_total{service="payment-api"}[5m]))'
++GOOD = 'sum(rate(http_requests_total{service="payment-api",code!~"5.."}[5m]))'
++BAD = 'sum(rate(http_requests_total{service="payment-api",code=~"5.."}[5m]))'
++
++
++def _source(query: str) -> dict:
++    return {"metricSource": {"type": "Prometheus", "spec": {"query": query}}}
++
++
++def _openslo(ratio: dict) -> dict:
++    """An OpenSLO v1 SLO document, per the spec's SLO schema."""
++    return {
++        "apiVersion": "openslo/v1",
++        "kind": "SLO",
++        "metadata": {"name": "payment-availability"},
++        "spec": {
++            "service": "payment-api",
++            "indicator": {
++                "metadata": {"name": "availability"},
++                "spec": {"ratioMetric": {"counter": True, **ratio}},
++            },
++            "timeWindow": [{"duration": "30d", "isRolling": True}],
++            "objectives": [{"displayName": "99.9% of requests succeed", "target": 0.999}],
++        },
++    }
++
++
++class TestOpenSLORatioMetric:
++    def test_bad_over_total_keeps_both_queries(self) -> None:
++        (slo,) = parse_openslo_slos([_openslo({"bad": _source(BAD), "total": _source(TOTAL)})])
++
++        assert slo.bad_query == BAD
++        assert slo.total_query == TOTAL
++        assert slo.good_query is None
++        # indicator_query is the composed good ratio; consumers that read it
++        # (generate's Sloth path) are unchanged by this bead.
++        assert slo.indicator_query is None
++
++    def test_good_over_total_is_unchanged(self) -> None:
++        (slo,) = parse_openslo_slos([_openslo({"good": _source(GOOD), "total": _source(TOTAL)})])
++
++        assert slo.good_query == GOOD
++        assert slo.total_query == TOTAL
++        assert slo.bad_query is None
++        assert slo.indicator_query == f"({GOOD}) / ({TOTAL})"
++
++    def test_good_and_bad_together_is_an_error(self) -> None:
++        """OpenSLO allows one of them; with both, which is the numerator?"""
++        doc = _openslo({"good": _source(GOOD), "bad": _source(BAD), "total": _source(TOTAL)})
++        with pytest.raises(OpenSLOParseError, match="good.*bad"):
++            parse_openslo_slos([doc])
++
++
++LEGACY = """\
++apiVersion: nthlayer.dev/v1
++kind: Service
++service:
++  name: analytics-stream
++  team: data
++  tier: high
++  type: stream-processor
++resources:
++  - kind: SLO
++    name: processing-availability
++    spec:
++      objective: 99.5
++      window: 30d
++      indicators:
++        - type: availability
++          success_ratio:
++            total_query: sum(rate(events_processed_total{service="analytics-stream"}[5m]))
++            good_query: sum(rate(events_processed_total{service="analytics-stream",status="success"}[5m]))
++  - kind: SLO
++    name: stream-lag
++    spec:
++      objective: 99.0
++      window: 30d
++      indicators:
++        - type: custom
++          threshold: 60
++          metric: max(kafka_consumer_lag_seconds{service="analytics-stream",topic="events"})
++"""
++
++
++class TestLegacySuccessRatio:
++    def _slos(self, tmp_path: Path) -> dict:
++        path = tmp_path / "analytics-stream.yaml"
++        path.write_text(LEGACY)
++        return {s.name: s for s in load_manifest(path).slos}
++
++    def test_success_ratio_queries_are_kept(self, tmp_path: Path) -> None:
++        slo = self._slos(tmp_path)["processing-availability"]
++
++        assert slo.total_query == 'sum(rate(events_processed_total{service="analytics-stream"}[5m]))'
++        assert slo.good_query == (
++            'sum(rate(events_processed_total{service="analytics-stream",status="success"}[5m]))'
++        )
++        assert slo.bad_query is None
++        # The singular indicator.query is what fed indicator_query; still absent.
++        assert slo.indicator_query is None
++
++    def test_an_indicator_without_a_success_ratio_has_none(self, tmp_path: Path) -> None:
++        slo = self._slos(tmp_path)["stream-lag"]
++
++        assert slo.good_query is None
++        assert slo.total_query is None

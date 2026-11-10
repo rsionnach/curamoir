@@ -1,0 +1,348 @@
+{
+ "schema_version": 1,
+ "entry": "opensrm-3ntg",
+ "fidelity": "recorded",
+ "lens_order": [
+  "correctness",
+  "clarity",
+  "edge-cases",
+  "provenance",
+  "excellence"
+ ],
+ "iterations": {
+  "correctness": 3,
+  "clarity": 2,
+  "edge-cases": 2,
+  "provenance": 3
+ },
+ "rounds": [
+  {
+   "lens": "correctness",
+   "iteration": 1,
+   "recorded_iteration": null,
+   "counts": {
+    "critical": 0,
+    "important": 1,
+    "minor": 3
+   },
+   "findings": [
+    {
+     "lens": "correctness",
+     "severity": "IMPORTANT",
+     "path": "docs-site/concepts/tiers.md",
+     "start_line": 35,
+     "end_line": 36,
+     "claim": "standard blocks at <5% and warns at <10%; low warns at <20%. Both are wrong, and they contradict concepts/deployment-gates.md:41-45, which states it correctly (Standard and low tiers only warn).",
+     "evidence": null,
+     "fix": null,
+     "fingerprint": "e8de853f3612bc4b",
+     "verification_level": "asserted",
+     "resolves": null,
+     "regression": false,
+     "status": null,
+     "derived_from": "reviewer_transcript",
+     "extracted_by": "model",
+     "handback_sha256": "c7309d9514849b727a462304bf6b447b0d0133f2351d4fdd4d5fcc4f91c9be5f",
+     "fix_commit": "61770d597cd3448a8b34f6c5133c23acded553d5",
+     "reported_path": "docs-site/concepts/tiers.md",
+     "path_in_tree": true
+    }
+   ]
+  },
+  {
+   "lens": "correctness",
+   "iteration": 2,
+   "recorded_iteration": 2,
+   "counts": {
+    "critical": 0,
+    "important": 1,
+    "minor": 0
+   },
+   "findings": [
+    {
+     "lens": "correctness",
+     "severity": "IMPORTANT",
+     "path": "tests/test_docs_commands_parse.py",
+     "start_line": null,
+     "end_line": null,
+     "claim": "The guard appends only one name, so it reports green for hooks that break as soon as two files are staged.",
+     "evidence": null,
+     "fix": null,
+     "fingerprint": "35e261f026864427",
+     "verification_level": "asserted",
+     "resolves": null,
+     "regression": false,
+     "status": null,
+     "derived_from": "reviewer_transcript",
+     "extracted_by": "model",
+     "handback_sha256": "dc655d9d5102305e512be04eeb6524d31e93ced79acc48b361110ad0b7b1c578",
+     "fix_commit": "59348bfe2c20067970350d5d33e03ce4a669aeea",
+     "reported_path": "tests/test_docs_commands_parse.py",
+     "path_in_tree": true
+    }
+   ]
+  },
+  {
+   "lens": "correctness",
+   "iteration": 3,
+   "recorded_iteration": 3,
+   "counts": {
+    "critical": 0,
+    "important": 0,
+    "minor": 1
+   },
+   "findings": null
+  },
+  {
+   "lens": "clarity",
+   "iteration": 1,
+   "recorded_iteration": null,
+   "counts": {
+    "critical": 0,
+    "important": 2,
+    "minor": 9
+   },
+   "findings": [
+    {
+     "lens": "clarity",
+     "severity": "IMPORTANT",
+     "path": "docs-site/protect/index.md",
+     "start_line": 135,
+     "end_line": 135,
+     "claim": "That image is the generate CLI image, so a reader will assume it contains the workers package",
+     "evidence": null,
+     "fix": null,
+     "fingerprint": "fefbde3d217997ca",
+     "verification_level": "asserted",
+     "resolves": null,
+     "regression": false,
+     "status": null,
+     "derived_from": "reviewer_transcript",
+     "extracted_by": "model",
+     "handback_sha256": "508169807f35db6301257badf31a60872b40e15bf58b2f7ddf92279520948f1e",
+     "fix_commit": "87b2f4e9195ba975001c826dbf87803302d191c8",
+     "reported_path": "docs-site/protect/index.md",
+     "path_in_tree": true
+    },
+    {
+     "lens": "clarity",
+     "severity": "IMPORTANT",
+     "path": null,
+     "start_line": null,
+     "end_line": null,
+     "claim": "Inconsistent \"(nthlayer-workers)\" labelling in cross-links after the edits",
+     "evidence": null,
+     "fix": null,
+     "fingerprint": "3b40ff0cdd55a7f1",
+     "verification_level": "asserted",
+     "resolves": null,
+     "regression": false,
+     "status": null,
+     "derived_from": "reviewer_transcript",
+     "extracted_by": "model",
+     "handback_sha256": "508169807f35db6301257badf31a60872b40e15bf58b2f7ddf92279520948f1e",
+     "fix_commit": "87b2f4e9195ba975001c826dbf87803302d191c8",
+     "reported_path": null,
+     "path_in_tree": false
+    }
+   ]
+  },
+  {
+   "lens": "clarity",
+   "iteration": 2,
+   "recorded_iteration": 2,
+   "counts": {
+    "critical": 0,
+    "important": 0,
+    "minor": 1
+   },
+   "findings": null
+  },
+  {
+   "lens": "edge_cases",
+   "iteration": 1,
+   "recorded_iteration": null,
+   "counts": {
+    "critical": 0,
+    "important": 1,
+    "minor": 6
+   },
+   "findings": [
+    {
+     "lens": "edge_cases",
+     "severity": "IMPORTANT",
+     "path": "tests/test_docs_commands_parse.py",
+     "start_line": 61,
+     "end_line": 61,
+     "claim": "A 4-backtick fence breaks fence matching for the rest of the page, silently",
+     "evidence": null,
+     "fix": null,
+     "fingerprint": "93bdee05861e9df8",
+     "verification_level": "asserted",
+     "resolves": null,
+     "regression": false,
+     "status": null,
+     "derived_from": "reviewer_transcript",
+     "extracted_by": "model",
+     "handback_sha256": "3313f814e6ec32a74da1d79ddbfd886567841c365b34f56946775b2dd8a4d387",
+     "fix_commit": "bf1e80d7a2ca33d8592e95b187511c16c046ab68",
+     "reported_path": "tests/test_docs_commands_parse.py",
+     "path_in_tree": true
+    }
+   ]
+  },
+  {
+   "lens": "edge_cases",
+   "iteration": 2,
+   "recorded_iteration": 2,
+   "counts": {
+    "critical": 0,
+    "important": 0,
+    "minor": 1
+   },
+   "findings": null
+  },
+  {
+   "lens": "provenance",
+   "iteration": 1,
+   "recorded_iteration": null,
+   "counts": {
+    "critical": 3,
+    "important": 1,
+    "minor": 1
+   },
+   "findings": [
+    {
+     "lens": "provenance",
+     "severity": "CRITICAL",
+     "path": null,
+     "start_line": null,
+     "end_line": null,
+     "claim": "test_longer_fence_is_not_closed_by_shorter does not kill its own behaviour",
+     "evidence": null,
+     "fix": null,
+     "fingerprint": "5bd90ecefa379c4b",
+     "verification_level": "asserted",
+     "resolves": null,
+     "regression": false,
+     "status": null,
+     "derived_from": "reviewer_transcript",
+     "extracted_by": "model",
+     "handback_sha256": "533d86e9b33481b8558dc508d17d9b40091828c8bc463f1da0f2f5cbfaebb16a",
+     "fix_commit": "32b33cc4cbfb47fb90794f7c6d73a33d84079a42",
+     "reported_path": null,
+     "path_in_tree": false
+    },
+    {
+     "lens": "provenance",
+     "severity": "CRITICAL",
+     "path": null,
+     "start_line": null,
+     "end_line": null,
+     "claim": "removing the backtick in info string check survives",
+     "evidence": null,
+     "fix": null,
+     "fingerprint": "565d9b7f2012de93",
+     "verification_level": "asserted",
+     "resolves": null,
+     "regression": false,
+     "status": null,
+     "derived_from": "reviewer_transcript",
+     "extracted_by": "model",
+     "handback_sha256": "533d86e9b33481b8558dc508d17d9b40091828c8bc463f1da0f2f5cbfaebb16a",
+     "fix_commit": "32b33cc4cbfb47fb90794f7c6d73a33d84079a42",
+     "reported_path": null,
+     "path_in_tree": false
+    },
+    {
+     "lens": "provenance",
+     "severity": "CRITICAL",
+     "path": null,
+     "start_line": null,
+     "end_line": null,
+     "claim": "removing the quoted-yaml-scalar unwrap survives",
+     "evidence": null,
+     "fix": null,
+     "fingerprint": "df7fdc5fb88175d9",
+     "verification_level": "asserted",
+     "resolves": null,
+     "regression": false,
+     "status": null,
+     "derived_from": "reviewer_transcript",
+     "extracted_by": "model",
+     "handback_sha256": "533d86e9b33481b8558dc508d17d9b40091828c8bc463f1da0f2f5cbfaebb16a",
+     "fix_commit": "32b33cc4cbfb47fb90794f7c6d73a33d84079a42",
+     "reported_path": null,
+     "path_in_tree": false
+    },
+    {
+     "lens": "provenance",
+     "severity": "IMPORTANT",
+     "path": null,
+     "start_line": null,
+     "end_line": null,
+     "claim": "The vacuity floor allows a lot of loss",
+     "evidence": null,
+     "fix": null,
+     "fingerprint": "e8b259d3517ca005",
+     "verification_level": "asserted",
+     "resolves": null,
+     "regression": false,
+     "status": null,
+     "derived_from": "reviewer_transcript",
+     "extracted_by": "model",
+     "handback_sha256": "533d86e9b33481b8558dc508d17d9b40091828c8bc463f1da0f2f5cbfaebb16a",
+     "fix_commit": "32b33cc4cbfb47fb90794f7c6d73a33d84079a42",
+     "reported_path": null,
+     "path_in_tree": false
+    }
+   ]
+  },
+  {
+   "lens": "provenance",
+   "iteration": 2,
+   "recorded_iteration": 2,
+   "counts": {
+    "critical": 0,
+    "important": 1,
+    "minor": 0
+   },
+   "findings": [
+    {
+     "lens": "provenance",
+     "severity": "IMPORTANT",
+     "path": "tests/test_docs_commands_parse.py",
+     "start_line": 450,
+     "end_line": 455,
+     "claim": "The per-page guard can shrink without anything noticing.",
+     "evidence": null,
+     "fix": null,
+     "fingerprint": "053adaecc2a4e1c0",
+     "verification_level": "asserted",
+     "resolves": null,
+     "regression": false,
+     "status": null,
+     "derived_from": "reviewer_transcript",
+     "extracted_by": "model",
+     "handback_sha256": "d741bd5709e82f962b8af3978605007f1c57054fa8dda8b9b8b3a0a273821194",
+     "fix_commit": "a98e6542460765271333db8dd66af7cb99e8faf8",
+     "reported_path": "tests/test_docs_commands_parse.py",
+     "path_in_tree": true
+    }
+   ]
+  },
+  {
+   "lens": "provenance",
+   "iteration": 3,
+   "recorded_iteration": 3,
+   "counts": {
+    "critical": 0,
+    "important": 0,
+    "minor": 1
+   },
+   "findings": null
+  }
+ ],
+ "cross_repo_findings": [],
+ "escaped": []
+}

@@ -1,0 +1,79 @@
+{
+ "schema_version": 1,
+ "repository": "rsionnach/nthlayer",
+ "release_tag": "corpus-v1",
+ "bundles": [
+  {
+   "repo": "nthlayer",
+   "asset": "nthlayer.bundle",
+   "sha256": "46087845a4b5b8e2275091e728f99e5dd635bd712a9d9344386afe3a8f045272",
+   "size": 3526380,
+   "release_tag": "corpus-v1",
+   "url": "https://github.com/rsionnach/nthlayer/releases/download/corpus-v1/nthlayer.bundle",
+   "git_version": "git version 2.39.3 (Apple Git-146)"
+  },
+  {
+   "repo": "nthlayer-bench",
+   "asset": "nthlayer-bench.bundle",
+   "sha256": "724b8f7c7a4661d645338a07b87ecd5db63c84acff948cb6c9bf9b2a1da0439b",
+   "size": 263879,
+   "release_tag": "corpus-v1",
+   "url": "https://github.com/rsionnach/nthlayer/releases/download/corpus-v1/nthlayer-bench.bundle",
+   "git_version": "git version 2.39.3 (Apple Git-146)"
+  },
+  {
+   "repo": "nthlayer-common",
+   "asset": "nthlayer-common.bundle",
+   "sha256": "f9019061b549dfd646007ebbc850d287eecb97a0c2d390ec673c0624358e10b3",
+   "size": 720660,
+   "release_tag": "corpus-v1",
+   "url": "https://github.com/rsionnach/nthlayer/releases/download/corpus-v1/nthlayer-common.bundle",
+   "git_version": "git version 2.39.3 (Apple Git-146)"
+  },
+  {
+   "repo": "nthlayer-core",
+   "asset": "nthlayer-core.bundle",
+   "sha256": "70fcccb855b859bf88da08e67a14474356216341a31dada3eb10365d2c6e6e1c",
+   "size": 288431,
+   "release_tag": "corpus-v1",
+   "url": "https://github.com/rsionnach/nthlayer/releases/download/corpus-v1/nthlayer-core.bundle",
+   "git_version": "git version 2.39.3 (Apple Git-146)"
+  },
+  {
+   "repo": "nthlayer-generate",
+   "asset": "nthlayer-generate.bundle",
+   "sha256": "ae7a4088c0443a450808d7e036ef54809ee455a2942cdbd484614103f04657ee",
+   "size": 4821645,
+   "release_tag": "corpus-v1",
+   "url": "https://github.com/rsionnach/nthlayer/releases/download/corpus-v1/nthlayer-generate.bundle",
+   "git_version": "git version 2.39.3 (Apple Git-146)"
+  },
+  {
+   "repo": "nthlayer-override-adapter",
+   "asset": "nthlayer-override-adapter.bundle",
+   "sha256": "13722bec1d79862af791c5ba6d7069e95f514bbb7682f6363a532a3a66e5dc0e",
+   "size": 211400,
+   "release_tag": "corpus-v1",
+   "url": "https://github.com/rsionnach/nthlayer/releases/download/corpus-v1/nthlayer-override-adapter.bundle",
+   "git_version": "git version 2.39.3 (Apple Git-146)"
+  },
+  {
+   "repo": "nthlayer-workers",
+   "asset": "nthlayer-workers.bundle",
+   "sha256": "d75c0e5b32bd62e3dc7fc65be8889a2416fc5ec572bb74c9325d307406e73ee6",
+   "size": 950179,
+   "release_tag": "corpus-v1",
+   "url": "https://github.com/rsionnach/nthlayer/releases/download/corpus-v1/nthlayer-workers.bundle",
+   "git_version": "git version 2.39.3 (Apple Git-146)"
+  },
+  {
+   "repo": "opensrm",
+   "asset": "opensrm.bundle",
+   "sha256": "668de63e671db38ac1d7fe876797d776622890d76b94339aac8b6c7d20bc1503",
+   "size": 111320105,
+   "release_tag": "corpus-v1",
+   "url": "https://github.com/rsionnach/nthlayer/releases/download/corpus-v1/opensrm.bundle",
+   "git_version": "git version 2.39.3 (Apple Git-146)"
+  }
+ ]
+}

@@ -1,0 +1,897 @@
+diff --git a/CLAUDE.md b/CLAUDE.md
+index 10dc97c..65ee403 100644
+--- a/CLAUDE.md
++++ b/CLAUDE.md
+@@ -54,6 +54,11 @@ These are load-bearing — wrong-side mistakes cause silent breakage.
+          `threshold_from_v2_entry()` (opensrm-908x; public, re-exported;
+          defined in `parser/v2.py` because it wraps
+          `_parse_judgment_threshold`) is its inverse.
++       - threshold evaluation (the exception to the list's "not
++         re-exported") — `manifest/evaluation.py` (E1-E4 evaluator,
++         outcome model) and `manifest/threshold_series.py` (metric
++         contract) are public, re-exported from `manifest/__init__.py`,
++         and sit beside `manifest/thresholds.py`.
+        - domain guards, used on the CLASSICAL writers too, not just
+          judgment — `require_number()` (numeric or a string spelling
+          one; raises ValueError where a bare `float()` raised an
+diff --git a/docs/architecture.md b/docs/architecture.md
+index de02218..90ccc7b 100644
+--- a/docs/architecture.md
++++ b/docs/architecture.md
+@@ -47,6 +47,10 @@ src/nthlayer_common/
+     manifest/            # Unified OpenSRM manifest parsing (v1, v2, OpenSLO, legacy)
+                          #   + scan.py: walking a directory that holds
+                          #     manifests alongside other YAML
++                         #   + evaluation.py: pure threshold evaluation (E1-E4);
++                         #     public, re-exported
++                         #   + threshold_series.py: threshold metric contract
++                         #     (public, re-exported)
+                          #   + thresholds.py: judgment-threshold bound tables,
+                          #     FORBIDDEN_THRESHOLD_KEYS, srm_v1_threshold,
+                          #     threshold_to_v2_entry, check_type_fields,
+diff --git a/docs/upgrading-5.0.md b/docs/upgrading-5.0.md
+index d9b608d..7e58fb6 100644
+--- a/docs/upgrading-5.0.md
++++ b/docs/upgrading-5.0.md
+@@ -126,9 +126,14 @@ no `method`, `frequency` or `sampling`.
+   upgrade nthlayer-common no later than the service serving the entries.
+ - nthlayer-generate and nthlayer-workers read no `ThresholdMeasurement` field
+   today, so they need only the version bump and any `segments` fixtures; an
+-  evaluator added to workers later should get its thresholds through
+-  `threshold_from_v2_entry` and read `metric` and its parameters from the
+-  result.
++  evaluator in workers should get its thresholds through
++  `threshold_from_v2_entry` and evaluate them as in the 5.2.0 bullet below.
++- **New in 5.2.0:** evaluate thresholds with
++  `evaluate_threshold(threshold, Samples(...))` (pure; consumers supply
++  measurements per `THRESHOLD_SERIES`) and emit `ThresholdOutcome.to_dict()` as
++  a `judgment_threshold_evaluation` assessment. A sampler that can only bound a
++  value from below (a histogram quantile in the `+Inf` bucket) supplies
++  `AtLeast(v)`, which breaches iff `v >= limit`.
+ - Evaluators compare the rate `metric` names, per CORE §5.5.1. For `outcomes`,
+   count only decisions in `measurement.window` whose `outcome_signal.window` has
+   elapsed; a listed segment with none is not evaluable (CORE §5.5.6 E3).
+diff --git a/src/nthlayer_common/cloudevents.py b/src/nthlayer_common/cloudevents.py
+index d56ee3a..36e77c5 100644
+--- a/src/nthlayer_common/cloudevents.py
++++ b/src/nthlayer_common/cloudevents.py
+@@ -35,6 +35,7 @@ _VERDICT_TYPES = VALID_VERDICT_TYPES
+ ASSESSMENT_KINDS = frozenset({
+     "slo_status",
+     "judgment_slo_evaluation",
++    "judgment_threshold_evaluation",
+     "burn_rate",
+     "drift_signal",
+     "portfolio_status",
+diff --git a/src/nthlayer_common/manifest/__init__.py b/src/nthlayer_common/manifest/__init__.py
+index 7916c63..ffa2148 100644
+--- a/src/nthlayer_common/manifest/__init__.py
++++ b/src/nthlayer_common/manifest/__init__.py
+@@ -6,6 +6,16 @@ Public API:
+     from nthlayer_common.manifest.models import SLODefinition, Dependency, ...
+ """
+ 
++from nthlayer_common.manifest.evaluation import (
++    AtLeast,
++    BoundResult,
++    Missing,
++    Samples,
++    SegmentResult,
++    ThresholdOutcome,
++    combine,
++    evaluate_threshold,
++)
+ from nthlayer_common.manifest.models import (
+     SERVICE_TYPE_ALIASES,
+     SRM_V1_JUDGMENT_THRESHOLD_TYPES,
+@@ -87,6 +97,11 @@ from nthlayer_common.manifest.scan import (
+     iter_manifest_files,
+     scan_manifest_files,
+ )
++from nthlayer_common.manifest.threshold_series import (
++    FEEDBACK_LATENCY_WINDOW,
++    THRESHOLD_SERIES,
++    ThresholdSeries,
++)
+ from nthlayer_common.manifest.thresholds import duration_seconds, threshold_to_v2_entry
+ 
+ __all__ = [
+@@ -133,6 +148,18 @@ __all__ = [
+     "duration_seconds",
+     "threshold_from_v2_entry",
+     "threshold_to_v2_entry",
++    # Threshold evaluation (pure; consumers supply measurements)
++    "evaluate_threshold",
++    "combine",
++    "ThresholdOutcome",
++    "BoundResult",
++    "SegmentResult",
++    "Samples",
++    "Missing",
++    "AtLeast",
++    "THRESHOLD_SERIES",
++    "ThresholdSeries",
++    "FEEDBACK_LATENCY_WINDOW",
+     "BreachAction",
+     "StatisticalRequirements",
+     "ProbeConfig",
+diff --git a/src/nthlayer_common/manifest/evaluation.py b/src/nthlayer_common/manifest/evaluation.py
+new file mode 100644
+index 0000000..84d1640
+--- /dev/null
++++ b/src/nthlayer_common/manifest/evaluation.py
+@@ -0,0 +1,250 @@
++"""Judgment-threshold evaluation per OPENSRM-CORE-v2 §5.5.6 (opensrm-g32d).
++
++Pure and deterministic: no I/O. A sampler (nthlayer-workers) supplies the raw
++measurements the spec defines; evaluate_threshold applies E1-E4 and returns a
++ThresholdOutcome, whose to_dict() is the judgment_threshold_evaluation
++assessment payload.
++"""
++
++from __future__ import annotations
++
++import math
++from collections.abc import Iterable, Mapping
++from dataclasses import dataclass, field
++from typing import Any, Literal, get_args
++
++from nthlayer_common.manifest.models import JudgmentThreshold
++from nthlayer_common.manifest.thresholds import DURATION, THRESHOLD_BOUNDS, duration_seconds
++
++Status = Literal["within", "breach", "not_evaluable"]
++MissingReason = Literal["no_data_source", "no_data", "insufficient_window"]
++ResultReason = MissingReason | Literal["lower_bound"]
++
++_STATUSES: tuple[str, ...] = get_args(Status)
++_REASONS: tuple[str, ...] = get_args(MissingReason)
++# E4: breach > not_evaluable > within.
++_PRECEDENCE = {"within": 0, "not_evaluable": 1, "breach": 2}
++
++
++@dataclass(frozen=True)
++class Missing:
++    """A measurement that could not be taken (E3). ``reason`` says why:
++
++    - ``no_data_source``: no series is defined for this threshold type/bound.
++    - ``no_data``: the series is absent, its labels do not match, the query
++      failed, or the value is non-finite.
++    - ``insufficient_window``: Prometheus retention is shorter than the window.
++    """
++
++    reason: MissingReason
++    detail: str = ""
++
++    def __post_init__(self) -> None:
++        if self.reason not in _REASONS:
++            raise ValueError(f"Missing.reason must be one of {_REASONS}, got {self.reason!r}")
++
++
++@dataclass(frozen=True)
++class AtLeast:
++    """A lower bound: the true value is strictly greater than ``value``.
++
++    What a classic Prometheus histogram yields when a quantile falls in the
++    ``+Inf`` bucket: the value lies beyond the largest finite boundary, which
++    histogram_quantile would instead return the largest finite boundary,
++    silently capping the value."""
++
++    value: float
++
++    def __post_init__(self) -> None:
++        if not math.isfinite(self.value):
++            raise ValueError(f"AtLeast.value must be finite, got {self.value!r}")
++
++
++@dataclass(frozen=True)
++class Samples:
++    """The raw measurements for one threshold.
++
++    A bound omitted from ``bounds`` is reported as ``no_data``. A bool is not
++    data (True == 1.0 would otherwise pass as a rate) and is treated the same.
++    Segments carry rates; the evaluator computes |segment - overall| itself.
++
++    ``bounds`` maps a bound name to its measured value for every type except
++    segments; a value may be a lower bound (``AtLeast``). For segments,
++    ``overall`` is the overall rate and ``segments`` maps each listed segment
++    value to its rate; the evaluator computes the variance itself (CORE §5.5.1).
++    """
++
++    bounds: Mapping[str, float | Missing | AtLeast] = field(default_factory=dict)
++    overall: float | Missing | None = None
++    segments: Mapping[str, float | Missing] = field(default_factory=dict)
++
++
++@dataclass(frozen=True)
++class BoundResult:
++    """The outcome for one bound. ``limit`` is as declared (a ratio float or a
++    Duration string). ``reason`` is a MissingReason when not_evaluable,
++    ``"lower_bound"`` when a breach was decided from an AtLeast, else None.
++    For a segments threshold, ``measured`` is the largest evaluated variance
++    and ``reason`` the first segment reason."""
++
++    bound: str
++    status: Status
++    measured: float | None
++    limit: float | str
++    reason: ResultReason | None
++
++
++@dataclass(frozen=True)
++class SegmentResult:
++    """The outcome for one segment value. ``measured`` is |segment rate -
++    overall rate|, rounded to 12 places. ``reason`` is a MissingReason when
++    not_evaluable, else None."""
++
++    segment: str
++    status: Status
++    measured: float | None
++    reason: ResultReason | None
++
++
++def combine(statuses: Iterable[str]) -> Status:
++    """E4: breach > not_evaluable > within. Nothing decided -> not_evaluable."""
++    best: Status = "within"
++    seen = False
++    for s in statuses:
++        if s not in _PRECEDENCE:
++            raise ValueError(f"unknown status {s!r}")
++        seen = True
++        if _PRECEDENCE[s] > _PRECEDENCE[best]:
++            best = s  # type: ignore[assignment]
++    return best if seen else "not_evaluable"
++
++
++@dataclass(frozen=True)
++class ThresholdOutcome:
++    """The evaluation of one threshold: ``status`` is the E4 combination of
++    its ``bounds`` (one BoundResult per bound, each ``limit`` as declared: a
++    ratio float or a Duration string) and, for segments, ``segments``.
++    ``to_dict()`` is the judgment_threshold_evaluation assessment payload."""
++
++    type: str
++    status: Status
++    bounds: tuple[BoundResult, ...]
++    segments: tuple[SegmentResult, ...] = ()
++
++    def to_dict(self) -> dict[str, Any]:
++        return {
++            "type": self.type,
++            "status": self.status,
++            "bounds": [
++                {
++                    "bound": b.bound,
++                    "status": b.status,
++                    "measured": b.measured,
++                    "limit": b.limit,
++                    "reason": b.reason,
++                }
++                for b in self.bounds
++            ],
++            "segments": [
++                {
++                    "segment": s.segment,
++                    "status": s.status,
++                    "measured": s.measured,
++                    "reason": s.reason,
++                }
++                for s in self.segments
++            ],
++        }
++
++    @classmethod
++    def from_dict(cls, d: Mapping[str, Any]) -> ThresholdOutcome:
++        return cls(
++            type=d["type"],
++            status=d["status"],
++            bounds=tuple(BoundResult(**b) for b in d["bounds"]),
++            segments=tuple(SegmentResult(**s) for s in d.get("segments", ())),
++        )
++
++
++def _limit_value(threshold_type: str, bound: str, limit: float | str) -> float:
++    kinds = THRESHOLD_BOUNDS[threshold_type]
++    if bound not in kinds:
++        # Parsed thresholds never get here (parse_bounds rejects it); a
++        # hand-built one gets a ValueError, not a KeyError.
++        raise ValueError(f"{threshold_type} has no bound {bound!r}; expected one of {sorted(kinds)}")
++    if kinds[bound] == DURATION:
++        return duration_seconds(limit)  # type: ignore[arg-type]
++    return float(limit)
++
++
++def _decide(
++    measured: float | Missing | AtLeast | None, limit: float
++) -> tuple[Status, float | None, str | None]:
++    """E1 for one measured value; E3 for a missing or non-finite one.
++
++    A lower bound (AtLeast) breaches when it already reaches the limit: the
++    true value is strictly greater than it, so strictly greater than the
++    limit. AtLeast below the limit is reported not_evaluable/no_data: the true
++    value is above a boundary that is itself within the bound, so neither
++    breach nor within can be decided."""
++    if measured is None or isinstance(measured, bool):  # a bool is not a measurement
++        return "not_evaluable", None, "no_data"
++    if isinstance(measured, Missing):
++        return "not_evaluable", None, measured.reason
++    if isinstance(measured, AtLeast):
++        if measured.value >= limit:
++            return "breach", measured.value, "lower_bound"
++        return "not_evaluable", None, "no_data"
++    if not math.isfinite(measured):
++        return "not_evaluable", None, "no_data"
++    return ("breach" if measured > limit else "within"), measured, None
++
++
++def evaluate_threshold(threshold: JudgmentThreshold, samples: Samples) -> ThresholdOutcome:
++    """Apply CORE §5.5.6 E1-E4 to one threshold. Pure; raises ValueError for
++    a type that is not a judgment threshold type, a bound that type does not
++    define, or a segments threshold without exactly one bound."""
++    t = threshold.type
++    if t not in THRESHOLD_BOUNDS:
++        raise ValueError(f"not a judgment threshold type: {t!r}")
++    if t == "segments":
++        return _evaluate_segments(threshold, samples)
++    results = []
++    for bound, limit in threshold.bounds.items():
++        status, measured, reason = _decide(samples.bounds.get(bound), _limit_value(t, bound, limit))
++        results.append(BoundResult(bound, status, measured, limit, reason))
++    return ThresholdOutcome(t, combine(r.status for r in results), tuple(results))
++
++
++def _evaluate_segments(threshold: JudgmentThreshold, samples: Samples) -> ThresholdOutcome:
++    """CORE §5.5.1: each listed segment's rate is compared with the overall
++    rate; the bound caps |segment - overall| in either direction."""
++    if len(threshold.bounds) != 1:
++        raise ValueError(f"a segments threshold has exactly one bound, got {sorted(threshold.bounds)}")
++    ((bound, limit),) = threshold.bounds.items()
++    limit_v = _limit_value("segments", bound, limit)
++    overall = samples.overall
++    results: list[SegmentResult] = []
++    for value in dict.fromkeys(threshold.measurement.segment_values):  # distinct, in order
++        if overall is None or isinstance(overall, (Missing, bool)) or not math.isfinite(overall):
++            reason = overall.reason if isinstance(overall, Missing) else "no_data"
++            results.append(SegmentResult(value, "not_evaluable", None, reason))
++            continue
++        rate = samples.segments.get(value)
++        if rate is None or isinstance(rate, (Missing, bool)):
++            variance = rate
++        else:
++            # `measured` is this rounded variance. Bounds are decimal and binary
++            # subtraction is noisy (0.9 - 0.7 > 0.2), which would breach an exact
++            # equality (E1). Differences under 1e-12 are below any rate
++            # resolution, so a variance within 1e-12 of the bound counts as equal.
++            variance = round(abs(rate - overall), 12)
++        status, measured, reason = _decide(variance, limit_v)
++        results.append(SegmentResult(value, status, measured, reason))
++    status = combine(s.status for s in results)
++    evaluated = [s.measured for s in results if s.measured is not None]
++    reason = None if status != "not_evaluable" else next(
++        (x.reason for x in results if x.reason), "no_data"
++    )
++    bound_result = BoundResult(bound, status, max(evaluated) if evaluated else None, limit, reason)
++    return ThresholdOutcome("segments", status, (bound_result,), tuple(results))
+diff --git a/src/nthlayer_common/manifest/threshold_series.py b/src/nthlayer_common/manifest/threshold_series.py
+new file mode 100644
+index 0000000..ca188ed
+--- /dev/null
++++ b/src/nthlayer_common/manifest/threshold_series.py
+@@ -0,0 +1,60 @@
++"""The judgment-threshold metric contract (opensrm-g32d).
++
++Which Prometheus series measures each threshold bound. This table is the
++source of truth: nthlayer-workers builds its queries from it and the front
++door's docs/metrics-contract.md documents it. Pinned against THRESHOLD_BOUNDS
++in tests/test_threshold_series.py.
++"""
++
++from __future__ import annotations
++
++from dataclasses import dataclass
++from typing import Literal
++
++# CORE §5.5.5: feedback latency is computed over the last 30 days, anchored on
++# ground-truth arrival; a manifest cannot change it. Applies to the
++# feedback_latency histogram (gen_ai_feedback_latency_seconds) only.
++FEEDBACK_LATENCY_WINDOW = "30d"
++
++
++@dataclass(frozen=True)
++class ThresholdSeries:
++    """One bound's series. ``labels`` are the labels a sampler must match
++    (``bins``/``window`` take the manifest's measurement values); ``quantile``
++    is set only for a ``histogram_quantile`` series: a quantile of a classic
++    histogram, which the sampler computes from the ``_bucket`` counts (it
++    does not send PromQL's histogram_quantile, which hides a quantile in the
++    +Inf bucket)."""
++
++    metric: str
++    kind: Literal["gauge", "histogram_quantile"]
++    labels: tuple[str, ...]
++    quantile: float | None = None
++
++
++_CALIBRATION_LABELS = ("service", "bins", "window")
++
++THRESHOLD_SERIES: dict[str, dict[str, ThresholdSeries]] = {
++    "calibration": {
++        "maximum_expected_calibration_error": ThresholdSeries(
++            "gen_ai_calibration_ece", "gauge", _CALIBRATION_LABELS
++        ),
++        "maximum_brier_score": ThresholdSeries(
++            "gen_ai_calibration_brier", "gauge", _CALIBRATION_LABELS
++        ),
++    },
++    "feedback_latency": {
++        "maximum_p50": ThresholdSeries(
++            "gen_ai_feedback_latency_seconds", "histogram_quantile", ("service",), 0.5
++        ),
++        "maximum_p90": ThresholdSeries(
++            "gen_ai_feedback_latency_seconds", "histogram_quantile", ("service",), 0.9
++        ),
++    },
++    # No data source yet (opensrm-g32d follow-up beads): a sampler must supply
++    # Missing("no_data_source") for these bounds (an absent sample is reported
++    # as no_data).
++    "segments": {},
++    "stability": {},
++    "audit_backlog": {},
++}
+diff --git a/tests/test_evaluate_threshold.py b/tests/test_evaluate_threshold.py
+new file mode 100644
+index 0000000..8f9288a
+--- /dev/null
++++ b/tests/test_evaluate_threshold.py
+@@ -0,0 +1,119 @@
++"""evaluate_threshold: E1-E4 for calibration, stability, audit_backlog,
++feedback_latency (opensrm-g32d). Expected outcomes follow CORE §5.5.6."""
++
++import math
++
++import pytest
++
++from nthlayer_common.manifest.evaluation import AtLeast, Missing, Samples, evaluate_threshold
++from nthlayer_common.manifest.models import JudgmentThreshold, ThresholdMeasurement
++
++
++def _cal(**bounds):
++    return JudgmentThreshold("calibration", dict(bounds), ThresholdMeasurement(bins=10, window="30d"))
++
++
++def _lat(**bounds):
++    return JudgmentThreshold("feedback_latency", dict(bounds))
++
++
++# E1 ---------------------------------------------------------------------
++
++@pytest.mark.parametrize("measured,expected", [(0.05, "within"), (0.0500001, "breach"), (0.01, "within")])
++def test_e1_ratio_bound_is_strict(measured, expected):
++    o = evaluate_threshold(_cal(maximum_expected_calibration_error=0.05),
++                           Samples(bounds={"maximum_expected_calibration_error": measured}))
++    assert o.status == expected
++    assert o.bounds[0].measured == measured
++    assert o.bounds[0].limit == 0.05
++
++
++@pytest.mark.parametrize("measured,expected", [(0.0, "within"), (1e-9, "breach")])
++def test_e1_limit_zero(measured, expected):
++    o = evaluate_threshold(_cal(maximum_brier_score=0.0), Samples(bounds={"maximum_brier_score": measured}))
++    assert o.status == expected
++
++
++# E2 ---------------------------------------------------------------------
++
++@pytest.mark.parametrize(
++    "limit,measured,expected",
++    [("1h", 3600.0, "within"), ("1h", 3600.001, "breach"), ("60m", 3600.0, "within"),
++     ("1d", 86400.0, "within"), ("1w", 604800.5, "breach"), ("500ms", 0.5, "within")],
++)
++def test_e2_duration_bounds_compare_in_seconds(limit, measured, expected):
++    o = evaluate_threshold(_lat(maximum_p50=limit), Samples(bounds={"maximum_p50": measured}))
++    assert o.status == expected
++    assert o.bounds[0].limit == limit  # kept as declared
++
++
++# E3 ---------------------------------------------------------------------
++
++@pytest.mark.parametrize("reason", ["no_data_source", "no_data", "insufficient_window"])
++def test_e3_missing_sample_is_not_evaluable_with_its_reason(reason):
++    o = evaluate_threshold(_lat(maximum_p50="1h"), Samples(bounds={"maximum_p50": Missing(reason)}))
++    assert o.status == "not_evaluable"
++    assert o.bounds[0].reason == reason
++    assert o.bounds[0].measured is None
++
++
++def test_e3_absent_sample_is_no_data():
++    o = evaluate_threshold(_lat(maximum_p50="1h"), Samples())
++    assert (o.status, o.bounds[0].reason) == ("not_evaluable", "no_data")
++
++
++@pytest.mark.parametrize("bad", [math.nan, math.inf, -math.inf])
++def test_non_finite_sample_is_not_evaluable(bad):
++    o = evaluate_threshold(_cal(maximum_brier_score=0.1), Samples(bounds={"maximum_brier_score": bad}))
++    assert (o.status, o.bounds[0].reason) == ("not_evaluable", "no_data")
++
++
++# E4 ---------------------------------------------------------------------
++
++@pytest.mark.parametrize(
++    "p50,p90,expected",
++    [(10.0, 10.0, "within"), (10.0, Missing("no_data"), "not_evaluable"),
++     (99999.0, Missing("no_data"), "breach"), (10.0, 99999.0, "breach"),
++     (Missing("no_data"), Missing("no_data"), "not_evaluable")],
++)
++def test_e4_combines_bounds(p50, p90, expected):
++    o = evaluate_threshold(_lat(maximum_p50="1h", maximum_p90="1h"),
++                           Samples(bounds={"maximum_p50": p50, "maximum_p90": p90}))
++    assert o.status == expected
++    assert [b.bound for b in o.bounds] == ["maximum_p50", "maximum_p90"]  # declared order
++
++
++def test_every_declared_bound_is_evaluated_and_only_those():
++    o = evaluate_threshold(_cal(maximum_brier_score=0.1),
++                           Samples(bounds={"maximum_brier_score": 0.05,
++                                           "maximum_expected_calibration_error": 0.9}))
++    assert [b.bound for b in o.bounds] == ["maximum_brier_score"]
++    assert o.status == "within"
++
++
++def test_unknown_type_raises():
++    with pytest.raises(ValueError):
++        evaluate_threshold(JudgmentThreshold("vibes", {"x": 1.0}), Samples())
++
++
++def test_unknown_bound_for_the_type_raises_value_error():
++    # Hand-built (the parsers reject it): a ValueError, not a KeyError.
++    with pytest.raises(ValueError):
++        evaluate_threshold(_cal(maximum_p50="1h"), Samples())
++
++
++# A lower bound: what a histogram quantile in the +Inf bucket yields --------
++
++@pytest.mark.parametrize("lower,limit,expected", [
++    # The true value is > 86400 = 1d: a breach.
++    (86400.0, "1d", ("breach", 86400.0, "lower_bound")),
++    # > 3600 = 1h, equal at the boundary: still strictly above the limit.
++    (3600.0, "1h", ("breach", 3600.0, "lower_bound")),
++    # > 10000 (OTel's default top bucket) says nothing about a 1d limit.
++    (10000.0, "1d", ("not_evaluable", None, "no_data")),
++])
++def test_lower_bound_breaches_only_when_it_reaches_the_limit(lower, limit, expected):
++    o = evaluate_threshold(_lat(maximum_p90=limit), Samples(bounds={"maximum_p90": AtLeast(lower)}))
++    b = o.bounds[0]
++    assert (b.status, b.measured, b.reason) == expected
++    assert o.status == expected[0]
+diff --git a/tests/test_evaluate_threshold_segments.py b/tests/test_evaluate_threshold_segments.py
+new file mode 100644
+index 0000000..6a025df
+--- /dev/null
++++ b/tests/test_evaluate_threshold_segments.py
+@@ -0,0 +1,145 @@
++"""Segments evaluation (CORE §5.5.1 + §5.5.6) and every spec example."""
++
++from pathlib import Path
++
++import pytest
++import yaml
++
++from nthlayer_common.manifest import threshold_from_v2_entry
++from nthlayer_common.manifest.evaluation import Missing, Samples, evaluate_threshold
++from nthlayer_common.manifest.models import JudgmentThreshold, ThresholdMeasurement
++
++
++def _seg(limit=0.05, values=("eu", "us")):
++    return JudgmentThreshold(
++        "segments", {"maximum_variance_from_overall": limit},
++        ThresholdMeasurement(metric="escalation", segment_dimension="region",
++                             segment_values=list(values), window="30d"),
++    )
++
++
++@pytest.mark.parametrize("eu,expected", [(0.15, "within"), (0.150001, "breach"),
++                                         (0.05, "within"), (0.049999, "breach")])
++def test_variance_is_absolute_in_both_directions(eu, expected):
++    o = evaluate_threshold(_seg(values=("eu",)), Samples(overall=0.1, segments={"eu": eu}))
++    assert o.status == expected
++    assert o.segments[0].measured == pytest.approx(abs(eu - 0.1))
++
++
++def test_each_segment_decided_independently():
++    o = evaluate_threshold(_seg(), Samples(overall=0.1, segments={"eu": 0.3, "us": Missing("no_data")}))
++    assert [(s.segment, s.status) for s in o.segments] == [("eu", "breach"), ("us", "not_evaluable")]
++    assert o.status == "breach"
++    assert o.bounds[0].measured == pytest.approx(0.2)
++
++
++def test_missing_overall_makes_every_segment_not_evaluable():
++    o = evaluate_threshold(_seg(), Samples(overall=Missing("no_data_source"),
++                                           segments={"eu": 0.3, "us": 0.1}))
++    assert {s.status for s in o.segments} == {"not_evaluable"}
++    assert {s.reason for s in o.segments} == {"no_data_source"}
++    assert o.status == "not_evaluable"
++    assert o.bounds[0].measured is None
++
++
++def test_unsampled_segment_is_no_data():
++    o = evaluate_threshold(_seg(), Samples(overall=0.1, segments={"eu": 0.1}))
++    assert [(s.segment, s.reason) for s in o.segments] == [("eu", None), ("us", "no_data")]
++
++
++def test_duplicate_segment_value_evaluated_once():
++    o = evaluate_threshold(_seg(values=("eu", "eu", "us")),
++                           Samples(overall=0.1, segments={"eu": 0.1, "us": 0.1}))
++    assert [s.segment for s in o.segments] == ["eu", "us"]
++
++
++@pytest.mark.parametrize("bounds", [
++    {},
++    {"maximum_variance_from_overall": 0.05, "maximum_drift": 0.1},
++    {"maximum_drift": 0.1},  # one bound, but not a segments bound
++])
++def test_segments_without_exactly_its_one_bound_raises_value_error(bounds):
++    # Hand-built (the parsers reject all three).
++    t = JudgmentThreshold("segments", bounds,
++                          ThresholdMeasurement(metric="escalation", segment_dimension="region",
++                                               segment_values=["eu"], window="30d"))
++    with pytest.raises(ValueError):
++        evaluate_threshold(t, Samples(overall=0.1, segments={"eu": 0.1}))
++
++
++_SPEC_V2 = Path(__file__).resolve().parents[2] / "opensrm" / "spec" / "v2"
++# Every shipped example that declares judgment thresholds (spec §9: every one).
++_EXAMPLES = sorted(
++    p for p in (_SPEC_V2 / "examples").rglob("*.yaml")
++    if "judgment_threshold" in (yaml.safe_load(p.read_text()) or {}).get("spec", {})
++) if _SPEC_V2.is_dir() else []
++
++
++def test_the_threshold_examples_are_present():
++    # 8 at the time of writing (opensrm main, 2026-10-12): the six in
++    # examples/judgment-thresholds/, service-manifest-full.yaml and
++    # services/ai-gate.yaml. A floor, not an equality: new examples are welcome,
++    # but a glob or filter that silently drops some must fail here.
++    names = {p.relative_to(_SPEC_V2 / "examples").as_posix() for p in _EXAMPLES}
++    assert {"judgment-thresholds/all-five-types.yaml",
++            "judgment-thresholds/segments-two-dimensions.yaml",
++            "services/ai-gate.yaml"} <= names, names
++    assert len(_EXAMPLES) >= 8, names
++
++
++@pytest.mark.parametrize("source", _EXAMPLES, ids=lambda p: p.name)
++def test_every_spec_example_threshold_evaluates(source):
++    """Every threshold the spec ships is evaluable: all-within when each
++    measured value equals its bound (E1: equal is within), all-breach just
++    above it, all-not_evaluable when nothing is measured. Entries are parsed
++    one by one (threshold_from_v2_entry), so a manifest that does not parse
++    whole for unrelated reasons (ai-gate.yaml, opensrm-a742) still counts."""
++    entries = yaml.safe_load(source.read_text())["spec"]["judgment_threshold"]
++    for t in (threshold_from_v2_entry(e) for e in entries):
++        at, above, none = _samples_at(t, 0.0), _samples_at(t, 1e-6), Samples()
++        assert evaluate_threshold(t, at).status == "within", t
++        assert evaluate_threshold(t, above).status == "breach", t
++        assert evaluate_threshold(t, none).status == "not_evaluable", t
++
++
++def _samples_at(t, delta):
++    from nthlayer_common.manifest.thresholds import DURATION, THRESHOLD_BOUNDS, duration_seconds
++
++    if t.type == "segments":
++        limit = float(t.bounds["maximum_variance_from_overall"])
++        return Samples(overall=0.0, segments={v: limit + delta for v in t.measurement.segment_values})
++    vals = {}
++    for bound, limit in t.bounds.items():
++        base = duration_seconds(limit) if THRESHOLD_BOUNDS[t.type][bound] == DURATION else float(limit)
++        vals[bound] = base + delta
++    return Samples(bounds=vals)
++
++
++@pytest.mark.parametrize("overall,segment,bound", [
++    (0.7, 0.9, 0.2), (0.9, 0.7, 0.2), (0.1, 0.3, 0.2), (0.33, 0.38, 0.05), (0.6, 0.65, 0.05),
++])
++def test_decimal_equality_with_the_bound_is_within(overall, segment, bound):
++    # E1: equal is within. The bounds are decimal; binary subtraction noise must not breach.
++    o = evaluate_threshold(_seg(limit=bound, values=("eu",)),
++                           Samples(overall=overall, segments={"eu": segment}))
++    assert o.status == "within"
++    beyond = segment + 1e-9 if segment > overall else segment - 1e-9
++    o = evaluate_threshold(_seg(limit=bound, values=("eu",)),
++                           Samples(overall=overall, segments={"eu": beyond}))
++    assert o.status == "breach"
++
++
++@pytest.mark.parametrize("bad", [True, False])
++def test_bool_samples_are_not_data(bad):
++    o = evaluate_threshold(_seg(values=("eu",)), Samples(overall=0.1, segments={"eu": bad}))
++    assert o.segments[0].status == "not_evaluable" and o.segments[0].reason == "no_data"
++    o = evaluate_threshold(_seg(values=("eu",)), Samples(overall=bad, segments={"eu": 0.1}))
++    assert o.status == "not_evaluable"
++
++
++@pytest.mark.parametrize("bad", [True, False])
++def test_bool_bound_sample_is_not_data(bad):
++    t = JudgmentThreshold("stability", {"maximum_drift": 1.0},
++                          ThresholdMeasurement(metric="m", window="30d"))
++    o = evaluate_threshold(t, Samples(bounds={"maximum_drift": bad}))
++    assert (o.status, o.bounds[0].reason) == ("not_evaluable", "no_data")
+diff --git a/tests/test_threshold_evaluation_model.py b/tests/test_threshold_evaluation_model.py
+new file mode 100644
+index 0000000..cdbdaf8
+--- /dev/null
++++ b/tests/test_threshold_evaluation_model.py
+@@ -0,0 +1,79 @@
++"""Outcome model for threshold evaluation (opensrm-g32d)."""
++
++import pytest
++
++from nthlayer_common.manifest.evaluation import (
++    AtLeast,
++    BoundResult,
++    Missing,
++    SegmentResult,
++    ThresholdOutcome,
++    combine,
++)
++
++
++@pytest.mark.parametrize(
++    "statuses,expected",
++    [
++        (["within"], "within"),
++        (["within", "within"], "within"),
++        (["within", "not_evaluable"], "not_evaluable"),
++        (["not_evaluable", "within"], "not_evaluable"),
++        (["within", "breach"], "breach"),
++        (["not_evaluable", "breach"], "breach"),
++        (["breach", "not_evaluable", "within"], "breach"),
++        (["not_evaluable"], "not_evaluable"),
++        ([], "not_evaluable"),
++    ],
++)
++def test_combine_is_e4_precedence(statuses, expected):
++    assert combine(statuses) == expected
++
++
++def test_combine_rejects_an_unknown_status():
++    with pytest.raises(ValueError):
++        combine(["fine"])
++
++
++def _outcome():
++    return ThresholdOutcome(
++        type="segments",
++        status="breach",
++        bounds=(BoundResult("maximum_variance_from_overall", "breach", 0.2, 0.05, None),),
++        segments=(
++            SegmentResult("eu", "breach", 0.2, None),
++            SegmentResult("us", "not_evaluable", None, "no_data"),
++        ),
++    )
++
++
++def test_to_dict_from_dict_round_trip():
++    o = _outcome()
++    assert ThresholdOutcome.from_dict(o.to_dict()) == o
++
++
++def test_to_dict_is_json_serialisable_and_shaped():
++    import json
++
++    d = _outcome().to_dict()
++    json.dumps(d)
++    assert d["status"] == "breach"
++    assert d["bounds"][0] == {
++        "bound": "maximum_variance_from_overall",
++        "status": "breach",
++        "measured": 0.2,
++        "limit": 0.05,
++        "reason": None,
++    }
++    assert d["segments"][1]["reason"] == "no_data"
++
++
++def test_missing_rejects_an_unknown_reason():
++    with pytest.raises(ValueError):
++        Missing("because")
++
++
++@pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf")])
++def test_lower_bound_must_be_finite(bad):
++    with pytest.raises(ValueError):
++        AtLeast(bad)
+diff --git a/tests/test_threshold_evaluation_public.py b/tests/test_threshold_evaluation_public.py
+new file mode 100644
+index 0000000..05c68be
+--- /dev/null
++++ b/tests/test_threshold_evaluation_public.py
+@@ -0,0 +1,19 @@
++import nthlayer_common.manifest as manifest
++from nthlayer_common.cloudevents import ASSESSMENT_KINDS, _ce_type_for_assessment
++
++_PUBLIC = ["evaluate_threshold", "ThresholdOutcome", "BoundResult", "SegmentResult",
++           "Samples", "Missing", "AtLeast", "THRESHOLD_SERIES", "ThresholdSeries",
++           "FEEDBACK_LATENCY_WINDOW", "combine"]
++
++
++def test_evaluation_api_is_public():
++    for name in _PUBLIC:
++        assert name in manifest.__all__, name
++        assert hasattr(manifest, name), name
++
++
++def test_assessment_kind_is_canonical():
++    assert "judgment_threshold_evaluation" in ASSESSMENT_KINDS
++    assert _ce_type_for_assessment("judgment_threshold_evaluation") == (
++        "io.nthlayer.assessment.judgment_threshold_evaluation.v1"
++    )
+diff --git a/tests/test_threshold_series.py b/tests/test_threshold_series.py
+new file mode 100644
+index 0000000..8561af2
+--- /dev/null
++++ b/tests/test_threshold_series.py
+@@ -0,0 +1,53 @@
++"""THRESHOLD_SERIES: the bound -> metric contract (opensrm-g32d)."""
++
++from nthlayer_common.manifest.threshold_series import (
++    FEEDBACK_LATENCY_WINDOW,
++    THRESHOLD_SERIES,
++    ThresholdSeries,
++)
++from nthlayer_common.manifest.thresholds import THRESHOLD_BOUNDS
++
++# The types with no data source yet (spec §2). Pinned: when a source is
++# added, this set and the metrics contract change together.
++_UNSOURCED = {"segments", "stability", "audit_backlog"}
++
++
++def test_covers_every_threshold_type():
++    assert set(THRESHOLD_SERIES) == set(THRESHOLD_BOUNDS)
++
++
++def test_every_series_names_a_real_bound():
++    for t, series in THRESHOLD_SERIES.items():
++        assert set(series) <= set(THRESHOLD_BOUNDS[t]), t
++
++
++def test_a_sourced_type_covers_all_its_bounds():
++    for t, series in THRESHOLD_SERIES.items():
++        if t not in _UNSOURCED:
++            assert set(series) == set(THRESHOLD_BOUNDS[t]), t
++
++
++def test_unsourced_types_are_exactly_these():
++    assert {t for t, s in THRESHOLD_SERIES.items() if not s} == _UNSOURCED
++
++
++def test_calibration_series_carry_bins_and_window():
++    for s in THRESHOLD_SERIES["calibration"].values():
++        assert s.kind == "gauge"
++        assert s.labels == ("service", "bins", "window")
++
++
++def test_feedback_latency_is_one_histogram_two_quantiles():
++    p50 = THRESHOLD_SERIES["feedback_latency"]["maximum_p50"]
++    p90 = THRESHOLD_SERIES["feedback_latency"]["maximum_p90"]
++    assert p50.metric == p90.metric == "gen_ai_feedback_latency_seconds"
++    assert (p50.kind, p50.quantile) == ("histogram_quantile", 0.5)
++    assert (p90.kind, p90.quantile) == ("histogram_quantile", 0.9)
++    assert FEEDBACK_LATENCY_WINDOW == "30d"
++
++
++def test_quantile_set_only_for_histograms():
++    for series in THRESHOLD_SERIES.values():
++        for s in series.values():
++            assert isinstance(s, ThresholdSeries)
++            assert (s.quantile is not None) == (s.kind == "histogram_quantile")
+diff --git a/uv.lock b/uv.lock
+index 9e0ab2c..f4ad71b 100644
+--- a/uv.lock
++++ b/uv.lock
+@@ -903,7 +903,7 @@ wheels = [
+ 
+ [[package]]
+ name = "nthlayer-common"
+-version = "5.0.0"
++version = "5.1.0"
+ source = { editable = "." }
+ dependencies = [
+     { name = "anthropic" },

@@ -1,0 +1,480 @@
+diff --git a/src/nthlayer_common/manifest/models.py b/src/nthlayer_common/manifest/models.py
+index b5abfd9..9c0e3ae 100644
+--- a/src/nthlayer_common/manifest/models.py
++++ b/src/nthlayer_common/manifest/models.py
+@@ -234,6 +234,15 @@ class PagerDutyConfig:
+     urgency: str | None = None
+     auto_resolve_timeout: int | None = None
+     create_escalation_policy: dict[str, Any] | None = None
++    # Legacy-format keys read by generate's PagerDutyHandler
++    # (opensrm-wo62.4.13): timezone and sre_escalation_policy_id from
++    # service.pagerduty, the integration keys from the resource spec. Stored
++    # as authored and not type-checked, so timezone is None when unset
++    # (generate owns the default).
++    timezone: str | None = None
++    sre_escalation_policy_id: str | None = None
++    integration_key: str | None = None
++    sre_integration_key: str | None = None
+ 
+ 
+ @dataclass
+diff --git a/src/nthlayer_common/manifest/parser/loader.py b/src/nthlayer_common/manifest/parser/loader.py
+index 582bacc..1445f2a 100644
+--- a/src/nthlayer_common/manifest/parser/loader.py
++++ b/src/nthlayer_common/manifest/parser/loader.py
+@@ -26,6 +26,7 @@ from nthlayer_common.manifest.models import (
+     DependencyCriticality,
+     DependencySLO,
+     JudgmentThreshold,
++    Observability,
+     Ownership,
+     PagerDutyConfig,
+     ReliabilityManifest,
+@@ -34,7 +35,7 @@ from nthlayer_common.manifest.models import (
+ )
+ from nthlayer_common.manifest.opensrm_v1 import OPENSRM_V1_REJECTION, is_opensrm_v1_format
+ from nthlayer_common.manifest.parser import legacy
+-from nthlayer_common.manifest.parser._shared import judgment_slo_fields
++from nthlayer_common.manifest.parser._shared import judgment_slo_fields, parse_observability
+ from nthlayer_common.manifest.parser.v1 import (
+     OpenSRMParseError,
+     is_srm_v1_format,
+@@ -315,6 +316,7 @@ def _parse_legacy_to_manifest(
+     dependencies = _extract_dependencies_from_resources(resources_data)
+     ownership = _extract_ownership(service_data, resources_data)
+     alerting = _extract_alerting_from_resources(resources_data)
++    observability = _extract_observability(resources_data)
+ 
+     return ReliabilityManifest(
+         name=name,
+@@ -329,6 +331,7 @@ def _parse_legacy_to_manifest(
+         dependencies=dependencies,
+         ownership=ownership,
+         alerting=alerting,
++        observability=observability,
+         language=service_data.get("language"),
+         framework=service_data.get("framework"),
+         template=service_data.get("template"),
+@@ -543,6 +546,42 @@ def _extract_alerting_from_resources(resources: list[dict[str, Any]]) -> Any:
+     return None
+ 
+ 
++def _extract_observability(resources: list[dict[str, Any]]) -> Observability | None:
++    """Map the first legacy ``kind: Observability`` resource.
++
++    generate's legacy detector plans a dashboard for any Observability
++    resource, whatever its spec, so an empty or missing spec still yields
++    ``Observability()``: presence is the signal. The legacy spec keys
++    (metrics, logs, health) have no Observability field and are not read.
++    A non-mapping spec is likewise only presence: it is warned about and
++    ignored rather than failing a load that succeeded before this resource
++    was read (malformed-spec errors are opensrm-wo62.4.10).
++    """
++    for resource in resources:
++        if resource.get("kind") == "Observability":
++            spec = resource.get("spec")
++            if spec is not None and not isinstance(spec, dict):
++                logger.warning("legacy_observability_spec_not_mapping", spec_type=type(spec).__name__)
++                spec = None
++            return parse_observability(spec) or Observability()
++    return None
++
++
++def _legacy_service_pagerduty(service_data: dict[str, Any]) -> dict[str, Any]:
++    """Return ``service.pagerduty`` as a mapping (``{}`` when unset).
++
++    It was never read before opensrm-wo62.4.13, so a non-mapping value is
++    warned about and ignored rather than failing a load that used to succeed.
++    """
++    value = service_data.get("pagerduty")
++    if value is None:
++        return {}
++    if not isinstance(value, dict):
++        logger.warning("legacy_service_pagerduty_not_mapping", value_type=type(value).__name__)
++        return {}
++    return value
++
++
+ def _extract_ownership(
+     service_data: dict[str, Any],
+     resources: list[dict[str, Any]],
+@@ -559,15 +598,22 @@ def _extract_ownership(
+         runbook=service_data.get("runbook_url"),
+     )
+ 
++    # The config is built only for a PagerDuty resource (generate plans
++    # pagerduty only then); service.pagerduty keys alone add nothing.
+     for resource in resources:
+         if resource.get("kind") == "PagerDuty":
+             spec = resource.get("spec", {})
++            service_pagerduty = _legacy_service_pagerduty(service_data)
+             ownership.pagerduty = PagerDutyConfig(
+                 service_id=spec.get("service_id"),
+                 escalation_policy_id=spec.get("escalation_policy"),
+                 urgency=spec.get("urgency"),
+                 auto_resolve_timeout=spec.get("auto_resolve_timeout"),
+                 create_escalation_policy=spec.get("create_escalation_policy"),
++                timezone=service_pagerduty.get("timezone"),
++                sre_escalation_policy_id=service_pagerduty.get("sre_escalation_policy_id"),
++                integration_key=spec.get("integration_key"),
++                sre_integration_key=spec.get("sre_integration_key"),
+             )
+             ownership.escalation = spec.get("escalation_policy")
+             break
+diff --git a/tests/fixtures/legacy_loader/services/notification-observability-only.yaml b/tests/fixtures/legacy_loader/services/notification-observability-only.yaml
+new file mode 100644
+index 0000000..e262e92
+--- /dev/null
++++ b/tests/fixtures/legacy_loader/services/notification-observability-only.yaml
+@@ -0,0 +1,32 @@
++# Copy of nthlayer-generate tests/golden/fixtures/legacy/notification-observability-only.yaml
++# (opensrm-wo62.4.13): an Observability resource and no Dependencies, the
++# shape whose dashboard rests on Observability presence alone. Unchanged
++# below this header except the original's comment block removed.
++
++service:
++  name: notification-observability-only
++  team: platform
++  tier: high
++  type: worker
++  description: Background worker for email, SMS, and push notifications
++  owner: platform-team@company.com
++
++resources:
++  - kind: SLO
++    name: delivery-success
++    spec:
++      objective: 99.5
++      window: 30d
++      indicators:
++        - type: availability
++          success_ratio:
++            total_query: sum(rate(notifications_sent_total{service="notification-observability-only"}[5m]))
++            good_query: sum(rate(notifications_sent_total{service="notification-observability-only",status="delivered"}[5m]))
++
++  - kind: Observability
++    name: observability
++    spec:
++      metrics:
++        - notifications_sent_total
++        - notifications_failed_total
++        - notification_processing_duration_seconds
+diff --git a/tests/fixtures/legacy_loader/services/pagerduty-sre-keys.yaml b/tests/fixtures/legacy_loader/services/pagerduty-sre-keys.yaml
+new file mode 100644
+index 0000000..2afe7d1
+--- /dev/null
++++ b/tests/fixtures/legacy_loader/services/pagerduty-sre-keys.yaml
+@@ -0,0 +1,31 @@
++# TEST-ONLY fixture (opensrm-wo62.4.13); no shipped example sets these keys.
++#
++# Derived from nthlayer-generate examples/services/payment-api-pagerduty-demo.yaml
++# (service block and PagerDuty resource) plus the keys generate's legacy
++# PagerDutyHandler reads (orchestration/handlers.py, PagerDutyHandler.generate):
++#   service.pagerduty.timezone, service.pagerduty.sre_escalation_policy_id,
++#   resource spec.integration_key, resource spec.sre_integration_key.
++# The two integration keys are the demo's commented-out lines, uncommented;
++# ${PAGERDUTY_*} is not a substitution variable, so it stays literal.
++
++service:
++  name: payment-api
++  team: payments
++  tier: critical
++  type: api
++  support_model: shared
++  language: java
++  framework: spring-boot
++  pagerduty:
++    timezone: Europe/Dublin
++    sre_escalation_policy_id: PSRE001
++
++resources:
++  - kind: PagerDuty
++    name: primary
++    spec:
++      integration_key: ${PAGERDUTY_INTEGRATION_KEY}
++      sre_integration_key: ${PAGERDUTY_SRE_INTEGRATION_KEY}
++      urgency: high
++      auto_resolve_timeout: 14400
++      auto_create: true
+diff --git a/tests/test_legacy_loader_overlays.py b/tests/test_legacy_loader_overlays.py
+index ba15968..d3fcbf2 100644
+--- a/tests/test_legacy_loader_overlays.py
++++ b/tests/test_legacy_loader_overlays.py
+@@ -1,5 +1,7 @@
+ """Legacy-format load: environment overlays, template expansion, ${var}
+-substitution and PagerDuty keys (opensrm-wo62.4.1, rulings D1-D4).
++substitution and PagerDuty keys (opensrm-wo62.4.1, rulings D1-D4), plus the
++PagerDuty SRE/integration keys and the Observability resource
++(opensrm-wo62.4.13, rulings P1-P5).
+ 
+ Every expected value below is derived from nthlayer-generate's legacy
+ semantics, not from nthlayer-common's implementation:
+@@ -17,7 +19,14 @@ semantics, not from nthlayer-common's implementation:
+   an invalid template file is skipped);
+ - substitution: generate specs/template.py over ServiceContext.to_dict
+   (type as authored, support_model default "self", language/framework ""
+-  when unset, env only when an environment is given; unknown left as-is).
++  when unset, env only when an environment is given; unknown left as-is);
++- PagerDuty SRE/integration keys: generate orchestration/handlers.py
++  (PagerDutyHandler.generate reads service.pagerduty.timezone and
++  .sre_escalation_policy_id, and the first PagerDuty resource's
++  spec.integration_key and spec.sre_integration_key);
++- Observability: generate orchestrator.py (ResourceDetector.detect plans a
++  dashboard when any `kind: Observability` resource exists, whatever its
++  spec).
+ 
+ The fixture tree (tests/fixtures/legacy_loader) is copied into tmp_path
+ for each test so that the .nthlayer/templates walk-up cannot reach a
+@@ -32,8 +41,14 @@ from importlib.resources import files
+ from pathlib import Path
+ 
+ import pytest
++from structlog.testing import capture_logs
+ 
+-from nthlayer_common.manifest import ManifestLoadError, PagerDutyConfig, load_manifest
++from nthlayer_common.manifest import (
++    ManifestLoadError,
++    Observability,
++    PagerDutyConfig,
++    load_manifest,
++)
+ from nthlayer_common.manifest.models import SourceFormat
+ from nthlayer_common.manifest.parser.loader import _find_template_dir
+ 
+@@ -593,6 +608,209 @@ class TestPagerDutyKeys:
+         }
+ 
+ 
++# =============================================================================
++# P1, P2, P4, P5 — PagerDuty SRE/integration keys (opensrm-wo62.4.13)
++# =============================================================================
++
++
++class TestPagerDutySreAndIntegrationKeys:
++    """The keys PagerDutyHandler.generate reads."""
++
++    def test_sre_and_integration_fields_default_to_none(self):
++        pd = PagerDutyConfig()
++        assert pd.timezone is None
++        assert pd.sre_escalation_policy_id is None
++        assert pd.integration_key is None
++        assert pd.sre_integration_key is None
++
++    def test_service_and_resource_keys_are_read(self):
++        m = _load(FIXTURES / "services" / "pagerduty-sre-keys.yaml")
++        assert m.ownership.pagerduty == PagerDutyConfig(
++            service_id=None,
++            escalation_policy_id=None,
++            urgency="high",
++            auto_resolve_timeout=14400,
++            create_escalation_policy=None,
++            timezone="Europe/Dublin",
++            sre_escalation_policy_id="PSRE001",
++            integration_key="${PAGERDUTY_INTEGRATION_KEY}",
++            sre_integration_key="${PAGERDUTY_SRE_INTEGRATION_KEY}",
++        )
++
++    def test_unset_timezone_is_not_defaulted(self):
++        # P4: generate applies America/New_York itself; common carries what
++        # was authored.
++        # The demo is the common real shape: a PagerDuty resource and no
++        # service.pagerduty. Unset is not malformed, so nothing is warned.
++        with capture_logs() as logs:
++            m = _load(FIXTURES / "services" / "payment-api-pagerduty-demo.yaml")
++        assert m.ownership.pagerduty.timezone is None
++        assert m.ownership.pagerduty.sre_escalation_policy_id is None
++        assert logs == []
++
++    def test_service_pagerduty_without_resource_builds_nothing(self, tree):
++        # P5: generate's detector plans pagerduty only for a PagerDuty
++        # resource, so service.pagerduty alone must not create a config.
++        path = tree / "pd-service-only.yaml"
++        path.write_text(
++            "service:\n  name: svc\n  team: t\n  tier: critical\n  type: api\n"
++            "  pagerduty:\n    timezone: Europe/Dublin\n"
++            "    sre_escalation_policy_id: PSRE001\n"
++        )
++        m = _load(path)
++        assert m.ownership.pagerduty is None
++
++    def test_malformed_service_pagerduty_without_resource_is_not_warned(self, tree):
++        # Unused under P5, so a malformed value is not worth a warning.
++        path = tree / "pd-malformed-unused.yaml"
++        path.write_text(
++            "service:\n  name: svc\n  team: t\n  tier: critical\n  type: api\n"
++            "  pagerduty: foo\n"
++        )
++        with capture_logs() as logs:
++            m = _load(path)
++        assert m.ownership.pagerduty is None
++        assert logs == []
++
++    def test_null_service_pagerduty_reads_as_unset(self, tree):
++        path = tree / "pd-null.yaml"
++        path.write_text(
++            "service:\n  name: svc\n  team: t\n  tier: critical\n  type: api\n"
++            "  pagerduty:\n"
++            "resources:\n  - kind: PagerDuty\n    name: primary\n"
++            "    spec:\n      urgency: high\n"
++        )
++        with capture_logs() as logs:
++            pd = _load(path).ownership.pagerduty
++        assert pd.urgency == "high"
++        assert pd.timezone is None
++        assert pd.sre_escalation_policy_id is None
++        assert logs == []
++
++    @pytest.mark.parametrize(
++        "value", ["foo", "[a, b]", "[]", "false"], ids=["scalar", "list", "empty-list", "false"]
++    )
++    def test_non_mapping_service_pagerduty_is_ignored_with_warning(self, tree, value):
++        # service.pagerduty was never read before wo62.4.13; a malformed one
++        # must not turn a load that succeeded into a crash.
++        path = tree / "pd-malformed.yaml"
++        path.write_text(
++            "service:\n  name: svc\n  team: t\n  tier: critical\n  type: api\n"
++            f"  pagerduty: {value}\n"
++            "resources:\n  - kind: PagerDuty\n    name: primary\n"
++            "    spec:\n      urgency: high\n"
++        )
++        with capture_logs() as logs:
++            pd = _load(path).ownership.pagerduty
++        assert pd.urgency == "high"
++        assert pd.timezone is None
++        assert pd.sre_escalation_policy_id is None
++        assert [e["event"] for e in logs] == ["legacy_service_pagerduty_not_mapping"]
++
++    def test_template_provided_resource_takes_service_keys(self, tree):
++        # The builtin critical-api template supplies the PagerDuty resource;
++        # the service-block keys still apply (handler reads them from
++        # service_def regardless of where the resource came from).
++        path = tree / "pd-templated.yaml"
++        path.write_text(
++            "service:\n  name: api-minimal\n  team: platform\n  tier: critical\n"
++            "  type: api\n  template: critical-api\n"
++            "  pagerduty:\n    timezone: Europe/Dublin\n"
++        )
++        pd = _load(path).ownership.pagerduty
++        assert pd.urgency == "high"  # from the template's resource
++        assert pd.timezone == "Europe/Dublin"
++
++    def test_overlay_service_pagerduty_is_merged(self, tree):
++        # The overlay deep-merges the service block (generate
++        # merge_service_config), so an env can change the timezone and keep
++        # the base's SRE policy.
++        overlay = tree / "environments" / "pagerduty-sre-keys-qa.yaml"
++        overlay.write_text(
++            "environment: qa\nservice:\n  pagerduty:\n    timezone: UTC\n"
++            "resources:\n  - kind: PagerDuty\n    name: primary\n"
++            "    spec:\n      integration_key: qa-key\n"
++        )
++        pd = _load(tree / "pagerduty-sre-keys.yaml", "qa").ownership.pagerduty
++        assert pd.timezone == "UTC"
++        assert pd.sre_escalation_policy_id == "PSRE001"
++        assert pd.integration_key == "qa-key"
++        assert pd.sre_integration_key == "${PAGERDUTY_SRE_INTEGRATION_KEY}"
++
++
++# =============================================================================
++# P3 — Observability resource (opensrm-wo62.4.13)
++# =============================================================================
++
++
++def _with_observability(tree: Path, resource_yaml: str) -> Path:
++    path = tree / "obs.yaml"
++    path.write_text(
++        "service:\n  name: obs\n  team: t\n  tier: high\n  type: worker\n"
++        "resources:\n" + resource_yaml
++    )
++    return path
++
++
++class TestObservabilityResource:
++    def test_observability_only_fixture_carries_presence(self):
++        # The legacy spec keys (metrics, logs, health) have no Observability
++        # field, so presence is all that carries; that is what the legacy
++        # dashboard detection keys on.
++        m = _load(FIXTURES / "services" / "notification-observability-only.yaml")
++        assert m.observability == Observability()
++
++    def test_no_observability_resource_is_none(self):
++        m = _load(FIXTURES / "services" / "payment-api-pagerduty-demo.yaml")
++        assert m.observability is None
++
++    def test_shared_keys_are_mapped(self, tree):
++        path = _with_observability(
++            tree,
++            "  - kind: Observability\n    name: observability\n    spec:\n"
++            "      metrics_prefix: obs\n      prometheus_job: obs-job\n"
++            "      labels:\n        env: prod\n",
++        )
++        assert _load(path).observability == Observability(
++            metrics_prefix="obs", prometheus_job="obs-job", labels={"env": "prod"}
++        )
++
++    @pytest.mark.parametrize(
++        "spec_yaml",
++        ["    spec: {}\n", "    spec:\n", ""],
++        ids=["empty", "null", "missing"],
++    )
++    def test_empty_or_missing_spec_still_carries_presence(self, tree, spec_yaml):
++        # P3: the legacy detector plans a dashboard for any Observability
++        # resource, so an empty spec must not read as "no observability".
++        path = _with_observability(
++            tree, "  - kind: Observability\n    name: observability\n" + spec_yaml
++        )
++        assert _load(path).observability == Observability()
++
++    @pytest.mark.parametrize(
++        "spec_yaml", ["    spec: [a, b]\n", "    spec: hello\n"], ids=["list", "scalar"]
++    )
++    def test_non_mapping_spec_is_presence_with_warning(self, tree, spec_yaml):
++        # The legacy detector never reads the spec, so a malformed one still
++        # plans a dashboard; common must not crash where it used to load.
++        path = _with_observability(
++            tree, "  - kind: Observability\n    name: observability\n" + spec_yaml
++        )
++        with capture_logs() as logs:
++            obs = _load(path).observability
++        assert obs == Observability()
++        assert [e["event"] for e in logs] == ["legacy_observability_spec_not_mapping"]
++
++    def test_first_observability_resource_wins(self, tree):
++        path = _with_observability(
++            tree,
++            "  - kind: Observability\n    name: a\n    spec:\n      metrics_prefix: first\n"
++            "  - kind: Observability\n    name: b\n    spec:\n      metrics_prefix: second\n",
++        )
++        assert _load(path).observability.metrics_prefix == "first"
++
++
+ # =============================================================================
+ # srm/v1 and v2 are unaffected
+ # =============================================================================
+@@ -627,6 +845,26 @@ class TestOtherFormatsUnaffected:
+             service_id="PABC123", escalation_policy_id="PEP456"
+         )
+ 
++    def test_v1_pagerduty_ignores_legacy_service_keys(self, tree):
++        # P1: the four wo62.4.13 keys are legacy-only; v1 does not define them.
++        path = tree / "v1-pd.yaml"
++        text = (FIXTURES / "srm-v1-payment-api.yaml").read_text()
++        anchor = "      escalation_policy_id: PEP456\n"
++        assert text.count(anchor) == 1
++        path.write_text(
++            text.replace(
++                anchor,
++                anchor + "      timezone: Europe/Dublin\n"
++                "      sre_escalation_policy_id: PSRE001\n"
++                "      integration_key: k\n      sre_integration_key: s\n",
++            )
++        )
++        m = _load(path)
++        assert m.source_format == SourceFormat.SRM_V1
++        assert m.ownership.pagerduty == PagerDutyConfig(
++            service_id="PABC123", escalation_policy_id="PEP456"
++        )
++
+     @pytest.mark.parametrize("name", ["../prod", "prod_eu"])
+     def test_v1_does_not_validate_environment_name(self, v1, name):
+         assert _load(v1, name).source_format == SourceFormat.SRM_V1

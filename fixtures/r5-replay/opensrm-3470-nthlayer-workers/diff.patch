@@ -1,0 +1,566 @@
+diff --git a/pyproject.toml b/pyproject.toml
+index 59bec89..1c68cad 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -9,7 +9,14 @@ description = "NthLayer workers — Tier 2 background computation (observe, meas
+ readme = "README.md"
+ requires-python = ">=3.11"
+ dependencies = [
+-    "nthlayer-common>=1.5.0,<2.0.0",
++    # >=2.1.0: foreign_yaml_reason / iter_manifest_files land there
++    # (opensrm-3470). The previous <2.0.0 ceiling was already WRONG before
++    # this change — opensrm-ih0v made spec.service.type required in 2.0.0 and
++    # this package's fixtures depend on it, so an install resolving 1.7.x
++    # would fail. CI hides that by resolving nthlayer-common from a sibling
++    # checkout rather than PyPI; anyone installing nthlayer-workers from PyPI
++    # would have hit it.
++    "nthlayer-common>=2.1.0,<3.0.0",
+     "httpx>=0.27",
+     "pyyaml>=6.0",
+     "structlog>=24.1.0",
+diff --git a/src/nthlayer_workers/learn/retrospective.py b/src/nthlayer_workers/learn/retrospective.py
+index a4dd397..7c904ab 100644
+--- a/src/nthlayer_workers/learn/retrospective.py
++++ b/src/nthlayer_workers/learn/retrospective.py
+@@ -7,14 +7,13 @@ from pathlib import Path
+ from typing import Any
+ 
+ import structlog
+-import yaml
+ from nthlayer_common.manifest import (
+     ManifestLoadError,
+     extract_declared_dependencies,
++    foreign_yaml_reason,
++    iter_manifest_files,
+     load_manifest,
+ )
+-from nthlayer_common.manifest.parser.v1 import is_srm_v1_format
+-from nthlayer_common.manifest.parser.v2 import is_opensrm_v2_format
+ from nthlayer_common.outcomes import (
+     compute_financial_impact,
+     estimate_decisions_in_window,
+@@ -233,101 +232,6 @@ def _parse_ts(ts: Any) -> datetime:
+     return dt
+ 
+ 
+-def _spec_files(specs_path: Path) -> list[Path]:
+-    """Every manifest-suffixed file directly under ``specs_path``, in a stable
+-    order.
+-
+-    Both suffixes, because ``observe/slo/spec_loader.py`` has always accepted
+-    both and a ``.yml`` manifest that this glob could not see was dropped from
+-    the financial figure with ``parse_failures == 0`` — the same silent-subset
+-    failure as opensrm-oh27, reached by file extension rather than parse error.
+-
+-    Sorted, because the duplicate-skip branch below is first-wins and would
+-    otherwise resolve on filesystem order.
+-    """
+-    return sorted(
+-        p for p in specs_path.iterdir() if p.suffix in (".yaml", ".yml")
+-    )
+-
+-
+-def _foreign_yaml_reason(spec_file: Path) -> str | None:
+-    """Why a file that failed to load should NOT count as a broken manifest.
+-
+-    ``load_manifest`` raises ``ManifestLoadError`` for any YAML it cannot parse
+-    as a manifest, including files that never claimed to be one — a
+-    ``kustomization.yaml``, a Prometheus rules file. Counting those would fire
+-    the caller's "computed over a subset" caveat on every run over a mixed
+-    directory, and a caveat that always fires stops being read. Returns None
+-    when the file was aiming at being a manifest (so the caller counts it), or
+-    a short reason when it plainly was not (so the caller drops it).
+-
+-    Evidence of intent is checked in three widening steps: the canonical v1/v2
+-    format predicates, so this cannot drift from what the parser accepts; then
+-    a near miss on those headers, since a typo'd kind or a drifted API group is
+-    an ordinary way a real manifest breaks; then the body, since a bad merge or
+-    a mis-indent can strip the header while leaving ``spec.service`` (as a
+-    mapping), ``spec.slos`` or ``spec.outcomes`` intact.
+-    Anything unreadable or empty counts too — a syntax error or a truncated
+-    write inside a specs directory is a deployment error either way.
+-
+-    The two format predicates are imported from
+-    ``nthlayer_common.manifest.parser.v1`` / ``.v2`` rather than the top-level
+-    manifest API, which exports only the path-level ``is_manifest_file``. That
+-    one re-reads and re-parses the file and swallows every exception as False
+-    — the silent-skip shape this module is removing — where these operate on
+-    the dict already in hand. Exporting them from ``nthlayer_common.manifest``
+-    is filed as a follow-up.
+-
+-    LIMIT, stated rather than deferred: this recovers intent only while
+-    evidence of intent survives. A file that has lost both its header and its
+-    body is indistinguishable in principle from any other headerless YAML
+-    mapping — both are dicts with no apiVersion, no kind, no ``spec.service``.
+-    No content heuristic separates those, and adding more markers would not
+-    change that. Such a file is dropped, recorded at debug rather than
+-    silently, and the ``manifest_file_ignored`` log is where an investigator
+-    chasing a number that looks wrong picks the trail back up.
+-    """
+-    try:
+-        data = yaml.safe_load(spec_file.read_text())
+-    except (OSError, ValueError, yaml.YAMLError):
+-        # ValueError covers UnicodeDecodeError on non-UTF-8 bytes. Too
+-        # malformed to inspect, so it counts.
+-        return None
+-    if not data:
+-        # None (zero-byte, whitespace, comments) or an empty container.
+-        return None
+-    if not isinstance(data, dict):
+-        return f"top-level YAML is {type(data).__name__}, not a mapping"
+-
+-    # "service" is the legacy pre-apiVersion shape load_manifest still accepts.
+-    if is_opensrm_v2_format(data) or is_srm_v1_format(data) or "service" in data:
+-        return None
+-
+-    api_version = data.get("apiVersion")
+-    kind = data.get("kind")
+-    near_miss = (
+-        isinstance(api_version, str)
+-        and (api_version.startswith("srm/") or "opensrm" in api_version)
+-    ) or (
+-        isinstance(kind, str)
+-        and kind.startswith(("ServiceManifest", "ServiceReliabilityManifest"))
+-    )
+-    if near_miss:
+-        return None
+-
+-    # Header gone, body may not be. `spec.service` as a *mapping* is the
+-    # discriminator: OpenSLO also carries `spec.service`, but as a string.
+-    spec = data.get("spec")
+-    if isinstance(spec, dict) and (
+-        isinstance(spec.get("service"), dict)
+-        or isinstance(spec.get("slos"), list)
+-        or isinstance(spec.get("outcomes"), dict)
+-    ):
+-        return None
+-
+-    return f"no manifest markers (apiVersion={api_version!r}, kind={kind!r})"
+-
+-
+ @dataclass(frozen=True)
+ class LoadedManifests:
+     """Outcome of scanning a specs directory (opensrm-oh27).
+@@ -375,11 +279,11 @@ def _load_manifests_from_specs(specs_dir: str | None) -> LoadedManifests:
+ 
+     manifests: dict[str, Any] = {}
+     parse_failures = 0
+-    for spec_file in _spec_files(specs_path):
++    for spec_file in iter_manifest_files(specs_path):
+         try:
+             manifest = load_manifest(str(spec_file))
+         except (ManifestLoadError, UnicodeDecodeError) as exc:
+-            foreign_reason = _foreign_yaml_reason(spec_file)
++            foreign_reason = foreign_yaml_reason(spec_file)
+             if foreign_reason is not None:
+                 # Foreign YAML sharing the directory, not a broken manifest.
+                 # Recorded rather than dropped without trace — skipping
+diff --git a/src/nthlayer_workers/observe/cli.py b/src/nthlayer_workers/observe/cli.py
+index 115a26b..8e3c461 100644
+--- a/src/nthlayer_workers/observe/cli.py
++++ b/src/nthlayer_workers/observe/cli.py
+@@ -11,9 +11,27 @@ from pathlib import Path
+ 
+ from nthlayer_common.errors import main_with_error_handling
+ 
++from nthlayer_workers.observe.slo.spec_loader import LoadedSpecs
++
+ _log = logging.getLogger(__name__)
+ 
+ 
++
++def _warn_parse_failures(loaded: LoadedSpecs, specs_dir: str) -> None:
++    """Tell the operator when the SLOs below cover only part of the directory.
++
++    Surfaced rather than only logged: whoever is reading SLO output is the
++    one who needs to know the view is partial, and a warning in a log they
++    are not tailing does not reach them (opensrm-3470).
++    """
++    if loaded.parse_failures:
++        print(
++            f"Warning: {loaded.parse_failures} manifest(s) in {specs_dir} "
++            f"failed to parse and were not evaluated",
++            file=sys.stderr,
++        )
++
++
+ def _add_decision_store_args(parser: argparse.ArgumentParser) -> None:
+     """Add --decision-store and --legacy-store flags to a subcommand parser."""
+     parser.add_argument(
+@@ -79,7 +97,9 @@ def _cmd_collect(args: argparse.Namespace) -> int:
+     from nthlayer_workers.observe.slo.spec_loader import load_specs
+     from nthlayer_workers.observe.sqlite_store import SQLiteAssessmentStore
+ 
+-    service_slos = load_specs(args.specs_dir)
++    loaded = load_specs(args.specs_dir)
++    service_slos = loaded.service_slos
++    _warn_parse_failures(loaded, args.specs_dir)
+     if not service_slos:
+         print("No SLO definitions found in specs directory", file=sys.stderr)
+         return 0
+@@ -193,7 +213,9 @@ def _cmd_verify(args: argparse.Namespace) -> int:
+     from nthlayer_workers.observe.verification.extractor import Resource, extract_metric_contract
+     from nthlayer_workers.observe.verification.verifier import MetricVerifier
+ 
+-    service_slos = load_specs(args.specs_dir)
++    loaded = load_specs(args.specs_dir)
++    service_slos = loaded.service_slos
++    _warn_parse_failures(loaded, args.specs_dir)
+     if not service_slos:
+         print("No SLO definitions found in specs directory", file=sys.stderr)
+         return 0
+diff --git a/src/nthlayer_workers/observe/slo/spec_loader.py b/src/nthlayer_workers/observe/slo/spec_loader.py
+index b35adbc..ac12f27 100644
+--- a/src/nthlayer_workers/observe/slo/spec_loader.py
++++ b/src/nthlayer_workers/observe/slo/spec_loader.py
+@@ -6,35 +6,86 @@ SLODefinition class is deleted — use nthlayer_common.manifest.models.SLODefini
+ 
+ from __future__ import annotations
+ 
++from dataclasses import dataclass, field
+ from pathlib import Path
+ 
+-from nthlayer_common.manifest import ManifestLoadError, load_manifest
++import structlog
++from nthlayer_common.manifest import (
++    ManifestLoadError,
++    foreign_yaml_reason,
++    iter_manifest_files,
++    load_manifest,
++)
+ 
+ from nthlayer_workers.observe.slo.collector import ServiceSLO
+ 
++log = structlog.get_logger(__name__)
+ 
+-def load_specs(specs_dir: str | Path) -> list[ServiceSLO]:
++
++@dataclass(frozen=True)
++class LoadedSpecs:
++    """Outcome of scanning a specs directory (opensrm-3470).
++
++    ``parse_failures`` counts FILES that failed to load while aiming to be a
++    manifest — not services missing from ``service_slos``, and not foreign
++    YAML sharing the directory.
++
++    It travels with the SLOs because every downstream consumer evaluates
++    ``service_slos`` alone: without the count, a service whose manifest
++    failed to parse contributes zero SLOs and is indistinguishable from a
++    service that declares none. The SLOs that would have breached are simply
++    never evaluated, and nothing says so. The per-file
++    ``spec_parse_failed`` warning carries which file and why.
++    """
++
++    service_slos: list[ServiceSLO] = field(default_factory=list)
++    parse_failures: int = 0
++
++
++def load_specs(specs_dir: str | Path) -> LoadedSpecs:
+     """Load OpenSRM specs from a directory and extract ServiceSLO pairs.
+ 
+-    Reads all .yaml/.yml files, skips non-manifest files silently.
+-    Returns a flat list of ServiceSLO across all specs.
++    Reads every ``.yaml``/``.yml`` file. A file that fails to load is
++    logged and counted when it was aiming to be a manifest, and recorded at
++    debug when it plainly was not — a ``kustomization.yaml`` or a Prometheus
++    rules file sharing the directory is not a broken manifest, and counting
++    those would fire a coverage caveat on every mixed-directory run.
++
++    The distinction is ``nthlayer_common.manifest.foreign_yaml_reason``,
++    shared with the retrospective path (opensrm-oh27) rather than
++    reimplemented here.
++
++    Returns a :class:`LoadedSpecs` rather than a bare list, so callers can
++    tell a partial view from a complete one.
+     """
+     specs_path = Path(specs_dir)
+     if not specs_path.is_dir():
+         raise ValueError(f"Specs directory does not exist: {specs_dir}")
+ 
+     results: list[ServiceSLO] = []
++    parse_failures = 0
+ 
+-    for path in sorted(specs_path.iterdir()):
+-        if path.suffix not in (".yaml", ".yml"):
+-            continue
+-
++    for path in iter_manifest_files(specs_path):
+         try:
+             manifest = load_manifest(path, suppress_deprecation_warning=True)
+-        except (ManifestLoadError, FileNotFoundError, ValueError, OSError):
++        except (ManifestLoadError, FileNotFoundError, ValueError, OSError) as exc:
++            # The handler stays broad deliberately: ValueError covers both
++            # UnicodeDecodeError on non-UTF-8 bytes and ReliabilityManifest's
++            # own validation (an invalid tier or type), and a manifest
++            # rejected for either reason is still a manifest that failed to
++            # load. What changes is that it is no longer swallowed.
++            reason = foreign_yaml_reason(path)
++            if reason is not None:
++                # Foreign YAML sharing the directory. Recorded rather than
++                # dropped without trace — skipping without saying so is the
++                # shape opensrm-3470 exists to remove.
++                log.debug("spec_file_ignored", spec_file=str(path), reason=reason)
++                continue
++            parse_failures += 1
++            log.warning("spec_parse_failed", spec_file=str(path), error=str(exc))
+             continue
+ 
+         for slo in manifest.slos:
+             results.append(ServiceSLO(service=manifest.name, slo=slo))
+ 
+-    return results
++    return LoadedSpecs(service_slos=results, parse_failures=parse_failures)
+diff --git a/tests/learn/test_retrospective_manifest_failures.py b/tests/learn/test_retrospective_manifest_failures.py
+index d766ef7..3902912 100644
+--- a/tests/learn/test_retrospective_manifest_failures.py
++++ b/tests/learn/test_retrospective_manifest_failures.py
+@@ -350,9 +350,9 @@ class TestEmptyAndAmbiguousFiles:
+         ``FileNotFoundError`` out of ``load_manifest`` instead, which this
+         does not cover and does not claim to.
+         """
+-        from nthlayer_workers.learn.retrospective import _foreign_yaml_reason
++        from nthlayer_common.manifest import foreign_yaml_reason
+ 
+-        assert _foreign_yaml_reason(tmp_path / "vanished.yaml") is None
++        assert foreign_yaml_reason(tmp_path / "vanished.yaml") is None
+ 
+     def test_non_utf8_file_is_counted(self, tmp_path: Path):
+         """`load_manifest` opens with the default encoding and only wraps
+@@ -551,3 +551,35 @@ class TestDropsAreRecorded:
+         assert ignored[0]["log_level"] == "debug"
+         assert ignored[0]["spec_file"].endswith("kustomization.yaml")
+         assert ignored[0]["reason"]
++
++
++class TestGateIsNotDuplicated:
++    """opensrm-3470 promoted the gate to nthlayer-common. This module must
++    USE it, not keep a copy.
++
++    Two copies of a heuristic gate is the drift surface the promotion exists
++    to close: they are logic-identical today, and the way that stops being
++    true is a fix landing in one of them. Asserting identity rather than
++    equal behaviour is deliberate — behaviour tests would keep passing right
++    up until they diverged.
++    """
++
++    def test_retrospective_uses_the_shared_gate(self):
++        from nthlayer_common.manifest import foreign_yaml_reason as shared
++
++        from nthlayer_workers.learn import retrospective
++
++        assert retrospective.foreign_yaml_reason is shared, (
++            "retrospective must import the shared gate, not define its own"
++        )
++        assert not hasattr(retrospective, "_foreign_yaml_reason"), (
++            "the local copy of the gate should be deleted, not kept alongside"
++        )
++
++    def test_retrospective_uses_the_shared_file_lister(self):
++        from nthlayer_common.manifest import iter_manifest_files as shared
++
++        from nthlayer_workers.learn import retrospective
++
++        assert retrospective.iter_manifest_files is shared
++        assert not hasattr(retrospective, "_spec_files")
+diff --git a/tests/observe/test_slo_spec_loader.py b/tests/observe/test_slo_spec_loader.py
+index 3856774..19827f1 100644
+--- a/tests/observe/test_slo_spec_loader.py
++++ b/tests/observe/test_slo_spec_loader.py
+@@ -32,12 +32,12 @@ class TestLoadSpecs:
+         })
+         (tmp_path / "payment.yaml").write_text(yaml.dump(spec))
+ 
+-        results = load_specs(tmp_path)
+-        assert len(results) == 2
+-        assert all(isinstance(r, ServiceSLO) for r in results)
+-        assert results[0].service == "payment-api"
+-        assert results[0].slo.name == "availability"
+-        assert results[0].slo.target == 99.95
++        result = load_specs(tmp_path)
++        assert len(result.service_slos) == 2
++        assert all(isinstance(r, ServiceSLO) for r in result.service_slos)
++        assert result.service_slos[0].service == "payment-api"
++        assert result.service_slos[0].slo.name == "availability"
++        assert result.service_slos[0].slo.target == 99.95
+ 
+     def test_loads_srm_v1_api_version(self, tmp_path):
+         spec = {
+@@ -51,8 +51,8 @@ class TestLoadSpecs:
+         }
+         (tmp_path / "svc.yaml").write_text(yaml.dump(spec))
+ 
+-        results = load_specs(tmp_path)
+-        assert len(results) == 1
++        result = load_specs(tmp_path)
++        assert len(result.service_slos) == 1
+ 
+     def test_skips_non_srm_files(self, tmp_path):
+         (tmp_path / "prometheus.yaml").write_text(
+@@ -61,28 +61,33 @@ class TestLoadSpecs:
+         spec = _valid_spec("svc", {"avail": {"target": 99.9, "window": "7d"}})
+         (tmp_path / "valid.yaml").write_text(yaml.dump(spec))
+ 
+-        results = load_specs(tmp_path)
+-        assert len(results) == 1
+-        assert results[0].service == "svc"
++        result = load_specs(tmp_path)
++        assert len(result.service_slos) == 1
++        assert result.service_slos[0].service == "svc"
+ 
+     def test_skips_non_yaml_files(self, tmp_path):
+         (tmp_path / "readme.md").write_text("# Specs")
+         (tmp_path / "data.json").write_text("{}")
+-        results = load_specs(tmp_path)
+-        assert results == []
++        result = load_specs(tmp_path)
++        assert result.service_slos == []
+ 
+     def test_empty_directory(self, tmp_path):
+-        results = load_specs(tmp_path)
+-        assert results == []
++        result = load_specs(tmp_path)
++        assert result.service_slos == []
+ 
+     def test_nonexistent_directory_raises(self):
+         with pytest.raises(ValueError, match="does not exist"):
+             load_specs("/nonexistent/path")
+ 
+-    def test_skips_malformed_yaml(self, tmp_path):
++    def test_malformed_yaml_yields_no_slos_and_is_counted(self, tmp_path):
++        """Renamed from test_skips_malformed_yaml: since opensrm-3470 it is
++        not skipped, it is COUNTED. A syntax error inside a specs directory
++        is a deployment error, and the old name would be read as a live
++        contract that it no longer is."""
+         (tmp_path / "bad.yaml").write_text("{{invalid yaml:")
+-        results = load_specs(tmp_path)
+-        assert results == []
++        result = load_specs(tmp_path)
++        assert result.parse_failures == 1
++        assert result.service_slos == []
+ 
+     def test_skips_spec_without_metadata_name(self, tmp_path):
+         spec = {
+@@ -94,8 +99,8 @@ class TestLoadSpecs:
+             },
+         }
+         (tmp_path / "no-name.yaml").write_text(yaml.dump(spec))
+-        results = load_specs(tmp_path)
+-        assert results == []
++        result = load_specs(tmp_path)
++        assert result.service_slos == []
+ 
+     def test_skips_spec_without_slos(self, tmp_path):
+         spec = {
+@@ -104,17 +109,17 @@ class TestLoadSpecs:
+             "spec": {"type": "api"},
+         }
+         (tmp_path / "no-slos.yaml").write_text(yaml.dump(spec))
+-        results = load_specs(tmp_path)
+-        assert results == []
++        result = load_specs(tmp_path)
++        assert result.service_slos == []
+ 
+     def test_multiple_specs_multiple_services(self, tmp_path):
+         for name in ("svc-a", "svc-b"):
+             spec = _valid_spec(name, {"avail": {"target": 99.9, "window": "30d"}})
+             (tmp_path / f"{name}.yaml").write_text(yaml.dump(spec))
+ 
+-        results = load_specs(tmp_path)
+-        assert len(results) == 2
+-        services = {r.service for r in results}
++        result = load_specs(tmp_path)
++        assert len(result.service_slos) == 2
++        services = {r.service for r in result.service_slos}
+         assert services == {"svc-a", "svc-b"}
+ 
+ 
+@@ -127,3 +132,89 @@ class TestServiceSLO:
+         assert item.service == "svc"
+         assert item.slo.name == "avail"
+         assert item.slo.target == 99.9
++
++
++class TestParseFailuresAreVisible:
++    """opensrm-3470 — the observe path was measuring a subset in silence.
++
++    load_specs swallowed ManifestLoadError, FileNotFoundError, ValueError and
++    OSError with a bare `continue`. A service whose manifest failed to parse
++    contributed zero SLOs and was indistinguishable from one declaring none,
++    so the SLOs that would have breached were simply never evaluated.
++
++    Same failure shape as opensrm-oh27's financial figure, one subsystem over.
++    """
++
++    def _broken(self, tmp_path):
++        # Aims at being a manifest (v1 header) and fails: tier is invalid, so
++        # ReliabilityManifest.__post_init__ raises ValueError, which the old
++        # handler swallowed along with everything else.
++        (tmp_path / "broken.yaml").write_text(yaml.dump({
++            "apiVersion": "srm/v1",
++            "kind": "ServiceReliabilityManifest",
++            "metadata": {"name": "svc", "team": "t", "tier": "nonexistent-tier"},
++            "spec": {"type": "api", "slos": {"a": {"target": 99.9, "window": "7d"}}},
++        }))
++
++    def test_a_broken_manifest_is_counted(self, tmp_path):
++        self._broken(tmp_path)
++        spec = _valid_spec("good", {"avail": {"target": 99.9, "window": "7d"}})
++        (tmp_path / "good.yaml").write_text(yaml.dump(spec))
++
++        result = load_specs(tmp_path)
++
++        assert len(result.service_slos) == 1, "the good manifest still loads"
++        assert result.parse_failures == 1, (
++            "a manifest that failed to parse must reach the caller as a count; "
++            "without it a partial view is indistinguishable from a complete one"
++        )
++
++    def test_a_broken_manifest_is_logged_with_its_path(self, tmp_path):
++        """Asserted on the structured event, not on captured text — the log is
++        a data contract for whoever investigates a number that looks wrong."""
++        import structlog
++
++        self._broken(tmp_path)
++
++        with structlog.testing.capture_logs() as logs:
++            load_specs(tmp_path)
++
++        failures = [e for e in logs if e["event"] == "spec_parse_failed"]
++        assert len(failures) == 1
++        assert failures[0]["log_level"] == "warning"
++        assert failures[0]["spec_file"].endswith("broken.yaml")
++        assert failures[0]["error"]
++
++    def test_foreign_yaml_is_not_counted_as_a_failure(self, tmp_path):
++        """A prometheus rules file sharing the directory is not a broken
++        manifest. Counting it would fire the caller's coverage caveat on every
++        mixed-directory run, and a caveat that always fires stops being read."""
++        (tmp_path / "prometheus.yaml").write_text(
++            yaml.dump({"groups": [{"name": "g", "rules": []}]})
++        )
++        spec = _valid_spec("good", {"avail": {"target": 99.9, "window": "7d"}})
++        (tmp_path / "good.yaml").write_text(yaml.dump(spec))
++
++        result = load_specs(tmp_path)
++
++        assert len(result.service_slos) == 1
++        assert result.parse_failures == 0
++
++    def test_yml_manifests_are_loaded(self, tmp_path):
++        """`.yml` was already handled here, unlike opensrm-oh27's path — this
++        pins it so the shared lister cannot regress it."""
++        spec = _valid_spec("svc", {"avail": {"target": 99.9, "window": "7d"}})
++        (tmp_path / "svc.yml").write_text(yaml.dump(spec))
++
++        result = load_specs(tmp_path)
++
++        assert len(result.service_slos) == 1
++        assert result.service_slos[0].service == "svc"
++
++    def test_clean_directory_reports_zero_failures(self, tmp_path):
++        spec = _valid_spec("svc", {"avail": {"target": 99.9, "window": "7d"}})
++        (tmp_path / "svc.yaml").write_text(yaml.dump(spec))
++
++        result = load_specs(tmp_path)
++
++        assert result.parse_failures == 0

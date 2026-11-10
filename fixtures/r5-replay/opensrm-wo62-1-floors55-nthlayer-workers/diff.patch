@@ -1,0 +1,3380 @@
+diff --git a/.release-please-manifest.json b/.release-please-manifest.json
+index 6fa3b72..015c662 100644
+--- a/.release-please-manifest.json
++++ b/.release-please-manifest.json
+@@ -1 +1 @@
+-{".":"4.2.0"}
++{".":"3.0.3"}
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index 9fedd01..e8623e8 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -6,124 +6,6 @@ across the ecosystem under the v1.5 epic plan; we did not reconstruct phase-by-p
+ git history because that history did not exist as commits at the time the work
+ was being done. This narrative is the honest substitute.
+ 
+-## [4.2.0](https://github.com/rsionnach/nthlayer-workers/compare/v4.1.1...v4.2.0) (2026-11-07)
+-
+-
+-### Features
+-
+-* **measure:** evaluate every classical SLO from its error budget [opensrm-zo0o]; throughput, freshness, lag and custom SLOs are reported not evaluable. **Requires nthlayer-generate >= 4.1.0 recording rules**: on older rules latency and error_rate SLOs read no data (see docs/upgrading-4.0.md, section 4.2) ([0a4e93e](https://github.com/rsionnach/nthlayer-workers/commit/0a4e93e33c2b7a2794c67ac6330a9d8b95fb719b))
+-
+-
+-### Bug Fixes
+-
+-
+-## [4.1.1](https://github.com/rsionnach/nthlayer-workers/compare/v4.1.0...v4.1.1) (2026-11-04)
+-
+-
+-### Bug Fixes
+-
+-* require nthlayer-common 5.12.0 ([3509382](https://github.com/rsionnach/nthlayer-workers/commit/3509382636c3951c9ac9f5d9d1c2fed288f3fcb1))
+-
+-## [4.1.0](https://github.com/rsionnach/nthlayer-workers/compare/v4.0.2...v4.1.0) (2026-11-03)
+-
+-
+-### Features
+-
+-* **measure:** emit telemetry as OTel log records [opensrm-quqo]; to export them, set an OTLP gRPC endpoint (see docs/upgrading-4.0.md) ([ddda1e8](https://github.com/rsionnach/nthlayer-workers/commit/ddda1e8dc28874dfd2eac5ce597ce331228d0736))
+-
+-
+-### Bug Fixes
+-
+-* require nthlayer-common 5.11.0 ([a0276ad](https://github.com/rsionnach/nthlayer-workers/commit/a0276ad840a0a4ce60da014c885be11d3cbeb6ae))
+-
+-## [4.0.2](https://github.com/rsionnach/nthlayer-workers/compare/v4.0.1...v4.0.2) (2026-11-02)
+-
+-
+-### Bug Fixes
+-
+-* require nthlayer-common 5.10.1 ([5265cfb](https://github.com/rsionnach/nthlayer-workers/commit/5265cfb9d9eba343858ce71f319699d3f79a866e))
+-* require nthlayer-common 5.10.1 ([a050ee1](https://github.com/rsionnach/nthlayer-workers/commit/a050ee1e14039f85a194370a6ed5b51b08d747a5))
+-
+-## [4.0.1](https://github.com/rsionnach/nthlayer-workers/compare/v4.0.0...v4.0.1) (2026-11-02)
+-
+-
+-### Bug Fixes
+-
+-* **measure:** read the error-budget series generate writes (opensrm-h0at) ([b102aee](https://github.com/rsionnach/nthlayer-workers/commit/b102aee76bfffafa18f4bd43c00cf3477ee9e837))
+-* **measure:** read the error-budget series generate writes (opensrm-h0at) ([d5fd87d](https://github.com/rsionnach/nthlayer-workers/commit/d5fd87d4a3168f8993ca927afc83ec26261367d4))
+-* require nthlayer-common 5.10.0 ([1fa7967](https://github.com/rsionnach/nthlayer-workers/commit/1fa7967efc541c5ac8e547b4a0eef4360d8f8d79))
+-* require nthlayer-common 5.10.0 ([9ad3f0e](https://github.com/rsionnach/nthlayer-workers/commit/9ad3f0e616c777b185cda4688cc8c22dfe1bc609))
+-
+-## [4.0.0](https://github.com/rsionnach/nthlayer-workers/compare/v3.0.10...v4.0.0) (2026-11-01)
+-
+-
+-### ⚠ BREAKING CHANGES
+-
+-* every OTel event the measure module emits is renamed. gen_ai.decision.evaluated becomes one gen_ai.evaluation.result per scored dimension (nthlayer.evaluator.kind=implementation) plus one nthlayer.evaluation.completed summary per evaluation; auto-approved outputs emit the summary only. gen_ai.override.applied becomes a gen_ai.evaluation.result with nthlayer.evaluator.kind=human. gen_ai.calibration.report becomes nthlayer.calibration.report and gen_ai.agent.state.changed becomes nthlayer.autonomy.changed. Attribute keys move to gen_ai.evaluation.*, gen_ai.agent.name and nthlayer.*; see docs/upgrading-4.0.md. LLM-call events now report a derived gen_ai.provider.name instead of "unknown" for bare model names.
+-
+-### Bug Fixes
+-
+-* measure telemetry follows OpenSRM Addendum A1 (opensrm-ju8r) ([c195c49](https://github.com/rsionnach/nthlayer-workers/commit/c195c49c43b7521b098190d8e65f1d8d3a5e776b))
+-* report the LLM provider derived from the model, not "unknown" (opensrm-ju8r) ([7c32022](https://github.com/rsionnach/nthlayer-workers/commit/7c320229e6d26fd35b93a49255886a7ad3f27461))
+-* workers telemetry uses OpenSRM A1 event names (opensrm-ju8r) ([1fa2edb](https://github.com/rsionnach/nthlayer-workers/commit/1fa2edbb09a59855f26c97c4886e10aca9feba0c))
+-
+-## [3.0.10](https://github.com/rsionnach/nthlayer-workers/compare/v3.0.9...v3.0.10) (2026-11-01)
+-
+-
+-### Bug Fixes
+-
+-* require nthlayer-common 5.9.1 ([b5ba803](https://github.com/rsionnach/nthlayer-workers/commit/b5ba803f9d651deaea1e6d5a2a05ca6a2ff4b55c))
+-* require nthlayer-common 5.9.1 ([603ba90](https://github.com/rsionnach/nthlayer-workers/commit/603ba9099793e6d43daa0c2ae599608423a1b3ae))
+-
+-## [3.0.9](https://github.com/rsionnach/nthlayer-workers/compare/v3.0.8...v3.0.9) (2026-11-01)
+-
+-
+-### Bug Fixes
+-
+-* require nthlayer-common 5.9.0 ([99f6d3d](https://github.com/rsionnach/nthlayer-workers/commit/99f6d3db79375e57703750c6ddb1ae95ce889da9))
+-* require nthlayer-common 5.9.0 ([fea595e](https://github.com/rsionnach/nthlayer-workers/commit/fea595e7d0a68ad63bd3ca50580f12d8a3051149))
+-
+-## [3.0.8](https://github.com/rsionnach/nthlayer-workers/compare/v3.0.7...v3.0.8) (2026-10-31)
+-
+-
+-### Bug Fixes
+-
+-* require nthlayer-common 5.8.1 ([b0a9d65](https://github.com/rsionnach/nthlayer-workers/commit/b0a9d65c5e829b9cbb497ab8096070ac1dea4776))
+-* require nthlayer-common 5.8.1 ([7873180](https://github.com/rsionnach/nthlayer-workers/commit/7873180e5f52616b2a5e8e802af7c009c72500ff))
+-
+-## [3.0.7](https://github.com/rsionnach/nthlayer-workers/compare/v3.0.6...v3.0.7) (2026-10-31)
+-
+-
+-### Bug Fixes
+-
+-* ship the Apache-2.0 LICENSE and declare it in package metadata (opensrm-bqfj) ([aa1aefa](https://github.com/rsionnach/nthlayer-workers/commit/aa1aefa3dfe9d326f5711bdfebcd3032c1621b5f))
+-* ship the Apache-2.0 LICENSE and declare it in package metadata (opensrm-bqfj) ([b8ca392](https://github.com/rsionnach/nthlayer-workers/commit/b8ca39284abccd8d9d2e5862029e3da090c0f0af))
+-
+-## [3.0.6](https://github.com/rsionnach/nthlayer-workers/compare/v3.0.5...v3.0.6) (2026-10-29)
+-
+-
+-### Bug Fixes
+-
+-* require nthlayer-common 5.8.0 (opensrm-wo62.4.13) ([5b12aba](https://github.com/rsionnach/nthlayer-workers/commit/5b12aba06395e3ca30e56e8789eead903d975670))
+-* require nthlayer-common 5.8.0 (opensrm-wo62.4.13) ([bda52c3](https://github.com/rsionnach/nthlayer-workers/commit/bda52c37b42dd5a868fdbba98c5a91ebf207a34f))
+-
+-## [3.0.5](https://github.com/rsionnach/nthlayer-workers/compare/v3.0.4...v3.0.5) (2026-10-28)
+-
+-
+-### Bug Fixes
+-
+-* require nthlayer-common 5.6.0 (opensrm-wo62.4.1) ([36dbfc7](https://github.com/rsionnach/nthlayer-workers/commit/36dbfc7a0ad1955ac1e4839d5f36c822074a37c6))
+-* require nthlayer-common 5.6.0 (opensrm-wo62.4.1) ([3ba6b1c](https://github.com/rsionnach/nthlayer-workers/commit/3ba6b1cb6f4a033cbdaa21770cd965767da17f6b))
+-* require nthlayer-common 5.7.0 (opensrm-wo62.4.7) ([ddb84a2](https://github.com/rsionnach/nthlayer-workers/commit/ddb84a267237000caa7d47bd651f78542c2dce72))
+-* require nthlayer-common 5.7.0 (opensrm-wo62.4.7) ([68f9f60](https://github.com/rsionnach/nthlayer-workers/commit/68f9f60a0df9331de040c2fc08d8e67e891f2c69))
+-
+-## [3.0.4](https://github.com/rsionnach/nthlayer-workers/compare/v3.0.3...v3.0.4) (2026-10-27)
+-
+-
+-### Dependencies
+-
+-* require nthlayer-common 5.5.0 (opensrm-wo62.1) ([85feea9](https://github.com/rsionnach/nthlayer-workers/commit/85feea981028961a4957e53884c4f040d8638178))
+-
+ ## [3.0.3](https://github.com/rsionnach/nthlayer-workers/compare/v3.0.2...v3.0.3) (2026-10-24)
+ 
+ 
+diff --git a/LICENSE b/LICENSE
+deleted file mode 100644
+index b485d9a..0000000
+--- a/LICENSE
++++ /dev/null
+@@ -1,190 +0,0 @@
+-                                 Apache License
+-                           Version 2.0, January 2004
+-                        http://www.apache.org/licenses/
+-
+-   TERMS AND CONDITIONS FOR USE, REPRODUCTION, AND DISTRIBUTION
+-
+-   1. Definitions.
+-
+-      "License" shall mean the terms and conditions for use, reproduction,
+-      and distribution as defined by Sections 1 through 9 of this document.
+-
+-      "Licensor" shall mean the copyright owner or entity authorized by
+-      the copyright owner that is granting the License.
+-
+-      "Legal Entity" shall mean the union of the acting entity and all
+-      other entities that control, are controlled by, or are under common
+-      control with that entity. For the purposes of this definition,
+-      "control" means (i) the power, direct or indirect, to cause the
+-      direction or management of such entity, whether by contract or
+-      otherwise, or (ii) ownership of fifty percent (50%) or more of the
+-      outstanding shares, or (iii) beneficial ownership of such entity.
+-
+-      "You" (or "Your") shall mean an individual or Legal Entity
+-      exercising permissions granted by this License.
+-
+-      "Source" form shall mean the preferred form for making modifications,
+-      including but not limited to software source code, documentation
+-      source, and configuration files.
+-
+-      "Object" form shall mean any form resulting from mechanical
+-      transformation or translation of a Source form, including but
+-      not limited to compiled object code, generated documentation,
+-      and conversions to other media types.
+-
+-      "Work" shall mean the work of authorship, whether in Source or
+-      Object form, made available under the License, as indicated by a
+-      copyright notice that is included in or attached to the work
+-      (an example is provided in the Appendix below).
+-
+-      "Derivative Works" shall mean any work, whether in Source or Object
+-      form, that is based on (or derived from) the Work and for which the
+-      editorial revisions, annotations, elaborations, or other modifications
+-      represent, as a whole, an original work of authorship. For the purposes
+-      of this License, Derivative Works shall not include works that remain
+-      separable from, or merely link (or bind by name) to the interfaces of,
+-      the Work and Derivative Works thereof.
+-
+-      "Contribution" shall mean any work of authorship, including
+-      the original version of the Work and any modifications or additions
+-      to that Work or Derivative Works thereof, that is intentionally
+-      submitted to the Licensor for inclusion in the Work by the copyright owner
+-      or by an individual or Legal Entity authorized to submit on behalf of
+-      the copyright owner. For the purposes of this definition, "submitted"
+-      means any form of electronic, verbal, or written communication sent
+-      to the Licensor or its representatives, including but not limited to
+-      communication on electronic mailing lists, source code control systems,
+-      and issue tracking systems that are managed by, or on behalf of, the
+-      Licensor for the purpose of discussing and improving the Work, but
+-      excluding communication that is conspicuously marked or otherwise
+-      designated in writing by the copyright owner as "Not a Contribution."
+-
+-      "Contributor" shall mean Licensor and any individual or Legal Entity
+-      on behalf of whom a Contribution has been received by Licensor and
+-      subsequently incorporated within the Work.
+-
+-   2. Grant of Copyright License. Subject to the terms and conditions of
+-      this License, each Contributor hereby grants to You a perpetual,
+-      worldwide, non-exclusive, no-charge, royalty-free, irrevocable
+-      copyright license to reproduce, prepare Derivative Works of,
+-      publicly display, publicly perform, sublicense, and distribute the
+-      Work and such Derivative Works in Source or Object form.
+-
+-   3. Grant of Patent License. Subject to the terms and conditions of
+-      this License, each Contributor hereby grants to You a perpetual,
+-      worldwide, non-exclusive, no-charge, royalty-free, irrevocable
+-      (except as stated in this section) patent license to make, have made,
+-      use, offer to sell, sell, import, and otherwise transfer the Work,
+-      where such license applies only to those patent claims licensable
+-      by such Contributor that are necessarily infringed by their
+-      Contribution(s) alone or by combination of their Contribution(s)
+-      with the Work to which such Contribution(s) was submitted. If You
+-      institute patent litigation against any entity (including a
+-      cross-claim or counterclaim in a lawsuit) alleging that the Work
+-      or a Contribution incorporated within the Work constitutes direct
+-      or contributory patent infringement, then any patent licenses
+-      granted to You under this License for that Work shall terminate
+-      as of the date such litigation is filed.
+-
+-   4. Redistribution. You may reproduce and distribute copies of the
+-      Work or Derivative Works thereof in any medium, with or without
+-      modifications, and in Source or Object form, provided that You
+-      meet the following conditions:
+-
+-      (a) You must give any other recipients of the Work or
+-          Derivative Works a copy of this License; and
+-
+-      (b) You must cause any modified files to carry prominent notices
+-          stating that You changed the files; and
+-
+-      (c) You must retain, in the Source form of any Derivative Works
+-          that You distribute, all copyright, patent, trademark, and
+-          attribution notices from the Source form of the Work,
+-          excluding those notices that do not pertain to any part of
+-          the Derivative Works; and
+-
+-      (d) If the Work includes a "NOTICE" text file as part of its
+-          distribution, then any Derivative Works that You distribute must
+-          include a readable copy of the attribution notices contained
+-          within such NOTICE file, excluding those notices that do not
+-          pertain to any part of the Derivative Works, in at least one
+-          of the following places: within a NOTICE text file distributed
+-          as part of the Derivative Works; within the Source form or
+-          documentation, if provided along with the Derivative Works; or,
+-          within a display generated by the Derivative Works, if and
+-          wherever such third-party notices normally appear. The contents
+-          of the NOTICE file are for informational purposes only and
+-          do not modify the License. You may add Your own attribution
+-          notices within Derivative Works that You distribute, alongside
+-          or as an addendum to the NOTICE text from the Work, provided
+-          that such additional attribution notices cannot be construed
+-          as modifying the License.
+-
+-      You may add Your own copyright statement to Your modifications and
+-      may provide additional or different license terms and conditions
+-      for use, reproduction, or distribution of Your modifications, or
+-      for any such Derivative Works as a whole, provided Your use,
+-      reproduction, and distribution of the Work otherwise complies with
+-      the conditions stated in this License.
+-
+-   5. Submission of Contributions. Unless You explicitly state otherwise,
+-      any Contribution intentionally submitted for inclusion in the Work
+-      by You to the Licensor shall be under the terms and conditions of
+-      this License, without any additional terms or conditions.
+-      Notwithstanding the above, nothing herein shall supersede or modify
+-      the terms of any separate license agreement you may have executed
+-      with Licensor regarding such Contributions.
+-
+-   6. Trademarks. This License does not grant permission to use the trade
+-      names, trademarks, service marks, or product names of the Licensor,
+-      except as required for reasonable and customary use in describing the
+-      origin of the Work and reproducing the content of the NOTICE file.
+-
+-   7. Disclaimer of Warranty. Unless required by applicable law or
+-      agreed to in writing, Licensor provides the Work (and each
+-      Contributor provides its Contributions) on an "AS IS" BASIS,
+-      WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+-      implied, including, without limitation, any warranties or conditions
+-      of TITLE, NON-INFRINGEMENT, MERCHANTABILITY, or FITNESS FOR A
+-      PARTICULAR PURPOSE. You are solely responsible for determining the
+-      appropriateness of using or redistributing the Work and assume any
+-      risks associated with Your exercise of permissions under this License.
+-
+-   8. Limitation of Liability. In no event and under no legal theory,
+-      whether in tort (including negligence), contract, or otherwise,
+-      unless required by applicable law (such as deliberate and grossly
+-      negligent acts) or agreed to in writing, shall any Contributor be
+-      liable to You for damages, including any direct, indirect, special,
+-      incidental, or consequential damages of any character arising as a
+-      result of this License or out of the use or inability to use the
+-      Work (including but not limited to damages for loss of goodwill,
+-      work stoppage, computer failure or malfunction, or any and all
+-      other commercial damages or losses), even if such Contributor
+-      has been advised of the possibility of such damages.
+-
+-   9. Accepting Warranty or Additional Liability. While redistributing
+-      the Work or Derivative Works thereof, You may choose to offer,
+-      and charge a fee for, acceptance of support, warranty, indemnity,
+-      or other liability obligations and/or rights consistent with this
+-      License. However, in accepting such obligations, You may act only
+-      on Your own behalf and on Your sole responsibility, not on behalf
+-      of any other Contributor, and only if You agree to indemnify,
+-      defend, and hold each Contributor harmless for any liability
+-      incurred by, or claims asserted against, such Contributor by reason
+-      of your accepting any such warranty or additional liability.
+-
+-   END OF TERMS AND CONDITIONS
+-
+-   Copyright 2026 NthLayer Contributors
+-
+-   Licensed under the Apache License, Version 2.0 (the "License");
+-   you may not use this file except in compliance with the License.
+-   You may obtain a copy of the License at
+-
+-       http://www.apache.org/licenses/LICENSE-2.0
+-
+-   Unless required by applicable law or agreed to in writing, software
+-   distributed under the License is distributed on an "AS IS" BASIS,
+-   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+-   See the License for the specific language governing permissions and
+-   limitations under the License.
+diff --git a/docs/architecture.md b/docs/architecture.md
+index 023ecce..98147e7 100644
+--- a/docs/architecture.md
++++ b/docs/architecture.md
+@@ -114,14 +114,9 @@ SLO assessment, drift, discovery, gate, portfolio, verification.
+     `portfolio_status` (`service="__portfolio__"`,
+     `parent_ids=slo_assessment_ids`).
+   - `ObserveDriftModule.process_cycle()`: iterates
+-    `_drift_targets(manifests)`, keeps only the SLOs
+-    `DriftAnalyzer.budgeted_slos(service)` finds a budget series for
+-    (`group by (slo)` over the error budget, asked once per service; a
+-    failed lookup skips the service with one warning), then
+-    `DriftAnalyzer.analyze()` per `(service, tier, slo_name, window)` and
+-    submits `drift_signal` assessments. Which SLOs have a budget is
+-    generate's decision, read back from the series rather than re-derived
+-    from the manifest [opensrm-zo0o].
++    `_drift_targets(manifests)`, `DriftAnalyzer.analyze()` per
++    `(service, tier, slo_name, window)`, submits `drift_signal`
++    assessments.
+   - `ObserveTopologyModule`: `DependencyDiscovery` +
+     `PrometheusDepProvider`. `discovery.build_graph(service_names)`
+     once → per-service `calculate_blast_radius` → submits
+@@ -312,32 +307,20 @@ query_kind)`, the single query builder. The kind rides on
+ `SLODefinition.query_kind` (no default — a wrong one is silent) and is
+ what `evaluate_slos` dispatches its breach rule on: `judgment_rate`
+ inverts a 0-1 rate to an SLI, `ratio` scales a good-ratio SLI without
+-inverting, `error_budget` tests a signed budget against zero, and
+-`not_evaluable` is skipped. Dispatching
+-on the SLO's name or `slo_type` instead is what broke: the name is
+-author-chosen in v2, and most of the judgment taxonomy has no rate
+-builder, so neither answers what units the value is in [opensrm-fxln].
+-**Every request-ratio classical SLO is `error_budget`** (ruling Z1,
+-opensrm-zo0o): availability, latency and error_rate (`BUDGETED_KINDS`) read
+-`slo:error_budget_remaining:ratio{service, slo}` from nthlayer-common's
+-`ERROR_BUDGET_REMAINING`, which generate writes per SLO. The other classical
+-kinds are `not_evaluable` with an empty query (ruling D5, E3's
+-`no_data_source`): `evaluate_slos` never queries them and `evaluate-once`
+-lists them. `_classical_kind` is a copy of generate's `_slo_kind` so both
+-agree on which SLOs have a budget (opensrm-ltlw moves it to common). The
+-latency-seconds and classical ratio branches are gone; a budgeted SLO whose
+-series is missing (generate's guard skipped it, or pre-4.1.0 rules) is
+-logged as a warning, listed by `evaluate-once` as NO DATA, and not
+-evaluated. Module-level `_JUDGMENT_SLO_QUERIES`
+-lookup dict of lambdas keyed by **`spec.judgment_type`**, not by SLO
+-name: in v2 `metadata.name` is author-chosen and independent of the type.
+-Only 2 of the 5 judgment SLO types (`reversal_rate`,
+-`high_confidence_failure`) have a builder; the other 3 fall through to
+-the `slo:{name}:ratio` recording-rule convention, the only remaining use
+-of `ratio`. They must NOT yield `""` — Prometheus 400s on an empty query
+-and `query_prometheus` reads that as no-data, silently skipping the SLO
+-(opensrm-fxln; the `_judgment_slo_query` wrapper that returned `""` was
+-deleted there). Hysteresis reads each window's `raw_breach`
++inverting, `judgment_duration` and `latency_seconds` compare durations,
++`error_budget` tests a signed budget against zero. Dispatching on the
++SLO's name or `slo_type` instead is what broke: the name is author-chosen
++in v2, and half the judgment taxonomy has no rate builder, so neither
++answers what units the value is in [opensrm-fxln]. Module-level `_JUDGMENT_SLO_QUERIES` lookup
++dict of lambdas keyed by **`spec.judgment_type`**, not by SLO name: in
++v2 `metadata.name` is author-chosen and independent of the type
++(`reversal_rate` / `high_confidence_failure` / `calibration` /
++`feedback_latency`). Only 4 of the 8 `JUDGMENT_SLO_TYPES` have a
++builder; the other 4 fall through to the `slo:{name}:ratio` recording-
++rule convention. They must NOT yield `""` — Prometheus 400s on an empty
++query and `query_prometheus` reads that as no-data, silently skipping
++the SLO (opensrm-fxln; the `_judgment_slo_query` wrapper that returned
++`""` was deleted there). Hysteresis reads each window's `raw_breach`
+ back out of the verdict blob built by `evaluation_custom_metadata` —
+ one definition shared by the CLI writer and
+ `count_consecutive_breaches`, which previously re-derived breach as
+@@ -352,7 +335,13 @@ than a full cycle once a run covered 20 SLOs and capped `consecutive` at
+ measure writes the service into `subject.ref` and leaves
+ `subject.service` None, so that filter matches nothing, and populating
+ it now would silently shorten history for every SLO already running.
+-The module logs through `logging.getLogger`, NOT
++Duration targets convert via `_target_seconds` using the manifest's
++declared `unit`, which the parser preserves; a missing or unknown unit
++logs a warning and assumes `ms` rather than dropping the SLO.
++`calibration` +
++`feedback_latency` are
++window-agnostic (gauge metrics) so their lambdas use a `_window`
++underscore param. The module logs through `logging.getLogger`, NOT
+ structlog — %-style args only; kwargs would TypeError (load-bearing
+ fact per opensrm-y7dd R5 Pass 3).
+ 
+diff --git a/docs/upgrading-4.0.md b/docs/upgrading-4.0.md
+deleted file mode 100644
+index 9cd0b87..0000000
+--- a/docs/upgrading-4.0.md
++++ /dev/null
+@@ -1,132 +0,0 @@
+-# Upgrading to nthlayer-workers 4.0
+-
+-4.0.0 brings the telemetry workers emits into line with OpenSRM Addendum A1
+-(opensrm-ju8r). It is a major release because every OTel event the measure
+-module emits is renamed, and their attribute keys change. Dashboards, alerts
+-or trace queries keyed on the old names stop matching. Nothing in the
+-NthLayer ecosystem reads them; the change is visible only to your own
+-observability setup.
+-
+-A1 §4.0 bars `gen_ai.*` names for anything OpenSRM or NthLayer defines. The
+-measure module's scores are grader evaluations, so they now use the upstream
+-OpenTelemetry grader event, `gen_ai.evaluation.result` (A1 §4.4). Its other
+-events become `nthlayer.*` implementation events.
+-
+-In 4.0 the events were span events on the current span. Nothing in workers
+-made a span recording, so none of them was ever exported. From 4.1 they are
+-OTel log records, as A1 §4.0 describes (opensrm-quqo): each record's
+-`event_name` is the event name, its attributes are the keys below, and its
+-Timestamp is when the event happened. The `nthlayer.llm.call` events the
+-respond agents and correlate's summary emit start exporting the same way. A
+-deployment that ran its own recording TracerProvider and read these as span
+-events must read them as logs instead.
+-
+-To export them, set an OTLP endpoint (`OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` or
+-`OTEL_EXPORTER_OTLP_ENDPOINT`). The exporter is gRPC only, so point it at a
+-collector's gRPC port (4317, not 4318); `OTEL_EXPORTER_OTLP_PROTOCOL` is not
+-read. Every workers CLI calls nthlayer-common's `init_telemetry` at
+-startup. All of them report `service.name` `nthlayer-workers`; set
+-`OTEL_SERVICE_NAME` per process to tell them apart. The SDK and gRPC exporter
+-(`nthlayer-common[otel]`, which pulls in grpcio and protobuf) are now
+-installed with workers. Query the events as logs, not spans. A one-shot CLI
+-command flushes its events as it exits, and with the collector unreachable it
+-waits up to `OTEL_EXPORTER_OTLP_TIMEOUT` (10s by default) to do so; set it
+-lower where that matters, e.g. in scripts.
+-
+-## 4.2: every classical SLO is evaluated from its error budget
+-
+-From 4.2 (opensrm-zo0o, ruling Z1) `nthlayer-measure` evaluates every
+-classical SLO from `slo:error_budget_remaining:ratio{service, slo}`, the
+-series nthlayer-generate writes, and breaches when it goes negative. Before,
+-only availability SLOs read it; a latency SLO named `latency` compared a
+-percentile in seconds with its target, and every other classical SLO read
+-`slo:<name>:ratio`, which nothing wrote for error_rate, throughput, freshness,
+-lag or custom, so they were never evaluated.
+-
+-**Deploy nthlayer-generate 4.1.0's recording rules first.** Earlier
+-generate releases write a budget for availability SLOs only, so with them a
+-latency or error_rate SLO now reads no data and is not evaluated, where
+-workers 4.1 evaluated a latency SLO from its percentile. Budgets also read low for their
+-first window after the rules are deployed, as generate's upgrade note
+-explains.
+-
+-Throughput, freshness, lag and custom SLOs have no budget (D5,
+-opensrm-vcxm), so measure no longer queries anything for them: `evaluate-once`
+-lists each as `NOT EVALUABLE (no_data_source)`, writes no verdict for it, and
+-counts them in its closing summary. A request-ratio SLO whose budget series
+-is missing is logged as a warning (`No error budget value for <service>/<slo>;
+-not evaluated`) and skipped. That is expected when generate's guard skipped
+-its budget (generate's README lists when); otherwise generate 4.1.0's rules
+-are not deployed.
+-
+-Two other readers of the budget change with it:
+-
+-- **correlate** reports the service's worst budget with
+-  `bottomk(1, ...)` rather than `min(...)`, and its `error_budget_exhausted`
+-  event payload gains `slo`, naming the overspent SLO.
+-- **drift** (worker mode) analyses only SLOs Prometheus holds a budget series
+-  for. Judgment SLOs and budget-less classical SLOs no longer log
+-  `drift_analysis_failed` every cycle; if the lookup itself fails, it logs
+-  `drift_budget_discovery_failed` once per service and skips that service for
+-  the cycle.
+-
+-The `latency_seconds` query kind, its duration-unit table and
+-`SLODefinition.unit` in `measure/adapters/prometheus.py` are removed.
+-
+-## Breaking changes
+-
+-### `gen_ai.decision.evaluated` → per-dimension grader events + a summary
+-
+-One event per evaluation becomes one `gen_ai.evaluation.result` per scored
+-dimension, plus one `nthlayer.evaluation.completed` per evaluation.
+-
+-| Old (`gen_ai.decision.evaluated`) | New |
+-|---|---|
+-| one event per evaluation | one `gen_ai.evaluation.result` per dimension |
+-| — | `gen_ai.evaluation.name` = the dimension |
+-| — | `gen_ai.evaluation.score.value` = its score |
+-| — | `nthlayer.evaluator.kind` = `implementation` |
+-| `task_id` | `nthlayer.decision.id` (omitted when empty) |
+-| `agent_name` | `gen_ai.agent.name` |
+-| `eval_id` | `nthlayer.evaluation.id` |
+-| `evaluator_model` | `nthlayer.evaluator.model` |
+-| `confidence` | `nthlayer.evaluator.confidence` |
+-| `dimension_count` | `nthlayer.evaluation.dimension_count` (summary event) |
+-| `cost_usd` | `nthlayer.evaluation.cost_usd` (summary event) |
+-| `alert_count` | `nthlayer.evaluation.alert_count` (summary event) |
+-| — | `nthlayer.evaluation.auto_approved` (summary event) |
+-
+-Per-evaluation facts are on the summary event only, so cost is no longer
+-repeated, and summed, once per dimension. An **auto-approved** output emits
+-the summary and no grader events: no evaluator ran, so its configured scores
+-are nobody's opinion (A1 §3).
+-
+-### `gen_ai.override.applied` → a human grader event
+-
+-A human's corrected dimension score is a `gen_ai.evaluation.result` with
+-`nthlayer.evaluator.kind` = `human` (A1 §4.4).
+-
+-| Old (`gen_ai.override.applied`) | New (`gen_ai.evaluation.result`) |
+-|---|---|
+-| `dimension` | `gen_ai.evaluation.name` |
+-| `corrected_score` | `gen_ai.evaluation.score.value` |
+-| `original_score` | `nthlayer.evaluation.original_score` |
+-| `corrector` | `nthlayer.evaluator.actor` |
+-| `eval_id` | `nthlayer.evaluation.id` |
+-| — | `nthlayer.decision.id` (the evaluated task) |
+-
+-### Renamed, attributes unchanged
+-
+-| Old | New |
+-|---|---|
+-| `gen_ai.calibration.report` | `nthlayer.calibration.report` |
+-| `gen_ai.agent.state.changed` | `nthlayer.autonomy.changed` |
+-
+-### `gen_ai.provider.name` on LLM-call events
+-
+-Workers used to report `unknown` whenever a model string had no
+-`provider/` prefix, and always on correlate's summary-failure path. It now
+-derives the provider: an explicit prefix wins, `claude*` is `anthropic`, and
+-`gpt*`, `o1*` and `o3*` are `openai`. Anything else is still `unknown`. A
+-correlate failure with no model configured now reports nthlayer-common's
+-default model rather than `default`.
+diff --git a/pyproject.toml b/pyproject.toml
+index 5f15bb9..6b86268 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -4,10 +4,9 @@ build-backend = "setuptools.build_meta"
+ 
+ [project]
+ name = "nthlayer-workers"
+-version = "4.2.0"
++version = "3.0.3"
+ description = "NthLayer workers — Tier 2 background computation (observe, measure, correlate, respond, learn)"
+ readme = "README.md"
+-license = {text = "Apache-2.0"}
+ requires-python = ">=3.11"
+ dependencies = [
+     # >=3.0.0, NOT >=2.1.2. Two of the six breaks documented in
+@@ -56,10 +55,7 @@ dependencies = [
+     # nthlayer-common's evaluate_threshold (CORE §5.5.6) and read from core 3.0's
+     # /manifests via threshold_from_v2_entry; error magnitudes are no longer
+     # SLOs (decision 3c, common 4.0/5.0). See nthlayer-common/docs/upgrading-5.0.md.
+-    # [otel] (opensrm-quqo): the OTel SDK and OTLP log exporter, so the events
+-    # workers emits are exported once init_telemetry finds an endpoint. Without
+-    # them every event is dropped, which is how they all went missing.
+-    "nthlayer-common[otel]>=5.12.0,<6.0.0",
++    "nthlayer-common>=5.5.0,<6.0.0",
+     "httpx>=0.27",
+     "pyyaml>=6.0",
+     "structlog>=24.1.0",
+diff --git a/src/nthlayer_workers/__init__.py b/src/nthlayer_workers/__init__.py
+index de9d106..5397c55 100644
+--- a/src/nthlayer_workers/__init__.py
++++ b/src/nthlayer_workers/__init__.py
+@@ -7,9 +7,3 @@ Communicates with nthlayer-core exclusively via HTTP API.
+ from importlib.metadata import version
+ 
+ __version__ = version("nthlayer-workers")
+-
+-# The OTel service.name every CLI entry point passes to nthlayer-common's
+-# init_telemetry, which each calls after parsing its arguments and before
+-# running a command, so the command's events export (opensrm-quqo). Without
+-# an OTLP endpoint that call is a no-op.
+-TELEMETRY_SERVICE_NAME = "nthlayer-workers"
+diff --git a/src/nthlayer_workers/cli.py b/src/nthlayer_workers/cli.py
+index 60ae435..a4fae5a 100644
+--- a/src/nthlayer_workers/cli.py
++++ b/src/nthlayer_workers/cli.py
+@@ -4,9 +4,7 @@ import argparse
+ import asyncio
+ import sys
+ 
+-from nthlayer_common.telemetry import init_telemetry
+-
+-from nthlayer_workers import TELEMETRY_SERVICE_NAME, __version__
++from nthlayer_workers import __version__
+ from nthlayer_workers.runner import ModuleRunner
+ 
+ 
+@@ -60,7 +58,6 @@ def main():
+                              help="Core API URL (default: http://localhost:8000)")
+ 
+     args = parser.parse_args()
+-    init_telemetry(TELEMETRY_SERVICE_NAME)
+ 
+     if args.command == "serve":
+         from nthlayer_common.api_client import CoreAPIClient
+diff --git a/src/nthlayer_workers/correlate/cli.py b/src/nthlayer_workers/correlate/cli.py
+index 89d547e..fa57358 100644
+--- a/src/nthlayer_workers/correlate/cli.py
++++ b/src/nthlayer_workers/correlate/cli.py
+@@ -14,9 +14,7 @@ from typing import Any
+ 
+ import structlog
+ import yaml
+-from nthlayer_common.telemetry import init_telemetry
+ 
+-from nthlayer_workers import TELEMETRY_SERVICE_NAME
+ from nthlayer_workers.correlate.config import SitRepConfig, load_config
+ from nthlayer_workers.correlate.correlation.changes import find_change_candidates
+ from nthlayer_workers.correlate.correlation.dedup import deduplicate
+@@ -796,7 +794,6 @@ def main() -> None:
+     """CLI entry point."""
+     parser = _build_parser()
+     args = parser.parse_args()
+-    init_telemetry(TELEMETRY_SERVICE_NAME)
+ 
+     if args.command is None:
+         parser.print_help()
+diff --git a/src/nthlayer_workers/correlate/prometheus.py b/src/nthlayer_workers/correlate/prometheus.py
+index c351bbe..a7ec6ca 100644
+--- a/src/nthlayer_workers/correlate/prometheus.py
++++ b/src/nthlayer_workers/correlate/prometheus.py
+@@ -6,7 +6,6 @@ from datetime import UTC, datetime
+ 
+ import httpx
+ import structlog
+-from nthlayer_common.manifest import ERROR_BUDGET_REMAINING
+ 
+ from nthlayer_workers.correlate.types import EventType, SitRepEvent
+ 
+@@ -61,15 +60,11 @@ async def fetch_metric_breaches(
+     now = datetime.now(UTC)
+ 
+     for service in services:
+-        # Check error budget: the worst across the service's SLOs, since
+-        # generate writes one series per classical SLO (opensrm-h0at,
+-        # opensrm-zo0o). bottomk, not min: min aggregates the labels away,
+-        # and the event must say WHICH SLO is overspent.
+-        worst = await _query_instant_sample(
++        # Check error budget
++        budget = await _query_instant(
+             client, prometheus_url,
+-            f"bottomk(1, {ERROR_BUDGET_REMAINING.selector(service=service)})",
++            f'slo:error_budget:ratio{{service="{service}"}}',
+         )
+-        budget, budget_labels = worst if worst is not None else (None, {})
+         if budget is not None and budget < 0.0:
+             events.append(SitRepEvent(
+                 id=f"prom-metric-{uuid.uuid4().hex[:8]}",
+@@ -80,10 +75,9 @@ async def fetch_metric_breaches(
+                 environment="production",
+                 severity=min(1.0, abs(budget) * 5),  # 20% deficit → severity 1.0
+                 payload={
+-                    "metric": ERROR_BUDGET_REMAINING.metric,
++                    "metric": "slo:error_budget:ratio",
+                     "value": budget,
+                     "breach": "error_budget_exhausted",
+-                    "slo": budget_labels.get("slo"),
+                 },
+             ))
+ 
+@@ -218,16 +212,6 @@ async def _query_instant(
+     query: str,
+ ) -> float | None:
+     """Execute a PromQL instant query and return the scalar value."""
+-    sample = await _query_instant_sample(client, prometheus_url, query)
+-    return None if sample is None else sample[0]
+-
+-
+-async def _query_instant_sample(
+-    client: httpx.AsyncClient,
+-    prometheus_url: str,
+-    query: str,
+-) -> tuple[float, dict[str, str]] | None:
+-    """Execute a PromQL instant query; return the first sample's value and labels."""
+     try:
+         resp = await client.get(
+             f"{prometheus_url}/api/v1/query",
+@@ -241,8 +225,8 @@ async def _query_instant_sample(
+         val = float(results[0].get("value", [None, None])[1])
+         if val != val:  # NaN
+             return None
+-        return val, dict(results[0].get("metric") or {})
+-    except (httpx.HTTPError, ValueError, KeyError, IndexError, TypeError, AttributeError):
++        return val
++    except (httpx.HTTPError, ValueError, KeyError, IndexError, TypeError):
+         return None
+ 
+ 
+diff --git a/src/nthlayer_workers/correlate/summary.py b/src/nthlayer_workers/correlate/summary.py
+index 150109e..37539c1 100644
+--- a/src/nthlayer_workers/correlate/summary.py
++++ b/src/nthlayer_workers/correlate/summary.py
+@@ -151,11 +151,7 @@ def _select_sample_events(events: list[SitRepEvent], max_samples: int = 10) -> l
+ def _record_failure(error: Exception, snapshot_service: str, model: str | None = None) -> None:
+     """Record summary generation failure via logging + metrics."""
+     reason = _classify_failure(error)
+-    # No model means the call used nthlayer-common's default; report that
+-    # model, so the provider can be derived from it (opensrm-ju8r J4).
+-    from nthlayer_common.llm import DEFAULT_MODEL
+-
+-    resolved_model = model or DEFAULT_MODEL
++    resolved_model = model or "default"
+     logger.warning(
+         "correlate_summary_failed",
+         reason=reason,
+@@ -169,11 +165,9 @@ def _record_failure(error: Exception, snapshot_service: str, model: str | None =
+         pass  # metrics infra may not be configured
+     try:
+         from nthlayer_common.telemetry import emit_llm_event
+-
+-        from nthlayer_workers.llm_provider import provider_for_model
+         emit_llm_event(
+             model=resolved_model,
+-            provider=provider_for_model(resolved_model),
++            provider="unknown",
+             caller="correlate.generate_summary",
+             success=False,
+             error=str(error),
+diff --git a/src/nthlayer_workers/learn/cli.py b/src/nthlayer_workers/learn/cli.py
+index 3d7b2a6..8047744 100644
+--- a/src/nthlayer_workers/learn/cli.py
++++ b/src/nthlayer_workers/learn/cli.py
+@@ -11,12 +11,10 @@ from datetime import UTC, datetime, timedelta
+ from pathlib import Path
+ from typing import Any
+ 
+-from nthlayer_common.telemetry import init_telemetry
+ from nthlayer_common.verdicts.serialise import to_dict
+ from nthlayer_common.verdicts.sqlite_store import SQLiteVerdictStore
+ from nthlayer_common.verdicts.store import AccuracyFilter, VerdictFilter
+ 
+-from nthlayer_workers import TELEMETRY_SERVICE_NAME
+ from nthlayer_workers.learn._apply import apply_recommendations, format_summary
+ from nthlayer_workers.learn._gh import (
+     PreflightError,
+@@ -534,7 +532,6 @@ def main(argv: list[str] | None = None) -> None:
+     _add_recommendations_subcommand(sub)
+ 
+     args = parser.parse_args(argv)
+-    init_telemetry(TELEMETRY_SERVICE_NAME)
+ 
+     if args.command == "accuracy":
+         _cmd_accuracy(args)
+diff --git a/src/nthlayer_workers/llm_provider.py b/src/nthlayer_workers/llm_provider.py
+deleted file mode 100644
+index fc2cca8..0000000
+--- a/src/nthlayer_workers/llm_provider.py
++++ /dev/null
+@@ -1,33 +0,0 @@
+-"""The provider an LLM call is reported against (opensrm-ju8r, ruling J4).
+-
+-OpenSRM Addendum A1 §5 P4 identifies the provider by ``gen_ai.provider.name``.
+-Workers knows only the model string it called, so it derives the provider
+-from that: an explicit ``provider/`` prefix wins; otherwise only the model
+-families whose provider is unambiguous are mapped. Anything else is reported
+-as ``"unknown"`` rather than guessed (nthlayer-common's ``_guess_provider``
+-defaults to ``openai``, which would be a confident wrong answer here).
+-"""
+-
+-from __future__ import annotations
+-
+-UNKNOWN_PROVIDER = "unknown"
+-
+-# Bare-model prefixes whose provider is not in doubt. Add a family here only
+-# when its prefix cannot belong to another provider; otherwise it stays unknown.
+-_FAMILY_PREFIXES: tuple[tuple[str, str], ...] = (
+-    ("claude", "anthropic"),
+-    ("gpt", "openai"),
+-    ("o1", "openai"),
+-    ("o3", "openai"),
+-)
+-
+-
+-def provider_for_model(model: str) -> str:
+-    """Return the ``gen_ai.provider.name`` value for *model*."""
+-    if "/" in model:
+-        prefix = model.split("/", 1)[0]
+-        return prefix or UNKNOWN_PROVIDER
+-    for prefix, provider in _FAMILY_PREFIXES:
+-        if model.startswith(prefix):
+-            return provider
+-    return UNKNOWN_PROVIDER
+diff --git a/src/nthlayer_workers/measure/adapters/prometheus.py b/src/nthlayer_workers/measure/adapters/prometheus.py
+index 86dc59f..2cf1f4a 100644
+--- a/src/nthlayer_workers/measure/adapters/prometheus.py
++++ b/src/nthlayer_workers/measure/adapters/prometheus.py
+@@ -8,7 +8,6 @@ from typing import Any
+ 
+ import httpx
+ from nthlayer_common.manifest import (
+-    ERROR_BUDGET_REMAINING,
+     ManifestLoadError,
+     foreign_yaml_reason,
+     iter_manifest_files,
+@@ -36,8 +35,7 @@ class SLODefinition:
+     # How to read `query`'s value, chosen by _query_for when it built the
+     # query. The breach rule and the query are one decision: an
+     # overrides/decisions RATE must be inverted, a `slo:*:ratio` recording
+-    # rule must not, an error budget is signed against zero, and
+-    # `not_evaluable` has an empty query that is never sent. Keeping them apart
++    # rule must not, seconds must not be scaled at all. Keeping them apart
+     # meant the four judgment types with no builder got an SLI query and the
+     # inverting rule, reading a healthy 0.99 as 1.0% (opensrm-fxln).
+     #
+@@ -46,6 +44,12 @@ class SLODefinition:
+     # answer — the failure shape this whole bead is about.
+     query_kind: str
+     judgment_type: str | None = None
++    # The manifest's declared unit for a duration target. The parser
++    # preserves it verbatim, so `latency: {target: 2, unit: s}` and
++    # `{target: 2000, unit: ms}` both arrive as target=2000.0/2.0 with the
++    # unit that makes sense of them. Hard-coding milliseconds here compared
++    # a seconds SLO against a threshold 1000x too small (opensrm-fxln).
++    unit: str | None = None
+ 
+ 
+ @dataclass
+@@ -116,7 +120,7 @@ def load_specs(specs_dir: Path) -> LoadedSpecs:
+             # Deliberately NOT slo.indicator_query. evaluate_slos' branches
+             # are hard-coded to the semantics of the synthesised queries:
+             # availability breaches on `current < 0.0`, meaningful only for
+-            # the error-budget series, and judgment inverts, right only for
++            # slo:error_budget:ratio, and judgment inverts, right only for
+             # the overrides/decisions RATIO. A manifest's own query supplies
+             # an SLI instead, which would make availability unbreachable and
+             # double-invert judgment. Query and breach rule travel together.
+@@ -130,59 +134,23 @@ def load_specs(specs_dir: Path) -> LoadedSpecs:
+                 window=slo.window or "7d",
+                 query=query,
+                 query_kind=query_kind,
++                unit=slo.unit,
+             ))
+ 
+     return LoadedSpecs(slos=slos, parse_failures=parse_failures)
+ 
+ 
+-# The classical kinds generate writes an error budget for (ruling D5,
+-# opensrm-zo0o). Throughput, freshness, lag and custom have none until
+-# time-slice budgets exist (opensrm-vcxm).
+-BUDGETED_KINDS = frozenset({"availability", "latency", "error_rate"})
+-
+-
+-def _classical_kind(slo: ManifestSLO) -> str | None:
+-    """The SLO's kind as generate classifies it, or None for one it writes
+-    no rules for (freshness, lag, custom).
+-
+-    A copy of generate's ``_slo_kind`` (recording_rules/manifest_builder.py),
+-    kept identical so measure asks for exactly the budgets generate writes:
+-    substring on the lowered type, falling back to the name when no type is
+-    set, because srm/v1 and legacy pass an explicit ``type:`` through
+-    unnormalised (opensrm-hiw2). TODO(opensrm-ltlw): move it to
+-    nthlayer-common so the two cannot drift.
+-    """
+-    # str(): srm/v1 loads `name: 404` as an int.
+-    slo_type = str(slo.slo_type or slo.name).lower()
+-    for needle, kind in (
+-        ("availability", "availability"),
+-        ("latency", "latency"),
+-        ("error", "error_rate"),
+-        ("throughput", "throughput"),
+-    ):
+-        if needle in slo_type:
+-            return kind
+-    return None
+-
+-
+ def _query_for(service: str, slo: ManifestSLO) -> tuple[str, str]:
+     """PromQL for an SLO, always synthesised, never taken from the manifest.
+ 
+     Returns ``(query, query_kind)``. The kind is not decoration: it is how
+     evaluate_slos knows whether the number coming back is a rate to invert,
+-    a good-ratio SLI, or a signed error budget. Deriving it later from the
+-    SLO's name or type cannot work — that is precisely what broke.
+-
+-    Judgment SLOs get the interim raw-metric queries below, or the
+-    recording-rule convention when their type has no builder. A classical
+-    SLO of a request-ratio kind reads the error budget generate writes for
+-    it: by ruling Z1 (opensrm-zo0o) each one is good/total against its
+-    objective, so one series and one breach rule cover them all. Every
+-    other classical kind is ``not_evaluable`` with an empty query (ruling
+-    D5): generate writes no budget for it, so there is nothing to ask
+-    Prometheus, and evaluate_slos reports it rather than querying a series
+-    nobody writes. Judgment SLOs always get a query: one reaching
+-    evaluation with none would be dropped silently.
++    a good-ratio SLI, seconds, or a signed error budget. Deriving it later
++    from the SLO's name or type cannot work — that is precisely what broke.
++
++    Judgment SLOs get the interim raw-metric queries below. Everything else
++    falls back to the recording-rule convention. Always returns a query: an
++    SLO reaching evaluation with none would be dropped silently.
+     """
+     name = slo.name
+     if slo.judgment_type:
+@@ -195,14 +163,13 @@ def _query_for(service: str, slo: ManifestSLO) -> tuple[str, str]:
+         if builder is not None:
+             kind = _JUDGMENT_QUERY_KINDS[slo.judgment_type]
+             return builder(service, slo.window or "7d"), kind
+-    if not slo.judgment_type:
+-        if _classical_kind(slo) not in BUDGETED_KINDS:
+-            return "", "not_evaluable"
+-        # The selector filters to this SLO, as each series carries
+-        # slo=<name> (opensrm-h0at).
++    if name == "availability":
++        return f'slo:error_budget:ratio{{service="{service}"}}', "error_budget"
++    if name == "latency":
++        percentile = slo.percentile or "p99"
+         return (
+-            ERROR_BUDGET_REMAINING.selector(service=service, slo=name),
+-            "error_budget",
++            f'slo:http_request_duration_seconds:{percentile}{{service="{service}"}}',
++            "latency_seconds",
+         )
+     return f'slo:{name}:ratio{{service="{service}"}}', "ratio"
+ 
+@@ -253,6 +220,54 @@ def evaluation_custom_metadata(result: EvaluationResult) -> dict:
+     }
+ 
+ 
++# Seconds per unit of a duration target. Prometheus latency queries return
++# seconds, so the target is converted TO seconds rather than the reverse.
++# Keys are matched case-insensitively after stripping; the spelled-out and
++# abbreviated forms are aliases because manifests are hand-written and
++# `unit: seconds` reaching the unknown-unit path would assume milliseconds —
++# a threshold 1000x too small that breaches every window.
++_DURATION_UNIT_SECONDS = {
++    "us": 0.000_001, "µs": 0.000_001, "microsecond": 0.000_001,
++    "microseconds": 0.000_001,
++    "ms": 0.001, "msec": 0.001, "millisecond": 0.001, "milliseconds": 0.001,
++    "s": 1.0, "sec": 1.0, "secs": 1.0, "second": 1.0, "seconds": 1.0,
++    "m": 60.0, "min": 60.0, "minute": 60.0, "minutes": 60.0,
++}
++
++# What a duration target means when the manifest declared no unit. The
++# schema's own latency example uses `ms`, and so does every manifest in the
++# ecosystem, so that is the assumption — but it IS an assumption, so it is
++# logged rather than applied silently. Refusing to evaluate instead would
++# drop the SLO, which is the failure this bead exists to remove.
++_DEFAULT_DURATION_UNIT = "ms"
++
++
++def _target_seconds(target: float, unit: str | None) -> float:
++    """Convert a duration target to seconds using its declared unit."""
++    if unit is None:
++        logger.warning(
++            "Latency target %s has no unit; assuming %s",
++            target,
++            _DEFAULT_DURATION_UNIT,
++        )
++        unit = _DEFAULT_DURATION_UNIT
++    # str() before strip(): parser/v1.py passes config.get("unit") through
++    # unvalidated, so `unit: 100` arrives as an int. Calling .strip() on it
++    # would raise out of evaluate_slos' loop and abort the cycle with
++    # verdicts already written for earlier SLOs — a partial cycle rather
++    # than a clean failure. Coercing routes it to the warning below.
++    scale = _DURATION_UNIT_SECONDS.get(str(unit).strip().lower())
++    if scale is None:
++        logger.warning(
++            "Unknown duration unit %r for target %s; assuming %s",
++            unit,
++            target,
++            _DEFAULT_DURATION_UNIT,
++        )
++        scale = _DURATION_UNIT_SECONDS[_DEFAULT_DURATION_UNIT]
++    return target * scale
++
++
+ async def query_prometheus(
+     client: httpx.AsyncClient,
+     prometheus_url: str,
+@@ -379,36 +394,9 @@ async def evaluate_slos(
+ 
+     async with httpx.AsyncClient() as client:
+         for slo in slos:
+-            if slo.query_kind == "not_evaluable":
+-                # E3's no_data_source: no series is defined for this kind.
+-                # The CLI reports it; there is nothing to query or to count
+-                # toward hysteresis.
+-                logger.info(
+-                    "%s/%s is not evaluable (no_data_source): generate writes "
+-                    "no error budget for its kind",
+-                    slo.service, slo.slo_name,
+-                )
+-                continue
+             current_value = await query_prometheus(client, prometheus_url, slo.query)
+             if current_value is None:
+-                if slo.query_kind == "error_budget":
+-                    # Not debug: for a classical SLO this is usually not a
+-                    # scrape gap but a budget generate chose not to write (an
+-                    # objective or latency bound it cannot trust), or rules
+-                    # older than generate 4.1.0, and the SLO is then never
+-                    # evaluated. WARNING because workers configures no
+-                    # logging, so stdlib shows nothing below it; the CLI also
+-                    # lists the SLO as NO DATA.
+-                    logger.warning(
+-                        "No error budget value for %s/%s; not evaluated "
+-                        "(Prometheus did not answer, or the series is missing: "
+-                        "generate skips a budget whose objective or latency "
+-                        "bound it cannot trust, and before 4.1.0 wrote only "
+-                        "availability budgets)",
+-                        slo.service, slo.slo_name,
+-                    )
+-                else:
+-                    logger.debug("No data for %s/%s, skipping", slo.service, slo.slo_name)
++                logger.debug("No data for %s/%s, skipping", slo.service, slo.slo_name)
+                 continue
+ 
+             # Dispatch on the kind of number the query returns, decided by
+@@ -428,15 +416,18 @@ async def evaluate_slos(
+                 sli_pct = (1.0 - current_value) * 100
+                 raw_breach = sli_pct < slo.target
+             elif slo.query_kind == "error_budget":
+-                # The error budget is signed — negative is overspent.
++                # slo:error_budget:ratio is signed — negative is overspent.
+                 # The target is not consulted; it is baked into the rule.
+                 raw_breach = current_value < 0.0
++            elif slo.query_kind == "latency_seconds":
++                # Query is seconds; the target is in whatever unit the
++                # manifest declared.
++                raw_breach = current_value > _target_seconds(slo.target, slo.unit)
+             else:
+-                # "ratio", only for a judgment type with no builder: the
+-                # recording-rule convention's 0-1 good-ratio SLI against a
+-                # 0-100 target, so it scales but does not invert — the same
+-                # arithmetic as worker.py:242. Comparing the two conventions
+-                # directly, as this branch used to, breaches every window.
++                # "ratio": a 0-1 good-ratio SLI against a 0-100 target, so it
++                # scales but does not invert — the same arithmetic as
++                # worker.py:242. Comparing the two conventions directly, as
++                # this branch used to, breaches every window.
+                 raw_breach = current_value * 100 < slo.target
+ 
+             # Get consecutive breach count from verdict store
+diff --git a/src/nthlayer_workers/measure/cli.py b/src/nthlayer_workers/measure/cli.py
+index f2daf88..ad1b08a 100644
+--- a/src/nthlayer_workers/measure/cli.py
++++ b/src/nthlayer_workers/measure/cli.py
+@@ -13,9 +13,6 @@ from datetime import UTC
+ from pathlib import Path
+ from typing import TYPE_CHECKING
+ 
+-from nthlayer_common.telemetry import init_telemetry
+-
+-from nthlayer_workers import TELEMETRY_SERVICE_NAME
+ from nthlayer_workers.measure.config import MeasureConfig, load_config
+ 
+ if TYPE_CHECKING:
+@@ -113,24 +110,6 @@ def _build_adapter(config: MeasureConfig):
+ # status, calibrate, overrides, tiering — remain.
+ 
+ 
+-def unevaluated_slos(slos, results):
+-    """The SLOs a run produced no verdict for, as ``(not_evaluable, no_data)``.
+-
+-    ``not_evaluable``: kinds with no error budget, never queried (ruling D5,
+-    opensrm-zo0o; E3 no_data_source). ``no_data``: budgeted SLOs whose query
+-    returned nothing, because the series is missing (a budget generate
+-    skipped, or pre-4.1.0 rules) or Prometheus did not answer. Both are
+-    listed by evaluate-once so neither can vanish from a run unseen.
+-    """
+-    evaluated = {(r.service, r.slo_name) for r in results}
+-    not_evaluable = [s for s in slos if s.query_kind == "not_evaluable"]
+-    no_data = [
+-        s for s in slos
+-        if s.query_kind == "error_budget" and (s.service, s.slo_name) not in evaluated
+-    ]
+-    return not_evaluable, no_data
+-
+-
+ def cmd_evaluate_once(args: argparse.Namespace) -> None:
+     """One-shot Prometheus SLO evaluation — evaluate all SLOs, write verdicts, exit."""
+     from nthlayer_common.verdicts import SQLiteVerdictStore
+@@ -230,16 +209,7 @@ def cmd_evaluate_once(args: argparse.Namespace) -> None:
+                         v.metadata.custom["slack_thread_ts"] = thread_ts
+                         verdict_store.put(v)
+ 
+-        not_evaluable, no_data = unevaluated_slos(slos, results)
+-        for s in not_evaluable:
+-            print(f"  {s.service}/{s.slo_name}: NOT EVALUABLE (no_data_source)")
+-        for s in no_data:
+-            print(f"  {s.service}/{s.slo_name}: NO DATA (no error budget value)")
+-
+-        print(
+-            f"\nEvaluated {len(results)} SLOs, {breach_count} in breach"
+-            f", {len(not_evaluable)} not evaluable, {len(no_data)} with no data."
+-        )
++        print(f"\nEvaluated {len(results)} SLOs, {breach_count} in breach.")
+         return results
+ 
+     try:
+@@ -569,7 +539,6 @@ def main() -> None:
+     )
+ 
+     args = parser.parse_args()
+-    init_telemetry(TELEMETRY_SERVICE_NAME)
+ 
+     handlers = {
+         "evaluate": cmd_evaluate,
+diff --git a/src/nthlayer_workers/measure/pipeline/router.py b/src/nthlayer_workers/measure/pipeline/router.py
+index 7d7673b..07263e1 100644
+--- a/src/nthlayer_workers/measure/pipeline/router.py
++++ b/src/nthlayer_workers/measure/pipeline/router.py
+@@ -14,7 +14,7 @@ from nthlayer_workers.measure.detection.protocol import DegradationDetector
+ from nthlayer_workers.measure.governance.engine import GovernanceEngine
+ from nthlayer_workers.measure.pipeline.evaluator import Evaluator
+ from nthlayer_workers.measure.store.protocol import ScoreStore
+-from nthlayer_workers.measure.telemetry import emit_evaluation_events
++from nthlayer_workers.measure.telemetry import emit_decision_event
+ from nthlayer_workers.measure.tiering.classifier import TierClassifier
+ from nthlayer_workers.measure.trends.tracker import TrendTracker
+ from nthlayer_workers.measure.types import QualityScore
+@@ -82,7 +82,7 @@ class PipelineRouter:
+                         auto_approved=True,
+                     )
+                     await self._store.save_score(auto_score)
+-                    emit_evaluation_events(auto_score, None)
++                    emit_decision_event(auto_score, None)
+                     continue
+ 
+                 # Model routing for non-minimal tiers (or sampled minimal)
+@@ -117,7 +117,7 @@ class PipelineRouter:
+                 )
+                 alerts = self._detector.check(window)
+ 
+-            emit_evaluation_events(score, alerts)
++            emit_decision_event(score, alerts)
+ 
+             if self._governance is not None:
+                 await self._governance.check_agent(output.agent_name)
+diff --git a/src/nthlayer_workers/measure/store/sqlite.py b/src/nthlayer_workers/measure/store/sqlite.py
+index 001c24d..496c27f 100644
+--- a/src/nthlayer_workers/measure/store/sqlite.py
++++ b/src/nthlayer_workers/measure/store/sqlite.py
+@@ -6,29 +6,17 @@ import asyncio
+ import sqlite3
+ import threading
+ import uuid
+-from collections.abc import Iterator
+-from contextlib import contextmanager
+-from datetime import UTC, datetime
++from datetime import datetime
+ from pathlib import Path
+ 
+ from nthlayer_common.verdicts import VerdictStore as VerdictStoreBase
+ 
+-from nthlayer_workers.measure.telemetry import emit_correction_event, emit_state_transition_event
++from nthlayer_workers.measure.telemetry import emit_override_event, emit_state_transition_event
+ from nthlayer_workers.measure.types import QualityScore
+ 
+ _SCHEMA_PATH = Path(__file__).parent / "schema.sql"
+ 
+ 
+-def _store_now() -> tuple[datetime, str]:
+-    """Now, truncated to milliseconds, and its text in the format schema.sql's
+-    column defaults write (``strftime('%Y-%m-%dT%H:%M:%fZ')``). A row and its
+-    telemetry event share this one time, so the event's Timestamp (ruling Q2)
+-    is exactly the time the store records."""
+-    now = datetime.now(UTC)
+-    now = now.replace(microsecond=now.microsecond // 1000 * 1000)
+-    return now, now.isoformat(timespec="milliseconds").replace("+00:00", "Z")
+-
+-
+ class SQLiteScoreStore:
+     """Persists evaluation scores to a local SQLite database."""
+ 
+@@ -62,7 +50,7 @@ class SQLiteScoreStore:
+                     raise
+ 
+     def _save_score_sync(self, score: QualityScore) -> None:
+-        with self._lock, self._rolled_back_on_error():
++        with self._lock:
+             self._conn.execute(
+                 "INSERT INTO evaluations (eval_id, agent_name, task_id, evaluator_model, confidence, cost_usd, created_at) "
+                 "VALUES (?, ?, ?, ?, ?, ?, ?)",
+@@ -161,71 +149,45 @@ class SQLiteScoreStore:
+     ) -> list[QualityScore]:
+         return await asyncio.to_thread(self._get_scores_sync, agent_name, since, limit)
+ 
+-    @contextmanager
+-    def _rolled_back_on_error(self) -> Iterator[None]:
+-        """Roll the open transaction back if the block raises. Without it a
+-        failed write's earlier INSERTs stay pending on the shared connection,
+-        and the next unrelated commit makes them durable with no telemetry
+-        event for them. Call with self._lock held."""
+-        try:
+-            yield
+-        except BaseException:
+-            self._conn.rollback()
+-            raise
+-
+     def _save_override_sync(
+         self, eval_id: str, corrected_dimensions: dict[str, float], corrector: str
+     ) -> None:
+         verdict_id = None
+-        corrections: list[tuple[str, float, float]] = []
+         with self._lock:
+-            # Taken under the lock, so stored times follow commit order.
+-            corrected_at, corrected_at_text = _store_now()
+-            with self._rolled_back_on_error():
+-                # Verify eval_id exists
+-                eval_row = self._conn.execute(
+-                    "SELECT task_id FROM evaluations WHERE eval_id = ?", (eval_id,)
+-                ).fetchone()
+-                if not eval_row:
+-                    raise ValueError(
+-                        f"Cannot override non-existent evaluation: {eval_id}"
+-                    )
++            # Verify eval_id exists
++            exists = self._conn.execute(
++                "SELECT 1 FROM evaluations WHERE eval_id = ?", (eval_id,)
++            ).fetchone()
++            if not exists:
++                raise ValueError(
++                    f"Cannot override non-existent evaluation: {eval_id}"
++                )
+ 
+-                for dim_name, corrected_score in corrected_dimensions.items():
+-                    row = self._conn.execute(
+-                        "SELECT score FROM dimension_scores "
+-                        "WHERE eval_id = ? AND dimension = ?",
+-                        (eval_id, dim_name),
+-                    ).fetchone()
+-                    original_score = row["score"] if row else 0.0
+-                    self._conn.execute(
+-                        "INSERT INTO overrides "
+-                        "(override_id, eval_id, dimension, original_score, "
+-                        "corrected_score, corrector, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+-                        (
+-                            str(uuid.uuid4()),
+-                            eval_id,
+-                            dim_name,
+-                            original_score,
+-                            corrected_score,
+-                            corrector,
+-                            corrected_at_text,
+-                        ),
+-                    )
+-                    corrections.append((dim_name, original_score, corrected_score))
+-                self._conn.commit()
+-            # Straight after the commit, still under the lock: a failed write
+-            # emits no event, and the verdict lookup below cannot suppress one
+-            # by raising. (_set_autonomy_sync emits after its lock instead;
+-            # nothing follows its commit.)
+-            for dim_name, original_score, corrected_score in corrections:
+-                emit_correction_event(
++            for dim_name, corrected_score in corrected_dimensions.items():
++                row = self._conn.execute(
++                    "SELECT score FROM dimension_scores "
++                    "WHERE eval_id = ? AND dimension = ?",
++                    (eval_id, dim_name),
++                ).fetchone()
++                original_score = row["score"] if row else 0.0
++                self._conn.execute(
++                    "INSERT INTO overrides "
++                    "(override_id, eval_id, dimension, original_score, "
++                    "corrected_score, corrector) VALUES (?, ?, ?, ?, ?, ?)",
++                    (
++                        str(uuid.uuid4()),
++                        eval_id,
++                        dim_name,
++                        original_score,
++                        corrected_score,
++                        corrector,
++                    ),
++                )
++                emit_override_event(
+                     eval_id, dim_name, original_score,
+                     corrected_score, corrector,
+-                    corrected_at=corrected_at,
+-                    # The evaluated task is the decision the correction is about.
+-                    decision_id=eval_row["task_id"],
+                 )
++            self._conn.commit()
+ 
+             # Look up verdict_id for resolution
+             if self._verdict_store is not None:
+@@ -287,35 +249,25 @@ class SQLiteScoreStore:
+ 
+     def _set_autonomy_sync(self, agent_name: str, level: str, updated_by: str) -> None:
+         with self._lock:
+-            # Taken under the lock, so stored times follow commit order.
+-            changed_at, changed_at_text = _store_now()
+-            with self._rolled_back_on_error():
+-                current = self._conn.execute(
+-                    "SELECT level FROM agent_autonomy WHERE agent_name = ?",
+-                    (agent_name,),
+-                ).fetchone()
+-                from_level = current["level"] if current else "full"
++            current = self._conn.execute(
++                "SELECT level FROM agent_autonomy WHERE agent_name = ?",
++                (agent_name,),
++            ).fetchone()
++            from_level = current["level"] if current else "full"
+ 
+-                self._conn.execute(
+-                    "INSERT INTO agent_autonomy (agent_name, level, updated_by, updated_at) "
+-                    "VALUES (?, ?, ?, ?) "
+-                    "ON CONFLICT(agent_name) DO UPDATE SET level = excluded.level, "
+-                    "updated_by = excluded.updated_by, updated_at = excluded.updated_at",
+-                    (agent_name, level, updated_by, changed_at_text),
+-                )
+-                self._conn.execute(
+-                    "INSERT INTO governance_log "
+-                    "(agent_name, from_level, to_level, reason, triggered_by, created_at) "
+-                    "VALUES (?, ?, ?, ?, ?, ?)",
+-                    (
+-                        agent_name, from_level, level, f"Autonomy changed to {level}",
+-                        updated_by, changed_at_text,
+-                    ),
+-                )
+-                self._conn.commit()
+-        emit_state_transition_event(
+-            agent_name, from_level, level, updated_by, changed_at=changed_at
+-        )
++            self._conn.execute(
++                "INSERT INTO agent_autonomy (agent_name, level, updated_by) VALUES (?, ?, ?) "
++                "ON CONFLICT(agent_name) DO UPDATE SET level = excluded.level, "
++                "updated_by = excluded.updated_by, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')",
++                (agent_name, level, updated_by),
++            )
++            self._conn.execute(
++                "INSERT INTO governance_log (agent_name, from_level, to_level, reason, triggered_by) "
++                "VALUES (?, ?, ?, ?, ?)",
++                (agent_name, from_level, level, f"Autonomy changed to {level}", updated_by),
++            )
++            self._conn.commit()
++        emit_state_transition_event(agent_name, from_level, level, updated_by)
+ 
+     async def set_autonomy(self, agent_name: str, level: str, updated_by: str) -> None:
+         await asyncio.to_thread(self._set_autonomy_sync, agent_name, level, updated_by)
+diff --git a/src/nthlayer_workers/measure/telemetry.py b/src/nthlayer_workers/measure/telemetry.py
+index e96e9b1..1cdf429 100644
+--- a/src/nthlayer_workers/measure/telemetry.py
++++ b/src/nthlayer_workers/measure/telemetry.py
+@@ -1,117 +1,67 @@
+ """OTel instrumentation — records facts as events, never evaluates quality (ZFC).
+ 
+-Every event is an OTel log record emitted through nthlayer-common's
+-``emit_event`` (opensrm-quqo, A1 §4.0). They used to be span events on the
+-current span, but nothing in workers ever made a span recording, so all of
+-them were dropped. Each record's Timestamp is when the event happened,
+-taken from the score or passed by the caller; only the calibration report,
+-computed as it is emitted, uses the emit time. That is ruling Q2: A1 T1
+-itself names only the decision and outcome events.
+-
+-Emitting is a no-op until the process calls ``init_telemetry`` with an OTLP
+-endpoint; every CLI entry point does.
++Gracefully no-ops if opentelemetry is not installed.
+ """
+ 
+ from __future__ import annotations
+ 
+-from datetime import datetime
+ from typing import TYPE_CHECKING
+ 
+-from nthlayer_common.telemetry import emit_event
+-
+ if TYPE_CHECKING:
+     from nthlayer_workers.measure.detection.protocol import Alert
+     from nthlayer_workers.measure.types import QualityScore
+ 
++try:
++    from opentelemetry import trace
+ 
+-# OpenSRM Addendum A1 (opensrm-ju8r). Measure's scores are grader evaluations,
+-# emitted as the upstream grader event (A1 §4.4). The other events here are
+-# nthlayer.* implementation events: A1 does not define them, and A1 §4.0 bars
+-# gen_ai.* names for anything OpenSRM-defined or our own. The calibration and
+-# autonomy events only had their names changed: their attributes stay bare
+-# (agent_name, from_level), unlike the namespaced grader attributes.
+-GRADER_EVENT = "gen_ai.evaluation.result"
+-
++    _tracer = trace.get_tracer("nthlayer-measure")
++    _HAS_OTEL = True
++except ImportError:
++    _tracer = None  # type: ignore[assignment]
++    _HAS_OTEL = False
+ 
+-def emit_evaluation_events(score: QualityScore, alerts: list[Alert] | None = None) -> None:
+-    """Record an evaluation: one grader event per dimension, plus a summary.
+ 
+-    Each dimension score is a ``gen_ai.evaluation.result`` about the evaluated
+-    task's decision, with ``nthlayer.evaluator.kind`` ``implementation``
+-    (NthLayer's evaluator, vs ``human`` in ``emit_correction_event``). Per-evaluation facts
+-    (cost, alerts, dimension count) go on one ``nthlayer.evaluation.completed``
+-    event instead, so they are not repeated, and summed, once per dimension.
+-
+-    An auto-approved output emits the summary only: no evaluator ran, so its
+-    configured scores are nobody's opinion and must not reach grader
+-    consumers (A1 §3).
+-
+-    Every record is stamped with ``score.timestamp``, when the evaluation was
+-    made.
+-    """
+-    # A1 §4.4: nthlayer.decision.id only when the decision is identifiable;
+-    # some adapters leave task_id empty.
+-    decision_attrs: dict[str, str] = (
+-        {"nthlayer.decision.id": score.task_id} if score.task_id else {}
+-    )
+-    if not score.auto_approved:
+-        for dimension, value in score.dimensions.items():
+-            emit_event(
+-                GRADER_EVENT,
+-                {
+-                    **decision_attrs,
+-                    "gen_ai.evaluation.name": dimension,
+-                    "gen_ai.evaluation.score.value": value,
+-                    "nthlayer.evaluator.kind": "implementation",
+-                    "gen_ai.agent.name": score.agent_name,
+-                    "nthlayer.evaluation.id": score.eval_id,
+-                    "nthlayer.evaluator.model": score.evaluator_model,
+-                    "nthlayer.evaluator.confidence": score.confidence,
+-                },
+-                timestamp=score.timestamp,
+-            )
+-    summary: dict[str, str | float | int | bool] = {
+-        **decision_attrs,
+-        "nthlayer.evaluation.id": score.eval_id,
+-        "gen_ai.agent.name": score.agent_name,
+-        "nthlayer.evaluation.dimension_count": len(score.dimensions),
+-        "nthlayer.evaluation.auto_approved": score.auto_approved,
++def emit_decision_event(score: QualityScore, alerts: list[Alert] | None = None) -> None:
++    """Record an evaluation decision as a span event."""
++    if not _HAS_OTEL:
++        return
++    span = trace.get_current_span()
++    attributes: dict[str, str | float | int | bool] = {
++        "eval_id": score.eval_id,
++        "agent_name": score.agent_name,
++        "task_id": score.task_id,
++        "confidence": score.confidence,
++        "evaluator_model": score.evaluator_model,
++        "dimension_count": len(score.dimensions),
+     }
+     if score.cost_usd is not None:
+-        summary["nthlayer.evaluation.cost_usd"] = score.cost_usd
++        attributes["cost_usd"] = score.cost_usd
+     if alerts:
+-        summary["nthlayer.evaluation.alert_count"] = len(alerts)
+-    emit_event("nthlayer.evaluation.completed", summary, timestamp=score.timestamp)
++        attributes["alert_count"] = len(alerts)
++    span.add_event("gen_ai.decision.evaluated", attributes=attributes)
+ 
+ 
+-def emit_correction_event(
++def emit_override_event(
+     eval_id: str,
+     dimension: str,
+     original: float,
+     corrected: float,
+     corrector: str,
+-    *,
+-    corrected_at: datetime,
+-    decision_id: str | None = None,
+ ) -> None:
+-    """Record a human's corrected dimension score as a human grader evaluation.
+-
+-    A1 §4.4: a human's verdict on a completion is a grader evaluation with
+-    ``nthlayer.evaluator.kind`` ``human``. ``decision_id`` is the evaluated
+-    task; it is omitted when unknown or empty. ``corrected_at`` is when the
+-    human made the correction, the record's Timestamp (ruling Q2).
+-    """
+-    attributes: dict[str, str | float | int | bool] = {
+-        "gen_ai.evaluation.name": dimension,
+-        "gen_ai.evaluation.score.value": corrected,
+-        "nthlayer.evaluator.kind": "human",
+-        "nthlayer.evaluation.id": eval_id,
+-        "nthlayer.evaluation.original_score": original,
+-        "nthlayer.evaluator.actor": corrector,
+-    }
+-    if decision_id:
+-        attributes["nthlayer.decision.id"] = decision_id
+-    emit_event(GRADER_EVENT, attributes, timestamp=corrected_at)
++    """Record a human override as a span event."""
++    if not _HAS_OTEL:
++        return
++    span = trace.get_current_span()
++    span.add_event(
++        "gen_ai.override.applied",
++        attributes={
++            "eval_id": eval_id,
++            "dimension": dimension,
++            "original_score": original,
++            "corrected_score": corrected,
++            "corrector": corrector,
++        },
++    )
+ 
+ 
+ def emit_calibration_report_event(
+@@ -124,8 +74,10 @@ def emit_calibration_report_event(
+     mae: float,
+     compliant: bool | None = None,
+ ) -> None:
+-    """Record a calibration/SLO report. It is computed as it is emitted, so
+-    its Timestamp is the emit time."""
++    """Record a calibration/SLO report as a span event."""
++    if not _HAS_OTEL:
++        return
++    span = trace.get_current_span()
+     attributes: dict[str, str | float | int | bool] = {
+         "agent_name": agent_name,
+         "window_days": window_days,
+@@ -140,7 +92,7 @@ def emit_calibration_report_event(
+         attributes["recall"] = recall
+     if compliant is not None:
+         attributes["reversal_rate_compliant"] = compliant
+-    emit_event("nthlayer.calibration.report", attributes)
++    span.add_event("gen_ai.calibration.report", attributes=attributes)
+ 
+ 
+ def emit_state_transition_event(
+@@ -148,18 +100,17 @@ def emit_state_transition_event(
+     from_level: str,
+     to_level: str,
+     triggered_by: str,
+-    *,
+-    changed_at: datetime,
+ ) -> None:
+-    """Record an autonomy state transition. ``changed_at`` is when the level
+-    changed, the record's Timestamp (ruling Q2)."""
+-    emit_event(
+-        "nthlayer.autonomy.changed",
+-        {
++    """Record an autonomy state transition as a span event."""
++    if not _HAS_OTEL:
++        return
++    span = trace.get_current_span()
++    span.add_event(
++        "gen_ai.agent.state.changed",
++        attributes={
+             "agent_name": agent_name,
+             "from_level": from_level,
+             "to_level": to_level,
+             "triggered_by": triggered_by,
+         },
+-        timestamp=changed_at,
+     )
+diff --git a/src/nthlayer_workers/observe/cli.py b/src/nthlayer_workers/observe/cli.py
+index 9a69dac..e2b536d 100644
+--- a/src/nthlayer_workers/observe/cli.py
++++ b/src/nthlayer_workers/observe/cli.py
+@@ -10,9 +10,7 @@ from collections import defaultdict
+ from pathlib import Path
+ 
+ from nthlayer_common.errors import main_with_error_handling
+-from nthlayer_common.telemetry import init_telemetry
+ 
+-from nthlayer_workers import TELEMETRY_SERVICE_NAME
+ from nthlayer_workers.cli_output import warn_parse_failures
+ 
+ _log = logging.getLogger(__name__)
+@@ -730,7 +728,6 @@ def main(argv: list[str] | None = None) -> int:
+     vr_parser.add_argument("--incident", default=None, help="Incident ID to verify")
+ 
+     args = parser.parse_args(argv)
+-    init_telemetry(TELEMETRY_SERVICE_NAME)
+ 
+     dispatch = {
+         "collect": _cmd_collect,
+diff --git a/src/nthlayer_workers/observe/drift/analyzer.py b/src/nthlayer_workers/observe/drift/analyzer.py
+index 0f09ce3..5ce0f35 100644
+--- a/src/nthlayer_workers/observe/drift/analyzer.py
++++ b/src/nthlayer_workers/observe/drift/analyzer.py
+@@ -12,7 +12,6 @@ from datetime import UTC, datetime, timedelta
+ from typing import Any
+ 
+ import numpy as np
+-from nthlayer_common.manifest import ERROR_BUDGET_REMAINING
+ from scipy import stats
+ 
+ from nthlayer_workers.observe.drift.models import (
+@@ -150,44 +149,6 @@ class DriftAnalyzer:
+             exit_code=exit_code,
+         )
+ 
+-    async def budgeted_slos(self, service: str) -> set[str]:
+-        """Names of the service's SLOs that have an error budget series.
+-
+-        Generate decides which SLOs get a budget (opensrm-zo0o: availability,
+-        latency and error_rate, minus objectives it cannot trust), so drift
+-        asks for the series it wrote rather than re-deriving that rule from
+-        the manifest, which in worker mode lacks the fields it needs.
+-        Raises DriftAnalysisError when Prometheus cannot answer, so a caller
+-        can tell "none" from "unknown".
+-        """
+-        import httpx
+-
+-        query = f"group by (slo) ({ERROR_BUDGET_REMAINING.selector(service=service)})"
+-        auth = (self.username, self.password) if self.username and self.password else None
+-        try:
+-            async with httpx.AsyncClient(auth=auth, timeout=30.0) as client:
+-                response = await client.get(
+-                    f"{self.prometheus_url}/api/v1/query", params={"query": query}
+-                )
+-                response.raise_for_status()
+-                result = response.json()
+-        except (httpx.HTTPError, httpx.InvalidURL, ValueError) as e:
+-            raise DriftAnalysisError(f"Failed to query Prometheus: {e}") from e
+-        if not isinstance(result, dict):
+-            raise DriftAnalysisError(f"Malformed Prometheus response: {type(result).__name__}")
+-        if result.get("status") != "success":
+-            raise DriftAnalysisError(f"Prometheus query failed: {result.get('error', 'Unknown')}")
+-        try:
+-            return {
+-                series["metric"]["slo"]
+-                for series in result["data"]["result"]
+-                if "slo" in series.get("metric", {})
+-            }
+-        except (KeyError, TypeError, AttributeError) as e:
+-            # A success status with a malformed body must still read as
+-            # "could not ask", not escape process_cycle.
+-            raise DriftAnalysisError(f"Malformed Prometheus response: {e}") from e
+-
+     async def _query_budget_history(
+         self,
+         service: str,
+@@ -198,7 +159,7 @@ class DriftAnalyzer:
+         """Query error budget over time window."""
+         import httpx
+ 
+-        query = ERROR_BUDGET_REMAINING.selector(service=service, slo=slo)
++        query = f'slo:error_budget_remaining:ratio{{service="{service}", slo="{slo}"}}'
+ 
+         end = datetime.now(UTC)
+         start = end - self._parse_duration(window)
+diff --git a/src/nthlayer_workers/observe/worker.py b/src/nthlayer_workers/observe/worker.py
+index 94c5d74..820bfb4 100644
+--- a/src/nthlayer_workers/observe/worker.py
++++ b/src/nthlayer_workers/observe/worker.py
+@@ -168,27 +168,7 @@ class ObserveDriftModule:
+ 
+         analyzer = DriftAnalyzer(self.prometheus_url)
+ 
+-        # Only SLOs with an error budget series can drift (opensrm-zo0o):
+-        # judgment SLOs and the classical kinds generate writes no budget for
+-        # would otherwise fail every cycle with a warning each.
+-        # None = the lookup failed this cycle: skip the service. An empty set
+-        # = it answered, and the service has no budget.
+-        budgeted: dict[str, set[str] | None] = {}
+         for service, tier, slo_name, window in _drift_targets(manifests):
+-            if service not in budgeted:
+-                try:
+-                    budgeted[service] = await analyzer.budgeted_slos(service)
+-                except DriftAnalysisError:
+-                    logger.warning("drift_budget_discovery_failed", service=service)
+-                    budgeted[service] = None
+-                except Exception:
+-                    # As analyze() below: one service's surprise must not end
+-                    # the cycle for every other service.
+-                    logger.exception("drift_budget_discovery_unexpected_error", service=service)
+-                    budgeted[service] = None
+-            names = budgeted[service]
+-            if names is None or str(slo_name) not in names:
+-                continue
+             try:
+                 result = await analyzer.analyze(service, tier, slo_name, window)
+             except DriftAnalysisError:
+diff --git a/src/nthlayer_workers/respond/agents/base.py b/src/nthlayer_workers/respond/agents/base.py
+index 29f4949..eb2b280 100644
+--- a/src/nthlayer_workers/respond/agents/base.py
++++ b/src/nthlayer_workers/respond/agents/base.py
+@@ -16,7 +16,6 @@ from nthlayer_common.telemetry import emit_llm_event
+ from nthlayer_common.verdicts import Verdict
+ from nthlayer_common.verdicts import create as verdict_create
+ 
+-from nthlayer_workers.llm_provider import provider_for_model
+ from nthlayer_workers.respond.types import AgentRole, IncidentContext
+ 
+ log = structlog.get_logger(__name__)
+@@ -112,7 +111,7 @@ class AgentBase(ABC):
+         existing ``parse_response`` (which accepts a JSON string and
+         produces a dataclass result) can be reused without rewrite.
+         """
+-        provider = provider_for_model(self._model)
++        provider = self._model.split("/", 1)[0] if "/" in self._model else "unknown"
+         caller = f"respond.{self.role.value}"
+         try:
+             result = await asyncio.wait_for(
+diff --git a/src/nthlayer_workers/respond/cli.py b/src/nthlayer_workers/respond/cli.py
+index c3118ce..15abb59 100644
+--- a/src/nthlayer_workers/respond/cli.py
++++ b/src/nthlayer_workers/respond/cli.py
+@@ -12,10 +12,8 @@ from typing import Any
+ 
+ import structlog
+ import yaml
+-from nthlayer_common.telemetry import init_telemetry
+ from nthlayer_common.verdicts import MemoryStore, SQLiteVerdictStore
+ 
+-from nthlayer_workers import TELEMETRY_SERVICE_NAME
+ from nthlayer_workers.respond.agents.communication import CommunicationAgent
+ from nthlayer_workers.respond.agents.investigation import InvestigationAgent
+ from nthlayer_workers.respond.agents.remediation import RemediationAgent
+@@ -553,7 +551,6 @@ def main() -> None:
+     """CLI entry point."""
+     parser = build_parser()
+     args = parser.parse_args()
+-    init_telemetry(TELEMETRY_SERVICE_NAME)
+ 
+     if args.command is None:
+         parser.print_help()
+diff --git a/tests/correlate/test_correlate_command.py b/tests/correlate/test_correlate_command.py
+index a42d696..6ca9297 100644
+--- a/tests/correlate/test_correlate_command.py
++++ b/tests/correlate/test_correlate_command.py
+@@ -5,7 +5,6 @@ from __future__ import annotations
+ from unittest.mock import patch
+ 
+ import pytest
+-from nthlayer_common.manifest import ERROR_BUDGET_REMAINING
+ 
+ from nthlayer_workers.correlate.prometheus import (
+     blast_radius_services,
+@@ -178,7 +177,7 @@ def test_correlate_command_writes_correlation_verdict(specs_dir, tmp_path):
+             service="fraud-detect",
+             environment="production",
+             severity=0.7,
+-            payload={"metric": ERROR_BUDGET_REMAINING.metric, "value": -0.05},
++            payload={"metric": "slo:error_budget:ratio", "value": -0.05},
+         )]
+ 
+     from nthlayer_workers.correlate.cli import correlate_command
+@@ -286,7 +285,7 @@ def _setup_trigger_and_mocks(specs_dir, tmp_path):
+             id="breach-1", timestamp="2026-03-25T10:01:00Z",
+             source="prometheus", type=EventType.METRIC_BREACH,
+             service="fraud-detect", environment="production",
+-            severity=0.7, payload={"metric": ERROR_BUDGET_REMAINING.metric, "value": -0.05},
++            severity=0.7, payload={"metric": "slo:error_budget:ratio", "value": -0.05},
+         )]
+ 
+     return store_path, trigger.id, mock_fetch_alerts, mock_fetch_breaches
+@@ -466,45 +465,3 @@ def test_trace_baseline_window_passed_through(specs_dir, tmp_path):
+     # Verify baseline_window was passed as timedelta(hours=2)
+     call_kwargs = mock_backend.get_trace_evidence.call_args
+     assert call_kwargs[1]["baseline_window"] == timedelta(hours=2)
+-
+-
+-# --- opensrm-h0at: correlate reads the error-budget series generate writes ---
+-
+-
+-@pytest.mark.asyncio
+-async def test_metric_breaches_name_the_slo_whose_budget_is_overspent():
+-    """correlate queried slo:error_budget:ratio, which nothing writes, so it
+-    never saw an exhausted budget (opensrm-h0at). It has no SLO in hand, so it
+-    asks for the service's worst budget across its SLOs, and must say which
+-    SLO that is: min() aggregated the slo label away (opensrm-zo0o)."""
+-    import httpx
+-
+-    from nthlayer_workers.correlate.prometheus import fetch_metric_breaches
+-
+-    budget_query = f"bottomk(1, {ERROR_BUDGET_REMAINING.selector(service='checkout')})"
+-    sent: list[str] = []
+-
+-    def handler(request: httpx.Request) -> httpx.Response:
+-        query = request.url.params["query"]
+-        sent.append(query)
+-        # Prometheus HTTP API instant-query shape. bottomk returns the input
+-        # series itself, so it keeps the labels generate writes on the
+-        # budget (nthlayer-common ERROR_BUDGET_REMAINING.labels).
+-        series = {
+-            "__name__": ERROR_BUDGET_REMAINING.metric,
+-            "service": "checkout", "slo": "checkout-latency", "objective": "99.0",
+-        }
+-        result = [{"metric": series, "value": [1730000000, "-0.05"]}] if query == budget_query else []
+-        return httpx.Response(
+-            200, json={"status": "success", "data": {"resultType": "vector", "result": result}}
+-        )
+-
+-    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+-        events = await fetch_metric_breaches(client, "http://prom", {"checkout"})
+-
+-    assert budget_query in sent
+-    budget = [e for e in events if e.payload.get("breach") == "error_budget_exhausted"]
+-    assert len(budget) == 1
+-    assert budget[0].payload["metric"] == ERROR_BUDGET_REMAINING.metric
+-    assert budget[0].payload["value"] == -0.05
+-    assert budget[0].payload["slo"] == "checkout-latency"
+diff --git a/tests/correlate/test_summary.py b/tests/correlate/test_summary.py
+index 367a96f..858f707 100644
+--- a/tests/correlate/test_summary.py
++++ b/tests/correlate/test_summary.py
+@@ -195,34 +195,3 @@ class TestGenerateSummary:
+             [],
+         )
+         assert result is None
+-
+-
+-def test_failure_telemetry_derives_the_provider_from_the_model():
+-    """A bare Claude model is reported as anthropic, not "unknown" (opensrm-ju8r J4)."""
+-    from unittest.mock import patch
+-
+-    from nthlayer_workers.correlate.summary import _record_failure
+-
+-    with patch("nthlayer_common.telemetry.emit_llm_event") as emit:
+-        _record_failure(RuntimeError("boom"), "checkout", model="claude-sonnet-4-20250514")
+-
+-    emit.assert_called_once()
+-    assert emit.call_args.kwargs["provider"] == "anthropic"
+-
+-
+-def test_failure_telemetry_without_a_model_reports_the_default_model():
+-    """correlate's worker passes no model; the call used common's DEFAULT_MODEL."""
+-    from unittest.mock import patch
+-
+-    from nthlayer_common.llm import DEFAULT_MODEL
+-
+-    from nthlayer_workers.correlate.summary import _record_failure
+-    from nthlayer_workers.llm_provider import provider_for_model
+-
+-    with patch("nthlayer_common.telemetry.emit_llm_event") as emit:
+-        _record_failure(RuntimeError("boom"), "checkout")
+-
+-    kwargs = emit.call_args.kwargs
+-    assert kwargs["model"] == DEFAULT_MODEL
+-    assert kwargs["provider"] == provider_for_model(DEFAULT_MODEL)
+-    assert kwargs["provider"] != "unknown"
+diff --git a/tests/measure/test_prometheus.py b/tests/measure/test_prometheus.py
+index b52d72d..95920ae 100644
+--- a/tests/measure/test_prometheus.py
++++ b/tests/measure/test_prometheus.py
+@@ -2,12 +2,9 @@
+ """Tests for the Prometheus polling adapter with mocked HTTP responses."""
+ from __future__ import annotations
+ 
+-import logging
+-from pathlib import Path
+ from unittest.mock import AsyncMock, patch
+ 
+ import pytest
+-from nthlayer_common.manifest import ERROR_BUDGET_REMAINING
+ from nthlayer_common.manifest.models import SLODefinition as ManifestSLO
+ 
+ from nthlayer_workers.measure.adapters.prometheus import (
+@@ -619,7 +616,7 @@ class TestQueryAndBreachLogicAreAMatchedPair:
+     hard-coded to the semantics of its OWN synthesised queries.
+ 
+     `availability` breaches on `current < 0.0`, which is only meaningful for
+-    the synthesised error-budget series. Judgment SLOs invert
++    the synthesised `slo:error_budget:ratio`. Judgment SLOs invert
+     (`(1-rate)*100`), which is only right for the synthesised
+     overrides/decisions RATIO — measure/worker.py does not invert because it
+     feeds get_sli_value(indicator_query), whose value is already an SLI.
+@@ -641,9 +638,7 @@ class TestQueryAndBreachLogicAreAMatchedPair:
+ 
+         slo = load_specs(tmp_path).slos[0]
+ 
+-        assert slo.query == ERROR_BUDGET_REMAINING.selector(
+-            service="svc", slo="availability"
+-        ), (
++        assert "slo:error_budget:ratio" in slo.query, (
+             "availability's breach check is `current < 0.0`, which only the "
+             "synthesised error-budget query can satisfy"
+         )
+@@ -815,31 +810,43 @@ async def test_recording_rule_fallback_is_not_inverted(verdict_store):
+     )
+ 
+ 
++@pytest.mark.asyncio
++async def test_latency_rule_follows_the_query_not_the_slo_name(verdict_store):
++    """Same name-vs-type gap the judgment branch closed, on the classical side.
++
++    The latency comparison keyed on `slo_name == "latency"`. A v2 SLO named
++    anything else — p99-latency, checkout-latency — fell to the ratio branch
++    and had its seconds compared against a 0-100 target.
++    """
++    slo = SLODefinition(
++        service="svc", slo_name="p99-latency", slo_type="traditional",
++        target=100.0, window="30d", query="q", query_kind="latency_seconds",
++    )
++
++    with patch(
++        "nthlayer_workers.measure.adapters.prometheus.query_prometheus"
++    ) as mock_query:
++        mock_query.return_value = 0.05  # 50ms, well inside a 100ms target
++        results = await evaluate_slos("http://prom", [slo], verdict_store)
++
++    assert results[0].raw_breach is False
++
++
+ def test_query_for_reports_the_breach_rule_with_the_query():
+     """_query_for's invariant, as a returned value rather than a comment."""
+-    # slo_type as the parsers set it: judgment SLOs are "availability"-shaped
+-    # (nthlayer-common SLODefinition docstring), classical ones carry their
+-    # kind. "judgment" and "traditional" are not values any parser writes.
+-    rate = ManifestSLO(name="rev", target=98.5, slo_type="availability",
++    rate = ManifestSLO(name="rev", target=98.5, slo_type="judgment",
+                        window="5m", judgment_type="reversal_rate")
+-    unbuilt = ManifestSLO(name="seg", target=98.0, slo_type="availability",
++    unbuilt = ManifestSLO(name="seg", target=98.0, slo_type="judgment",
+                           window="5m", judgment_type="segment_disparity")
++    latency = ManifestSLO(name="latency", target=100.0, slo_type="traditional",
++                          window="30d")
++    avail = ManifestSLO(name="availability", target=99.9, slo_type="traditional",
++                        window="30d")
++
+     assert _query_for("s", rate)[1] == "judgment_rate"
+     assert _query_for("s", unbuilt)[1] == "ratio"
+-
+-
+-# slo_type as the parsers write it for each request-ratio kind.
+-@pytest.mark.parametrize("kind", ["availability", "latency", "error_rate"])
+-def test_every_request_ratio_slo_reads_its_own_error_budget(kind):
+-    """Ruling Z1 (opensrm-zo0o): every request-ratio SLO is good/total against
+-    its objective, so generate writes one budget series per SLO and measure
+-    reads that series, filtered to the SLO by name, whatever its kind."""
+-    slo = ManifestSLO(name=f"checkout-{kind}", target=99.0, slo_type=kind, window="30d")
+-
+-    query, query_kind = _query_for("checkout", slo)
+-
+-    assert query == ERROR_BUDGET_REMAINING.selector(service="checkout", slo=f"checkout-{kind}")
+-    assert query_kind == "error_budget"
++    assert _query_for("s", latency)[1] == "latency_seconds"
++    assert _query_for("s", avail)[1] == "error_budget"
+ 
+ 
+ @pytest.mark.asyncio
+@@ -880,13 +887,13 @@ async def test_hysteresis_survives_a_realistic_number_of_slos(verdict_store):
+ 
+ 
+ @pytest.mark.asyncio
+-async def test_a_latency_slo_breaches_on_its_budget(tmp_path, verdict_store):
+-    """load_specs -> evaluate_slos for latency, through the budget.
++async def test_latency_target_is_read_in_its_declared_unit(tmp_path, verdict_store):
++    """load_specs -> evaluate_slos for latency, the round trip nothing covered.
+ 
+-    Latency used to read a percentile in seconds and compare it with the
+-    target converted by its unit. Under ruling Z1 the bound lives in
+-    generate's good query and the objective in the budget, so measure reads
+-    the signed budget and breaches below zero, as for availability.
++    The branch hard-coded `target / 1000.0`, assuming milliseconds. The
++    target reaches it from the parser, which preserves whatever `unit` the
++    manifest declared — so a seconds-denominated SLO was compared against a
++    threshold a thousand times too small and breached every window.
+     """
+     (tmp_path / "svc.yaml").write_text(
+         "apiVersion: srm/v1\nkind: ServiceReliabilityManifest\n"
+@@ -895,76 +902,17 @@ async def test_a_latency_slo_breaches_on_its_budget(tmp_path, verdict_store):
+         "    latency: {target: 2, unit: s, percentile: p99, window: 30d}\n"
+     )
+     slo = next(s for s in load_specs(tmp_path).slos if s.slo_name == "latency")
+-    assert slo.query == ERROR_BUDGET_REMAINING.selector(service="svc", slo="latency")
+-
+-    with patch(
+-        "nthlayer_workers.measure.adapters.prometheus.query_prometheus"
+-    ) as mock_query:
+-        mock_query.return_value = -0.25  # overspent by a quarter
+-        overspent = await evaluate_slos("http://prom", [slo], verdict_store)
+-        mock_query.return_value = 0.4
+-        healthy = await evaluate_slos("http://prom", [slo], verdict_store)
+-
+-    assert overspent[0].raw_breach is True
+-    assert healthy[0].raw_breach is False
+-
+-
+-# The kinds generate writes no budget for (D5): throughput, and the three its
+-# classifier maps to no rules at all.
+-@pytest.mark.parametrize("kind", ["throughput", "freshness", "lag", "custom"])
+-def test_a_kind_with_no_budget_is_not_evaluable(kind):
+-    """Ruling D5 (opensrm-zo0o): measure reports these not evaluable (E3's
+-    no_data_source) rather than querying a series nobody writes."""
+-    slo = ManifestSLO(name=f"orders-{kind}", target=99.0, slo_type=kind, window="30d")
+-
+-    assert _query_for("orders", slo) == ("", "not_evaluable")
+-
+-
+-@pytest.mark.asyncio
+-async def test_a_not_evaluable_slo_is_never_queried(verdict_store):
+-    slo = SLODefinition(
+-        service="svc", slo_name="freshness", slo_type="traditional",
+-        target=99.0, window="30d", query="", query_kind="not_evaluable",
+-    )
+ 
+     with patch(
+         "nthlayer_workers.measure.adapters.prometheus.query_prometheus"
+     ) as mock_query:
++        mock_query.return_value = 1.5  # 1.5s, inside a 2s target
+         results = await evaluate_slos("http://prom", [slo], verdict_store)
+ 
+-    mock_query.assert_not_called()
+-    assert results == []
+-
+-
+-@pytest.mark.asyncio
+-async def test_a_missing_budget_is_reported_not_hidden(verdict_store, caplog):
+-    """Generate skips a budget whose objective or latency bound it cannot
+-    trust, and rules older than generate 4.1.0 carry none for latency. Such
+-    an SLO is never evaluated, so that is logged where an operator sees it,
+-    unlike a judgment query's ordinary no-data, which stays at debug."""
+-    classical = SLODefinition(
+-        service="svc", slo_name="latency", slo_type="traditional",
+-        target=99.0, window="30d", query="q", query_kind="error_budget",
+-    )
+-    judgment = SLODefinition(
+-        service="svc", slo_name="rev", slo_type="judgment", target=98.5,
+-        window="7d", query="q", query_kind="judgment_rate",
+-        judgment_type="reversal_rate",
++    assert results[0].raw_breach is False, (
++        "a 2s target read as 2ms makes every response a breach"
+     )
+ 
+-    with patch(
+-        "nthlayer_workers.measure.adapters.prometheus.query_prometheus"
+-    ) as mock_query, caplog.at_level(logging.DEBUG):
+-        mock_query.return_value = None
+-        results = await evaluate_slos("http://prom", [classical, judgment], verdict_store)
+-
+-    assert results == []
+-    levels = {
+-        r.args[1]: r.levelno for r in caplog.records
+-        if r.name == "nthlayer_workers.measure.adapters.prometheus" and r.msg.startswith("No ")
+-    }
+-    assert levels == {"latency": logging.WARNING, "rev": logging.DEBUG}
+-
+ 
+ # A v2 manifest that still declares calibration under judgment_slo. Error
+ # magnitudes are thresholds now (decision 3c), so this pins a load failure.
+@@ -1001,6 +949,21 @@ def test_a_calibration_judgment_slo_is_a_load_failure(tmp_path):
+     assert loaded.parse_failures == 1
+ 
+ 
++@pytest.mark.parametrize(
++    ("unit", "expected_seconds"),
++    [("s", 2.0), ("S", 2.0), ("sec", 2.0), ("seconds", 2.0), (" ms ", 0.002)],
++)
++def test_duration_units_are_matched_leniently(unit, expected_seconds):
++    """Manifests are hand-written; `unit: seconds` must not mean milliseconds.
++
++    An unmatched unit assumes ms, so every one of these spellings falling
++    through would give a threshold 1000x too small and breach every window.
++    """
++    from nthlayer_workers.measure.adapters.prometheus import _target_seconds
++
++    assert _target_seconds(2.0, unit) == pytest.approx(expected_seconds)
++
++
+ @pytest.mark.parametrize("value", [0, -1])
+ def test_evaluate_once_rejects_a_hysteresis_below_one(tmp_path, value, capsys):
+     """`consecutive >= 0` is true before any window runs.
+@@ -1024,140 +987,13 @@ def test_evaluate_once_rejects_a_hysteresis_below_one(tmp_path, value, capsys):
+     assert exc.value.code == 2
+ 
+ 
+-# --- opensrm-h0at: measure reads the error-budget series generate writes ---
+-
+-# The spec's own v2 example, not a fixture written for this test. CI checks
+-# opensrm out as a sibling (test.yml), as for measure/thresholds/test_phase.py;
+-# a missing file fails here, it does not skip.
+-_API_FULL_V2 = (
+-    Path(__file__).resolve().parents[3]
+-    / "opensrm" / "spec" / "v2" / "examples" / "migration" / "api-full-v2.yaml"
+-)
++def test_a_non_string_unit_warns_rather_than_aborting_the_cycle():
++    """`unit: 100` reaches here as an int; the parser does not validate it.
+ 
+-
+-def test_v2_classical_slos_read_the_series_generate_writes(tmp_path):
+-    """v2 names SLOs freely: `payment-api-availability`, not `availability`.
+-
+-    measure keyed the error-budget branch on the NAME `availability`, so every
+-    such SLO fell through to `slo:payment-api-availability:ratio`, a series
+-    nothing writes, and read as no data. generate labels each budget with the
+-    SLO's name, and since opensrm-zo0o writes one for latency and error_rate
+-    too, so every classical SLO here reads its own.
++    Raising would propagate out of evaluate_slos' per-SLO loop and end the
++    run with verdicts already written for earlier SLOs — a partial cycle,
++    which is worse than a wrong-but-flagged threshold.
+     """
+-    (tmp_path / "payment-api.yaml").write_text(_API_FULL_V2.read_text())
+-
+-    by_name = {s.slo_name: s for s in load_specs(tmp_path).slos}
+-
+-    for name in ("payment-api-availability", "payment-api-latency", "payment-api-error-rate"):
+-        assert by_name[name].query == ERROR_BUDGET_REMAINING.selector(
+-            service="payment-api", slo=name
+-        ), name
+-        assert by_name[name].query_kind == "error_budget", name
+-    # The same spec example's throughput SLO has no budget (ruling D5).
+-    assert by_name["payment-api-throughput"].query == ""
+-    assert by_name["payment-api-throughput"].query_kind == "not_evaluable"
+-
+-
+-def test_evaluate_once_reports_the_slos_it_wrote_no_verdict_for(tmp_path):
+-    """evaluate-once on the spec's v2 example, end to end: one SLO with a
+-    budget gets a verdict, the two whose budget is missing are reported as no
+-    data, and throughput as not evaluable (R5 provenance, zo0o). Checked
+-    through the verdict store and unevaluated_slos' return, not printed text."""
+-    import argparse
+-
+-    from nthlayer_common.verdicts import SQLiteVerdictStore, VerdictFilter
+-
+-    from nthlayer_workers.measure import cli
+-
+-    specs = tmp_path / "specs"
+-    specs.mkdir()
+-    (specs / "payment-api.yaml").write_text(_API_FULL_V2.read_text())
+-    args = argparse.Namespace(
+-        specs_dir=str(specs), hysteresis=3, verdict_store=str(tmp_path / "v.db"),
+-        prometheus_url="http://prom", decision_store=None,
+-    )
+-    budget_for = {
+-        ERROR_BUDGET_REMAINING.selector(service="payment-api", slo="payment-api-availability"): 0.5
+-    }
+-
+-    reported = []
+-    real = cli.unevaluated_slos
+-
+-    def capture(slos, results):
+-        reported.append(real(slos, results))
+-        return reported[-1]
+-
+-    with patch(
+-        "nthlayer_workers.measure.adapters.prometheus.query_prometheus",
+-        side_effect=lambda _c, _u, promql: budget_for.get(promql),
+-    ), patch.object(cli, "unevaluated_slos", side_effect=capture):
+-        cli.cmd_evaluate_once(args)
+-
+-    assert len(reported) == 1
+-    not_evaluable, no_data = reported[0]
+-    assert [s.slo_name for s in not_evaluable] == ["payment-api-throughput"]
+-    assert sorted(s.slo_name for s in no_data) == ["payment-api-error-rate", "payment-api-latency"]
+-    store = SQLiteVerdictStore(args.verdict_store)
+-    try:
+-        written = store.query(VerdictFilter(producer_system="nthlayer-measure", limit=50))
+-    finally:
+-        store.close()
+-    assert [v.metadata.custom["slo_name"] for v in written] == ["payment-api-availability"]
+-
+-
+-def test_an_unbuilt_judgment_slo_does_not_read_the_error_budget():
+-    """Judgment SLOs parse with slo_type="availability" too. One with no
+-    builder must not be sent to the error-budget branch: its breach rule
+-    (`current < 0.0`) is meaningless for a judgment rate."""
+-    unbuilt = ManifestSLO(name="seg", target=98.0, slo_type="availability",
+-                          window="5m", judgment_type="segment_disparity")
+-
+-    query, kind = _query_for("s", unbuilt)
+-
+-    assert ERROR_BUDGET_REMAINING.metric not in query
+-    assert kind == "ratio"
+-
+-
+-def test_an_unnormalised_type_still_reads_the_budget():
+-    """parser/v1.py and parser/loader.py pass an explicit `type:` through
+-    unnormalised (opensrm-hiw2), so "Availability" can arrive. measure once
+-    matched the type to choose the budget, so its spelling mattered; it now
+-    sends every classical SLO to its budget, and must keep doing so for this
+-    shape. Not spec-valid: the v1 schema has no SLO `type` field."""
+-    explicit = ManifestSLO(name="checkout-avail", target=99.9,
+-                           slo_type="Availability", window="30d")
+-
+-    query, kind = _query_for("s", explicit)
+-
+-    assert query == ERROR_BUDGET_REMAINING.selector(service="s", slo="checkout-avail")
+-    assert kind == "error_budget"
+-
+-
+-@pytest.mark.asyncio
+-async def test_evaluate_once_accounts_for_every_slo_it_gives_no_verdict(tmp_path, verdict_store):
+-    """A run must account for every SLO: evaluated, not evaluable (D5), or
+-    budgeted with no series. The third went unlisted, so a latency SLO whose
+-    budget generate skipped vanished from the run (R5 correctness, zo0o)."""
+-    from nthlayer_workers.measure.cli import unevaluated_slos
+-
+-    (tmp_path / "svc.yaml").write_text(
+-        "apiVersion: srm/v1\nkind: ServiceReliabilityManifest\n"
+-        "metadata: {name: svc, team: t, tier: critical}\n"
+-        "spec:\n  type: api\n  slos:\n"
+-        "    availability: {target: 99.9, window: 30d}\n"
+-        "    latency: {target: 200, unit: ms, percentile: p99, window: 30d}\n"
+-        "    throughput: {target: 1000, window: 30d}\n"
+-    )
+-    slos = load_specs(tmp_path).slos
+-    budget_for = {ERROR_BUDGET_REMAINING.selector(service="svc", slo="availability"): 0.5}
+-
+-    with patch(
+-        "nthlayer_workers.measure.adapters.prometheus.query_prometheus"
+-    ) as mock_query:
+-        mock_query.side_effect = lambda _c, _u, promql: budget_for.get(promql)
+-        results = await evaluate_slos("http://prom", slos, verdict_store)
++    from nthlayer_workers.measure.adapters.prometheus import _target_seconds
+ 
+-    not_evaluable, no_data = unevaluated_slos(slos, results)
+-    assert [r.slo_name for r in results] == ["availability"]
+-    assert [s.slo_name for s in not_evaluable] == ["throughput"]
+-    assert [s.slo_name for s in no_data] == ["latency"]
++    assert _target_seconds(2.0, 100) == pytest.approx(0.002)  # assumes ms
+diff --git a/tests/measure/test_store.py b/tests/measure/test_store.py
+index fdd9692..1879dd9 100644
+--- a/tests/measure/test_store.py
++++ b/tests/measure/test_store.py
+@@ -1,6 +1,5 @@
+ """Tests for SQLiteScoreStore — round-trip save/get for scores, overrides, autonomy."""
+ 
+-import sqlite3
+ from datetime import UTC, datetime, timedelta
+ 
+ import pytest
+@@ -119,147 +118,3 @@ async def test_get_overrides_filtered_by_agent(store):
+ 
+     all_overrides = await store.get_overrides(since)
+     assert len(all_overrides) == 2
+-
+-
+-@pytest.mark.asyncio
+-async def test_override_telemetry_names_the_evaluated_task(store):
+-    """The human grader event carries the evaluated task as its decision id.
+-
+-    The store looks the task up from the evaluation (opensrm-ju8r); the
+-    corrector does not supply it.
+-    """
+-    from nthlayer_common.telemetry import capture_events
+-
+-    await store.save_score(_make_score(eval_id="e1", task="task-42"))
+-    with capture_events() as cap:
+-        await store.save_override("e1", {"correctness": 0.5}, "reviewer")
+-
+-    (event,) = cap.named("gen_ai.evaluation.result")
+-    assert event.attributes["nthlayer.decision.id"] == "task-42"
+-
+-
+-def _iso_ns(text: str) -> int:
+-    """Unix nanoseconds of a stored ``...T...Z`` timestamp."""
+-    dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
+-    return int(dt.timestamp()) * 10**9 + dt.microsecond * 1000
+-
+-
+-@pytest.mark.asyncio
+-async def test_override_event_time_is_the_stored_correction_time(store):
+-    """Ruling Q2: the human grader event carries when the correction was made,
+-    the same time the store records for it."""
+-    from nthlayer_common.telemetry import capture_events
+-
+-    await store.save_score(_make_score(eval_id="e1"))
+-    with capture_events() as cap:
+-        await store.save_override("e1", {"correctness": 0.5, "style": 0.4}, "reviewer")
+-
+-    stored = await store.get_overrides(since=datetime(2000, 1, 1, tzinfo=UTC))
+-    events = cap.named("gen_ai.evaluation.result")
+-    assert len(stored) == len(events) == 2
+-    assert {e.timestamp for e in events} == {_iso_ns(o["created_at"]) for o in stored}
+-
+-
+-@pytest.mark.asyncio
+-async def test_autonomy_event_time_is_the_stored_change_time(store):
+-    """Ruling Q2: the autonomy event carries when the level changed, the same time
+-    the store records on the autonomy row and in the governance log."""
+-    from nthlayer_common.telemetry import capture_events
+-
+-    with capture_events() as cap:
+-        await store.set_autonomy("agent-a", "supervised", "governance")
+-
+-    (event,) = cap.named("nthlayer.autonomy.changed")
+-    row = store._conn.execute(
+-        "SELECT updated_at FROM agent_autonomy WHERE agent_name = 'agent-a'"
+-    ).fetchone()
+-    log = store._conn.execute(
+-        "SELECT created_at FROM governance_log WHERE agent_name = 'agent-a'"
+-    ).fetchone()
+-    assert event.timestamp == _iso_ns(row["updated_at"]) == _iso_ns(log["created_at"])
+-
+-
+-def _committed(store, sql: str) -> list:
+-    """Rows a separate connection sees, i.e. what is durably committed."""
+-    import sqlite3
+-
+-    conn = sqlite3.connect(str(store._db_path))
+-    try:
+-        return conn.execute(sql).fetchall()
+-    finally:
+-        conn.close()
+-
+-
+-@pytest.mark.asyncio
+-async def test_failed_override_is_rolled_back_not_committed_by_a_later_write(store):
+-    """A write that fails on its second dimension leaves nothing pending: a
+-    later unrelated commit must not persist the first dimension's row, which
+-    would be a stored correction with no grader event."""
+-    from nthlayer_common.telemetry import capture_events
+-
+-    await store.save_score(_make_score(eval_id="e1"))
+-    with capture_events() as cap:
+-        with pytest.raises(sqlite3.Error):
+-            # A value sqlite cannot bind fails the second INSERT.
+-            await store.save_override("e1", {"correctness": 0.5, "style": object()}, "rob")
+-        await store.set_autonomy("agent-a", "supervised", "governance")
+-
+-    assert _committed(store, "SELECT dimension FROM overrides") == []
+-    assert cap.named("gen_ai.evaluation.result") == []
+-
+-
+-@pytest.mark.asyncio
+-async def test_failed_autonomy_change_is_rolled_back_not_committed_by_a_later_write(store):
+-    """If the governance-log INSERT fails, the level upsert before it must not
+-    be committed by the next write: a changed level with no transition event
+-    and no log entry."""
+-    from nthlayer_common.telemetry import capture_events
+-
+-    store._conn.execute(
+-        "CREATE TEMP TRIGGER fail_log BEFORE INSERT ON governance_log "
+-        "BEGIN SELECT RAISE(ABORT, 'injected'); END"
+-    )
+-    with capture_events() as cap:
+-        with pytest.raises(sqlite3.IntegrityError):
+-            await store.set_autonomy("agent-a", "supervised", "governance")
+-        store._conn.execute("DROP TRIGGER fail_log")
+-        await store.save_score(_make_score(eval_id="e1"))
+-
+-    assert _committed(store, "SELECT level FROM agent_autonomy") == []
+-    assert cap.named("nthlayer.autonomy.changed") == []
+-
+-
+-@pytest.mark.asyncio
+-async def test_failed_score_is_rolled_back_not_committed_by_a_later_write(store):
+-    """An evaluation whose dimension INSERT fails must not be persisted, with
+-    missing dimensions, by the next unrelated commit."""
+-    with pytest.raises(sqlite3.Error):
+-        await store.save_score(_make_score(eval_id="e1", dimensions={"correctness": object()}))
+-    await store.set_autonomy("agent-a", "supervised", "governance")
+-
+-    assert _committed(store, "SELECT eval_id FROM evaluations") == []
+-
+-
+-@pytest.mark.asyncio
+-async def test_written_times_are_in_the_schema_default_format(store):
+-    """The times the store writes must be text SQLite's own column default
+-    (schema.sql: strftime('%Y-%m-%dT%H:%M:%fZ', 'now')) would have written,
+-    or `created_at >= ?` comparisons and ORDER BY mix two formats. SQLite is
+-    the oracle: re-formatting each value with that pattern is the identity."""
+-    await store.save_score(_make_score(eval_id="e1"))
+-    await store.save_override("e1", {"correctness": 0.5}, "reviewer")
+-    await store.set_autonomy("agent-a", "supervised", "governance")
+-
+-    written = [
+-        r[0] for r in store._conn.execute(
+-            "SELECT created_at FROM overrides "
+-            "UNION ALL SELECT updated_at FROM agent_autonomy "
+-            "UNION ALL SELECT created_at FROM governance_log"
+-        )
+-    ]
+-    assert len(written) == 3
+-    for text in written:
+-        (reformatted,) = store._conn.execute(
+-            "SELECT strftime('%Y-%m-%dT%H:%M:%fZ', ?)", (text,)
+-        ).fetchone()
+-        assert reformatted == text
+diff --git a/tests/measure/test_telemetry.py b/tests/measure/test_telemetry.py
+index d7048bc..a4d79f9 100644
+--- a/tests/measure/test_telemetry.py
++++ b/tests/measure/test_telemetry.py
+@@ -1,38 +1,17 @@
+-"""Tests for OTel telemetry instrumentation.
++"""Tests for OTel telemetry instrumentation."""
+ 
+-Event shapes follow OpenSRM Addendum A1 (opensrm-ju8r): measure's scores are
+-grader evaluations, emitted as the upstream ``gen_ai.evaluation.result``
+-(A1 §4.4); the rest are ``nthlayer.*`` implementation events. No ``gen_ai.``
+-form of an OpenSRM-defined event is emitted (A1 §4.0).
+-
+-Every event is an OTel log record (opensrm-quqo), asserted on through
+-nthlayer-common's ``capture_events()``, whose Timestamp is the event's own
+-time (ruling Q2; A1 T1 itself names only the decision and outcome events).
+-"""
+-
+-from datetime import UTC, datetime
+-
+-from nthlayer_common.telemetry import capture_events
+-from opentelemetry._logs import SeverityNumber
++from unittest.mock import MagicMock, patch
+ 
+ from nthlayer_workers.measure.detection.protocol import Alert
+ from nthlayer_workers.measure.types import QualityScore
+ 
+-GRADER_EVENT = "gen_ai.evaluation.result"
+-RETIRED_EVENT_NAMES = (
+-    "gen_ai.decision.evaluated",
+-    "gen_ai.override.applied",
+-    "gen_ai.calibration.report",
+-    "gen_ai.agent.state.changed",
+-)
+-
+ 
+ def _make_score(**kwargs) -> QualityScore:
+     defaults = dict(
+         eval_id="e1",
+         agent_name="agent-a",
+         task_id="t1",
+-        dimensions={"correctness": 0.9, "safety": 0.7},
++        dimensions={"correctness": 0.9},
+         confidence=0.85,
+         evaluator_model="test-model",
+         cost_usd=0.01,
+@@ -41,185 +20,64 @@ def _make_score(**kwargs) -> QualityScore:
+     return QualityScore(**defaults)
+ 
+ 
+-# An event time well clear of "now", so a record stamped with the emit time
+-# instead of the event's own fails the timestamp assertions.
+-EVENT_TIME = datetime(2026, 1, 2, 3, 4, 5, 678000, tzinfo=UTC)
+-EVENT_TIME_NS = 1767323045678000000
+-INFO = SeverityNumber.INFO.value  # ruling Q2
+-
+-
+-def _records(emit):
+-    """Run *emit*; return the log records it emitted, asserting each is an
+-    INFO record and that no retired event name was emitted."""
+-    with capture_events() as cap:
+-        emit()
+-    records = cap.events
+-    assert not [r.name for r in records if r.name in RETIRED_EVENT_NAMES]
+-    assert {r.severity_number for r in records} <= {INFO}
+-    return records
+-
+-
+-def _events(emit) -> list[tuple[str, dict]]:
+-    """(name, attributes) for each record *emit* emitted."""
+-    return [(r.name, r.attributes) for r in _records(emit)]
+-
+-
+-def test_evaluation_is_one_grader_event_per_dimension():
+-    from nthlayer_workers.measure.telemetry import emit_evaluation_events
+-
+-    events = _events(lambda: emit_evaluation_events(_make_score()))
+-
+-    graded = {a["gen_ai.evaluation.name"]: a for n, a in events if n == GRADER_EVENT}
+-    assert set(graded) == {"correctness", "safety"}
+-    assert graded["correctness"]["gen_ai.evaluation.score.value"] == 0.9
+-    assert graded["safety"]["gen_ai.evaluation.score.value"] == 0.7
+-    for attrs in graded.values():
+-        # A1 §4.4: the evaluator kind, and the decision the evaluation is about.
+-        assert attrs["nthlayer.evaluator.kind"] == "implementation"
+-        assert attrs["nthlayer.decision.id"] == "t1"
+-        assert attrs["gen_ai.agent.name"] == "agent-a"
+-        assert attrs["nthlayer.evaluation.id"] == "e1"
+-        assert attrs["nthlayer.evaluator.model"] == "test-model"
+-        assert attrs["nthlayer.evaluator.confidence"] == 0.85
+-        # Per-evaluation facts stay off per-dimension events: summing cost
+-        # over them would count it once per dimension.
+-        assert "nthlayer.evaluation.cost_usd" not in attrs
+-
+-
+-def test_evaluation_summary_carries_per_evaluation_facts():
+-    from nthlayer_workers.measure.telemetry import emit_evaluation_events
+-
+-    alerts = [
+-        Alert(agent_name="agent-a", metric_name="reversal_rate",
+-              current_value=0.5, threshold=0.3, message="too high")
+-    ]
+-    events = _events(lambda: emit_evaluation_events(_make_score(), alerts))
+-
+-    (summary,) = [a for n, a in events if n == "nthlayer.evaluation.completed"]
+-    assert summary["nthlayer.evaluation.id"] == "e1"
+-    assert summary["nthlayer.decision.id"] == "t1"
+-    assert summary["nthlayer.evaluation.dimension_count"] == 2
+-    assert summary["nthlayer.evaluation.cost_usd"] == 0.01
+-    assert summary["nthlayer.evaluation.alert_count"] == 1
+-    assert summary["nthlayer.evaluation.auto_approved"] is False
+-
+-
+-def test_auto_approved_output_is_not_a_grader_evaluation():
+-    """No evaluator ran, so the configured scores are not anyone's opinion."""
+-    from nthlayer_workers.measure.telemetry import emit_evaluation_events
+-
+-    score = _make_score(auto_approved=True, evaluator_model="auto-approved", cost_usd=None)
+-    events = _events(lambda: emit_evaluation_events(score))
+-
+-    assert [n for n, _ in events] == ["nthlayer.evaluation.completed"]
+-    summary = events[0][1]
+-    assert summary["nthlayer.evaluation.auto_approved"] is True
+-    assert "nthlayer.evaluation.cost_usd" not in summary
+-    assert "nthlayer.evaluation.alert_count" not in summary
+-
+-
+-def test_empty_task_id_is_not_emitted_as_a_decision_id():
+-    """A1 §4.4: omit nthlayer.decision.id when the decision is not identifiable."""
+-    from nthlayer_workers.measure.telemetry import emit_correction_event, emit_evaluation_events
+-
+-    events = _events(lambda: emit_evaluation_events(_make_score(task_id="")))
+-    events += _events(lambda: emit_correction_event(
+-        "e1", "correctness", 0.9, 0.5, "r", corrected_at=EVENT_TIME, decision_id="",
+-    ))
+-
+-    assert events
+-    assert not [n for n, a in events if "nthlayer.decision.id" in a]
+-
+-
+-def test_evaluation_with_no_dimensions_emits_only_the_summary():
+-    from nthlayer_workers.measure.telemetry import emit_evaluation_events
+-
+-    events = _events(lambda: emit_evaluation_events(_make_score(dimensions={})))
+-
+-    assert [n for n, _ in events] == ["nthlayer.evaluation.completed"]
+-    assert events[0][1]["nthlayer.evaluation.dimension_count"] == 0
+-
+-
+-def test_evaluation_records_are_stamped_with_the_evaluation_time():
+-    """Ruling Q2: every record of an evaluation carries when it was made."""
+-    from nthlayer_workers.measure.telemetry import emit_evaluation_events
+-
+-    records = _records(lambda: emit_evaluation_events(_make_score(timestamp=EVENT_TIME)))
+-
+-    assert len(records) == 3  # two dimensions and the summary
+-    assert {r.timestamp for r in records} == {EVENT_TIME_NS}
+-
+-
+-def test_correction_record_is_stamped_with_the_correction_time():
+-    from nthlayer_workers.measure.telemetry import emit_correction_event
+-
+-    (record,) = _records(lambda: emit_correction_event(
+-        "e1", "correctness", 0.9, 0.5, "reviewer", corrected_at=EVENT_TIME,
+-    ))
+-
+-    assert record.timestamp == EVENT_TIME_NS
+-
+-
+-def test_autonomy_record_is_stamped_with_the_change_time():
+-    from nthlayer_workers.measure.telemetry import emit_state_transition_event
+-
+-    (record,) = _records(lambda: emit_state_transition_event(
+-        "agent-a", "full", "supervised", "governance", changed_at=EVENT_TIME,
+-    ))
+-
+-    assert record.timestamp == EVENT_TIME_NS
+-
+-
+-def test_emitting_without_telemetry_initialised_does_not_raise():
+-    """Outside capture_events and before init_telemetry, emits are no-ops."""
+-    from nthlayer_workers.measure.telemetry import emit_evaluation_events
+-
+-    emit_evaluation_events(_make_score())
+-
+-
+-def test_human_correction_is_a_human_grader_evaluation():
+-    """A1 §4.4: a human's verdict on a completion is a grader evaluation."""
+-    from nthlayer_workers.measure.telemetry import emit_correction_event
+-
+-    events = _events(lambda: emit_correction_event(
+-        "e1", "correctness", 0.9, 0.5, "reviewer", corrected_at=EVENT_TIME, decision_id="t1",
+-    ))
+-
+-    (attrs,) = [a for n, a in events if n == GRADER_EVENT]
+-    assert len(events) == 1
+-    assert attrs["gen_ai.evaluation.name"] == "correctness"
+-    assert attrs["gen_ai.evaluation.score.value"] == 0.5
+-    assert attrs["nthlayer.evaluator.kind"] == "human"
+-    assert attrs["nthlayer.decision.id"] == "t1"
+-    assert attrs["nthlayer.evaluation.id"] == "e1"
+-    assert attrs["nthlayer.evaluation.original_score"] == 0.9
+-    assert attrs["nthlayer.evaluator.actor"] == "reviewer"
+-
+-
+-def test_calibration_report_is_an_implementation_event():
+-    from nthlayer_workers.measure.telemetry import emit_calibration_report_event
+-
+-    events = _events(lambda: emit_calibration_report_event(
+-        agent_name="agent-a", window_days=30, reversal_rate=0.1,
+-        false_accept_rate=None, precision=0.8, recall=None, mae=0.05,
+-    ))
+-
+-    assert [n for n, _ in events] == ["nthlayer.calibration.report"]
+-    attrs = events[0][1]
+-    assert attrs["agent_name"] == "agent-a"
+-    assert attrs["reversal_rate"] == 0.1
+-    assert attrs["precision"] == 0.8
+-    assert "recall" not in attrs
+-
+-
+-def test_autonomy_change_is_an_implementation_event():
+-    from nthlayer_workers.measure.telemetry import emit_state_transition_event
+-
+-    events = _events(lambda: emit_state_transition_event(
+-        "agent-a", "full", "supervised", "governance", changed_at=EVENT_TIME,
+-    ))
+-
+-    assert [n for n, _ in events] == ["nthlayer.autonomy.changed"]
+-    attrs = events[0][1]
+-    assert attrs["from_level"] == "full"
+-    assert attrs["to_level"] == "supervised"
++def test_emit_decision_event_with_otel():
++    mock_span = MagicMock()
++    with patch("nthlayer_workers.measure.telemetry._HAS_OTEL", True), \
++         patch("nthlayer_workers.measure.telemetry.trace") as mock_trace:
++        mock_trace.get_current_span.return_value = mock_span
++
++        from nthlayer_workers.measure.telemetry import emit_decision_event
++        score = _make_score()
++        alerts = [
++            Alert(agent_name="agent-a", metric_name="reversal_rate",
++                  current_value=0.5, threshold=0.3, message="too high")
++        ]
++        emit_decision_event(score, alerts)
++
++        mock_span.add_event.assert_called_once()
++        call_args = mock_span.add_event.call_args
++        assert call_args[0][0] == "gen_ai.decision.evaluated"
++        attrs = call_args[1]["attributes"]
++        assert attrs["eval_id"] == "e1"
++        assert attrs["alert_count"] == 1
++
++
++def test_noop_without_otel():
++    with patch("nthlayer_workers.measure.telemetry._HAS_OTEL", False):
++        from nthlayer_workers.measure.telemetry import emit_decision_event
++        # Should not raise even with no OTel
++        emit_decision_event(_make_score())
++
++
++def test_emit_override_event():
++    mock_span = MagicMock()
++    with patch("nthlayer_workers.measure.telemetry._HAS_OTEL", True), \
++         patch("nthlayer_workers.measure.telemetry.trace") as mock_trace:
++        mock_trace.get_current_span.return_value = mock_span
++
++        from nthlayer_workers.measure.telemetry import emit_override_event
++        emit_override_event("e1", "correctness", 0.9, 0.5, "reviewer")
++
++        mock_span.add_event.assert_called_once()
++        call_args = mock_span.add_event.call_args
++        assert call_args[0][0] == "gen_ai.override.applied"
++        attrs = call_args[1]["attributes"]
++        assert attrs["eval_id"] == "e1"
++        assert attrs["corrected_score"] == 0.5
++
++
++def test_emit_state_transition():
++    mock_span = MagicMock()
++    with patch("nthlayer_workers.measure.telemetry._HAS_OTEL", True), \
++         patch("nthlayer_workers.measure.telemetry.trace") as mock_trace:
++        mock_trace.get_current_span.return_value = mock_span
++
++        from nthlayer_workers.measure.telemetry import emit_state_transition_event
++        emit_state_transition_event("agent-a", "full", "supervised", "governance")
++
++        mock_span.add_event.assert_called_once()
++        call_args = mock_span.add_event.call_args
++        assert call_args[0][0] == "gen_ai.agent.state.changed"
++        attrs = call_args[1]["attributes"]
++        assert attrs["from_level"] == "full"
++        assert attrs["to_level"] == "supervised"
+diff --git a/tests/measure/test_tiering_integration.py b/tests/measure/test_tiering_integration.py
+index 9b1fd6a..0526551 100644
+--- a/tests/measure/test_tiering_integration.py
++++ b/tests/measure/test_tiering_integration.py
+@@ -142,33 +142,3 @@ async def test_router_without_classifier_unchanged(
+     await router.run()
+ 
+     mock_evaluator.evaluate.assert_called_once()
+-
+-
+-@pytest.mark.asyncio
+-@pytest.mark.parametrize("tier", ["minimal", "standard"], ids=["auto-approved", "evaluated"])
+-async def test_router_emits_evaluation_telemetry_for_each_saved_score(
+-    mock_evaluator, mock_store, mock_tracker, tier
+-):
+-    """Both router paths emit the A1 evaluation telemetry for the score they save (opensrm-ju8r)."""
+-    from unittest.mock import patch
+-
+-    config = TieringConfig(
+-        enabled=True, default_tier=tier, sampling_rate=0.0,
+-        models={"standard": "anthropic/claude-haiku-4-20250414"},
+-    )
+-    classifier = TierClassifier(config, manifests={})
+-
+-    async def single_output():
+-        yield _make_output()
+-
+-    adapter = AsyncMock()
+-    adapter.receive = single_output
+-    router = PipelineRouter(
+-        adapter=adapter, evaluator=mock_evaluator, store=mock_store,
+-        tracker=mock_tracker, dimensions=["correctness"], classifier=classifier,
+-    )
+-    with patch("nthlayer_workers.measure.pipeline.router.emit_evaluation_events") as emit:
+-        await router.run()
+-
+-    emit.assert_called_once()
+-    assert emit.call_args.args[0] is mock_store.save_score.call_args.args[0]
+diff --git a/tests/observe/test_drift.py b/tests/observe/test_drift.py
+index f2bb4e3..8de12c8 100644
+--- a/tests/observe/test_drift.py
++++ b/tests/observe/test_drift.py
+@@ -349,107 +349,3 @@ class TestDriftCLI:
+         assert "--service" in captured.out
+         assert "--prometheus-url" in captured.out
+         assert "--tier" in captured.out
+-
+-
+-# --- opensrm-h0at: drift reads the error-budget series through the contract ---
+-
+-
+-@pytest.mark.asyncio
+-async def test_budget_history_queries_the_shared_error_budget_series(monkeypatch):
+-    import httpx
+-    from nthlayer_common.manifest import ERROR_BUDGET_REMAINING
+-
+-    sent: list[str] = []
+-
+-    def handler(request: httpx.Request) -> httpx.Response:
+-        sent.append(request.url.params["query"])
+-        # Prometheus HTTP API range-query shape.
+-        return httpx.Response(200, json={"status": "success", "data": {
+-            "resultType": "matrix",
+-            "result": [{"metric": {}, "values": [[1730000000, "0.8"]]}],
+-        }})
+-
+-    real_client = httpx.AsyncClient
+-    monkeypatch.setattr(
+-        httpx, "AsyncClient",
+-        lambda **kw: real_client(transport=httpx.MockTransport(handler), **kw),
+-    )
+-
+-    analyzer = DriftAnalyzer(prometheus_url="http://prom")
+-    data = await analyzer._query_budget_history("checkout", "7d", slo="checkout-availability")
+-
+-    assert sent == [
+-        ERROR_BUDGET_REMAINING.selector(service="checkout", slo="checkout-availability")
+-    ]
+-    assert [v for _, v in data] == [0.8]
+-
+-
+-# --- opensrm-zo0o: drift targets only SLOs with a budget series ---
+-
+-
+-def _prometheus_returning(monkeypatch, response: dict | Exception, sent: list[str]):
+-    import httpx
+-
+-    def handler(request: httpx.Request) -> httpx.Response:
+-        sent.append(request.url.params["query"])
+-        if isinstance(response, Exception):
+-            raise response
+-        return httpx.Response(200, json=response)
+-
+-    real_client = httpx.AsyncClient
+-    monkeypatch.setattr(
+-        httpx, "AsyncClient",
+-        lambda **kw: real_client(transport=httpx.MockTransport(handler), **kw),
+-    )
+-
+-
+-@pytest.mark.asyncio
+-async def test_budgeted_slos_are_the_slo_labels_of_the_written_series(monkeypatch):
+-    from nthlayer_common.manifest import ERROR_BUDGET_REMAINING
+-
+-    sent: list[str] = []
+-    # Prometheus HTTP API instant-query shape for `group by (slo) (...)`: one
+-    # series per distinct slo label, carrying only that label, value 1.
+-    _prometheus_returning(monkeypatch, {"status": "success", "data": {
+-        "resultType": "vector",
+-        "result": [
+-            {"metric": {"slo": "checkout-availability"}, "value": [1730000000, "1"]},
+-            {"metric": {"slo": "checkout-latency"}, "value": [1730000000, "1"]},
+-        ],
+-    }}, sent)
+-
+-    names = await DriftAnalyzer(prometheus_url="http://prom").budgeted_slos("checkout")
+-
+-    assert sent == [f"group by (slo) ({ERROR_BUDGET_REMAINING.selector(service='checkout')})"]
+-    assert names == {"checkout-availability", "checkout-latency"}
+-
+-
+-@pytest.mark.asyncio
+-async def test_budgeted_slos_is_empty_when_the_service_has_no_budget(monkeypatch):
+-    _prometheus_returning(monkeypatch, {"status": "success", "data": {
+-        "resultType": "vector", "result": [],
+-    }}, [])
+-
+-    assert await DriftAnalyzer(prometheus_url="http://prom").budgeted_slos("checkout") == set()
+-
+-
+-@pytest.mark.asyncio
+-@pytest.mark.parametrize("failure", ["unreachable", "error_status", "null_data", "not_an_object"])
+-async def test_budgeted_slos_raises_when_prometheus_cannot_answer(monkeypatch, failure):
+-    """"No budget" and "could not ask" must stay distinguishable: the worker
+-    skips the service on either, but warns only on the second."""
+-    import httpx
+-
+-    response = {
+-        "unreachable": httpx.ConnectError("refused"),
+-        "error_status": {"status": "error", "errorType": "bad_data", "error": "parse error"},
+-        # A success status with no data body, which must not escape as an
+-        # AttributeError out of the worker's process_cycle.
+-        "null_data": {"status": "success", "data": None},
+-        # Valid JSON that is not an object, e.g. from a proxy in front.
+-        "not_an_object": [],
+-    }[failure]
+-    _prometheus_returning(monkeypatch, response, [])
+-
+-    with pytest.raises(DriftAnalysisError):
+-        await DriftAnalyzer(prometheus_url="http://prom").budgeted_slos("checkout")
+diff --git a/tests/observe/test_observe_worker.py b/tests/observe/test_observe_worker.py
+index de085e3..71db3d4 100644
+--- a/tests/observe/test_observe_worker.py
++++ b/tests/observe/test_observe_worker.py
+@@ -306,74 +306,6 @@ class TestDriftCycle:
+         client.submit_assessment.assert_not_awaited()
+ 
+ 
+-class TestDriftTargetsHaveABudget:
+-    """Drift reads the error budget, so it analyses only SLOs that have one
+-    (opensrm-zo0o). It targeted every manifest SLO, judgment ones included,
+-    and each SLO with no budget series failed every cycle with a warning."""
+-
+-    def _module(self, analyzer_cls, budgeted):
+-        from nthlayer_workers.observe.drift import DriftAnalysisError
+-
+-        analyzer = AsyncMock()
+-        # Only the call matters here; the analysis itself is tested elsewhere.
+-        analyzer.analyze = AsyncMock(side_effect=DriftAnalysisError("no history"))
+-        if isinstance(budgeted, Exception):
+-            analyzer.budgeted_slos = AsyncMock(side_effect=budgeted)
+-        else:
+-            analyzer.budgeted_slos = AsyncMock(return_value=budgeted)
+-        analyzer_cls.return_value = analyzer
+-        client = AsyncMock()
+-        client.get_manifests = AsyncMock(return_value=_manifest_response())
+-        return ObserveDriftModule(client=client, prometheus_url="http://prom:9090"), analyzer
+-
+-    @patch("nthlayer_workers.observe.drift.DriftAnalyzer")
+-    async def test_only_slos_with_a_budget_series_are_analysed(self, analyzer_cls):
+-        module, analyzer = self._module(analyzer_cls, {"availability"})
+-
+-        await module.process_cycle()
+-
+-        analysed = [c.args[2] for c in analyzer.analyze.await_args_list]
+-        assert analysed == ["availability"]  # not the judgment SLO reversal_rate
+-
+-    @patch("nthlayer_workers.observe.drift.DriftAnalyzer")
+-    async def test_a_service_with_no_budget_is_not_analysed(self, analyzer_cls):
+-        module, analyzer = self._module(analyzer_cls, set())
+-
+-        await module.process_cycle()
+-
+-        analyzer.analyze.assert_not_awaited()
+-
+-    @patch("nthlayer_workers.observe.drift.DriftAnalyzer")
+-    async def test_discovery_failure_skips_the_service_with_one_warning(self, analyzer_cls):
+-        from nthlayer_workers.observe.drift import DriftAnalysisError
+-
+-        module, analyzer = self._module(analyzer_cls, DriftAnalysisError("down"))
+-
+-        with patch("nthlayer_workers.observe.worker.logger") as log:
+-            await module.process_cycle()
+-
+-        analyzer.analyze.assert_not_awaited()
+-        # Asked once for the service, not once per SLO.
+-        assert analyzer.budgeted_slos.await_count == 1
+-        assert [c.args[0] for c in log.warning.call_args_list] == ["drift_budget_discovery_failed"]
+-
+-
+-    @patch("nthlayer_workers.observe.drift.DriftAnalyzer")
+-    async def test_an_unexpected_discovery_error_skips_only_that_service(self, analyzer_cls):
+-        two_services = _manifest_response([
+-            {"name": "svc-a", "tier": "critical", "slos": [{"name": "availability", "target": 99.9}]},
+-            {"name": "svc-b", "tier": "critical", "slos": [{"name": "availability", "target": 99.9}]},
+-        ])
+-        module, analyzer = self._module(analyzer_cls, {"availability"})
+-        module.client.get_manifests = AsyncMock(return_value=two_services)
+-        analyzer.budgeted_slos = AsyncMock(side_effect=[RuntimeError("surprise"), {"availability"}])
+-
+-        await module.process_cycle()
+-
+-        analysed = [c.args[0] for c in analyzer.analyze.await_args_list]
+-        assert analysed == ["svc-b"]
+-
+-
+ # ---------------------------------------------------------------------------
+ # ObserveTopologyModule
+ # ---------------------------------------------------------------------------
+@@ -487,9 +419,6 @@ class TestDriftCycleHappyPath:
+             recommendation="Investigate trend",
+             exit_code=1,
+         ))
+-        # Prometheus holds a budget for the classical SLO only; the judgment
+-        # SLO beside it in the manifest has none (opensrm-zo0o).
+-        mock_analyzer.budgeted_slos = AsyncMock(return_value={"availability"})
+         mock_analyzer_cls.return_value = mock_analyzer
+ 
+         client = AsyncMock()
+diff --git a/tests/respond/test_agent_base.py b/tests/respond/test_agent_base.py
+index b818adb..e0f76c2 100644
+--- a/tests/respond/test_agent_base.py
++++ b/tests/respond/test_agent_base.py
+@@ -459,31 +459,3 @@ async def test_structured_path_emits_otel_event_on_failure(verdict_store):
+     assert kwargs["caller"] == "respond.triage"
+     # Token fields are absent on failure (no usage data available).
+     assert "input_tokens" not in kwargs or kwargs["input_tokens"] is None
+-
+-
+-async def test_structured_path_reports_a_bare_model_s_provider(verdict_store):
+-    """A bare Claude model is reported as anthropic, not "unknown" (opensrm-ju8r J4)."""
+-    from nthlayer_common.llm_structured import StructuredCallResult, StructuredCallUsage
+-
+-    from nthlayer_workers.respond.agents.response_models import TriageResponse
+-
+-    canned = TriageResponse(
+-        severity=2, blast_radius=[], affected_slos=[],
+-        assigned_team=None, reasoning="", confidence=0.5,
+-    )
+-    agent = StructuredStubAgent(
+-        model="claude-sonnet-4-20250514", max_tokens=100,
+-        verdict_store=verdict_store, config={},
+-    )
+-
+-    with patch(
+-        "nthlayer_workers.respond.agents.base.structured_call_with_usage",
+-        return_value=StructuredCallResult(
+-            data=canned, usage=StructuredCallUsage(input_tokens=1, output_tokens=1),
+-        ),
+-    ), patch(
+-        "nthlayer_workers.respond.agents.base.emit_llm_event",
+-    ) as mock_emit:
+-        await agent._call_model_structured("s", "u", TriageResponse)
+-
+-    assert mock_emit.call_args.kwargs["provider"] == "anthropic"
+diff --git a/tests/test_cli_telemetry.py b/tests/test_cli_telemetry.py
+deleted file mode 100644
+index 553aa26..0000000
+--- a/tests/test_cli_telemetry.py
++++ /dev/null
+@@ -1,65 +0,0 @@
+-"""Every CLI entry point initialises telemetry before it runs a command.
+-
+-Without ``init_telemetry`` no LoggerProvider is installed, and every event a
+-command emits is dropped (opensrm-quqo). The ``python -m`` entry points call
+-these same ``main`` functions.
+-"""
+-
+-import importlib
+-import sys
+-from unittest.mock import patch
+-
+-import pytest
+-
+-from nthlayer_workers import TELEMETRY_SERVICE_NAME
+-
+-
+-class _Initialised(Exception):
+-    """Raised by the patched init_telemetry, so the test stops before the
+-    command does anything real, and proves the call came first."""
+-
+-
+-# Each argv is one the CLI's parser accepts, so main gets past parse_args.
+-ENTRY_POINTS = [
+-    ("nthlayer_workers.cli", []),
+-    ("nthlayer_workers.measure.cli", []),
+-    ("nthlayer_workers.observe.cli", ["drift", "--service", "s", "--prometheus-url", "http://p"]),
+-    ("nthlayer_workers.learn.cli", ["accuracy", "--producer", "p"]),
+-    ("nthlayer_workers.respond.cli", []),
+-    ("nthlayer_workers.correlate.cli", []),
+-]
+-
+-
+-@pytest.mark.parametrize(("module", "argv"), ENTRY_POINTS, ids=[m for m, _ in ENTRY_POINTS])
+-def test_main_initialises_telemetry_before_running_a_command(module, argv):
+-    cli = importlib.import_module(module)
+-    with patch.object(cli, "init_telemetry", side_effect=_Initialised) as init, \
+-         patch.object(sys, "argv", ["prog", *argv]), \
+-         pytest.raises(_Initialised):
+-        cli.main()
+-
+-    init.assert_called_once_with(TELEMETRY_SERVICE_NAME)
+-
+-
+-def test_every_entry_point_is_covered():
+-    """A new console script, or a new ``python -m`` module, must have its main
+-    added to ENTRY_POINTS."""
+-    import tomllib
+-    from pathlib import Path
+-
+-    root = Path(__file__).parents[1]
+-    pyproject = tomllib.loads((root / "pyproject.toml").read_text())
+-    scripts = {target.split(":")[0] for target in pyproject["project"]["scripts"].values()}
+-    # Each __main__ module runs its sibling cli.main.
+-    mains = [p.parent for p in (root / "src" / "nthlayer_workers").rglob("__main__.py")]
+-    assert len(mains) >= 4, "__main__ discovery found too few modules; the layout moved"
+-    via_main = {f"nthlayer_workers.{pkg.name}.cli" for pkg in mains}
+-
+-    assert scripts | via_main <= {m for m, _ in ENTRY_POINTS}
+-
+-
+-def test_the_otel_sdk_and_log_exporter_are_installed():
+-    """The [otel] extra must actually deliver what init_telemetry imports, or
+-    it reports SDK_MISSING and every event drops."""
+-    import opentelemetry.exporter.otlp.proto.grpc._log_exporter  # noqa: F401
+-    import opentelemetry.sdk._logs  # noqa: F401
+diff --git a/tests/test_dependency_declarations.py b/tests/test_dependency_declarations.py
+index 85d3078..1084d5e 100644
+--- a/tests/test_dependency_declarations.py
++++ b/tests/test_dependency_declarations.py
+@@ -345,10 +345,3 @@ def test_uv_lock_records_this_projects_version():
+         f"uv.lock records {project['name']} {entries[0].get('version')}, pyproject says "
+         f"{project['version']}: run `uv lock` (and check release-please-config.json extra-files)"
+     )
+-
+-
+-def test_common_is_declared_with_the_otel_extra():
+-    """nthlayer-common's ``otel`` extra carries the OTel SDK and OTLP log
+-    exporter. Without it, ``init_telemetry`` finds an endpoint but no SDK, and
+-    every event workers emits is dropped (opensrm-quqo)."""
+-    assert "otel" in _siblings()["nthlayer-common"].extras
+diff --git a/tests/test_llm_provider.py b/tests/test_llm_provider.py
+deleted file mode 100644
+index fed0b0a..0000000
+--- a/tests/test_llm_provider.py
++++ /dev/null
+@@ -1,38 +0,0 @@
+-"""provider_for_model: the gen_ai.provider.name workers reports (opensrm-ju8r J4).
+-
+-OpenSRM Addendum A1 §5 P4 names the provider by gen_ai.provider.name, whose
+-upstream well-known values include "anthropic" and "openai". Workers used to
+-send the sentinel "unknown" whenever a model string carried no
+-"provider/" prefix, so a bare Claude model was reported as an unknown provider.
+-"""
+-
+-import pytest
+-
+-from nthlayer_workers.llm_provider import provider_for_model
+-
+-
+-@pytest.mark.parametrize(
+-    ("model", "provider"),
+-    [
+-        # An explicit provider/ prefix is authoritative, whatever follows.
+-        ("anthropic/claude-sonnet-4-20250514", "anthropic"),
+-        ("openai/gpt-4o", "openai"),
+-        ("ollama/claude-lookalike", "ollama"),
+-        # An empty prefix names nothing.
+-        ("/claude-sonnet", "unknown"),
+-        # Bare model names from the two families whose provider is unambiguous.
+-        ("claude-sonnet-4-20250514", "anthropic"),
+-        ("gpt-4o", "openai"),
+-        ("o1-mini", "openai"),
+-        ("o3", "openai"),
+-        # Nothing to go on: say so rather than guess.
+-        # Not normalised: unrecognised spellings are unknown, not guessed.
+-        ("Claude-sonnet", "unknown"),
+-        ("anthropic.claude-3-sonnet", "unknown"),
+-        ("llama3", "unknown"),
+-        ("default", "unknown"),
+-        ("", "unknown"),
+-    ],
+-)
+-def test_provider_for_model(model: str, provider: str) -> None:
+-    assert provider_for_model(model) == provider
+diff --git a/uv.lock b/uv.lock
+index 2d92403..4da2bbe 100644
+--- a/uv.lock
++++ b/uv.lock
+@@ -1,11 +1,6 @@
+ version = 1
+ revision = 3
+ requires-python = ">=3.11"
+-resolution-markers = [
+-    "python_full_version >= '3.14'",
+-    "python_full_version == '3.13.*'",
+-    "python_full_version < '3.13'",
+-]
+ 
+ [[package]]
+ name = "aiohappyeyeballs"
+@@ -450,79 +445,6 @@ wheels = [
+     { url = "https://files.pythonhosted.org/packages/9a/9a/e35b4a917281c0b8419d4207f4334c8e8c5dbf4f3f5f9ada73958d937dcc/frozenlist-1.8.0-py3-none-any.whl", hash = "sha256:0c18a16eab41e82c295618a77502e17b195883241c563b00f0aa5106fc4eaa0d", size = 13409, upload-time = "2025-10-06T05:38:16.721Z" },
+ ]
+ 
+-[[package]]
+-name = "googleapis-common-protos"
+-version = "1.76.0"
+-source = { registry = "https://pypi.org/simple" }
+-dependencies = [
+-    { name = "protobuf" },
+-]
+-sdist = { url = "https://files.pythonhosted.org/packages/62/b6/bc095b23a3e0d978e75c8c18cabe4c11f791837410670e4486f0d539bfba/googleapis_common_protos-1.76.0.tar.gz", hash = "sha256:71db0e44a1d4c2dd024ebad44ca67129cc1e2892e4861df466764749d5ef8642", size = 156250, upload-time = "2026-10-22T23:43:36.263Z" }
+-wheels = [
+-    { url = "https://files.pythonhosted.org/packages/05/6d/78dc67a9e779e594b49bf62604034d3a6aa428a55afc729cafda4b7333e1/googleapis_common_protos-1.76.0-py3-none-any.whl", hash = "sha256:59e13344a9f3651aa201a03e2bee815a3bf43a4baf1f9ff8a9b62a840ce25fac", size = 307707, upload-time = "2026-10-22T23:43:10.445Z" },
+-]
+-
+-[[package]]
+-name = "grpcio"
+-version = "1.85.1"
+-source = { registry = "https://pypi.org/simple" }
+-dependencies = [
+-    { name = "typing-extensions" },
+-]
+-sdist = { url = "https://files.pythonhosted.org/packages/f0/03/f9e805772d4d01da2a1754a5f63c58601eacaf8f1e878729217188de7d16/grpcio-1.85.1.tar.gz", hash = "sha256:5f530287d5de5f7f66089ead81de44f6787162944dab3922efa65dfdff108a1d", size = 14091456, upload-time = "2026-10-30T16:01:16.909Z" }
+-wheels = [
+-    { url = "https://files.pythonhosted.org/packages/47/3c/ab73cb485967ac57f00350fef66c8180400c6a832436cf39811cc7d41f8d/grpcio-1.85.1-cp311-cp311-linux_armv7l.whl", hash = "sha256:d2a776b113e7bd6d139e679f5da281193d6410cce361e4180c9da0d553e01927", size = 6823898, upload-time = "2026-10-30T15:59:12.079Z" },
+-    { url = "https://files.pythonhosted.org/packages/81/0f/80bd2a767a8cb78e9c257b9062f9786b67c3ce26d403825545ba2e9a79ad/grpcio-1.85.1-cp311-cp311-macosx_11_0_universal2.whl", hash = "sha256:cfa9bf4daed57dd5bd5fac4be3276f5dc1703f41abf4df0737f4e7952705cbc6", size = 12654220, upload-time = "2026-10-30T15:59:14.324Z" },
+-    { url = "https://files.pythonhosted.org/packages/f8/a0/efb97c6639f59907fe3c17270904918b37cdc406eba2dbe97feacf309a86/grpcio-1.85.1-cp311-cp311-manylinux2014_aarch64.manylinux_2_17_aarch64.whl", hash = "sha256:9885436e83eab92dd0d476642baf08a17c55ef2b1db430adcba3e89bb6938a5d", size = 7215807, upload-time = "2026-10-30T15:59:17.395Z" },
+-    { url = "https://files.pythonhosted.org/packages/f7/f2/2b0900585deed45e126a1d5939acbaba94f6f4c62a787949cdc03329979d/grpcio-1.85.1-cp311-cp311-manylinux2014_i686.manylinux_2_17_i686.whl", hash = "sha256:3bbf7ae798e38eccb1b7abf169d9e228514418da6f68caec69a295fde899ec17", size = 8200549, upload-time = "2026-10-30T15:59:19.657Z" },
+-    { url = "https://files.pythonhosted.org/packages/1a/4f/30f66cedfec6c03bc304b28fbe073ed53179cf37a511b8ee8e8e7e2d3f17/grpcio-1.85.1-cp311-cp311-manylinux2014_x86_64.manylinux_2_17_x86_64.whl", hash = "sha256:83aced2a1c05648cee0de34e531351118b14c58238f0a61b43559ac8851647a8", size = 7392335, upload-time = "2026-10-30T15:59:21.917Z" },
+-    { url = "https://files.pythonhosted.org/packages/4a/ad/5dee0e6e5a57f88379bc2820aa6e3098a2174e21a40bfb961c6d5f5b28d0/grpcio-1.85.1-cp311-cp311-musllinux_1_2_aarch64.whl", hash = "sha256:b364bc3daa601eb1cb0023e90b1309cbf6da0de6ca40a19f2d5a31edeb9990e3", size = 7955183, upload-time = "2026-10-30T15:59:24.197Z" },
+-    { url = "https://files.pythonhosted.org/packages/43/d8/93b729c8fc1aee6232906cffd44a9dfcb6f8387e6279a1238cd972ff468a/grpcio-1.85.1-cp311-cp311-musllinux_1_2_i686.whl", hash = "sha256:c9a4a4e504bd914e10c0d6190ffac59b9e21f1c962366b72293075ade097793d", size = 9212733, upload-time = "2026-10-30T15:59:26.388Z" },
+-    { url = "https://files.pythonhosted.org/packages/08/4d/d6339c51032649a90c347a67ad41b56f2f1a564f4960efcc72409fe03eba/grpcio-1.85.1-cp311-cp311-musllinux_1_2_x86_64.whl", hash = "sha256:83b09ca3f9602caf4f1b4295b4bb002b10477789ff9797feeedc811b9a6be0b7", size = 8332651, upload-time = "2026-10-30T15:59:29.113Z" },
+-    { url = "https://files.pythonhosted.org/packages/b4/bf/085116e89db4f758af02eca2da9ad3a1890fb1691f5e2fc882c402ed9622/grpcio-1.85.1-cp311-cp311-win32.whl", hash = "sha256:bbc678a2b8d10e0dea666d948f36237e681be3686079564937df689bac386bc5", size = 4779959, upload-time = "2026-10-30T15:59:31.001Z" },
+-    { url = "https://files.pythonhosted.org/packages/9b/b8/fb80401f9eaf51eb2fc8c5dbf8e4f8cbfeebc21bf837f7c6576790ce433e/grpcio-1.85.1-cp311-cp311-win_amd64.whl", hash = "sha256:27b519f6594da04cf2dda1378f46811b2b6160d60a01f88a0ec4de009bbbfa46", size = 5615553, upload-time = "2026-10-30T15:59:33.252Z" },
+-    { url = "https://files.pythonhosted.org/packages/31/8c/b6d9ea0bf02a6b47ba34c5f936da2921d76f5e40cbb411e9abb246b70d2d/grpcio-1.85.1-cp312-cp312-linux_armv7l.whl", hash = "sha256:1a10d337967ec2be049c6a2345320f6a59f71bf9f54febfd80e5a966cffaa945", size = 6797195, upload-time = "2026-10-30T15:59:35.364Z" },
+-    { url = "https://files.pythonhosted.org/packages/c6/ee/f60cfacd679fe811944be391c899955c3d9c7e07db922b47e535ddda550c/grpcio-1.85.1-cp312-cp312-macosx_11_0_universal2.whl", hash = "sha256:658a9d89c5736bf4aa3ef4ecbc79528e26d8e23c5e1c83417d2870a1a06063e5", size = 12633025, upload-time = "2026-10-30T15:59:37.66Z" },
+-    { url = "https://files.pythonhosted.org/packages/f1/0d/5dbe225f0ceb208538dc8c16c5f52b0c402b91611f981604b5e280439dfb/grpcio-1.85.1-cp312-cp312-manylinux2014_aarch64.manylinux_2_17_aarch64.whl", hash = "sha256:843aa281a48188621f50880496d35defed51298bcb66d5345d5f282fd3f87354", size = 7170616, upload-time = "2026-10-30T15:59:40.138Z" },
+-    { url = "https://files.pythonhosted.org/packages/54/35/ce972a4e5bb721ba85f5c9e20a0029253ae0b2deb5276dafa3383e025133/grpcio-1.85.1-cp312-cp312-manylinux2014_i686.manylinux_2_17_i686.whl", hash = "sha256:e768556a2346d1d2921f511f3145e2462e4fe68095c31e4db407558bcd3f1d4f", size = 8180786, upload-time = "2026-10-30T15:59:42.7Z" },
+-    { url = "https://files.pythonhosted.org/packages/00/8d/74a8649d2787dae0a661855cdf09a8e2238fa741689bb368ca1b4f6d5b6f/grpcio-1.85.1-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.whl", hash = "sha256:a1a72d19c0ab84b4b73b6c47eeaade76d84b1973a51593ff1160a73df33d03d9", size = 7362744, upload-time = "2026-10-30T15:59:45.076Z" },
+-    { url = "https://files.pythonhosted.org/packages/03/72/87ef13aba6bd2c5c6d4c5117238b17b1e3c1c1efa26c66cb377053124eb7/grpcio-1.85.1-cp312-cp312-musllinux_1_2_aarch64.whl", hash = "sha256:0e07f477e1d1a05bdbe71d63add964c5457e7ab2e3f5fd32859639ed8ecb976e", size = 7929643, upload-time = "2026-10-30T15:59:47.294Z" },
+-    { url = "https://files.pythonhosted.org/packages/09/f1/2e75b2906c9643e0be81a74bf23ae10c29661e0199c8f3a6e2c23707e882/grpcio-1.85.1-cp312-cp312-musllinux_1_2_i686.whl", hash = "sha256:b2846c70ed58c8e149e8e5d867af40805a13b151d84157d8272952d711a77c5c", size = 9181161, upload-time = "2026-10-30T15:59:49.399Z" },
+-    { url = "https://files.pythonhosted.org/packages/c1/d9/6b9127e8fa3ef14a3ec199436bec6c1a54a0bb429ca261b1a2fb518938d1/grpcio-1.85.1-cp312-cp312-musllinux_1_2_x86_64.whl", hash = "sha256:9998f03ac0dfed226eead6e93cee1b547d7a32e47e1915dee94eff0e113b167e", size = 8318829, upload-time = "2026-10-30T15:59:52.09Z" },
+-    { url = "https://files.pythonhosted.org/packages/21/46/ff3374d33efee490a0e50e3c3fc59280b7f7fc2ed3ab1ee8c4e9873dc83d/grpcio-1.85.1-cp312-cp312-win32.whl", hash = "sha256:2670c03d154f6bec66a0fef97c607116761b032183187dfdfe229b5975820a4f", size = 4768056, upload-time = "2026-10-30T15:59:54.132Z" },
+-    { url = "https://files.pythonhosted.org/packages/dd/48/4030a63540089d00a36cea15282623bcf084a5ea4c0ffc4685a42ef0f342/grpcio-1.85.1-cp312-cp312-win_amd64.whl", hash = "sha256:eaad7e6aa9ac3aded4f6bc86a18bf2cff3de356f972bf32a5558df9788085b85", size = 5607218, upload-time = "2026-10-30T15:59:56.721Z" },
+-    { url = "https://files.pythonhosted.org/packages/c1/05/2d40be7dbfd8e66e8e5675ec695fafacc69823dcd2ef5d387ad7431c7af7/grpcio-1.85.1-cp313-cp313-linux_armv7l.whl", hash = "sha256:e117b074d707d418ff411e0ad6fc86e97e83047b742488b41d7a5b7a62953cd3", size = 6801759, upload-time = "2026-10-30T15:59:58.834Z" },
+-    { url = "https://files.pythonhosted.org/packages/b0/98/530af74d704dc8e79c79b26888af44ccbdd1827bfabc9cb405b3d4cc184e/grpcio-1.85.1-cp313-cp313-macosx_11_0_universal2.whl", hash = "sha256:6bb4bbb5cb46010687db552fd88852c405595814fb7d435b072124bd6b93f827", size = 12629341, upload-time = "2026-10-30T16:00:01.159Z" },
+-    { url = "https://files.pythonhosted.org/packages/21/cb/bac12e6c7ab3b1c6b50816fdcbf7f97aec1bd0992cc0d193e332aff716a5/grpcio-1.85.1-cp313-cp313-manylinux2014_aarch64.manylinux_2_17_aarch64.whl", hash = "sha256:0bde4264ca71aaf3bc56c587380c426b1c959d1db0ab0a3f632bc66515f9726f", size = 7174387, upload-time = "2026-10-30T16:00:04.847Z" },
+-    { url = "https://files.pythonhosted.org/packages/90/0a/7770a652508a3a6c7d16fbb81db0f0b2be8a73a469af88a6cdfdc3d29cf2/grpcio-1.85.1-cp313-cp313-manylinux2014_i686.manylinux_2_17_i686.whl", hash = "sha256:7b931335c163510fb054c30007fe3556ef3bf354a1c37b5da403f2e52c6bbd95", size = 8185778, upload-time = "2026-10-30T16:00:07.009Z" },
+-    { url = "https://files.pythonhosted.org/packages/bf/cb/52417fb272b7603d13ec8688e843dfd8df64584da1951ad954b9120d7c80/grpcio-1.85.1-cp313-cp313-manylinux2014_x86_64.manylinux_2_17_x86_64.whl", hash = "sha256:de520b1555ae445cdc4f8f1cc7ccba12a19992bfafa7c292ebe7fe1fe5da6c53", size = 7364062, upload-time = "2026-10-30T16:00:09.777Z" },
+-    { url = "https://files.pythonhosted.org/packages/ba/86/9329799fa9defe9327084b9ca7b9a9745e83e7174bb90f2bfb2f37063967/grpcio-1.85.1-cp313-cp313-musllinux_1_2_aarch64.whl", hash = "sha256:2b20ba567ca818b8393fd4668878b5688cab32a46e8e7a4d1a58641fc0072df9", size = 7932775, upload-time = "2026-10-30T16:00:11.956Z" },
+-    { url = "https://files.pythonhosted.org/packages/48/e4/826e0ae8f89a3d2ab3a15b91ee4ef486bdd7a09fd1ff72e12d01505341dc/grpcio-1.85.1-cp313-cp313-musllinux_1_2_i686.whl", hash = "sha256:f0ebfbd8ba42497e0ff7229c8c5e166e07c2b348462c1481dbd90faa978ad8af", size = 9173461, upload-time = "2026-10-30T16:00:15.696Z" },
+-    { url = "https://files.pythonhosted.org/packages/88/2d/d4baf37bf1a9ba8222dcb133c6aeb09119b183bd7b471061762a1198461c/grpcio-1.85.1-cp313-cp313-musllinux_1_2_x86_64.whl", hash = "sha256:000999ea9bba80217b1625782d638e7a688790f6154e845e18826f7da859bfc7", size = 8311104, upload-time = "2026-10-30T16:00:18.533Z" },
+-    { url = "https://files.pythonhosted.org/packages/e4/02/b07af232a583727fa84665d11165bbd7be6ddd31d84c2b8cb62a7b69062f/grpcio-1.85.1-cp313-cp313-win32.whl", hash = "sha256:b3722f4e01820f4d2422679a567fe33f31b6f14eba4352657a1078f4b4ed323e", size = 4769351, upload-time = "2026-10-30T16:00:21.165Z" },
+-    { url = "https://files.pythonhosted.org/packages/f9/f0/d2448e860d884e8c89dd9135cd9373df064c10227d90973d822c2125428d/grpcio-1.85.1-cp313-cp313-win_amd64.whl", hash = "sha256:c17d61af28b322c48ab3881c685e5f6e7e367c56844cf589ee7707be9477b969", size = 5606831, upload-time = "2026-10-30T16:00:23.621Z" },
+-    { url = "https://files.pythonhosted.org/packages/39/cc/da49c22b9c571b5315acc507e2ff6568e5ff9d4c99895285910283bf87e3/grpcio-1.85.1-cp314-cp314-linux_armv7l.whl", hash = "sha256:2a378eb60ea42996be5a8c7167302fb30d968fcfcf9edd7b3fa6c985906c4500", size = 6803626, upload-time = "2026-10-30T16:00:26.587Z" },
+-    { url = "https://files.pythonhosted.org/packages/12/92/35bcee92bcfc2b0f66290a5dd6dd23ced7b9423fe269cf4495136e73d55b/grpcio-1.85.1-cp314-cp314-macosx_11_0_universal2.whl", hash = "sha256:90a7e0f26de39d15f5c741b8848bb2065c9ab7351c57d4fc973ff5cbda0cb9c7", size = 12640307, upload-time = "2026-10-30T16:00:28.969Z" },
+-    { url = "https://files.pythonhosted.org/packages/f2/b5/469b69dadb2c413706f16e0c3e7a2749cc70abaab10d718873603bec29b2/grpcio-1.85.1-cp314-cp314-manylinux2014_aarch64.manylinux_2_17_aarch64.whl", hash = "sha256:421925365f9a665830eded01b8053033abbc2fbabc9bb4e9c59c3b5b12acbab9", size = 7187308, upload-time = "2026-10-30T16:00:31.652Z" },
+-    { url = "https://files.pythonhosted.org/packages/c4/df/2fcb1567d37e91ce26bddfca30f39fe6c39cbc5a2f4a210cfb1246ced1b2/grpcio-1.85.1-cp314-cp314-manylinux2014_i686.manylinux_2_17_i686.whl", hash = "sha256:8a921a98ed6142a29651b4a6f4c7b8e051d115f1e78c31655a9642dcf6356dd9", size = 8188002, upload-time = "2026-10-30T16:00:33.893Z" },
+-    { url = "https://files.pythonhosted.org/packages/7b/b2/c67c1d8c7b70a094d404b28233458887bc1ca1319daa95d8952621216717/grpcio-1.85.1-cp314-cp314-manylinux2014_x86_64.manylinux_2_17_x86_64.whl", hash = "sha256:e0e6d5829b50a2ffcfcd2dbf08d02ac0d6919051a2e97c2ee27c99bc9916a245", size = 7368045, upload-time = "2026-10-30T16:00:36.675Z" },
+-    { url = "https://files.pythonhosted.org/packages/80/48/5cf6c704be4b059d508e8f6c981154223533595ba7a3ee531211ef8be62e/grpcio-1.85.1-cp314-cp314-musllinux_1_2_aarch64.whl", hash = "sha256:58b5ebe509da292bec5a1913c1e4c14d842a33f6cb330a87d3713c5089dd0f55", size = 7941330, upload-time = "2026-10-30T16:00:39.173Z" },
+-    { url = "https://files.pythonhosted.org/packages/67/96/5ef14edb784ea2053610753993601e98a76a18b541a8a74103dc390540ab/grpcio-1.85.1-cp314-cp314-musllinux_1_2_i686.whl", hash = "sha256:016982ebd21d2b48e955aa808e9db8d628708a35c6eba852cd0e70765826ab06", size = 9176909, upload-time = "2026-10-30T16:00:41.335Z" },
+-    { url = "https://files.pythonhosted.org/packages/50/01/4264ae95364bdeede4c8a5f0d83df83a21b477935f9ab8c829ae5606e1d4/grpcio-1.85.1-cp314-cp314-musllinux_1_2_x86_64.whl", hash = "sha256:0fa3d7b8b95e8a609967991c3b0a302b2f9d510fe417efadfa7c7d2d044a99ba", size = 8316226, upload-time = "2026-10-30T16:00:44.199Z" },
+-    { url = "https://files.pythonhosted.org/packages/75/b8/79dace38eb4bb904751b804cfdc71609a3840f34084af7475169059dce20/grpcio-1.85.1-cp314-cp314-win32.whl", hash = "sha256:39b1965266b579f3758db20d74f9075b130d1b1edcf0464cda316e403a15da9b", size = 4853260, upload-time = "2026-10-30T16:00:47.098Z" },
+-    { url = "https://files.pythonhosted.org/packages/48/c9/68a6bbd2450f08942c3056acd8995ac28af2b4eeb0574c0a8e59fa59b140/grpcio-1.85.1-cp314-cp314-win_amd64.whl", hash = "sha256:5f015600190124813032da0560ec950c13c257f77c1307abd77c393c0994f76f", size = 5758958, upload-time = "2026-10-30T16:00:49.145Z" },
+-    { url = "https://files.pythonhosted.org/packages/1b/bd/1a2481b354ab4528eb8b3462937904c9206e2a54748f3f74a2576205ef3e/grpcio-1.85.1-cp315-cp315-linux_armv7l.whl", hash = "sha256:07bfef5df75875d8481d3403f864785e30096594162e8041c53a84fb11ee4f8e", size = 6803392, upload-time = "2026-10-30T16:00:51.782Z" },
+-    { url = "https://files.pythonhosted.org/packages/40/45/1868c12c18058d778fcecee0e04c867891a82d983d2dd0de2639158aa960/grpcio-1.85.1-cp315-cp315-macosx_10_15_universal2.whl", hash = "sha256:e909e0f9145a555d3968dd2a448616b0d3cb58748b9e2053de3e7974b3e429bc", size = 12657793, upload-time = "2026-10-30T16:00:55.335Z" },
+-    { url = "https://files.pythonhosted.org/packages/ed/af/c283032a42df5217913b98bd0113738b68dd94b91cea16b2209565fefe67/grpcio-1.85.1-cp315-cp315-manylinux2014_aarch64.manylinux_2_17_aarch64.whl", hash = "sha256:1f3064e209167e5fcb75a72cbc18918c06027b92b29fa06eaff0126f9a2aab5a", size = 7209146, upload-time = "2026-10-30T16:00:58.279Z" },
+-    { url = "https://files.pythonhosted.org/packages/45/64/8a72fd6c20c206cff07eaa49b2ca63bb15d7ed9b6bf7c653ea10ec578e4b/grpcio-1.85.1-cp315-cp315-manylinux2014_i686.manylinux_2_17_i686.whl", hash = "sha256:07675c635a2da0c772e58ac736a7fb10c7c7c1613157766441e6866ad97d25b4", size = 7511067, upload-time = "2026-10-30T16:01:00.806Z" },
+-    { url = "https://files.pythonhosted.org/packages/5d/b8/32afa404288c7eea4c6034d031f1a07eff772a8cdbfc7751314382e7b724/grpcio-1.85.1-cp315-cp315-manylinux2014_x86_64.manylinux_2_17_x86_64.whl", hash = "sha256:759f7df78954e3ac0ed4c87612eff9125021b9271be37be8c88167aa533e29ee", size = 7410227, upload-time = "2026-10-30T16:01:02.966Z" },
+-    { url = "https://files.pythonhosted.org/packages/89/a4/1c51e2c2d0d9e4d37e8e8a7be412c5dfb3fd5c80ab100dd531fd81b44d43/grpcio-1.85.1-cp315-cp315-musllinux_1_2_aarch64.whl", hash = "sha256:7cd08bd5ad063ad9639dbebf95d3a6b8c8aa2c9d49049bc0e8f47e73ecf1c1a2", size = 7964886, upload-time = "2026-10-30T16:01:05.208Z" },
+-    { url = "https://files.pythonhosted.org/packages/07/f3/e26f570129c162d8f15a02af6edb49e592ac1c88a63490cd3ec9142d8c67/grpcio-1.85.1-cp315-cp315-musllinux_1_2_i686.whl", hash = "sha256:2198269c8b69cb1e9d5d20628029245e40b7227d5f6fc6f298a420701d8fb652", size = 8504060, upload-time = "2026-10-30T16:01:07.82Z" },
+-    { url = "https://files.pythonhosted.org/packages/16/e1/e334cf7442c01892ed813563b21b2a8ab5b042e34f33ad76cf64526d1de8/grpcio-1.85.1-cp315-cp315-musllinux_1_2_x86_64.whl", hash = "sha256:7bc5de50374416223bc35332aa8185567ec065f86190ff0ca6e13176ed39a3b4", size = 8346563, upload-time = "2026-10-30T16:01:10.394Z" },
+-    { url = "https://files.pythonhosted.org/packages/66/bb/cf72913ce0baae1fed95445f1ba8ac309184ac16b4f20fb5f88219eff72c/grpcio-1.85.1-cp315-cp315-win32.whl", hash = "sha256:5740aedf1e6acde538d7b80a2507eb6ee0b8983c577a36890d27a0e2b62cc1eb", size = 4853404, upload-time = "2026-10-30T16:01:12.239Z" },
+-    { url = "https://files.pythonhosted.org/packages/ea/b8/b7cff7b9e1ff7b6a8d36a19ce8b9c575963e71fcbb3878b276cff6748b05/grpcio-1.85.1-cp315-cp315-win_amd64.whl", hash = "sha256:b32f39c56d22d2e8722eececd4376074d94e01595a29f4f944ae0b6cea1caa70", size = 5758584, upload-time = "2026-10-30T16:01:14.325Z" },
+-]
+-
+ [[package]]
+ name = "h11"
+ version = "0.16.0"
+@@ -569,6 +491,18 @@ wheels = [
+     { url = "https://files.pythonhosted.org/packages/5d/13/ad7d7ca3808a898b4612b6fe93cde56b53f3034dcde235acb1f0e1df24c6/idna-3.13-py3-none-any.whl", hash = "sha256:892ea0cde124a99ce773decba204c5552b69c3c67ffd5f232eb7696135bc8bb3", size = 68629, upload-time = "2026-04-22T16:42:40.909Z" },
+ ]
+ 
++[[package]]
++name = "importlib-metadata"
++version = "8.7.1"
++source = { registry = "https://pypi.org/simple" }
++dependencies = [
++    { name = "zipp" },
++]
++sdist = { url = "https://files.pythonhosted.org/packages/f3/49/3b30cad09e7771a4982d9975a8cbf64f00d4a1ececb53297f1d9a7be1b10/importlib_metadata-8.7.1.tar.gz", hash = "sha256:49fef1ae6440c182052f407c8d34a68f72efc36db9ca90dc0113398f2fdde8bb", size = 57107, upload-time = "2025-12-21T10:00:19.278Z" }
++wheels = [
++    { url = "https://files.pythonhosted.org/packages/fa/5e/f8e9a1d23b9c20a551a8a02ea3637b4642e22c2626e3a13a9a29cdea99eb/importlib_metadata-8.7.1-py3-none-any.whl", hash = "sha256:5a1f80bf1daa489495071efbb095d75a634cf28a8bc299581244063b53176151", size = 27865, upload-time = "2025-12-21T10:00:18.329Z" },
++]
++
+ [[package]]
+ name = "iniconfig"
+ version = "2.3.0"
+@@ -940,7 +874,7 @@ wheels = [
+ 
+ [[package]]
+ name = "nthlayer-common"
+-version = "5.12.0"
++version = "5.5.0"
+ source = { editable = "../nthlayer-common" }
+ dependencies = [
+     { name = "anthropic" },
+@@ -959,12 +893,6 @@ dependencies = [
+     { name = "tenacity" },
+ ]
+ 
+-[package.optional-dependencies]
+-otel = [
+-    { name = "opentelemetry-exporter-otlp-proto-grpc" },
+-    { name = "opentelemetry-sdk" },
+-]
+-
+ [package.metadata]
+ requires-dist = [
+     { name = "anthropic", specifier = ">=0.40" },
+@@ -974,10 +902,7 @@ requires-dist = [
+     { name = "instructor", specifier = ">=1.5" },
+     { name = "jsonschema", marker = "extra == 'dev'", specifier = ">=4.21" },
+     { name = "openai", specifier = ">=1.50" },
+-    { name = "opentelemetry-api", specifier = ">=1.38,<2" },
+-    { name = "opentelemetry-exporter-otlp-proto-grpc", marker = "extra == 'otel'", specifier = ">=1.38,<2" },
+-    { name = "opentelemetry-sdk", marker = "extra == 'dev'", specifier = ">=1.38,<2" },
+-    { name = "opentelemetry-sdk", marker = "extra == 'otel'", specifier = ">=1.38,<2" },
++    { name = "opentelemetry-api", specifier = ">=1.28" },
+     { name = "pagerduty", specifier = ">=6.0.0,<8.0.0" },
+     { name = "prometheus-client", specifier = ">=0.21" },
+     { name = "pydantic", specifier = ">=2.7.0,<3.0.0" },
+@@ -989,15 +914,15 @@ requires-dist = [
+     { name = "structlog", specifier = ">=24.1.0" },
+     { name = "tenacity", specifier = ">=8.2.3,<10.0.0" },
+ ]
+-provides-extras = ["otel", "dev"]
++provides-extras = ["dev"]
+ 
+ [[package]]
+ name = "nthlayer-workers"
+-version = "4.2.0"
++version = "3.0.3"
+ source = { editable = "." }
+ dependencies = [
+     { name = "httpx" },
+-    { name = "nthlayer-common", extra = ["otel"] },
++    { name = "nthlayer-common" },
+     { name = "numpy" },
+     { name = "python-multipart" },
+     { name = "pyyaml" },
+@@ -1020,7 +945,7 @@ dev = [
+ [package.metadata]
+ requires-dist = [
+     { name = "httpx", specifier = ">=0.27" },
+-    { name = "nthlayer-common", extras = ["otel"], editable = "../nthlayer-common" },
++    { name = "nthlayer-common", editable = "../nthlayer-common" },
+     { name = "numpy", specifier = ">=1.24" },
+     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.2" },
+     { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.23" },
+@@ -1137,96 +1062,15 @@ wheels = [
+ 
+ [[package]]
+ name = "opentelemetry-api"
+-version = "1.45.2"
++version = "1.41.0"
+ source = { registry = "https://pypi.org/simple" }
+ dependencies = [
++    { name = "importlib-metadata" },
+     { name = "typing-extensions" },
+ ]
+-sdist = { url = "https://files.pythonhosted.org/packages/19/14/cf3a6b6448849656e1e5f4e2101f3988dc6789724050096aba1bc5ccf592/opentelemetry_api-1.45.2.tar.gz", hash = "sha256:d7b0008e21e5fd61cbe7a7f34ca3b6905a78ab677d9bc395e299359c75cda6b4", size = 73277, upload-time = "2026-10-29T17:29:37.888Z" }
++sdist = { url = "https://files.pythonhosted.org/packages/47/8e/3778a7e87801d994869a9396b9fc2a289e5f9be91ff54a27d41eace494b0/opentelemetry_api-1.41.0.tar.gz", hash = "sha256:9421d911326ec12dee8bc933f7839090cad7a3f13fcfb0f9e82f8174dc003c09", size = 71416, upload-time = "2026-04-09T14:38:34.544Z" }
+ wheels = [
+-    { url = "https://files.pythonhosted.org/packages/a9/2d/610db864d7513158cebb8f36cc88e67e73bd6c7aa1905ef18d89e1281c81/opentelemetry_api-1.45.2-py3-none-any.whl", hash = "sha256:2cbd737377e710ee740d261c94e93fa0f08e6d037c18f17513cc0a2d94479a34", size = 60335, upload-time = "2026-10-29T17:29:06.955Z" },
+-]
+-
+-[[package]]
+-name = "opentelemetry-exporter-otlp-common"
+-version = "0.66b2"
+-source = { registry = "https://pypi.org/simple" }
+-dependencies = [
+-    { name = "opentelemetry-sdk" },
+-]
+-sdist = { url = "https://files.pythonhosted.org/packages/5a/3c/3f2cc8c42bde2620e65024d71e2eb025f7bd0821bb363b52bcc5a3260dbd/opentelemetry_exporter_otlp_common-0.66b2.tar.gz", hash = "sha256:06f5a9b88638e310efa1f1d206cdf6b75393e112aba4e174a963416192bd1028", size = 14325, upload-time = "2026-10-29T17:29:41.701Z" }
+-wheels = [
+-    { url = "https://files.pythonhosted.org/packages/a8/47/b3049e30b339c82e3c7ec1fc692185a5d5a3ba65a94c570bb39b2c0b8424/opentelemetry_exporter_otlp_common-0.66b2-py3-none-any.whl", hash = "sha256:ace86efb75489f925f1ef809856ae5f0c7db534e4afdc624530222228b1236a5", size = 12385, upload-time = "2026-10-29T17:29:13.667Z" },
+-]
+-
+-[[package]]
+-name = "opentelemetry-exporter-otlp-proto-common"
+-version = "1.45.2"
+-source = { registry = "https://pypi.org/simple" }
+-dependencies = [
+-    { name = "opentelemetry-proto" },
+-]
+-sdist = { url = "https://files.pythonhosted.org/packages/69/58/239c98b36d9ea317098769957043c251703636a26189c884fba46c1dad84/opentelemetry_exporter_otlp_proto_common-1.45.2.tar.gz", hash = "sha256:f1f2806f3f28ce7938033823e50934fcd91595a39de38e69a28a51e19f40fc6d", size = 18873, upload-time = "2026-10-29T17:29:44.496Z" }
+-wheels = [
+-    { url = "https://files.pythonhosted.org/packages/e6/d6/0f30d38120a949aef70528f845bf539f80df62abb4b8e62fdf69c2b6df5a/opentelemetry_exporter_otlp_proto_common-1.45.2-py3-none-any.whl", hash = "sha256:af483b24217028892f017096731b794b196b785025d2e6808874720fd0b05a80", size = 15392, upload-time = "2026-10-29T17:29:17.913Z" },
+-]
+-
+-[[package]]
+-name = "opentelemetry-exporter-otlp-proto-grpc"
+-version = "1.45.2"
+-source = { registry = "https://pypi.org/simple" }
+-dependencies = [
+-    { name = "googleapis-common-protos" },
+-    { name = "grpcio" },
+-    { name = "opentelemetry-api" },
+-    { name = "opentelemetry-exporter-otlp-common" },
+-    { name = "opentelemetry-exporter-otlp-proto-common" },
+-    { name = "opentelemetry-proto" },
+-    { name = "opentelemetry-sdk" },
+-    { name = "typing-extensions" },
+-]
+-sdist = { url = "https://files.pythonhosted.org/packages/46/2c/996861b327ddde01d3c0971582ebcd3f01a376acc720f7b0cb5274df4b70/opentelemetry_exporter_otlp_proto_grpc-1.45.2.tar.gz", hash = "sha256:9e4a6490ca7711479fec7c519425bc09808abbc9a2a1775528edecf200d19a5a", size = 25995, upload-time = "2026-10-29T17:29:45.2Z" }
+-wheels = [
+-    { url = "https://files.pythonhosted.org/packages/e8/48/14301cac3d106e795eef7e89e191489f086b4e5ad26e47c9635a198e95f4/opentelemetry_exporter_otlp_proto_grpc-1.45.2-py3-none-any.whl", hash = "sha256:8a48d60835e90536846bd82de487bfbd81bccb5a1b3d0fb82edeea17db07395c", size = 19490, upload-time = "2026-10-29T17:29:18.934Z" },
+-]
+-
+-[[package]]
+-name = "opentelemetry-proto"
+-version = "1.45.2"
+-source = { registry = "https://pypi.org/simple" }
+-dependencies = [
+-    { name = "protobuf" },
+-]
+-sdist = { url = "https://files.pythonhosted.org/packages/24/9c/1aa4ce60e9bc72af20dc49c92cc0566825092d92b3d6a277439fb5fb7c01/opentelemetry_proto-1.45.2.tar.gz", hash = "sha256:bd8d23cf770605b0af9b7be2071d26a464fea289d35429abfd2a66226114ad64", size = 46486, upload-time = "2026-10-29T17:29:53.007Z" }
+-wheels = [
+-    { url = "https://files.pythonhosted.org/packages/7e/0d/a0b8f2b9efe2ec1abdf639d3696db9b1563ebeb11d91aac08ba7341e9122/opentelemetry_proto-1.45.2-py3-none-any.whl", hash = "sha256:03a7ca1b43f89fd5b965d5975902bb2515c0c86e2428b456836e9a6149c6235a", size = 72484, upload-time = "2026-10-29T17:29:31.403Z" },
+-]
+-
+-[[package]]
+-name = "opentelemetry-sdk"
+-version = "1.45.2"
+-source = { registry = "https://pypi.org/simple" }
+-dependencies = [
+-    { name = "opentelemetry-api" },
+-    { name = "opentelemetry-semantic-conventions" },
+-    { name = "typing-extensions" },
+-]
+-sdist = { url = "https://files.pythonhosted.org/packages/7b/1a/74a21d4d6969fb8b432ac397e66112a8167a6deb267ea4559dbaf2fe91ef/opentelemetry_sdk-1.45.2.tar.gz", hash = "sha256:7eec4de13dd21ff3a1670dcb0e02079e692736f94d733dfdce5af461d884248d", size = 221705, upload-time = "2026-10-29T17:29:54.685Z" }
+-wheels = [
+-    { url = "https://files.pythonhosted.org/packages/9f/a5/9a3b793ef48245f2336a16beb2324c2397dbb3f987cd68942f77cca06156/opentelemetry_sdk-1.45.2-py3-none-any.whl", hash = "sha256:ff974ea70ee4f1d51e2ec152db37c2b626c7bf82bb3f7d86114fd8704e7199c6", size = 141756, upload-time = "2026-10-29T17:29:33.722Z" },
+-]
+-
+-[[package]]
+-name = "opentelemetry-semantic-conventions"
+-version = "0.66b2"
+-source = { registry = "https://pypi.org/simple" }
+-dependencies = [
+-    { name = "opentelemetry-api" },
+-    { name = "typing-extensions" },
+-]
+-sdist = { url = "https://files.pythonhosted.org/packages/37/3f/50f95972b50e8e353f5b9342034c9cd17730f1956f009ce6a3fbbd89f9ce/opentelemetry_semantic_conventions-0.66b2.tar.gz", hash = "sha256:7da5f1a5dc4383eb66711d4d3d3e71824d9403ac1559fea021cc103c1a4c4976", size = 150246, upload-time = "2026-10-29T17:29:55.682Z" }
+-wheels = [
+-    { url = "https://files.pythonhosted.org/packages/67/bd/6bf33ed31521c565931c037e9e81bac47c1acb000e850c6e24220e2a0c00/opentelemetry_semantic_conventions-0.66b2-py3-none-any.whl", hash = "sha256:4cbe61e5f9275d57ab31708446e7938ef4291ebbe6a7fca6f7a629c5acae87d8", size = 206280, upload-time = "2026-10-29T17:29:35.062Z" },
++    { url = "https://files.pythonhosted.org/packages/58/ee/99ab786653b3bda9c37ade7e24a7b607a1b1f696063172768417539d876d/opentelemetry_api-1.41.0-py3-none-any.whl", hash = "sha256:0e77c806e6a89c9e4f8d372034622f3e1418a11bdbe1c80a50b3d3397ad0fa4f", size = 69007, upload-time = "2026-04-09T14:38:11.833Z" },
+ ]
+ 
+ [[package]]
+@@ -1376,21 +1220,6 @@ wheels = [
+     { url = "https://files.pythonhosted.org/packages/5b/5a/bc7b4a4ef808fa59a816c17b20c4bef6884daebbdf627ff2a161da67da19/propcache-0.4.1-py3-none-any.whl", hash = "sha256:af2a6052aeb6cf17d3e46ee169099044fd8224cbaf75c76a2ef596e8163e2237", size = 13305, upload-time = "2025-10-08T19:49:00.792Z" },
+ ]
+ 
+-[[package]]
+-name = "protobuf"
+-version = "7.36.2"
+-source = { registry = "https://pypi.org/simple" }
+-sdist = { url = "https://files.pythonhosted.org/packages/d9/89/5b8517baa72f84a67b8a307ba953c91057af618bf40bf676f3c03551f8f0/protobuf-7.36.2.tar.gz", hash = "sha256:497d0463ff3316681da6c0b9e8d06cb465d61abce00b613ab42226175644d1bb", size = 512737, upload-time = "2026-09-17T20:07:59.326Z" }
+-wheels = [
+-    { url = "https://files.pythonhosted.org/packages/32/72/98342feb672507c8f3a69e34b4fa8961f608edba5c1a48a6f47156d92cb5/protobuf-7.36.2-cp310-abi3-macosx_10_9_universal2.whl", hash = "sha256:cbc70b17ee27e28894c7fee8bb04be1abead49e936bc70eb60052531eee2079e", size = 456039, upload-time = "2026-09-17T20:07:51.542Z" },
+-    { url = "https://files.pythonhosted.org/packages/b6/ea/91fdf7c2b8bbd49cde056f00a9df6773532987e1c00fe2830b895af95c7e/protobuf-7.36.2-cp310-abi3-manylinux2014_aarch64.whl", hash = "sha256:e11e1f0180583a2af89db6a2ecd9e8dc40aa6d2988ca175bfd0e6d12ea72d74e", size = 344219, upload-time = "2026-09-17T20:07:52.914Z" },
+-    { url = "https://files.pythonhosted.org/packages/17/ab/5fd5f8ece73fad885c5a09aa849b32d70472f954ba3a92d3bb5974ea953b/protobuf-7.36.2-cp310-abi3-manylinux2014_s390x.whl", hash = "sha256:f4fee11ec330d238b34a05c9b675f693c20415d1c5bd7d5320cc2f8a798eb9cf", size = 357223, upload-time = "2026-09-17T20:07:53.985Z" },
+-    { url = "https://files.pythonhosted.org/packages/db/f3/3996583dd2906297a637af12114deddf7658af6e683fedb83be061983fb5/protobuf-7.36.2-cp310-abi3-manylinux2014_x86_64.whl", hash = "sha256:89f23aa53c24553a2416fd4fd1ec06f74fa42b14b546d8883128813f775bbfd2", size = 343223, upload-time = "2026-09-17T20:07:54.931Z" },
+-    { url = "https://files.pythonhosted.org/packages/fc/1b/dcc64f358fcb51811b58ae40b3d28f820725f116d86487cc20bd4b130701/protobuf-7.36.2-cp310-abi3-win32.whl", hash = "sha256:912c1221170e16c08d1f086762f563dd61ff83c18b5fa6652952dfaded66f728", size = 442998, upload-time = "2026-09-17T20:07:55.826Z" },
+-    { url = "https://files.pythonhosted.org/packages/8a/55/b77bda4e5e5f5971fb51b07663694690e9afdb9402136c16a522bd621cad/protobuf-7.36.2-cp310-abi3-win_amd64.whl", hash = "sha256:a300819d441e078a5608c0d3c709796bb548136058fda017ae51d425b44fd353", size = 456514, upload-time = "2026-09-17T20:07:57.188Z" },
+-    { url = "https://files.pythonhosted.org/packages/e4/04/d52c7016b04b6c5108f26691f9d33ec82a9b65d041f1a9c771137693d618/protobuf-7.36.2-py3-none-any.whl", hash = "sha256:bdb3a345d48db958e6ce1f18e508beb0cc981d64f24088427549c866cd039f1e", size = 179806, upload-time = "2026-09-17T20:07:58.211Z" },
+-]
+-
+ [[package]]
+ name = "pydantic"
+ version = "2.13.3"
+@@ -2021,3 +1850,12 @@ wheels = [
+     { url = "https://files.pythonhosted.org/packages/51/47/3fa2286c3cb162c71cdb34c4224d5745a1ceceb391b2bd9b19b668a8d724/yarl-1.23.0-cp314-cp314t-win_arm64.whl", hash = "sha256:44bb7bef4ea409384e3f8bc36c063d77ea1b8d4a5b2706956c0d6695f07dcc25", size = 86041, upload-time = "2026-03-01T22:07:49.026Z" },
+     { url = "https://files.pythonhosted.org/packages/69/68/c8739671f5699c7dc470580a4f821ef37c32c4cb0b047ce223a7f115757f/yarl-1.23.0-py3-none-any.whl", hash = "sha256:a2df6afe50dea8ae15fa34c9f824a3ee958d785fd5d089063d960bae1daa0a3f", size = 48288, upload-time = "2026-03-01T22:07:51.388Z" },
+ ]
++
++[[package]]
++name = "zipp"
++version = "3.23.1"
++source = { registry = "https://pypi.org/simple" }
++sdist = { url = "https://files.pythonhosted.org/packages/30/21/093488dfc7cc8964ded15ab726fad40f25fd3d788fd741cc1c5a17d78ee8/zipp-3.23.1.tar.gz", hash = "sha256:32120e378d32cd9714ad503c1d024619063ec28aad2248dc6672ad13edfa5110", size = 25965, upload-time = "2026-04-13T23:21:46.6Z" }
++wheels = [
++    { url = "https://files.pythonhosted.org/packages/08/8a/0861bec20485572fbddf3dfba2910e38fe249796cb73ecdeb74e07eeb8d3/zipp-3.23.1-py3-none-any.whl", hash = "sha256:0b3596c50a5c700c9cb40ba8d86d9f2cc4807e9bedb06bcdf7fac85633e444dc", size = 10378, upload-time = "2026-04-13T23:21:45.386Z" },
++]

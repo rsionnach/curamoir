@@ -1,0 +1,132 @@
+{
+ "schema_version": 1,
+ "entry": "opensrm-9dbl",
+ "fidelity": "recorded",
+ "lens_order": [
+  "correctness",
+  "clarity",
+  "edge-cases",
+  "provenance",
+  "excellence"
+ ],
+ "iterations": {
+  "correctness": 1,
+  "clarity": 2,
+  "edge-cases": 2,
+  "provenance": 1
+ },
+ "rounds": [
+  {
+   "lens": "correctness",
+   "iteration": 1,
+   "recorded_iteration": 1,
+   "counts": {
+    "critical": 0,
+    "important": 0,
+    "minor": 2
+   },
+   "findings": null
+  },
+  {
+   "lens": "clarity",
+   "iteration": 1,
+   "recorded_iteration": 1,
+   "counts": {
+    "critical": 0,
+    "important": 1,
+    "minor": 4
+   },
+   "findings": [
+    {
+     "lens": "clarity",
+     "severity": "IMPORTANT",
+     "path": "tests/golden/test_golden_legacy_cli.py",
+     "start_line": 764,
+     "end_line": 768,
+     "claim": "Comment gives the wrong reason",
+     "evidence": null,
+     "fix": null,
+     "fingerprint": "931212faa152540e",
+     "verification_level": "asserted",
+     "resolves": null,
+     "regression": false,
+     "status": null,
+     "derived_from": "reviewer_transcript",
+     "extracted_by": "model",
+     "handback_sha256": "15ad6c6f4e6307844391b75cfb27e4293088205f658dd0c18881f6949e0c40f8",
+     "fix_commit": "0ae010d25e90c7ef1715f675720fe102a29a87df",
+     "reported_path": "tests/golden/test_golden_legacy_cli.py",
+     "path_in_tree": true
+    }
+   ]
+  },
+  {
+   "lens": "clarity",
+   "iteration": 2,
+   "recorded_iteration": 2,
+   "counts": {
+    "critical": 0,
+    "important": 0,
+    "minor": 2
+   },
+   "findings": null
+  },
+  {
+   "lens": "edge_cases",
+   "iteration": 1,
+   "recorded_iteration": 1,
+   "counts": {
+    "critical": 0,
+    "important": 1,
+    "minor": 2
+   },
+   "findings": [
+    {
+     "lens": "edge_cases",
+     "severity": "IMPORTANT",
+     "path": "tests/golden/test_golden_legacy_cli.py",
+     "start_line": 682,
+     "end_line": 691,
+     "claim": "The truncation boundary is not pinned",
+     "evidence": null,
+     "fix": null,
+     "fingerprint": "181f4a5f638103cf",
+     "verification_level": "asserted",
+     "resolves": null,
+     "regression": false,
+     "status": null,
+     "derived_from": "reviewer_transcript",
+     "extracted_by": "model",
+     "handback_sha256": "6a05f53348411930c9923f9d24ffc3d16492209c824b2f3255beb745572fd847",
+     "fix_commit": "b57f96ad0e4646d2c167df37c34f864bb201d953",
+     "reported_path": "tests/golden/test_golden_legacy_cli.py",
+     "path_in_tree": true
+    }
+   ]
+  },
+  {
+   "lens": "edge_cases",
+   "iteration": 2,
+   "recorded_iteration": 2,
+   "counts": {
+    "critical": 0,
+    "important": 0,
+    "minor": 1
+   },
+   "findings": null
+  },
+  {
+   "lens": "provenance",
+   "iteration": 1,
+   "recorded_iteration": 1,
+   "counts": {
+    "critical": 0,
+    "important": 0,
+    "minor": 0
+   },
+   "findings": null
+  }
+ ],
+ "cross_repo_findings": [],
+ "escaped": []
+}

@@ -1,0 +1,196 @@
+diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
+index ae17f87..93e7ede 100644
+--- a/.github/workflows/ci.yml
++++ b/.github/workflows/ci.yml
+@@ -12,6 +12,8 @@ name: CI
+ # What CI does for the front-door now:
+ #   - shell-syntax (this workflow): bash -n on every demo/ and test/ shell script.
+ #   - python-lint  (this workflow): ruff check on the 5 root helpers (opensrm-u5dw.1).
++#   - error-budget-seam (this workflow): generate's error-budget rules vs measure's
++#     queries over the spec's and generate's example manifests (opensrm-h0at).
+ #   - .github/workflows/docs.yml: mkdocs build --strict on docs-site/.
+ #   - .github/workflows/demo-paths.yml: cmd_start path-resolution test (opensrm-oey5).
+ #   - .github/workflows/integration-three-tier.yml: nightly cross-repo smoke.
+@@ -62,3 +64,32 @@ jobs:
+       # dedicated workflows (demo-paths, demo-start-lock) exist for tests that do.
+       - name: eco-doctor regression test
+         run: bash test/test_eco_doctor.sh
++
++  # opensrm-h0at: measure read an error-budget series nothing wrote, and both
++  # repos' suites stayed green. This checks the seam across the two published
++  # packages. The corpus comes from sibling checkouts, laid out as in the
++  # workspace so the test's path resolution is the same locally and here; a
++  # missing checkout fails the test rather than skipping it.
++  error-budget-seam:
++    runs-on: ubuntu-latest
++    steps:
++      - uses: actions/checkout@v6
++        with:
++          path: nthlayer
++      - uses: actions/checkout@v6
++        with:
++          repository: rsionnach/opensrm
++          path: opensrm
++      - uses: actions/checkout@v6
++        with:
++          repository: rsionnach/nthlayer-generate
++          path: nthlayer-generate
++
++      - name: install uv
++        uses: astral-sh/setup-uv@v6
++
++      - name: error-budget seam (published nthlayer-generate + nthlayer-workers)
++        run: >
++          uv run --isolated --no-project --python 3.11
++          --with nthlayer-generate --with nthlayer-workers --with pytest
++          pytest -q nthlayer/test/test_error_budget_seam.py
+diff --git a/CLAUDE.md b/CLAUDE.md
+index 685397f..c47aa46 100644
+--- a/CLAUDE.md
++++ b/CLAUDE.md
+@@ -156,10 +156,12 @@ examples, generator-specific scripts.
+   orchestrator, example OpenSRM specifications.
+ - `.github/workflows/`:
+   - `docs.yml` — docs site build + GitHub Pages deploy.
+-  - `ci.yml` — three steps: `bash -n` across `demo/`, `test/` and
+-    `scripts/` *.sh (opensrm-0buj); `ruff check` over the same three
+-    directories (opensrm-u5dw.1); and the `test_eco_doctor.sh`
+-    regression suite (opensrm-8hn3).
++  - `ci.yml` — `bash -n` across `demo/`, `test/` and `scripts/` *.sh
++    (opensrm-0buj); `ruff check` over the same three directories
++    (opensrm-u5dw.1); the `test_eco_doctor.sh` regression suite
++    (opensrm-8hn3); and `error-budget-seam`, which runs
++    `test/test_error_budget_seam.py` against the published
++    nthlayer-generate and nthlayer-workers (opensrm-h0at).
+   - `demo-paths.yml` — `cmd_start` path-resolution regression test
+     (opensrm-oey5).
+   - `demo-start-lock.yml` — `cmd_start` concurrent-invocation lock
+diff --git a/docs/metrics-contract.md b/docs/metrics-contract.md
+index 029671e..1840f19 100644
+--- a/docs/metrics-contract.md
++++ b/docs/metrics-contract.md
+@@ -21,7 +21,7 @@ These metrics are already OTel-aligned in generate templates.
+ | `slo:requests_total:30d` | `sum(increase(http_requests_total{service="X"}[30d]))` | Availability denominator |
+ | `slo:requests_success:30d` | `sum(increase(http_requests_total{service="X",status!~"5.."}[30d]))` | Availability numerator |
+ | `slo:availability:ratio` | success / total | Availability SLO ratio |
+-| `slo:error_budget:ratio` | `1 - ((1 - availability) / (1 - objective))` | Remaining error budget |
++| `slo:error_budget_remaining:ratio` | `1 - ((1 - availability) / (1 - objective))` | Remaining error budget, signed (negative is overspent). Labels `service`, `slo`, `objective`. Name and labels are owned by nthlayer-common's `ERROR_BUDGET_REMAINING` (`manifest/slo_series.py`), which generate writes and measure, correlate and drift read (opensrm-h0at); `test/test_error_budget_seam.py` checks writer and readers agree |
+ | `slo:latency_requests_total:30d` | `sum(increase(http_request_duration_seconds_count{...}[30d]))` | Latency denominator |
+ | `slo:latency_requests_fast:30d` | `sum(increase(http_request_duration_seconds_bucket{...,le="0.5"}[30d]))` | Latency numerator (requests under threshold) |
+ | `slo:latency:ratio` | fast / total | Latency SLO ratio |
+@@ -72,7 +72,7 @@ sum(increase(gen_ai_overrides_hcf_total{service="fraud-detect"}[7d]))
+ sum(increase(gen_ai_decisions_total{service="fraud-detect",confidence_bucket="high"}[7d]))
+ 
+ # Error budget remaining (availability)
+-slo:error_budget:ratio{service="fraud-detect", slo="availability"}
++slo:error_budget_remaining:ratio{service="fraud-detect",slo="availability"}
+ ```
+ 
+ ## Judgment threshold metrics (opensrm-g32d)
+diff --git a/test/test_error_budget_seam.py b/test/test_error_budget_seam.py
+new file mode 100644
+index 0000000..0bb4b16
+--- /dev/null
++++ b/test/test_error_budget_seam.py
+@@ -0,0 +1,101 @@
++"""The error-budget seam between nthlayer-generate and nthlayer-workers (opensrm-h0at).
++
++measure read ``slo:error_budget:ratio``, a series nothing wrote, so every
++availability SLO evaluated as no data. Each side had a green suite; nothing
++checked that the reader asks for what the writer writes. This does: for every
++real manifest, the error-budget series generate writes and the error-budget
++queries measure sends must be the same set, in both directions.
++
++The manifests are the spec's own examples and generate's shipped examples,
++not fixtures written for this test. Both corpora must be present: a missing
++checkout fails here rather than skipping (the opensrm-oh27 lesson), and a
++minimum count stops an emptied corpus from passing vacuously.
++
++Run from the ecosystem root, against the published packages:
++
++    uv run --with nthlayer-generate --with nthlayer-workers --with pytest \\
++        pytest nthlayer/test/test_error_budget_seam.py
++"""
++
++from __future__ import annotations
++
++import shutil
++import warnings
++from pathlib import Path
++
++from nthlayer_common.manifest import ERROR_BUDGET_REMAINING, load_manifest
++from nthlayer_generate.recording_rules import build_recording_rules_from_manifest
++from nthlayer_workers.measure.adapters.prometheus import load_specs
++
++# nthlayer/test/ -> ecosystem root, where opensrm and nthlayer-generate are
++# siblings (locally, and as laid out by the front door's CI job).
++ROOT = Path(__file__).resolve().parents[2]
++CORPUS_DIRS = (
++    ROOT / "opensrm" / "spec" / "v2" / "examples",
++    ROOT / "nthlayer-generate" / "examples" / "services",
++    ROOT / "nthlayer-generate" / "examples" / "opensrm",
++)
++# 24 manifests wrote an error budget when this test was written (2026-11-02).
++MIN_WITH_BUDGET = 20
++
++
++def _corpus() -> list[Path]:
++    missing = [d for d in CORPUS_DIRS if not d.is_dir()]
++    assert not missing, f"corpus checkout missing: {missing}"
++    return sorted(p for d in CORPUS_DIRS for p in d.rglob("*.yaml"))
++
++
++def _load(path: Path):
++    with warnings.catch_warnings():
++        warnings.simplefilter("ignore")
++        try:
++            return load_manifest(path)
++        except Exception:  # archetypes etc. that the loader rejects
++            return None
++
++
++def _written(manifest) -> set[str]:
++    """Each error-budget series generate writes, as the selector reading it."""
++    return {
++        ERROR_BUDGET_REMAINING.selector(service=r.labels["service"], slo=r.labels["slo"])
++        for group in build_recording_rules_from_manifest(manifest)
++        for r in group.rules
++        if r.record == ERROR_BUDGET_REMAINING.metric
++    }
++
++
++def _read(path: Path, tmp_path: Path) -> set[str]:
++    """Each error-budget query measure sends for the manifest."""
++    spec_dir = tmp_path / path.stem
++    spec_dir.mkdir()
++    shutil.copy(path, spec_dir / path.name)
++    with warnings.catch_warnings():
++        warnings.simplefilter("ignore")
++        slos = load_specs(spec_dir).slos
++    return {s.query for s in slos if s.query_kind == "error_budget"}
++
++
++def test_measure_reads_exactly_the_error_budget_generate_writes(tmp_path):
++    with_budget = []
++    mismatches = {}
++    for path in _corpus():
++        manifest = _load(path)
++        if manifest is None:
++            continue
++        written, read = _written(manifest), _read(path, tmp_path)
++        if written != read:
++            mismatches[str(path.relative_to(ROOT))] = {
++                "written_not_read": sorted(written - read),
++                "read_not_written": sorted(read - written),
++            }
++        if written:
++            with_budget.append(path)
++
++    assert not mismatches, mismatches
++    assert len(with_budget) >= MIN_WITH_BUDGET, [str(p) for p in with_budget]
++    # Every manifest format the loader serves reaches the seam: the spec's v2
++    # example, srm/v1 and legacy.
++    names = {p.name for p in with_budget}
++    assert "api-full-v2.yaml" in names
++    assert any(n.endswith(".reliability.yaml") for n in names)
++    assert "payment-api.yaml" in names

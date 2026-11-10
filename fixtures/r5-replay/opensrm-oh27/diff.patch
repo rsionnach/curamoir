@@ -1,0 +1,954 @@
+diff --git a/docs/architecture.md b/docs/architecture.md
+index 1b941a5..64d52ca 100644
+--- a/docs/architecture.md
++++ b/docs/architecture.md
+@@ -760,6 +760,19 @@ failure_mode, volume_source}` or None when no service has an
+ outcomes block. Duplicate manifests per service deduplicated by
+ `metadata.name`.
+ 
++`_load_manifests_from_specs` (opensrm-jmy.21) returns
++`LoadedManifests(manifests, parse_failures)` over both `*.yaml` and
++`*.yml`, sorted. `manifests` feeds `declared_dependencies_by_service`
++(`_extract_declared_dependencies`, opensrm-jmy.21) and
++`_compute_financial_impact`; `parse_failures` reaches callers as
++`retro.metadata.custom["manifest_parse_failures"]` — always present, 0
++on a clean load — and as the CLI's "Manifest parse failures: N" line
++(opensrm-oh27). A file that fails to load is counted only when
++`_foreign_yaml_reason` finds evidence it was aiming at being a
++manifest; foreign YAML sharing the directory is dropped with a
++`manifest_file_ignored` debug log carrying the reason. Parse failures
++log `manifest_parse_failed` with `spec_file` and `error`.
++
+ `recommendations.py` — NEW (opensrm-jmy.2): `SpecRecommendation` +
+ `Recommendation` dataclasses + `analyze_incident()` glue.
+ `Recommendation` fields: service / type / rationale / proposed_value
+diff --git a/src/nthlayer_workers/learn/cli.py b/src/nthlayer_workers/learn/cli.py
+index 903cfff..8047744 100644
+--- a/src/nthlayer_workers/learn/cli.py
++++ b/src/nthlayer_workers/learn/cli.py
+@@ -139,6 +139,15 @@ def _cmd_retrospective(args: argparse.Namespace) -> None:
+         impact = custom.get("financial_impact")
+         if impact:
+             print(f"  Financial impact: ${impact.get('estimated', 0):.2f} ({impact.get('failure_mode')})")
++        # opensrm-oh27: an unparseable manifest drops its service from the
++        # figures above. Print the count so the reader knows the numbers
++        # were computed over a subset rather than over everything.
++        parse_failures = custom.get("manifest_parse_failures", 0)
++        if parse_failures:
++            print(
++                f"  Manifest parse failures: {parse_failures} "
++                "(figures computed over a subset; see manifest_parse_failed logs)"
++            )
+     except KeyError as e:
+         print(f"Error: {e}", file=__import__("sys").stderr)
+         __import__("sys").exit(1)
+diff --git a/src/nthlayer_workers/learn/retrospective.py b/src/nthlayer_workers/learn/retrospective.py
+index eae47e9..a4dd397 100644
+--- a/src/nthlayer_workers/learn/retrospective.py
++++ b/src/nthlayer_workers/learn/retrospective.py
+@@ -1,16 +1,20 @@
+ """Retrospective builder — walks verdict lineage to produce a post-incident analysis."""
+ from __future__ import annotations
+ 
++from dataclasses import dataclass
+ from datetime import UTC, datetime, timedelta
+ from pathlib import Path
+ from typing import Any
+ 
+ import structlog
++import yaml
+ from nthlayer_common.manifest import (
+     ManifestLoadError,
+     extract_declared_dependencies,
+     load_manifest,
+ )
++from nthlayer_common.manifest.parser.v1 import is_srm_v1_format
++from nthlayer_common.manifest.parser.v2 import is_opensrm_v2_format
+ from nthlayer_common.outcomes import (
+     compute_financial_impact,
+     estimate_decisions_in_window,
+@@ -116,8 +120,8 @@ def build_retrospective(
+     # ground-truth view of operator-declared deps that downstream
+     # add_dependency recommendation logic compares against the
+     # incident's observed call graph.
+-    loaded_manifests = _load_manifests_from_specs(specs_dir)
+-    declared_dependencies_by_service = _extract_declared_dependencies(loaded_manifests)
++    loaded_specs = _load_manifests_from_specs(specs_dir)
++    declared_dependencies_by_service = _extract_declared_dependencies(loaded_specs.manifests)
+ 
+     # Financial impact (if specs available)
+     financial_impact = _compute_financial_impact(
+@@ -125,7 +129,7 @@ def build_retrospective(
+         duration_minutes,
+         breach_counts_by_service,
+         specs_dir,
+-        loaded_manifests=loaded_manifests,
++        manifests_by_service=loaded_specs.manifests,
+     )
+ 
+     # Generate recommendations
+@@ -155,6 +159,10 @@ def build_retrospective(
+         "financial_impact": financial_impact,
+         "recommendations": recommendations,
+         "declared_dependencies_by_service": declared_dependencies_by_service,
++        # opensrm-oh27: always present, 0 on a clean load. An absent key
++        # would read the same as "no failures", which is the ambiguity
++        # the silent skip created in the first place.
++        "manifest_parse_failures": loaded_specs.parse_failures,
+     }
+     if trigger_service is not None:
+         retro_custom["trigger_service"] = trigger_service
+@@ -225,32 +233,169 @@ def _parse_ts(ts: Any) -> datetime:
+     return dt
+ 
+ 
+-def _load_manifests_from_specs(specs_dir: str | None) -> dict[str, Any]:
++def _spec_files(specs_path: Path) -> list[Path]:
++    """Every manifest-suffixed file directly under ``specs_path``, in a stable
++    order.
++
++    Both suffixes, because ``observe/slo/spec_loader.py`` has always accepted
++    both and a ``.yml`` manifest that this glob could not see was dropped from
++    the financial figure with ``parse_failures == 0`` — the same silent-subset
++    failure as opensrm-oh27, reached by file extension rather than parse error.
++
++    Sorted, because the duplicate-skip branch below is first-wins and would
++    otherwise resolve on filesystem order.
++    """
++    return sorted(
++        p for p in specs_path.iterdir() if p.suffix in (".yaml", ".yml")
++    )
++
++
++def _foreign_yaml_reason(spec_file: Path) -> str | None:
++    """Why a file that failed to load should NOT count as a broken manifest.
++
++    ``load_manifest`` raises ``ManifestLoadError`` for any YAML it cannot parse
++    as a manifest, including files that never claimed to be one — a
++    ``kustomization.yaml``, a Prometheus rules file. Counting those would fire
++    the caller's "computed over a subset" caveat on every run over a mixed
++    directory, and a caveat that always fires stops being read. Returns None
++    when the file was aiming at being a manifest (so the caller counts it), or
++    a short reason when it plainly was not (so the caller drops it).
++
++    Evidence of intent is checked in three widening steps: the canonical v1/v2
++    format predicates, so this cannot drift from what the parser accepts; then
++    a near miss on those headers, since a typo'd kind or a drifted API group is
++    an ordinary way a real manifest breaks; then the body, since a bad merge or
++    a mis-indent can strip the header while leaving ``spec.service`` (as a
++    mapping), ``spec.slos`` or ``spec.outcomes`` intact.
++    Anything unreadable or empty counts too — a syntax error or a truncated
++    write inside a specs directory is a deployment error either way.
++
++    The two format predicates are imported from
++    ``nthlayer_common.manifest.parser.v1`` / ``.v2`` rather than the top-level
++    manifest API, which exports only the path-level ``is_manifest_file``. That
++    one re-reads and re-parses the file and swallows every exception as False
++    — the silent-skip shape this module is removing — where these operate on
++    the dict already in hand. Exporting them from ``nthlayer_common.manifest``
++    is filed as a follow-up.
++
++    LIMIT, stated rather than deferred: this recovers intent only while
++    evidence of intent survives. A file that has lost both its header and its
++    body is indistinguishable in principle from any other headerless YAML
++    mapping — both are dicts with no apiVersion, no kind, no ``spec.service``.
++    No content heuristic separates those, and adding more markers would not
++    change that. Such a file is dropped, recorded at debug rather than
++    silently, and the ``manifest_file_ignored`` log is where an investigator
++    chasing a number that looks wrong picks the trail back up.
++    """
++    try:
++        data = yaml.safe_load(spec_file.read_text())
++    except (OSError, ValueError, yaml.YAMLError):
++        # ValueError covers UnicodeDecodeError on non-UTF-8 bytes. Too
++        # malformed to inspect, so it counts.
++        return None
++    if not data:
++        # None (zero-byte, whitespace, comments) or an empty container.
++        return None
++    if not isinstance(data, dict):
++        return f"top-level YAML is {type(data).__name__}, not a mapping"
++
++    # "service" is the legacy pre-apiVersion shape load_manifest still accepts.
++    if is_opensrm_v2_format(data) or is_srm_v1_format(data) or "service" in data:
++        return None
++
++    api_version = data.get("apiVersion")
++    kind = data.get("kind")
++    near_miss = (
++        isinstance(api_version, str)
++        and (api_version.startswith("srm/") or "opensrm" in api_version)
++    ) or (
++        isinstance(kind, str)
++        and kind.startswith(("ServiceManifest", "ServiceReliabilityManifest"))
++    )
++    if near_miss:
++        return None
++
++    # Header gone, body may not be. `spec.service` as a *mapping* is the
++    # discriminator: OpenSLO also carries `spec.service`, but as a string.
++    spec = data.get("spec")
++    if isinstance(spec, dict) and (
++        isinstance(spec.get("service"), dict)
++        or isinstance(spec.get("slos"), list)
++        or isinstance(spec.get("outcomes"), dict)
++    ):
++        return None
++
++    return f"no manifest markers (apiVersion={api_version!r}, kind={kind!r})"
++
++
++@dataclass(frozen=True)
++class LoadedManifests:
++    """Outcome of scanning a specs directory (opensrm-oh27).
++
++    ``manifests`` is the parsed view keyed by service name; ``parse_failures``
++    counts *files* that raised ``ManifestLoadError``, not services missing
++    from ``manifests`` — a failed environment overlay for a service whose
++    base manifest parsed still counts one. The count is deliberately a
++    coverage-doubt signal rather than a precise miss-count, and it travels
++    with the manifests because the downstream financial figure is computed
++    over ``manifests`` alone: without it, a partial view is
++    indistinguishable from a complete one. The per-file
++    ``manifest_parse_failed`` warning carries which file and why.
++    """
++
++    manifests: dict[str, Any]
++    parse_failures: int = 0
++
++
++def _load_manifests_from_specs(specs_dir: str | None) -> LoadedManifests:
+     """Load all ``*.yaml`` manifests under ``specs_dir`` once, keyed by
+     ``manifest.name`` (the canonical service identity).
+ 
+-    Returns an empty dict when ``specs_dir`` is None or not a directory,
++    Returns empty manifests when ``specs_dir`` is None or not a directory,
+     so callers can treat the result uniformly without re-checking the
+     filesystem. Duplicate manifests for the same service (template forks,
+     environment overlays) are deduplicated by keeping the first one
+     encountered and emitting a warning — this matches the pre-jmy.21
+     behaviour of ``_compute_financial_impact``.
+ 
+-    Parse failures from ``load_manifest`` are silently skipped (consistent
+-    with the prior inline ``ManifestLoadError`` swallow); the financial-
+-    impact and dependency-extraction paths both tolerate a partial view.
++    Parse failures from ``load_manifest`` are logged and counted, then
++    skipped (opensrm-oh27). ``UnicodeDecodeError`` is caught alongside
++    ``ManifestLoadError`` because ``load_manifest`` opens with the default
++    encoding and only wraps ``YAMLError`` — non-UTF-8 bytes would otherwise
++    abort the whole retrospective, a hard stop where the design says log and
++    continue. The financial-impact and dependency-extraction
++    paths both tolerate a partial view, but the caller is told how partial
++    it is via ``LoadedManifests.parse_failures``.
+     """
+     if not specs_dir:
+-        return {}
++        return LoadedManifests(manifests={})
+     specs_path = Path(specs_dir)
+     if not specs_path.is_dir():
+-        return {}
++        return LoadedManifests(manifests={})
+ 
+     manifests: dict[str, Any] = {}
+-    for spec_file in specs_path.glob("*.yaml"):
++    parse_failures = 0
++    for spec_file in _spec_files(specs_path):
+         try:
+             manifest = load_manifest(str(spec_file))
+-        except ManifestLoadError:
++        except (ManifestLoadError, UnicodeDecodeError) as exc:
++            foreign_reason = _foreign_yaml_reason(spec_file)
++            if foreign_reason is not None:
++                # Foreign YAML sharing the directory, not a broken manifest.
++                # Recorded rather than dropped without trace — skipping
++                # without saying so is the shape this bead exists to remove.
++                log.debug(
++                    "manifest_file_ignored",
++                    spec_file=str(spec_file),
++                    reason=foreign_reason,
++                )
++                continue
++            parse_failures += 1
++            log.warning(
++                "manifest_parse_failed",
++                spec_file=str(spec_file),
++                error=str(exc),
++            )
+             continue
+         if manifest.name in manifests:
+             log.warning(
+@@ -260,16 +405,16 @@ def _load_manifests_from_specs(specs_dir: str | None) -> dict[str, Any]:
+             )
+             continue
+         manifests[manifest.name] = manifest
+-    return manifests
++    return LoadedManifests(manifests=manifests, parse_failures=parse_failures)
+ 
+ 
+ def _extract_declared_dependencies(
+-    loaded_manifests: dict[str, Any],
++    manifests_by_service: dict[str, Any],
+ ) -> dict[str, list[str]]:
+     """Wrapper around the shared helper (opensrm-dpws). The CLI path
+     works with Manifest dataclass instances loaded via load_manifest().
+     """
+-    return extract_declared_dependencies(from_manifests=loaded_manifests)
++    return extract_declared_dependencies(from_manifests=manifests_by_service)
+ 
+ 
+ def _compute_financial_impact(
+@@ -278,7 +423,7 @@ def _compute_financial_impact(
+     breach_counts_by_service: dict[str, int],
+     specs_dir: str | None,
+     *,
+-    loaded_manifests: dict[str, Any] | None = None,
++    manifests_by_service: dict[str, Any] | None = None,
+ ) -> dict | None:
+     """Compute spec § 1 financial impact across blast-radius services.
+ 
+@@ -289,10 +434,14 @@ def _compute_financial_impact(
+     services that share a currency; mixed-currency manifests are
+     skipped with a warning.
+ 
+-    ``loaded_manifests`` is the shared cache produced by
+-    ``_load_manifests_from_specs`` (opensrm-jmy.21). When omitted the
+-    function loads manifests itself — preserves the pre-jmy.21 calling
+-    convention used by ``tests/learn/test_retrospective_financial.py``.
++    ``manifests_by_service`` is the shared cache produced by
++    ``_load_manifests_from_specs(...).manifests`` (opensrm-jmy.21). When
++    omitted the function loads manifests itself — preserves the pre-jmy.21
++    calling convention used by ``tests/learn/test_retrospective_financial.py``.
++    That self-loading path discards the parse-failure count; only
++    ``build_retrospective`` surfaces it (as
++    ``metadata.custom["manifest_parse_failures"]``), and the per-file
++    warning log fires either way.
+     """
+     if not specs_dir or not blast_radius:
+         return None
+@@ -307,9 +456,9 @@ def _compute_financial_impact(
+         )
+         return None
+ 
+-    if loaded_manifests is None:
+-        loaded_manifests = _load_manifests_from_specs(specs_dir)
+-    if not loaded_manifests:
++    if manifests_by_service is None:
++        manifests_by_service = _load_manifests_from_specs(specs_dir).manifests
++    if not manifests_by_service:
+         return None
+ 
+     affected_services = {
+@@ -322,7 +471,7 @@ def _compute_financial_impact(
+     currency: str | None = None
+     aggregate_source: str | None = None
+ 
+-    for service_name, manifest in loaded_manifests.items():
++    for service_name, manifest in manifests_by_service.items():
+         if service_name not in affected_services:
+             continue
+         if manifest.outcomes is None:
+diff --git a/src/nthlayer_workers/learn/worker.py b/src/nthlayer_workers/learn/worker.py
+index bca6996..b7faf8b 100644
+--- a/src/nthlayer_workers/learn/worker.py
++++ b/src/nthlayer_workers/learn/worker.py
+@@ -323,8 +323,8 @@ class LearnRetrospectiveModule:
+                     ]
+                     if len(trigger_matches) > 1:
+                         # First-wins (matches the existing
+-                        # _load_manifests_from_specs dedup behaviour
+-                        # on the CLI side, retrospective.py line 238).
++                        # _load_manifests_from_specs dedup behaviour on the
++                        # CLI side, which logs manifest_duplicate_skipped).
+                         logger.warning(
+                             "learn_manifest_duplicate_skipped",
+                             service=trigger_service,
+diff --git a/tests/learn/test_retrospective_financial.py b/tests/learn/test_retrospective_financial.py
+index bd396dd..1f7fcb7 100644
+--- a/tests/learn/test_retrospective_financial.py
++++ b/tests/learn/test_retrospective_financial.py
+@@ -225,7 +225,7 @@ class TestDeclaredDependenciesByService:
+         (tmp_path / "svc-b.yaml").write_text(svc_b)
+ 
+         loaded = _load_manifests_from_specs(str(tmp_path))
+-        declared = _extract_declared_dependencies(loaded)
++        declared = _extract_declared_dependencies(loaded.manifests)
+ 
+         assert declared == {
+             "svc-a": ["dep-one", "dep-two"],
+@@ -239,7 +239,7 @@ class TestDeclaredDependenciesByService:
+         )
+ 
+         loaded = _load_manifests_from_specs(None)
+-        assert _extract_declared_dependencies(loaded) == {}
++        assert _extract_declared_dependencies(loaded.manifests) == {}
+ 
+     def test_declared_dependencies_empty_list_for_no_deps_block(self, tmp_path: Path):
+         """Services without ``dependencies:`` yield an empty list, never an absent key.
+@@ -265,7 +265,7 @@ class TestDeclaredDependenciesByService:
+         (tmp_path / "silent-svc.yaml").write_text(spec)
+ 
+         loaded = _load_manifests_from_specs(str(tmp_path))
+-        declared = _extract_declared_dependencies(loaded)
++        declared = _extract_declared_dependencies(loaded.manifests)
+ 
+         assert "silent-svc" in declared
+         assert declared["silent-svc"] == []
+diff --git a/tests/learn/test_retrospective_manifest_failures.py b/tests/learn/test_retrospective_manifest_failures.py
+new file mode 100644
+index 0000000..d766ef7
+--- /dev/null
++++ b/tests/learn/test_retrospective_manifest_failures.py
+@@ -0,0 +1,553 @@
++"""Manifest parse failures are logged and counted (opensrm-oh27).
++
++``_load_manifests_from_specs`` used to swallow ``ManifestLoadError`` with a
++bare ``continue`` — no log, no counter, no re-raise. Because the retrospective
++computes financial impact per service, that did not produce a questionable
++number; it produced a *confident* number computed over a subset, with the
++dropped service indistinguishable from one that genuinely had no impact.
++
++The loop's very next branch already logs when it skips a duplicate, so the
++convention was established and only the parse-failure branch ignored it.
++These tests pin the count at every surface it has to survive:
++``_load_manifests_from_specs`` (the warning log carrying file path and error,
++plus ``LoadedManifests.parse_failures``), ``build_retrospective``
++(``metadata.custom["manifest_parse_failures"]``), and the ``nthlayer-learn
++retrospective`` CLI, which is where a person actually reads the number the
++skip was quietly shrinking.
++"""
++from __future__ import annotations
++
++import argparse
++import textwrap
++from pathlib import Path
++
++import pytest
++import structlog
++from nthlayer_common.verdicts.core import create
++from nthlayer_common.verdicts.models import Verdict
++from nthlayer_common.verdicts.sqlite_store import SQLiteVerdictStore
++from nthlayer_common.verdicts.store import MemoryStore
++
++from nthlayer_workers.learn.cli import _cmd_retrospective
++from nthlayer_workers.learn.retrospective import (
++    _load_manifests_from_specs,
++    build_retrospective,
++)
++
++GOOD_MANIFEST = textwrap.dedent("""
++    apiVersion: opensrm.nthlayer.io/v2
++    kind: ServiceManifest
++    metadata: {name: svc-good, labels: {tier: critical}}
++    spec:
++      owner: {group: group:default/team-a}
++      service: {name: svc-good, type: api}
++""").strip()
++
++# Unparseable: spec.owner.group is not a valid Backstage entity reference,
++# so load_manifest raises ManifestLoadError rather than a YAML error.
++BROKEN_MANIFEST = textwrap.dedent("""
++    apiVersion: opensrm.nthlayer.io/v2
++    kind: ServiceManifest
++    metadata: {name: svc-broken, labels: {tier: critical}}
++    spec:
++      owner: {group: not-an-entity-ref}
++      service: {name: svc-broken, type: api}
++""").strip()
++
++
++def _write_specs(specs_dir: Path, *, broken: int = 0) -> Path:
++    """Write one parseable manifest plus ``broken`` unparseable ones."""
++    specs_dir.mkdir(parents=True, exist_ok=True)
++    (specs_dir / "svc-good.yaml").write_text(GOOD_MANIFEST)
++    for i in range(broken):
++        (specs_dir / f"svc-broken-{i}.yaml").write_text(
++            BROKEN_MANIFEST.replace("svc-broken", f"svc-broken-{i}")
++        )
++    return specs_dir
++
++
++def _incident() -> Verdict:
++    """An incident verdict with no lineage — the minimum ``build_retrospective``
++    accepts. ``subject.type='custom'`` because nthlayer-common's
++    VALID_SUBJECT_TYPES has no 'incident' bucket and build_retrospective does
++    not inspect the incident's own subject.type.
++    """
++    return create(
++        subject={
++            "type": "custom",
++            "ref": "INC-1",
++            "service": "svc-good",
++            "summary": "test incident",
++        },
++        judgment={"action": "flag", "confidence": 0.9, "reasoning": "test"},
++        producer={"system": "test"},
++        metadata={"custom": {"incident_id": "INC-1"}},
++    )
++
++
++@pytest.fixture
++def incident_db(tmp_path: Path) -> tuple[Path, str]:
++    """``(db_path, incident_verdict_id)`` for a real on-disk store holding one
++    incident. The CLI path opens the DB by path, so a MemoryStore will not do
++    (CLAUDE.md rule 14).
++    """
++    db = tmp_path / "verdicts.db"
++    store = SQLiteVerdictStore(str(db))
++    incident = _incident()
++    store.put(incident)
++    store.close()
++    return db, incident.id
++
++
++class TestParseFailureLogged:
++    """The skip leaves a trace: file path and error, at warning level."""
++
++    def test_parse_failure_logs_spec_file_and_error(self, tmp_path: Path):
++        _write_specs(tmp_path, broken=1)
++
++        with structlog.testing.capture_logs() as logs:
++            _load_manifests_from_specs(str(tmp_path))
++
++        failures = [e for e in logs if e["event"] == "manifest_parse_failed"]
++        assert len(failures) == 1
++        assert failures[0]["log_level"] == "warning"
++        assert failures[0]["spec_file"].endswith("svc-broken-0.yaml")
++        assert failures[0]["error"]
++
++    def test_clean_specs_dir_logs_no_parse_failure(self, tmp_path: Path):
++        _write_specs(tmp_path)
++
++        with structlog.testing.capture_logs() as logs:
++            _load_manifests_from_specs(str(tmp_path))
++
++        assert [e for e in logs if e["event"] == "manifest_parse_failed"] == []
++
++
++class TestParseFailureCount:
++    """The count reaches the caller on the result object."""
++
++    def test_count_reflects_unparseable_files(self, tmp_path: Path):
++        _write_specs(tmp_path, broken=2)
++
++        loaded = _load_manifests_from_specs(str(tmp_path))
++
++        assert loaded.parse_failures == 2
++        assert set(loaded.manifests) == {"svc-good"}
++
++    def test_count_is_zero_for_clean_specs_dir(self, tmp_path: Path):
++        _write_specs(tmp_path)
++
++        loaded = _load_manifests_from_specs(str(tmp_path))
++
++        assert loaded.parse_failures == 0
++        assert set(loaded.manifests) == {"svc-good"}
++
++    def test_count_is_zero_when_specs_dir_absent(self):
++        loaded = _load_manifests_from_specs(None)
++
++        assert loaded.parse_failures == 0
++        assert loaded.manifests == {}
++
++
++class TestRetrospectiveSurfacesParseFailures:
++    """``build_retrospective`` carries the count so consumers of the
++    financial figure can tell "computed over everything" from "computed
++    over a subset". The key is always present — an absent key would be
++    indistinguishable from a clean run.
++    """
++
++    def test_parse_failure_count_present_in_retro_custom(self, tmp_path: Path):
++        _write_specs(tmp_path, broken=1)
++        store = MemoryStore()
++        incident = _incident()
++        store.put(incident)
++
++        retro = build_retrospective(incident.id, store, specs_dir=str(tmp_path))
++
++        assert retro.metadata.custom["manifest_parse_failures"] == 1
++
++    def test_parse_failure_count_zero_when_no_specs_dir(self):
++        store = MemoryStore()
++        incident = _incident()
++        store.put(incident)
++
++        retro = build_retrospective(incident.id, store)
++
++        assert retro.metadata.custom["manifest_parse_failures"] == 0
++
++
++class TestCliSurfacesParseFailures:
++    """The count reaching ``retro.metadata.custom`` is only half the fix while
++    the human-facing surface still prints the financial figure with no caveat.
++    ``nthlayer-learn retrospective`` is the caller a person actually reads.
++    """
++
++    @staticmethod
++    def _run_cli(db_path: Path, incident_id: str, specs_dir: str | None) -> None:
++        _cmd_retrospective(
++            argparse.Namespace(
++                db=str(db_path),
++                incident_verdict=incident_id,
++                specs_dir=specs_dir,
++                decision_store=None,
++            )
++        )
++
++    def test_cli_reports_parse_failures(self, tmp_path: Path, incident_db, capsys):
++        specs = _write_specs(tmp_path / "specs", broken=1)
++        db, incident_id = incident_db
++
++        self._run_cli(db, incident_id, str(specs))
++
++        assert "Manifest parse failures: 1" in capsys.readouterr().out
++
++    def test_cli_silent_when_no_parse_failures(self, tmp_path: Path, incident_db, capsys):
++        specs = _write_specs(tmp_path / "specs")
++        db, incident_id = incident_db
++
++        self._run_cli(db, incident_id, str(specs))
++
++        assert "Manifest parse failures" not in capsys.readouterr().out
++
++
++class TestCountCountsOnlyManifests:
++    """R5 pass 3. ``load_manifest`` raises ``ManifestLoadError`` for *any*
++    YAML it cannot parse as a manifest, including files that never claimed to
++    be one — a ``kustomization.yaml``, a Prometheus rules file. Counting those
++    would fire the CLI's "computed over a subset" caveat on every run over a
++    mixed directory, and a caveat that always fires stops being read.
++
++    So the count is of files that *declare themselves* manifests (v1/v2
++    apiVersion+kind, or the legacy ``service:`` shape) and failed anyway,
++    plus YAML too malformed to make that determination.
++    """
++
++    def test_foreign_yaml_is_not_counted(self, tmp_path: Path):
++        specs = _write_specs(tmp_path / "specs")
++        (specs / "kustomization.yaml").write_text(
++            "resources:\n  - deployment.yaml\n"
++        )
++
++        loaded_specs = _load_manifests_from_specs(str(specs))
++
++        assert loaded_specs.parse_failures == 0
++        assert set(loaded_specs.manifests) == {"svc-good"}
++
++    def test_foreign_yaml_does_not_log_a_parse_failure(self, tmp_path: Path):
++        specs = _write_specs(tmp_path / "specs")
++        (specs / "kustomization.yaml").write_text(
++            "resources:\n  - deployment.yaml\n"
++        )
++
++        with structlog.testing.capture_logs() as logs:
++            _load_manifests_from_specs(str(specs))
++
++        assert [e for e in logs if e["event"] == "manifest_parse_failed"] == []
++
++    def test_declared_manifest_that_fails_is_still_counted(self, tmp_path: Path):
++        """The bead's case: a file that says `kind: ServiceManifest` and then
++        does not parse is exactly what the count exists for.
++        """
++        specs = _write_specs(tmp_path / "specs", broken=1)
++
++        assert _load_manifests_from_specs(str(specs)).parse_failures == 1
++
++    def test_unparseable_yaml_is_counted(self, tmp_path: Path):
++        """Too malformed to tell whether it claimed to be a manifest. Counting
++        it is the conservative read — a YAML syntax error inside a specs dir is
++        a deployment error either way.
++        """
++        specs = _write_specs(tmp_path / "specs")
++        (specs / "torn.yaml").write_text(": : : [unclosed\n")
++
++        assert _load_manifests_from_specs(str(specs)).parse_failures == 1
++
++
++class TestSpecsDirShapes:
++    """R5 pass 3: directory-level edge cases."""
++
++    def test_yml_extension_manifests_are_loaded(self, tmp_path: Path):
++        """A `.yml` manifest used to be invisible to the glob — dropped from
++        the financial figure with `parse_failures == 0`, which is the same
++        silent-subset failure this bead fixes, reached by file extension
++        instead of by parse error. `observe/slo/spec_loader.py` has always
++        accepted both suffixes.
++        """
++        specs = _write_specs(tmp_path / "specs")
++        (specs / "svc-yml.yml").write_text(
++            GOOD_MANIFEST.replace("svc-good", "svc-yml")
++        )
++
++        loaded_specs = _load_manifests_from_specs(str(specs))
++
++        assert set(loaded_specs.manifests) == {"svc-good", "svc-yml"}
++        assert loaded_specs.parse_failures == 0
++
++    def test_empty_specs_dir(self, tmp_path: Path):
++        empty = tmp_path / "empty"
++        empty.mkdir()
++
++        loaded_specs = _load_manifests_from_specs(str(empty))
++
++        assert loaded_specs.manifests == {}
++        assert loaded_specs.parse_failures == 0
++
++    def test_broken_overlay_counts_while_base_still_loads(self, tmp_path: Path):
++        """Per-file semantics, pinned: a service whose base manifest parsed is
++        still present even though one of its files failed. The count is a
++        coverage-doubt signal, not a miss-count.
++        """
++        specs = _write_specs(tmp_path / "specs")
++        (specs / "svc-good-overlay.yaml").write_text(BROKEN_MANIFEST)
++
++        loaded_specs = _load_manifests_from_specs(str(specs))
++
++        assert loaded_specs.parse_failures == 1
++        assert "svc-good" in loaded_specs.manifests
++
++    def test_every_manifest_broken_yields_no_financial_figure(
++        self, tmp_path: Path, incident_db, capsys
++    ):
++        """The worst case, end to end: nothing parsed, so there is no financial
++        line at all — and the caveat is the only thing telling the reader why.
++        """
++        specs = tmp_path / "specs"
++        specs.mkdir()
++        (specs / "svc-broken.yaml").write_text(BROKEN_MANIFEST)
++        db, incident_id = incident_db
++
++        TestCliSurfacesParseFailures._run_cli(db, incident_id, str(specs))
++
++        out = capsys.readouterr().out
++        assert "Financial impact" not in out
++        assert "Manifest parse failures: 1" in out
++
++
++class TestEmptyAndAmbiguousFiles:
++    """R5 pass 3 iteration 2. Gating the count on "does this file declare
++    itself a manifest" must not re-open the hole it was narrowing. A file that
++    parses to *nothing* is a broken manifest, not foreign YAML — an interrupted
++    write or a clobbered spec is exactly the case the count exists for.
++    """
++
++    def test_empty_file_is_counted(self, tmp_path: Path):
++        specs = _write_specs(tmp_path / "specs")
++        (specs / "truncated.yaml").write_text("")
++
++        assert _load_manifests_from_specs(str(specs)).parse_failures == 1
++
++    def test_comment_only_file_is_counted(self, tmp_path: Path):
++        specs = _write_specs(tmp_path / "specs")
++        (specs / "stub.yaml").write_text("# TODO: write this spec\n")
++
++        assert _load_manifests_from_specs(str(specs)).parse_failures == 1
++
++    def test_vanished_file_is_not_treated_as_foreign(self, tmp_path: Path):
++        """Unit test on the gate alone, deliberately. The gate's second read
++        can fail where ``load_manifest``'s first read succeeded — the file
++        moved between them — and treating that as foreign YAML would drop it
++        uncounted. End to end a file that never existed raises
++        ``FileNotFoundError`` out of ``load_manifest`` instead, which this
++        does not cover and does not claim to.
++        """
++        from nthlayer_workers.learn.retrospective import _foreign_yaml_reason
++
++        assert _foreign_yaml_reason(tmp_path / "vanished.yaml") is None
++
++    def test_non_utf8_file_is_counted(self, tmp_path: Path):
++        """`load_manifest` opens with the default encoding and only wraps
++        YAMLError, so non-UTF-8 bytes escape as UnicodeDecodeError. Left
++        uncaught it aborts the whole retrospective — a hard stop where the
++        design says log and continue.
++        """
++        specs = _write_specs(tmp_path / "specs")
++        (specs / "blob.yaml").write_bytes(b"\xff\xfe\x00binary garbage")
++
++        loaded_specs = _load_manifests_from_specs(str(specs))
++
++        assert loaded_specs.parse_failures == 1
++        assert set(loaded_specs.manifests) == {"svc-good"}
++
++    def test_empty_mapping_is_counted(self, tmp_path: Path):
++        """`{}` reads as nothing just as a zero-byte file does."""
++        specs = _write_specs(tmp_path / "specs")
++        (specs / "stub.yaml").write_text("{}\n")
++
++        assert _load_manifests_from_specs(str(specs)).parse_failures == 1
++
++
++class TestSameServiceInBothSuffixes:
++    """R5 pass 3 iteration 2: now that both suffixes are visible, a service
++    present as ``svc.yaml`` and ``svc.yml`` hits the duplicate branch. Sorted
++    iteration makes the winner deterministic instead of filesystem-ordered.
++    """
++
++    def test_yaml_wins_and_nothing_is_counted_as_a_failure(self, tmp_path: Path):
++        specs = _write_specs(tmp_path / "specs")
++        (specs / "svc-good.yml").write_text(GOOD_MANIFEST)
++
++        with structlog.testing.capture_logs() as logs:
++            loaded_specs = _load_manifests_from_specs(str(specs))
++
++        assert loaded_specs.parse_failures == 0
++        assert set(loaded_specs.manifests) == {"svc-good"}
++        duplicates = [e for e in logs if e["event"] == "manifest_duplicate_skipped"]
++        assert len(duplicates) == 1
++        assert duplicates[0]["spec_file"].endswith("svc-good.yml")
++
++
++class TestNearMissManifests:
++    """R5 pass 3 iteration 3. The canonical format predicates demand an exact
++    apiVersion+kind pair, so a manifest that gets one half right matches
++    neither, has no legacy ``service:`` key, and would be dropped as foreign
++    YAML. Version drift and a typo'd kind are the ordinary ways a real
++    manifest breaks — dropping those uncounted is the bead's failure mode
++    reached by a different route.
++    """
++
++    @staticmethod
++    def _count(specs_dir: Path, name: str, body: str) -> int:
++        (specs_dir / f"{name}.yaml").write_text(textwrap.dedent(body).strip())
++        return _load_manifests_from_specs(str(specs_dir)).parse_failures
++
++    def test_typo_in_kind_is_counted(self, tmp_path: Path):
++        specs = _write_specs(tmp_path / "specs")
++        assert self._count(specs, "typo", """
++            apiVersion: opensrm.nthlayer.io/v2
++            kind: ServiceManifests
++            metadata: {name: svc-typo}
++        """) == 1
++
++    def test_missing_kind_is_counted(self, tmp_path: Path):
++        specs = _write_specs(tmp_path / "specs")
++        assert self._count(specs, "nokind", """
++            apiVersion: opensrm.nthlayer.io/v2
++            metadata: {name: svc-nokind}
++        """) == 1
++
++    def test_drifted_api_group_is_counted(self, tmp_path: Path):
++        specs = _write_specs(tmp_path / "specs")
++        assert self._count(specs, "drift", """
++            apiVersion: opensrm.io/v2
++            kind: ServiceManifest
++            metadata: {name: svc-drift}
++        """) == 1
++
++    def test_drifted_v1_kind_is_counted(self, tmp_path: Path):
++        specs = _write_specs(tmp_path / "specs")
++        assert self._count(specs, "v1drift", """
++            apiVersion: srm/v1
++            kind: ServiceReliabilityManifests
++            metadata: {name: svc-v1drift}
++        """) == 1
++
++    def test_foreign_kubernetes_resource_is_still_not_counted(self, tmp_path: Path):
++        """The gate must stay narrow: a k8s resource declares apiVersion and
++        kind too, and is not a broken manifest.
++        """
++        specs = _write_specs(tmp_path / "specs")
++        assert self._count(specs, "deployment", """
++            apiVersion: apps/v1
++            kind: Deployment
++            metadata: {name: svc-good}
++        """) == 0
++
++
++class TestHeaderlessManifests:
++    """R5 pass 3 iteration 5. The gate recovers intent only while evidence of
++    intent survives, and a stripped ``apiVersion``/``kind`` pair is not the end
++    of that evidence — a bad merge, a truncated write, or a mis-indent that
++    reparents the header still leaves an unmistakable manifest body behind.
++
++    Where the body is gone too, the file is indistinguishable in principle
++    from any other headerless YAML mapping, and no content heuristic separates
++    them. That is the gate's stated limit, not a gap to close later.
++    """
++
++    @staticmethod
++    def _count(specs_dir: Path, name: str, body: str) -> int:
++        (specs_dir / f"{name}.yaml").write_text(textwrap.dedent(body).strip())
++        return _load_manifests_from_specs(str(specs_dir)).parse_failures
++
++    def test_stripped_header_with_intact_body_is_counted(self, tmp_path: Path):
++        specs = _write_specs(tmp_path / "specs")
++        assert self._count(specs, "checkout", """
++            metadata: {name: checkout}
++            spec:
++              owner: {group: group:default/team-a}
++              service: {name: checkout, type: api}
++        """) == 1
++
++    def test_null_header_is_counted(self, tmp_path: Path):
++        specs = _write_specs(tmp_path / "specs")
++        assert self._count(specs, "nulled", """
++            apiVersion:
++            kind:
++            metadata: {name: nulled}
++            spec:
++              service: {name: nulled, type: api}
++        """) == 1
++
++    def test_empty_string_header_is_counted(self, tmp_path: Path):
++        """A failed environment substitution leaves the keys present and blank."""
++        specs = _write_specs(tmp_path / "specs")
++        assert self._count(specs, "blank", '''
++            apiVersion: ""
++            kind: ""
++            metadata: {name: blank}
++            spec:
++              slos:
++                - name: availability
++                  target: 99.9
++        ''') == 1
++
++    def test_spec_only_truncation_is_counted(self, tmp_path: Path):
++        specs = _write_specs(tmp_path / "specs")
++        assert self._count(specs, "torn", """
++            spec:
++              outcomes: {estimated_daily_decisions: 1000}
++        """) == 1
++
++    def test_backstage_catalog_info_is_not_counted(self, tmp_path: Path):
++        """`spec` is a mapping and `spec.owner` exists, but `spec.service` is
++        absent — Backstage entities plausibly share a specs directory.
++        """
++        specs = _write_specs(tmp_path / "specs")
++        assert self._count(specs, "catalog-info", """
++            apiVersion: backstage.io/v1alpha1
++            kind: Component
++            metadata: {name: svc-good}
++            spec: {type: service, lifecycle: production, owner: team-a}
++        """) == 0
++
++    def test_openslo_is_not_counted(self, tmp_path: Path):
++        """OpenSLO also has ``spec.service`` — but as a string, not a mapping."""
++        specs = _write_specs(tmp_path / "specs")
++        assert self._count(specs, "openslo", """
++            apiVersion: openslo/v1
++            kind: SLO
++            metadata: {name: svc-good-availability}
++            spec:
++              service: svc-good
++              budgetingMethod: Occurrences
++        """) == 0
++
++
++class TestDropsAreRecorded:
++    """A dropped file must leave a trace. The original bug was not that the
++    loop skipped something — it is that it skipped without saying so, and a
++    drop with no record is that same shape one level up.
++    """
++
++    def test_ignored_file_logs_reason_at_debug(self, tmp_path: Path):
++        specs = _write_specs(tmp_path / "specs")
++        (specs / "kustomization.yaml").write_text("resources:\n  - deployment.yaml\n")
++
++        with structlog.testing.capture_logs() as logs:
++            _load_manifests_from_specs(str(specs))
++
++        ignored = [e for e in logs if e["event"] == "manifest_file_ignored"]
++        assert len(ignored) == 1
++        assert ignored[0]["log_level"] == "debug"
++        assert ignored[0]["spec_file"].endswith("kustomization.yaml")
++        assert ignored[0]["reason"]

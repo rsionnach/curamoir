@@ -1,0 +1,120 @@
+{
+ "schema_version": 1,
+ "entry": "opensrm-908x",
+ "fidelity": "recorded",
+ "lens_order": [
+  "correctness",
+  "clarity",
+  "edge-cases",
+  "provenance",
+  "excellence"
+ ],
+ "iterations": {
+  "correctness": 1,
+  "clarity": 2,
+  "edge-cases": 1,
+  "provenance": 1
+ },
+ "rounds": [
+  {
+   "lens": "correctness",
+   "iteration": 1,
+   "recorded_iteration": 1,
+   "counts": {
+    "critical": 0,
+    "important": 0,
+    "minor": 2
+   },
+   "findings": null
+  },
+  {
+   "lens": "clarity",
+   "iteration": 1,
+   "recorded_iteration": 1,
+   "counts": {
+    "critical": 0,
+    "important": 2,
+    "minor": 4
+   },
+   "findings": [
+    {
+     "lens": "clarity",
+     "severity": "IMPORTANT",
+     "path": "docs/upgrading-5.0.md",
+     "start_line": 116,
+     "end_line": 123,
+     "claim": "A 5.1.0 addition is filed in a 5.0 migration guide, inside the threshold_to_v2_entry bullet. A workers author reading CHANGELOG or the 5.1 release will not look here.",
+     "evidence": null,
+     "fix": null,
+     "fingerprint": "8e20f172c2cff26d",
+     "verification_level": "asserted",
+     "resolves": null,
+     "regression": false,
+     "status": null,
+     "derived_from": "reviewer_transcript",
+     "extracted_by": "model",
+     "handback_sha256": "db5c124d5621b2b6c915db53520585a26a61f8e7d855d85b3332184083b29cab",
+     "fix_commit": null,
+     "reported_path": "docs/upgrading-5.0.md",
+     "path_in_tree": true
+    },
+    {
+     "lens": "clarity",
+     "severity": "IMPORTANT",
+     "path": "src/nthlayer_common/manifest/parser/v2.py",
+     "start_line": 636,
+     "end_line": 660,
+     "claim": "The docstring says where prefixes any error but never says what to pass.",
+     "evidence": null,
+     "fix": null,
+     "fingerprint": "0365a7f2f21e5e7d",
+     "verification_level": "asserted",
+     "resolves": null,
+     "regression": false,
+     "status": null,
+     "derived_from": "reviewer_transcript",
+     "extracted_by": "model",
+     "handback_sha256": "db5c124d5621b2b6c915db53520585a26a61f8e7d855d85b3332184083b29cab",
+     "fix_commit": null,
+     "reported_path": "src/nthlayer_common/manifest/parser/v2.py",
+     "path_in_tree": true
+    }
+   ]
+  },
+  {
+   "lens": "clarity",
+   "iteration": 2,
+   "recorded_iteration": 2,
+   "counts": {
+    "critical": 0,
+    "important": 0,
+    "minor": 0
+   },
+   "findings": null
+  },
+  {
+   "lens": "edge_cases",
+   "iteration": 1,
+   "recorded_iteration": 1,
+   "counts": {
+    "critical": 0,
+    "important": 0,
+    "minor": 2
+   },
+   "findings": null
+  },
+  {
+   "lens": "provenance",
+   "iteration": 1,
+   "recorded_iteration": 1,
+   "counts": {
+    "critical": 0,
+    "important": 0,
+    "minor": 1
+   },
+   "findings": null
+  }
+ ],
+ "cross_repo_findings": [],
+ "escaped": []
+}

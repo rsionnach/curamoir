@@ -1,0 +1,997 @@
+diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
+index 011c640..867d473 100644
+--- a/.github/workflows/ci.yml
++++ b/.github/workflows/ci.yml
+@@ -66,3 +66,8 @@ jobs:
+       # dedicated workflows (demo-paths, demo-start-lock) exist for tests that do.
+       - name: eco-doctor regression test
+         run: bash test/test_eco_doctor.sh
++
++      # r5_baseline's tests (opensrm-6kqs.1). Standard library plus pytest, over
++      # trimmed real archives in test/fixtures/r5-baseline/; no network.
++      - name: r5-baseline tests
++        run: uv run --no-project --with pytest pytest -q test/test_r5_baseline.py
+diff --git a/CLAUDE.md b/CLAUDE.md
+index 5c92871..3f7abfb 100644
+--- a/CLAUDE.md
++++ b/CLAUDE.md
+@@ -159,6 +159,13 @@ examples, generator-specific scripts.
+       `SIBLING-MISSING`, `PARSE-ERROR`
+     - currency, logged only (`--fetch`) — `BEHIND`, `FETCH-FAILED`,
+       `NO-UPSTREAM`
++  - `r5_baseline.py` — the baseline of the sequential R5 gate from the
++    archived `.claude/r5-state-*-completed.json` records (R5 Gate v2
++    Phase A, opensrm-6kqs.1): per bead and lens, review iterations,
++    findings by severity per iteration, model steps, lens order;
++    `--json` for the replay corpus's `sequential_steps`. Standard library
++    only. Tests: `test/test_r5_baseline.py` (run by `ci.yml`). The
++    workspace root's `.claude/bin/r5-baseline.sh` is a shim.
+   - `meta-resolve-check.sh` — fails when `pip install nthlayer` would
+     hold a tier below its newest in-range release, or a tier's newest
+     release is outside its range [opensrm-z1kq].
+@@ -168,8 +175,8 @@ examples, generator-specific scripts.
+   - `docs.yml` — docs site build + GitHub Pages deploy.
+   - `ci.yml` — `bash -n` across `demo/`, `test/` and `scripts/` *.sh
+     (opensrm-0buj); `ruff check` over the same three directories
+-    (opensrm-u5dw.1); and the `test_eco_doctor.sh` regression suite
+-    (opensrm-8hn3).
++    (opensrm-u5dw.1); the `test_eco_doctor.sh` regression suite
++    (opensrm-8hn3); and `test/test_r5_baseline.py` (opensrm-6kqs.1).
+   - `meta-resolve.yml` — `scripts/meta-resolve-check.sh`, nightly and on
+     PRs (opensrm-z1kq).
+   - `error-budget-seam.yml` — `test/test_error_budget_seam.py` against
+diff --git a/docs/r5-gate.md b/docs/r5-gate.md
+index 8c78f18..790d2db 100644
+--- a/docs/r5-gate.md
++++ b/docs/r5-gate.md
+@@ -37,20 +37,37 @@ a sign that a blocking lens has a gap.
+ 
+ ### Why this order, and why excellence is advisory
+ 
+-Until 2026-08-28 the fourth blocking slot was excellence. Measured across the
+-20 beads then recorded in `.claude/r5-state-*.json` (274 findings):
+-
+-| pass | findings | CRITICAL | IMPORTANT | MINOR |
+-|---|---|---|---|---|
+-| correctness | 47 | 5 | 17 | 17 |
+-| clarity | 92 | 0 | 19 | 31 |
+-| edge-cases | 86 | 4 | 15 | 22 |
+-| excellence | 49 | 0 | 1 | 21 |
+-
+-All nine CRITICALs came from correctness and edge-cases; excellence spent a
+-blocking serial slot to produce one IMPORTANT in 18 runs. Meanwhile the two
+-known escapes cleared every lens, because none asked whether the tests touched
+-reality:
++Until 2026-08-28 the fourth blocking slot was excellence. The baseline below is
++`scripts/r5_baseline.py` run over every archived gate record
++(`.claude/r5-state-*-completed.json`, 2026-11-07) [opensrm-6kqs.1]:
++
++87 archived gate records, 64 beads (21 schema v1, 66 v2; 1 dry run(s) excluded).
++
++| pass | records | findings (pass totals) | CRITICAL | IMPORTANT | MINOR | other | unattributed | reviews | model steps |
++|---|---|---|---|---|---|---|---|---|---|
++| correctness | 87 | 146 | 14 | 71 | 158 | 0 | 24 | 137 | 190 |
++| clarity | 86 | 380 | 0 | 141 | 408 | 0 | 66 | 159 | 238 |
++| edge-cases | 84 | 256 | 17 | 79 | 268 | 0 | 69 | 166 | 252 |
++| provenance | 65 | 179 | 76 | 63 | 136 | 0 | 29 | 122 | 177 |
++| excellence | 82 | 318 | 1 | 31 | 256 | 0 | 30 | 93 | 105 |
++| other passes | 7 | 30 | 0 | 7 | 23 | 0 | 0 | 7 | 7 |
++
++Sequential model steps per gate: total 969, median 10, max 27.
++
++*Findings (pass totals)* sums each pass's `findings_count_initial`, the first
++review's count. The severity columns sum the severities logged for every review
++iteration, re-reviews included, so they can exceed the totals. *Unattributed* is
++the part of a first review's total that no logged severity accounts for, because
++many passes, most v1, recorded only the total. That is the 152-versus-274 gap in
++the 2026-08-28 table this replaces: its findings column was the totals, and its
++severity columns covered only the findings whose severity was logged. Model steps
++are reviews plus fix rounds, summed over a gate's passes.
++
++On 2026-08-28, over the 20 beads then recorded, all nine CRITICALs came from
++correctness and edge-cases, and excellence spent a blocking serial slot to
++produce one IMPORTANT in 18 runs. The full record bears it out: excellence has 1
++CRITICAL in 82 runs, provenance 76 in 65. Meanwhile the two known escapes cleared
++every lens, because none asked whether the tests touched reality:
+ 
+ - **opensrm-oh27** tested `spec.slos` as a list. v1 writes a mapping and v2
+   has no such key, so the branch never fired for a real manifest. It survived
+diff --git a/scripts/r5_baseline.py b/scripts/r5_baseline.py
+new file mode 100644
+index 0000000..cbd8be1
+--- /dev/null
++++ b/scripts/r5_baseline.py
+@@ -0,0 +1,238 @@
++#!/usr/bin/env python3
++"""Baseline of the sequential R5 gate, from its archived records (R5-R0).
++
++Reads every ``r5-state-*-completed.json`` in the workspace's ``.claude/`` and
++reports, per bead and per lens: review iterations, findings by severity per
++iteration, model steps on the critical path, and the lens order used. The
++totals are the baseline cúramóir's batched gate is measured against: the same
++or better catch rate in no more than a third of ``sequential_steps``
++(R5 Gate v2 spec, opensrm-6kqs.1; nthlayer/docs/superpowers/specs/
++2026-11-03-r5-gate-v2-nthlayer-spec.md section 3).
++
++Two sources in each record, and why both are read:
++
++- ``audit_trail`` ``findings_received`` events carry severities, one event per
++  review iteration. These give the severity columns.
++- ``completed_passes[].findings_count_initial`` is the pass's first-review
++  total. Many older passes recorded only this total, with the severities in
++  free text or nowhere, so it can exceed the first iteration's severity sum.
++  The excess is reported as ``unattributed``, never guessed.
++
++That difference is the 152-versus-274 discrepancy in the gate description's
++2026-08-28 table: its findings column summed the totals, its severity columns
++summed the events.
++
++Model steps, per pass: reviews (one per ``findings_received`` event, or
++``fix_iterations + 1`` when the record has none) plus fix rounds
++(``fix_iterations``). The sequential gate runs passes one after another, so the
++critical path is the sum over every pass, advisory excellence included.
++``steps_source`` says which derivation each pass used.
++
++Like ``eco_doctor.py`` this depends on nothing in the ecosystem: the standard
++library only.
++
++Usage:
++    python3 scripts/r5_baseline.py [--archive-dir DIR] [--json | --markdown]
++
++Exit codes: 0 report printed · 2 usage error or no records found.
++"""
++
++from __future__ import annotations
++
++import argparse
++import json
++import sys
++from collections import Counter
++from pathlib import Path
++
++SEVERITIES = ("critical", "important", "minor")
++# Blocking lenses in roster order, then the advisory one. A lens a record names
++# that is not here (none today) sorts after these, by name.
++LENS_ORDER = ("correctness", "clarity", "edge-cases", "provenance", "excellence")
++
++# scripts/ -> the front-door repo -> the workspace root, whose .claude/ holds
++# the archives (they are untracked, so they cannot live in this repo).
++DEFAULT_ARCHIVE_DIR = Path(__file__).resolve().parents[2] / ".claude"
++
++
++def _counts(raw: object) -> Counter:
++    """Severity counts from one findings_received ``counts`` value.
++
++    Keys outside SEVERITIES (``missing_tests`` in one edge-cases record) go to
++    ``other``; non-integer values are ignored, as no record uses one for a count.
++    """
++    out: Counter = Counter()
++    if not isinstance(raw, dict):
++        return out
++    for key, value in raw.items():
++        if isinstance(value, bool) or not isinstance(value, int):
++            continue
++        out[key if key in SEVERITIES else "other"] += value
++    return out
++
++
++def _lens_sort_key(lens: str) -> tuple[int, str]:
++    return (LENS_ORDER.index(lens), "") if lens in LENS_ORDER else (len(LENS_ORDER), lens)
++
++
++def analyse_record(record: dict) -> dict:
++    """The baseline row for one archived gate record."""
++    passes = [p for p in record.get("completed_passes", []) if isinstance(p, dict)]
++    summaries = {p["name"]: p for p in passes if isinstance(p.get("name"), str)}
++
++    iterations: dict[str, list[Counter]] = {}
++    advisory: dict[str, list[Counter]] = {}
++    started: list[str] = []
++    for event in record.get("audit_trail", []):
++        if not isinstance(event, dict):
++            continue
++        lens = event.get("pass")
++        if event.get("event") == "pass_started" and isinstance(lens, str) and lens not in started:
++            started.append(lens)
++        if event.get("event") == "findings_received" and isinstance(lens, str):
++            iterations.setdefault(lens, []).append(_counts(event.get("counts")))
++        if event.get("event") == "advisory_pass_completed" and isinstance(lens, str):
++            # The advisory read is one review with no fix loop; v2 records log
++            # it here rather than as findings_received. Used only for a lens
++            # with no findings_received of its own, so it is never counted twice.
++            advisory.setdefault(lens, []).append(_counts(event.get("counts")))
++    for lens, found in advisory.items():
++        iterations.setdefault(lens, found)
++
++    # Lens order as dispatched: pass_started order where the record has it,
++    # else completed_passes order; advisory lenses with no pass_started last.
++    order = list(started) or [p["name"] for p in passes]
++    for lens in sorted(set(summaries) | set(iterations), key=_lens_sort_key):
++        if lens not in order:
++            order.append(lens)
++
++    lenses = {}
++    for lens in order:
++        summary = summaries.get(lens, {})
++        fixes = summary.get("fix_iterations") or 0
++        found = iterations.get(lens, [])
++        if found:
++            reviews, source = len(found), "events"
++        else:
++            reviews, source = fixes + 1, "pass_summary"
++        initial = summary.get("findings_count_initial")
++        first = sum((found[0][s] for s in (*SEVERITIES, "other")), 0) if found else 0
++        if initial is None:
++            initial = first
++        lenses[lens] = {
++            "iterations": reviews,
++            "fix_rounds": fixes,
++            "findings_by_iteration": [
++                {s: c[s] for s in (*SEVERITIES, "other")} for c in found
++            ],
++            "findings_initial": initial,
++            "unattributed": max(0, initial - first),
++            "steps": reviews + fixes,
++            "steps_source": source,
++        }
++    return {
++        "bead": record.get("target_bead"),
++        "version": record.get("version", 1),
++        "started_at": record.get("started_at"),
++        "dry_run": bool(record.get("dry_run")),
++        "lens_order": order,
++        "lenses": lenses,
++        "sequential_steps": sum(v["steps"] for v in lenses.values()),
++    }
++
++
++def load_records(archive_dir: Path) -> list[tuple[str, dict]]:
++    """Every archived record, by file name, sorted by name for a stable report."""
++    out = []
++    for path in sorted(archive_dir.glob("r5-state-*-completed.json")):
++        with path.open(encoding="utf-8") as handle:
++            out.append((path.name, json.load(handle)))
++    return out
++
++
++def totals(rows: list[dict]) -> dict[str, dict[str, int]]:
++    """Per-lens totals over all rows: severities summed over every iteration."""
++    out: dict[str, Counter] = {}
++    for row in rows:
++        for lens, data in row["lenses"].items():
++            acc = out.setdefault(lens, Counter())
++            acc["records"] += 1
++            acc["findings_initial"] += data["findings_initial"]
++            acc["unattributed"] += data["unattributed"]
++            acc["iterations"] += data["iterations"]
++            acc["steps"] += data["steps"]
++            for it in data["findings_by_iteration"]:
++                for sev, n in it.items():
++                    acc[sev] += n
++    return {lens: dict(out[lens]) for lens in sorted(out, key=_lens_sort_key)}
++
++
++def baseline_rows(rows: list[dict]) -> list[dict]:
++    """The rows the baseline counts: live gates only. A dry run replays a bead
++    already gated, so counting it would count that bead twice."""
++    return [r for r in rows if not r["dry_run"]]
++
++
++def render_markdown(all_rows: list[dict]) -> str:
++    rows = baseline_rows(all_rows)
++    agg = totals(rows)
++    # Passes outside the roster (one-off re-checks such as "delta-clarity" or
++    # "scoped re-check", seven records) are folded into one row here; --json
++    # keeps them by name.
++    other: Counter = Counter()
++    for lens in [lens for lens in agg if lens not in LENS_ORDER]:
++        other.update(agg.pop(lens))
++    if other:
++        agg["other passes"] = dict(other)
++    beads = {r["bead"] for r in rows}
++    lines = [
++        f"{len(rows)} archived gate records, {len(beads)} beads"
++        f" ({sum(r['version'] == 1 for r in rows)} schema v1,"
++        f" {sum(r['version'] != 1 for r in rows)} v2;"
++        f" {len(all_rows) - len(rows)} dry run(s) excluded).",
++        "",
++        "| pass | records | findings (pass totals) | CRITICAL | IMPORTANT | MINOR"
++        " | other | unattributed | reviews | model steps |",
++        "|---|---|---|---|---|---|---|---|---|---|",
++    ]
++    for lens, t in agg.items():
++        lines.append(
++            f"| {lens} | {t['records']} | {t['findings_initial']} | {t.get('critical', 0)}"
++            f" | {t.get('important', 0)} | {t.get('minor', 0)} | {t.get('other', 0)}"
++            f" | {t['unattributed']} | {t['iterations']} | {t['steps']} |"
++        )
++    steps = [r["sequential_steps"] for r in rows]
++    lines += [
++        "",
++        f"Sequential model steps per gate: total {sum(steps)},"
++        f" median {sorted(steps)[len(steps) // 2]}, max {max(steps)}.",
++    ]
++    return "\n".join(lines)
++
++
++def main(argv: list[str] | None = None) -> int:
++    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
++    parser.add_argument("--archive-dir", type=Path, default=DEFAULT_ARCHIVE_DIR)
++    fmt = parser.add_mutually_exclusive_group()
++    fmt.add_argument("--json", action="store_true", help="per-record rows and totals as JSON")
++    fmt.add_argument("--markdown", action="store_true", help="the totals table (default)")
++    args = parser.parse_args(argv)
++
++    if not args.archive_dir.is_dir():
++        print(f"r5-baseline: no such directory {args.archive_dir}", file=sys.stderr)
++        return 2
++    records = load_records(args.archive_dir)
++    if not records:
++        print(f"r5-baseline: no r5-state-*-completed.json in {args.archive_dir}", file=sys.stderr)
++        return 2
++    rows = [dict(analyse_record(data), file=name) for name, data in records]
++    if args.json:
++        json.dump({"records": rows, "totals": totals(baseline_rows(rows))}, sys.stdout, indent=1)
++        print()
++    else:
++        print(render_markdown(rows))
++    return 0
++
++
++if __name__ == "__main__":
++    sys.exit(main())
+diff --git a/test/fixtures/r5-baseline/README.md b/test/fixtures/r5-baseline/README.md
+new file mode 100644
+index 0000000..a17c156
+--- /dev/null
++++ b/test/fixtures/r5-baseline/README.md
+@@ -0,0 +1,21 @@
++# r5_baseline fixtures
++
++Trimmed copies of four real archived gate records from the workspace root's
++`.claude/` (untracked, so they cannot be referenced in place). Each keeps the
++record's structure and every number the baseline reads; free text (notes,
++rulings, briefs) and session details are dropped, because the archives are
++internal and this repository is public.
++
++Kept: top-level `supervisor`, `version`, `target_bead`, `started_at`,
++`dry_run`, `passes`, `advisory_passes`, `status`; `completed_passes[]` `name`,
++`findings_count_initial`, `findings_count_final`, `fix_iterations`;
++`audit_trail[]` events `pass_started`, `findings_received`,
++`advisory_pass_completed`, `pass_completed` with `ts`, `event`, `pass`,
++`iteration`, `counts`.
++
++| file | why it is here |
++|---|---|
++| `r5-state-3ntg-completed.json` | schema v2, severities logged per iteration, advisory excellence as `advisory_pass_completed` |
++| `r5-state-1mja-completed.json` | schema v1, no `findings_received` at all: pass totals only, so every finding is unattributed |
++| `r5-state-oh27-completed.json` | schema v1, the oh27 escape; totals only, multi-iteration fix loops |
++| `r5-state-m7su-dryrun-completed.json` | the one dry run (excluded from totals), and the one `counts` key outside the three severities (`missing_tests`) |
+diff --git a/test/fixtures/r5-baseline/r5-state-1mja-completed.json b/test/fixtures/r5-baseline/r5-state-1mja-completed.json
+new file mode 100644
+index 0000000..356ee16
+--- /dev/null
++++ b/test/fixtures/r5-baseline/r5-state-1mja-completed.json
+@@ -0,0 +1,62 @@
++{
++ "supervisor": "r5-supervise",
++ "version": 1,
++ "target_bead": "opensrm-1mja",
++ "started_at": "2026-05-30T02:00:00Z",
++ "dry_run": false,
++ "passes": [
++  "correctness",
++  "clarity",
++  "edge-cases",
++  "excellence"
++ ],
++ "status": "completed",
++ "completed_passes": [
++  {
++   "name": "correctness",
++   "findings_count_initial": 2,
++   "findings_count_final": 0,
++   "fix_iterations": 1
++  },
++  {
++   "name": "clarity",
++   "findings_count_initial": 5,
++   "findings_count_final": 0,
++   "fix_iterations": 0
++  },
++  {
++   "name": "edge-cases",
++   "findings_count_initial": 3,
++   "findings_count_final": 0,
++   "fix_iterations": 1
++  },
++  {
++   "name": "excellence",
++   "findings_count_initial": 0,
++   "findings_count_final": 0,
++   "fix_iterations": 0
++  }
++ ],
++ "audit_trail": [
++  {
++   "ts": "2026-05-30T02:30:00Z",
++   "event": "pass_completed",
++   "pass": "correctness"
++  },
++  {
++   "ts": "2026-05-30T02:45:00Z",
++   "event": "pass_completed",
++   "pass": "clarity"
++  },
++  {
++   "ts": "2026-05-30T03:05:00Z",
++   "event": "pass_completed",
++   "pass": "edge-cases"
++  },
++  {
++   "ts": "2026-05-30T03:15:00Z",
++   "event": "pass_completed",
++   "pass": "excellence"
++  }
++ ]
++}
+\ No newline at end of file
+diff --git a/test/fixtures/r5-baseline/r5-state-3ntg-completed.json b/test/fixtures/r5-baseline/r5-state-3ntg-completed.json
+new file mode 100644
+index 0000000..32f96c5
+--- /dev/null
++++ b/test/fixtures/r5-baseline/r5-state-3ntg-completed.json
+@@ -0,0 +1,201 @@
++{
++ "supervisor": "r5-supervise",
++ "version": 2,
++ "target_bead": "opensrm-3ntg",
++ "started_at": "2026-10-23T20:06:45Z",
++ "dry_run": false,
++ "passes": [
++  "correctness",
++  "clarity",
++  "edge-cases",
++  "provenance"
++ ],
++ "advisory_passes": [
++  "excellence"
++ ],
++ "status": "completed",
++ "completed_passes": [
++  {
++   "name": "correctness",
++   "findings_count_initial": 4,
++   "findings_count_final": 0,
++   "fix_iterations": 2
++  },
++  {
++   "name": "clarity",
++   "findings_count_initial": 11,
++   "findings_count_final": 0,
++   "fix_iterations": 1
++  },
++  {
++   "name": "edge-cases",
++   "findings_count_initial": 7,
++   "findings_count_final": 0,
++   "fix_iterations": 1
++  },
++  {
++   "name": "provenance",
++   "findings_count_initial": 5,
++   "findings_count_final": 0,
++   "fix_iterations": 2
++  }
++ ],
++ "audit_trail": [
++  {
++   "ts": "2026-10-23T20:06:45Z",
++   "event": "pass_started",
++   "pass": "correctness"
++  },
++  {
++   "ts": "2026-10-23T20:09:35Z",
++   "event": "findings_received",
++   "pass": "correctness",
++   "counts": {
++    "critical": 0,
++    "important": 1,
++    "minor": 3
++   }
++  },
++  {
++   "ts": "2026-10-23T20:16:20Z",
++   "event": "findings_received",
++   "pass": "correctness",
++   "iteration": 2,
++   "counts": {
++    "critical": 0,
++    "important": 1,
++    "minor": 0
++   }
++  },
++  {
++   "ts": "2026-10-23T20:21:13Z",
++   "event": "findings_received",
++   "pass": "correctness",
++   "iteration": 3,
++   "counts": {
++    "critical": 0,
++    "important": 0,
++    "minor": 1
++   }
++  },
++  {
++   "ts": "2026-10-23T20:21:13Z",
++   "event": "pass_completed",
++   "pass": "correctness"
++  },
++  {
++   "ts": "2026-10-23T20:21:13Z",
++   "event": "pass_started",
++   "pass": "clarity"
++  },
++  {
++   "ts": "2026-10-23T20:22:00Z",
++   "event": "findings_received",
++   "pass": "clarity",
++   "counts": {
++    "critical": 0,
++    "important": 2,
++    "minor": 9
++   }
++  },
++  {
++   "ts": "2026-10-23T20:28:08Z",
++   "event": "findings_received",
++   "pass": "clarity",
++   "iteration": 2,
++   "counts": {
++    "critical": 0,
++    "important": 0,
++    "minor": 1
++   }
++  },
++  {
++   "ts": "2026-10-23T20:28:08Z",
++   "event": "pass_completed",
++   "pass": "clarity"
++  },
++  {
++   "ts": "2026-10-23T20:28:08Z",
++   "event": "pass_started",
++   "pass": "edge-cases"
++  },
++  {
++   "ts": "2026-10-23T20:32:04Z",
++   "event": "findings_received",
++   "pass": "edge-cases",
++   "counts": {
++    "critical": 0,
++    "important": 1,
++    "minor": 6
++   }
++  },
++  {
++   "ts": "2026-10-23T20:39:44Z",
++   "event": "findings_received",
++   "pass": "edge-cases",
++   "iteration": 2,
++   "counts": {
++    "critical": 0,
++    "important": 0,
++    "minor": 1
++   }
++  },
++  {
++   "ts": "2026-10-23T20:39:44Z",
++   "event": "pass_completed",
++   "pass": "edge-cases"
++  },
++  {
++   "ts": "2026-10-23T20:39:44Z",
++   "event": "pass_started",
++   "pass": "provenance"
++  },
++  {
++   "ts": "2026-10-23T20:44:04Z",
++   "event": "findings_received",
++   "pass": "provenance",
++   "counts": {
++    "critical": 3,
++    "important": 1,
++    "minor": 1
++   }
++  },
++  {
++   "ts": "2026-10-23T20:49:31Z",
++   "event": "findings_received",
++   "pass": "provenance",
++   "iteration": 2,
++   "counts": {
++    "critical": 0,
++    "important": 1,
++    "minor": 0
++   }
++  },
++  {
++   "ts": "2026-10-23T20:55:17Z",
++   "event": "findings_received",
++   "pass": "provenance",
++   "iteration": 3,
++   "counts": {
++    "critical": 0,
++    "important": 0,
++    "minor": 1
++   }
++  },
++  {
++   "ts": "2026-10-23T20:55:17Z",
++   "event": "pass_completed",
++   "pass": "provenance"
++  },
++  {
++   "ts": "2026-10-23T20:55:50Z",
++   "event": "advisory_pass_completed",
++   "pass": "excellence",
++   "counts": {
++    "critical": 0,
++    "important": 0,
++    "minor": 4
++   }
++  }
++ ]
++}
+\ No newline at end of file
+diff --git a/test/fixtures/r5-baseline/r5-state-m7su-dryrun-completed.json b/test/fixtures/r5-baseline/r5-state-m7su-dryrun-completed.json
+new file mode 100644
+index 0000000..aee7d30
+--- /dev/null
++++ b/test/fixtures/r5-baseline/r5-state-m7su-dryrun-completed.json
+@@ -0,0 +1,118 @@
++{
++ "supervisor": "r5-supervise",
++ "version": 1,
++ "target_bead": "opensrm-m7su",
++ "started_at": "2026-05-31T07:20:58Z",
++ "dry_run": true,
++ "passes": [
++  "correctness",
++  "clarity",
++  "edge-cases",
++  "excellence"
++ ],
++ "status": "completed",
++ "completed_passes": [
++  {
++   "name": "correctness",
++   "findings_count_initial": 2,
++   "findings_count_final": 2,
++   "fix_iterations": 0
++  },
++  {
++   "name": "clarity",
++   "findings_count_initial": 1,
++   "findings_count_final": 1,
++   "fix_iterations": 0
++  },
++  {
++   "name": "edge-cases",
++   "findings_count_initial": 4,
++   "findings_count_final": 4,
++   "fix_iterations": 0
++  },
++  {
++   "name": "excellence",
++   "findings_count_initial": 0,
++   "findings_count_final": 0,
++   "fix_iterations": 0
++  }
++ ],
++ "audit_trail": [
++  {
++   "ts": "2026-05-31T07:27:14Z",
++   "event": "findings_received",
++   "pass": "correctness",
++   "counts": {
++    "critical": 0,
++    "important": 2,
++    "minor": 1
++   }
++  },
++  {
++   "ts": "2026-05-31T07:27:14Z",
++   "event": "pass_completed",
++   "pass": "correctness"
++  },
++  {
++   "ts": "2026-05-31T07:27:14Z",
++   "event": "pass_started",
++   "pass": "clarity"
++  },
++  {
++   "ts": "2026-05-31T07:28:57Z",
++   "event": "findings_received",
++   "pass": "clarity",
++   "counts": {
++    "critical": 0,
++    "important": 1,
++    "minor": 4
++   }
++  },
++  {
++   "ts": "2026-05-31T07:28:57Z",
++   "event": "pass_completed",
++   "pass": "clarity"
++  },
++  {
++   "ts": "2026-05-31T07:28:57Z",
++   "event": "pass_started",
++   "pass": "edge-cases"
++  },
++  {
++   "ts": "2026-05-31T07:32:30Z",
++   "event": "findings_received",
++   "pass": "edge-cases",
++   "counts": {
++    "critical": 0,
++    "important": 4,
++    "minor": 4,
++    "missing_tests": 5
++   }
++  },
++  {
++   "ts": "2026-05-31T07:32:30Z",
++   "event": "pass_completed",
++   "pass": "edge-cases"
++  },
++  {
++   "ts": "2026-05-31T07:32:30Z",
++   "event": "pass_started",
++   "pass": "excellence"
++  },
++  {
++   "ts": "2026-05-31T07:34:35Z",
++   "event": "findings_received",
++   "pass": "excellence",
++   "counts": {
++    "critical": 0,
++    "important": 0,
++    "minor": 3
++   }
++  },
++  {
++   "ts": "2026-05-31T07:34:35Z",
++   "event": "pass_completed",
++   "pass": "excellence"
++  }
++ ]
++}
+\ No newline at end of file
+diff --git a/test/fixtures/r5-baseline/r5-state-oh27-completed.json b/test/fixtures/r5-baseline/r5-state-oh27-completed.json
+new file mode 100644
+index 0000000..4306974
+--- /dev/null
++++ b/test/fixtures/r5-baseline/r5-state-oh27-completed.json
+@@ -0,0 +1,82 @@
++{
++ "supervisor": "r5-supervise",
++ "version": 1,
++ "target_bead": "opensrm-oh27",
++ "started_at": "2026-08-28T00:00:00Z",
++ "dry_run": false,
++ "passes": [
++  "correctness",
++  "clarity",
++  "edge-cases",
++  "excellence"
++ ],
++ "status": "awaiting_user_confirmation",
++ "completed_passes": [
++  {
++   "name": "correctness",
++   "findings_count_initial": 3,
++   "findings_count_final": 0,
++   "fix_iterations": 1
++  },
++  {
++   "name": "clarity",
++   "findings_count_initial": 7,
++   "findings_count_final": 0,
++   "fix_iterations": 3
++  },
++  {
++   "name": "edge-cases",
++   "findings_count_initial": 6,
++   "findings_count_final": 0,
++   "fix_iterations": 5
++  },
++  {
++   "name": "excellence",
++   "findings_count_initial": 3,
++   "findings_count_final": 0,
++   "fix_iterations": 1
++  }
++ ],
++ "audit_trail": [
++  {
++   "ts": "2026-08-28T00:01:00Z",
++   "event": "pass_started",
++   "pass": "correctness"
++  },
++  {
++   "ts": "2026-08-28T00:20:00Z",
++   "event": "pass_completed",
++   "pass": "correctness"
++  },
++  {
++   "ts": "2026-08-28T00:21:00Z",
++   "event": "pass_started",
++   "pass": "clarity"
++  },
++  {
++   "ts": "2026-08-28T00:45:00Z",
++   "event": "pass_completed",
++   "pass": "clarity"
++  },
++  {
++   "ts": "2026-08-28T00:46:00Z",
++   "event": "pass_started",
++   "pass": "edge-cases"
++  },
++  {
++   "ts": "2026-08-28T02:10:00Z",
++   "event": "pass_completed",
++   "pass": "edge-cases"
++  },
++  {
++   "ts": "2026-08-28T02:11:00Z",
++   "event": "pass_started",
++   "pass": "excellence"
++  },
++  {
++   "ts": "2026-08-28T02:40:00Z",
++   "event": "pass_completed",
++   "pass": "excellence"
++  }
++ ]
++}
+\ No newline at end of file
+diff --git a/test/test_r5_baseline.py b/test/test_r5_baseline.py
+new file mode 100644
+index 0000000..26f2b7d
+--- /dev/null
++++ b/test/test_r5_baseline.py
+@@ -0,0 +1,131 @@
++"""Tests for scripts/r5_baseline.py (opensrm-6kqs.1, R5-R0).
++
++The fixtures are trimmed real archives (test/fixtures/r5-baseline/README.md),
++and every expected number below is read off those files by hand: the
++findings_received counts, findings_count_initial and fix_iterations each one
++records. None is copied from the script's output.
++
++Run: uv run --no-project --with pytest pytest -q test/test_r5_baseline.py
++"""
++
++from __future__ import annotations
++
++import importlib.util
++import json
++import shutil
++from pathlib import Path
++
++import pytest
++
++HERE = Path(__file__).resolve().parent
++FIXTURES = HERE / "fixtures" / "r5-baseline"
++_spec = importlib.util.spec_from_file_location("r5_baseline", HERE.parent / "scripts" / "r5_baseline.py")
++assert _spec and _spec.loader
++r5_baseline = importlib.util.module_from_spec(_spec)
++_spec.loader.exec_module(r5_baseline)
++
++
++def _row(name: str) -> dict:
++    record = json.loads((FIXTURES / f"r5-state-{name}-completed.json").read_text())
++    return r5_baseline.analyse_record(record)
++
++
++def test_fixtures_are_present():
++    # A missing fixture must fail here, not shrink the suite.
++    names = sorted(p.name for p in FIXTURES.glob("r5-state-*-completed.json"))
++    assert names == [
++        "r5-state-1mja-completed.json",
++        "r5-state-3ntg-completed.json",
++        "r5-state-m7su-dryrun-completed.json",
++        "r5-state-oh27-completed.json",
++    ]
++
++
++def test_severities_per_iteration_come_from_findings_received():
++    # 3ntg correctness logged three reviews: 0/1/3, then 0/1/0, then 0/0/1,
++    # with fix_iterations 2.
++    lens = _row("3ntg")["lenses"]["correctness"]
++    assert lens["findings_by_iteration"] == [
++        {"critical": 0, "important": 1, "minor": 3, "other": 0},
++        {"critical": 0, "important": 1, "minor": 0, "other": 0},
++        {"critical": 0, "important": 0, "minor": 1, "other": 0},
++    ]
++    assert (lens["iterations"], lens["fix_rounds"], lens["steps"]) == (3, 2, 5)
++    assert lens["steps_source"] == "events"
++    assert lens["unattributed"] == 0  # first review 0+1+3 = findings_count_initial 4
++
++
++def test_advisory_excellence_is_one_review_from_advisory_pass_completed():
++    lens = _row("3ntg")["lenses"]["excellence"]
++    assert lens["findings_by_iteration"] == [{"critical": 0, "important": 0, "minor": 4, "other": 0}]
++    assert (lens["iterations"], lens["fix_rounds"], lens["steps"]) == (1, 0, 1)
++
++
++def test_lens_order_and_critical_path_for_a_v2_record():
++    row = _row("3ntg")
++    assert row["lens_order"] == ["correctness", "clarity", "edge-cases", "provenance", "excellence"]
++    # reviews + fixes: correctness 3+2, clarity 2+1, edge-cases 2+1,
++    # provenance 3+2, excellence 1+0.
++    assert row["sequential_steps"] == 17
++
++
++def test_a_totals_only_record_reports_every_finding_unattributed():
++    # 1mja (v1) has no findings_received: totals 2/5/3/0, fix_iterations 1/0/1/0.
++    lenses = _row("1mja")["lenses"]
++    assert {k: (v["findings_initial"], v["unattributed"]) for k, v in lenses.items()} == {
++        "correctness": (2, 2), "clarity": (5, 5), "edge-cases": (3, 3), "excellence": (0, 0),
++    }
++    assert all(v["steps_source"] == "pass_summary" for v in lenses.values())
++    assert all(v["findings_by_iteration"] == [] for v in lenses.values())
++
++
++def test_without_events_reviews_are_fix_iterations_plus_one():
++    # oh27: fix_iterations 1/3/5/1, so reviews 2/4/6/2 and steps 3+7+11+3.
++    row = _row("oh27")
++    assert [row["lenses"][k]["iterations"] for k in row["lens_order"]] == [2, 4, 6, 2]
++    assert row["sequential_steps"] == 24
++
++
++def test_a_count_key_outside_the_three_severities_goes_to_other():
++    # m7su's first edge-cases review logged missing_tests: 5.
++    first = _row("m7su-dryrun")["lenses"]["edge-cases"]["findings_by_iteration"][0]
++    assert first["other"] == 5
++
++
++def test_dry_runs_are_excluded_from_the_totals():
++    rows = [r5_baseline.analyse_record(json.loads(p.read_text())) for p in sorted(FIXTURES.glob("*.json"))]
++    counted = r5_baseline.baseline_rows(rows)
++    assert sorted(r["bead"] for r in counted) == ["opensrm-1mja", "opensrm-3ntg", "opensrm-oh27"]
++    # Correctness pass totals over the three live records: 4 + 2 + 3.
++    assert r5_baseline.totals(counted)["correctness"]["findings_initial"] == 9
++
++
++def test_an_advisory_event_never_double_counts_a_lens_with_findings_received():
++    # Future-shape guard: no archive logs both today (checked 2026-11-07).
++    record = {"completed_passes": [], "audit_trail": [
++        {"event": "findings_received", "pass": "excellence", "counts": {"minor": 2}},
++        {"event": "advisory_pass_completed", "pass": "excellence", "counts": {"minor": 2}},
++    ]}
++    lens = r5_baseline.analyse_record(record)["lenses"]["excellence"]
++    assert lens["iterations"] == 1
++
++
++def test_json_mode_reports_every_record(tmp_path, capsys):
++    assert r5_baseline.main(["--archive-dir", str(FIXTURES), "--json"]) == 0
++    out = json.loads(capsys.readouterr().out)
++    assert len(out["records"]) == 4
++    assert "opensrm-m7su" not in {r["bead"] for r in r5_baseline.baseline_rows(out["records"])}
++
++
++@pytest.mark.parametrize("make", ["missing", "empty"])
++def test_no_records_is_a_usage_error(tmp_path, make):
++    target = tmp_path / "archive"
++    if make == "empty":
++        target.mkdir()
++    assert r5_baseline.main(["--archive-dir", str(target)]) == 2
++
++
++def test_a_non_archive_file_is_ignored(tmp_path):
++    shutil.copy(FIXTURES / "r5-state-1mja-completed.json", tmp_path)
++    (tmp_path / "r5-state.json").write_text("{}")  # the live state file, not an archive
++    assert [n for n, _ in r5_baseline.load_records(tmp_path)] == ["r5-state-1mja-completed.json"]

@@ -1,0 +1,351 @@
+diff --git a/AGENTS.md b/AGENTS.md
+index f9dbd48..cf85b30 100644
+--- a/AGENTS.md
++++ b/AGENTS.md
+@@ -25,8 +25,8 @@ uv run pytest tests/test_<name>.py -v  # single file
+ uv run pytest -k "<expr>" -v           # single test by name
+ uv run ruff check src/ tests/          # lint
+ uv run python scripts/regen_openapi.py # regen docs/api/openapi.json
+-nthlayer serve --host 0.0.0.0 --port 8000   # start the HTTP server
+-nthlayer -V                                  # print version
++nthlayer-core serve --host 0.0.0.0 --port 8000   # start the HTTP server
++nthlayer-core -V                               # print version
+ ```
+ 
+ **OpenAPI spec discipline (opensrm-tu04.1).** Any edit to a
+diff --git a/CONTRIBUTING.md b/CONTRIBUTING.md
+index 103833f..079322f 100644
+--- a/CONTRIBUTING.md
++++ b/CONTRIBUTING.md
+@@ -29,7 +29,7 @@ cd nthlayer-core
+ uv sync --extra dev                  # creates .venv with test/lint tools
+ 
+ # Run the API locally (optional; Ctrl-C to stop, not needed before tests)
+-uv run nthlayer serve --host 0.0.0.0 --port 8000
++uv run nthlayer-core serve --host 0.0.0.0 --port 8000
+ 
+ # Run the test suite
+ uv run pytest -q                     # full suite
+diff --git a/README.md b/README.md
+index 883a51c..7cde6ad 100644
+--- a/README.md
++++ b/README.md
+@@ -4,9 +4,11 @@
+ 
+ ```bash
+ pip install nthlayer-core
+-nthlayer serve --host 0.0.0.0 --port 8000
++nthlayer-core serve --host 0.0.0.0 --port 8000
+ ```
+ 
++The console script was `nthlayer` before 4.0.0; it was renamed to `nthlayer-core` because nthlayer-generate owns `nthlayer` (opensrm-dww5).
++
+ ## What it is
+ 
+ `nthlayer-core` is the single source of truth for the NthLayer runtime. It owns the SQLite store, exposes an HTTP API, and is the only component that touches the database. Tier 2 workers ([`nthlayer-workers`](https://github.com/rsionnach/nthlayer-workers)) and the Tier 3 operator TUI ([`nthlayer-bench`](https://github.com/rsionnach/nthlayer-bench)) talk to core exclusively over HTTP — never directly to SQLite.
+@@ -82,8 +84,8 @@ WAL mode + `PRAGMA synchronous=NORMAL` + `busy_timeout=5000`. Thread-local conne
+ ## CLI
+ 
+ ```bash
+-nthlayer serve [--host 0.0.0.0] [--port 8000]   # start the HTTP server
+-nthlayer -V                                       # print version
++nthlayer-core serve [--host 0.0.0.0] [--port 8000]   # start the HTTP server
++nthlayer-core -V                                    # print version
+ ```
+ 
+ ## NthLayer ecosystem
+diff --git a/docs/architecture.md b/docs/architecture.md
+index 2813724..d646617 100644
+--- a/docs/architecture.md
++++ b/docs/architecture.md
+@@ -11,7 +11,7 @@ reference.
+ nthlayer-core/
+   src/nthlayer_core/
+     __init__.py
+-    cli.py        # nthlayer serve [--host 0.0.0.0] [--port 8000]
++    cli.py        # nthlayer-core serve [--host 0.0.0.0] [--port 8000]
+     catalogue.py  # ManifestCatalogue: loads/caches OpenSRM manifests
+                   # from dir, mtime-based polling (load, poll, get,
+                   # list_all, to_dict_list). _manifest_to_dict()
+@@ -325,7 +325,7 @@ Core-specific methods (not on the VerdictStore ABC):
+ - `tests/smoke/test_imports.py` — walks every module under
+   `nthlayer_core` via `pkgutil`; asserts every `__all__` symbol
+   resolves via `getattr`.
+-- `tests/smoke/test_cli.py` — asserts the `nthlayer` console script is
++- `tests/smoke/test_cli.py` — asserts the `nthlayer-core` console script is
+   on PATH and `--help` exits 0 with non-empty stdout.
+ 
+ ## Runtime dependencies
+diff --git a/docs/deploying.md b/docs/deploying.md
+index 826a3d2..8af4809 100644
+--- a/docs/deploying.md
++++ b/docs/deploying.md
+@@ -27,13 +27,15 @@ uv tool install nthlayer-core
+ Verify the install:
+ 
+ ```bash
+-nthlayer --version
++nthlayer-core --version
+ ```
+ 
+ ```
+-nthlayer 1.7.0
++nthlayer-core 1.7.0
+ ```
+ 
++The console script was `nthlayer` before 4.0.0; it was renamed to `nthlayer-core` because nthlayer-generate owns `nthlayer` (opensrm-dww5).
++
+ ### 3. Choose a manifests directory
+ 
+ `nthlayer-core` serves a read-only catalogue of OpenSRM service
+@@ -67,7 +69,7 @@ This tutorial uses Option A from here on (Option B users substitute
+ From inside the `opensrm/` directory:
+ 
+ ```bash
+-NTHLAYER_MANIFESTS_DIR=./examples nthlayer serve
++NTHLAYER_MANIFESTS_DIR=./examples nthlayer-core serve
+ ```
+ 
+ You should see the server come up on port 8000:
+@@ -148,8 +150,8 @@ API surface via the OpenAPI spec at `GET /openapi.json`.
+ ### CLI
+ 
+ ```
+-nthlayer serve [--host HOST] [--port PORT]   # defaults 0.0.0.0:8000
+-nthlayer --version                            # also -V
++nthlayer-core serve [--host HOST] [--port PORT]   # defaults 0.0.0.0:8000
++nthlayer-core --version                            # also -V
+ ```
+ 
+ The CLI surface is intentionally minimal: one subcommand (`serve`) with
+@@ -222,9 +224,9 @@ problem. Table summarises symptoms; paragraphs below give the diagnosis.
+ | # | Symptom | Cause | Fix |
+ |---|---|---|---|
+ | 1 | `nthlayer: command not found` after install | uv tool-shim dir not on `PATH` | `uv tool update-shell` (or add `~/.local/bin` to `PATH`) |
+-| 2 | `OSError: [Errno 48/98] Address already in use` | Port 8000 taken | `nthlayer serve --port 8001` or kill the prior process |
++| 2 | `OSError: [Errno 48/98] Address already in use` | Port 8000 taken | `nthlayer-core serve --port 8001` or kill the prior process |
+ | 3 | `sqlite3.OperationalError: unable to open database file` | Cwd not writable, or `NTHLAYER_STORE_PATH` points at a missing dir, **or points at a directory itself instead of a file** | `NTHLAYER_STORE_PATH=/var/lib/nthlayer/store.db` (ensure dir exists and is writable; the path is the file, not the directory) or chdir to a writable dir |
+-| 4 | `sqlite3.OperationalError: database is locked` (persistent, not transient) | Two `nthlayer serve` processes on the same DB | Kill the duplicate; one writer per store. WAL + 5s busy-timeout handles transient contention, not two writers |
++| 4 | `sqlite3.OperationalError: database is locked` (persistent, not transient) | Two `nthlayer-core serve` processes on the same DB | Kill the duplicate; one writer per store. WAL + 5s busy-timeout handles transient contention, not two writers |
+ | 5 | `GET /manifests` returns `[]` despite `NTHLAYER_MANIFESTS_DIR` set | Relative path resolved from wrong cwd, or dir is empty/missing | Use an absolute path; check server logs for the load summary |
+ | 6 | One manifest missing from `GET /manifests` even though the file exists | Invalid YAML or schema mismatch; catalogue skips bad manifests rather than crashing the server | Check server logs for the parse error; fix the YAML; `POST /manifests/-/reload` |
+ | 7 | Local `curl` works, remote `curl` times out | Cloud firewall / security group / host firewall blocks 8000 | Open the port, or bind `--host 127.0.0.1` and SSH-tunnel |
+@@ -234,7 +236,7 @@ problem. Table summarises symptoms; paragraphs below give the diagnosis.
+ `uv tool install` writes a shim to `~/.local/bin` (Linux/macOS) and
+ prints a warning if that directory is not on `PATH`. If you missed the
+ warning, `uv tool update-shell` edits your shell rc to add it; opening
+-a new terminal then resolves `nthlayer`. Verify with `which nthlayer`.
++a new terminal then resolves `nthlayer-core`. Verify with `which nthlayer-core`.
+ On macOS with zsh, a stale `~/.zshrc` cache or a non-login shell can
+ also hide the shim — `exec zsh -l` forces a re-read.
+ 
+@@ -244,7 +246,7 @@ The exact error is `OSError: [Errno 48] Address already in use` on
+ macOS and `[Errno 98]` on Linux. Confirm with `lsof -i :8000` (macOS)
+ or `ss -ltnp 'sport = :8000'` (Linux); the output names the process
+ holding the port. Either kill it or pass `--port 8001` (or any free
+-port) to `nthlayer serve`. Re-running a backgrounded server without
++port) to `nthlayer-core serve`. Re-running a backgrounded server without
+ killing the prior process is the usual cause.
+ 
+ #### 3. Store path not writable
+@@ -276,7 +278,7 @@ The store opens with `PRAGMA journal_mode=WAL`,
+ writer, and the 5s busy-timeout absorbs transient contention from a
+ single process's connection pool. A `database is locked` error that
+ persists past 5s indicates two writers on the same file — typically a
+-second `nthlayer serve` started against the same `NTHLAYER_STORE_PATH`.
++second `nthlayer-core serve` started against the same `NTHLAYER_STORE_PATH`.
+ Kill the duplicate; the single-writer invariant is load-bearing. A
+ stale `nthlayer.db-wal` file alone is not the cause and should not be
+ deleted while any process holds the database open.
+@@ -307,7 +309,7 @@ appear "missing" — the later file wins in load order.
+ 
+ #### 7. Remote curl times out
+ 
+-`nthlayer serve` binds to `0.0.0.0:8000` by default, so a local
++`nthlayer-core serve` binds to `0.0.0.0:8000` by default, so a local
+ `curl localhost:8000/health` returns `{"status":"ok"}` even when
+ remote clients time out. The timeout (as opposed to a connection
+ refused) is the tell: the SYN is being dropped, not rejected, which
+@@ -360,7 +362,7 @@ operational guidance is the upstream documentation at
+ 
+ #### Process layout
+ 
+-`nthlayer serve` and `litestream replicate` run side-by-side, both
++`nthlayer-core serve` and `litestream replicate` run side-by-side, both
+ pointed at the same SQLite file (the path in `NTHLAYER_STORE_PATH`).
+ There are two patterns.
+ 
+@@ -369,7 +371,7 @@ systemd unit, both pointed at the same path:
+ 
+ ```bash
+ # Terminal 1 (or systemd unit nthlayer-core.service)
+-NTHLAYER_STORE_PATH=/var/lib/nthlayer/store.db nthlayer serve
++NTHLAYER_STORE_PATH=/var/lib/nthlayer/store.db nthlayer-core serve
+ 
+ # Terminal 2 (or systemd unit nthlayer-litestream.service)
+ litestream replicate -config /etc/litestream.yml
+@@ -378,7 +380,7 @@ litestream replicate -config /etc/litestream.yml
+ **Wrapper.** Let Litestream supervise the serve process via `-exec`:
+ 
+ ```bash
+-litestream replicate -config /etc/litestream.yml -exec "nthlayer serve"
++litestream replicate -config /etc/litestream.yml -exec "nthlayer-core serve"
+ ```
+ 
+ The wrapper pattern is recommended: it gives single-process semantics
+@@ -409,7 +411,7 @@ retention tuning.
+ 
+ Verify replication is actually happening (a wrong bucket name or wrong
+ credentials lets `litestream replicate` log errors and retry while
+-`nthlayer serve` writes locally — the operator believes the store is
++`nthlayer-core serve` writes locally — the operator believes the store is
+ durable when it is not). Run `litestream snapshots /var/lib/nthlayer/store.db`
+ after a few writes; a successful replica produces at least one snapshot
+ entry. No snapshots after sustained writes means the replica isn't
+@@ -426,7 +428,7 @@ litestream restore -o /var/lib/nthlayer/store.db s3://YOUR_BUCKET/nthlayer-core
+ You would run this in two situations: cold-starting a new VM that has
+ no local store yet, or recovering from disk loss on the existing host.
+ The server must not be running while the restore is in progress —
+-Litestream and `nthlayer serve` both want to own the SQLite file, and
++Litestream and `nthlayer-core serve` both want to own the SQLite file, and
+ overlapping ownership corrupts the restore.
+ 
+ #### What this does NOT give you
+diff --git a/pyproject.toml b/pyproject.toml
+index d6edb2b..f88ec26 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -20,17 +20,19 @@ dependencies = [
+     # every threshold entry [opensrm-7zpz]; catalogue.manifest_to_dict
+     # serialises each threshold via threshold_to_v2_entry, common's validated
+     # emitter of the v2 spec.judgment_threshold entry, never a hand-copy.
+-    # WHY 5.3.0 (opensrm-pnmv): the version this repo is now built and tested
++    # WHY 5.3.1 (opensrm-dww5): the version this repo is now built and tested
+     # against (rule 10: the floor is the installed sibling). Bump it on
+     # every nthlayer-common minor release: the floor guard fails until you do.
+-    "nthlayer-common>=5.3.0,<6.0.0",
++    # Raised to 5.3.1 (a patch) because its opensrm/v1 rejection names a
++    # command that runs in a co-install.
++    "nthlayer-common>=5.3.1,<6.0.0",
+     "starlette>=0.40",
+     "uvicorn>=0.30",
+     "httpx>=0.27",
+ ]
+ 
+ [project.scripts]
+-nthlayer = "nthlayer_core.cli:main"
++nthlayer-core = "nthlayer_core.cli:main"
+ 
+ [project.optional-dependencies]
+ dev = [
+diff --git a/src/nthlayer_core/cli.py b/src/nthlayer_core/cli.py
+index bec0dfc..59c4dfd 100644
+--- a/src/nthlayer_core/cli.py
++++ b/src/nthlayer_core/cli.py
+@@ -9,7 +9,7 @@ def build_parser() -> argparse.ArgumentParser:
+     """Build the CLI parser. Exposed so tests can introspect the surface
+     without running ``main``'s side effects (see
+     ``tests/test_deploying_doc_parity.py``)."""
+-    parser = argparse.ArgumentParser(description="NthLayer core")
++    parser = argparse.ArgumentParser(prog="nthlayer-core", description="NthLayer core")
+     parser.add_argument("-V", "--version", action="version", version=f"%(prog)s {__version__}")
+     sub = parser.add_subparsers(dest="command")
+ 
+diff --git a/tests/smoke/test_cli.py b/tests/smoke/test_cli.py
+index 8d7d6e2..bfa52d0 100644
+--- a/tests/smoke/test_cli.py
++++ b/tests/smoke/test_cli.py
+@@ -5,7 +5,7 @@ import shutil
+ import subprocess
+ 
+ 
+-CONSOLE_SCRIPT = "nthlayer"
++CONSOLE_SCRIPT = "nthlayer-core"
+ 
+ 
+ def test_console_script_on_path():
+diff --git a/tests/test_console_script_name.py b/tests/test_console_script_name.py
+new file mode 100644
+index 0000000..239a46c
+--- /dev/null
++++ b/tests/test_console_script_name.py
+@@ -0,0 +1,44 @@
++"""The console script is ``nthlayer-core``, never ``nthlayer``.
++
++nthlayer-generate owns ``nthlayer``. Both packages registering it made the
++installed one depend on install order, so core declares only ``nthlayer-core``
++(symmetric naming: PyPI name = repo = script). Bead: opensrm-dww5.
++"""
++from __future__ import annotations
++
++import pathlib
++import re
++import tomllib
++
++from nthlayer_core.cli import build_parser
++
++REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
++
++
++def _scripts() -> dict[str, str]:
++    data = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
++    return data["project"]["scripts"]
++
++
++def test_pyproject_declares_nthlayer_core_script() -> None:
++    assert _scripts().get("nthlayer-core") == "nthlayer_core.cli:main"
++
++
++def test_pyproject_does_not_declare_nthlayer_script() -> None:
++    assert "nthlayer" not in _scripts(), (
++        "core must not register `nthlayer`; nthlayer-generate owns it"
++    )
++
++
++def test_parser_prog_is_nthlayer_core() -> None:
++    assert build_parser().prog == "nthlayer-core"
++
++
++def test_deploying_doc_invokes_nthlayer_core_not_nthlayer() -> None:
++    text = (REPO_ROOT / "docs" / "deploying.md").read_text(encoding="utf-8")
++    # The rename note legitimately names the old script.
++    text = "\n".join(ln for ln in text.splitlines() if "before 4.0.0" not in ln)
++    # A bare `nthlayer` followed by a space/EOL/backtick, not nthlayer-core,
++    # nthlayer-common, NTHLAYER_*, or a path like /var/lib/nthlayer/.
++    bare = re.findall(r"(?<![\w/.-])nthlayer(?=\s+(?:serve|--version)|`)", text)
++    assert not bare, f"deploying.md still names the old script: {bare}"
+diff --git a/tests/test_deploying_doc_parity.py b/tests/test_deploying_doc_parity.py
+index 6a2bf14..fc4e357 100644
+--- a/tests/test_deploying_doc_parity.py
++++ b/tests/test_deploying_doc_parity.py
+@@ -109,7 +109,7 @@ def test_cli_subsection_matches_argparse() -> None:
+     (plus any subparsers) so the test sees exactly what users see.
+ 
+     Pins both *flag* parity and *subcommand-name* parity — a new top-level
+-    subcommand (e.g. ``nthlayer migrate``) added to cli.py without a
++    subcommand (e.g. ``nthlayer-core migrate``) added to cli.py without a
+     matching mention in the deploying.md CLI section fails this test.
+     """
+     section = _doc_section("### CLI")
+@@ -144,7 +144,7 @@ def test_cli_subsection_matches_argparse() -> None:
+ 
+     # Subcommand-name parity: each subcommand registered with the parser
+     # must appear verbatim in the CLI section (typically inside a code
+-    # block like ``nthlayer serve``). Catches "new subcommand added,
++    # block like ``nthlayer-core serve``). Catches "new subcommand added,
+     # nobody updated the docs."
+     missing_subcommands = {sc for sc in src_subcommands if sc not in section}
+     assert not missing_subcommands, (
+diff --git a/uv.lock b/uv.lock
+index 1be28bd..167ad9c 100644
+--- a/uv.lock
++++ b/uv.lock
+@@ -926,7 +926,7 @@ wheels = [
+ 
+ [[package]]
+ name = "nthlayer-common"
+-version = "5.3.0"
++version = "5.3.1"
+ source = { editable = "../nthlayer-common" }
+ dependencies = [
+     { name = "anthropic" },

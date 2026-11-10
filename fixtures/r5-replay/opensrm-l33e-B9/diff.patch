@@ -1,0 +1,548 @@
+diff --git a/CLAUDE.md b/CLAUDE.md
+index 838a7a6..d885418 100644
+--- a/CLAUDE.md
++++ b/CLAUDE.md
+@@ -42,8 +42,12 @@ These are load-bearing — wrong-side mistakes cause silent breakage.
+          `judgment_target_ratio()` [outbound],
+          `judgment_promise_direction()`, `judgment_promise()` [factory].
+        - thresholds — `manifest/thresholds.py` (bound tables,
+-         `FORBIDDEN_THRESHOLD_KEYS`, `parse_bounds()`, `normalise_bins()`,
+-         `srm_v1_threshold()`), also package-internal and not re-exported.
++         `FORBIDDEN_THRESHOLD_KEYS`, `srm_v1_threshold()`,
++         `threshold_to_v2_entry()`, `check_type_fields()`,
++         `parse_bounds()`, `is_duration()`, `normalise_bins()`,
++         `duration_seconds()`), also package-internal and not
++         re-exported, except `duration_seconds()`, which is public and
++         re-exported from `manifest/__init__.py`.
+        - domain guards, used on the CLASSICAL writers too, not just
+          judgment — `require_number()` (numeric or a string spelling
+          one; raises ValueError where a bare `float()` raised an
+diff --git a/docs/architecture.md b/docs/architecture.md
+index 61d43d6..3d6475f 100644
+--- a/docs/architecture.md
++++ b/docs/architecture.md
+@@ -47,9 +47,12 @@ src/nthlayer_common/
+     manifest/            # Unified OpenSRM manifest parsing (v1, v2, OpenSLO, legacy)
+                          #   + scan.py: walking a directory that holds
+                          #     manifests alongside other YAML
+-                         #   + thresholds.py: judgment-threshold bound tables and
+-                         #     checks, normalise_bins, FORBIDDEN_THRESHOLD_KEYS
+-                         #     (package-internal, not re-exported)
++                         #   + thresholds.py: judgment-threshold bound tables,
++                         #     FORBIDDEN_THRESHOLD_KEYS, srm_v1_threshold,
++                         #     threshold_to_v2_entry, check_type_fields,
++                         #     parse_bounds, is_duration, normalise_bins,
++                         #     duration_seconds (package-internal except
++                         #     duration_seconds, which is re-exported)
+ ```
+ 
+ ## Subsystem references
+@@ -312,8 +315,9 @@ a fourth directory walk** — three existed before this was shared
+   OpenSLO `$refs` resolved relative to manifest's directory.
+ - Judgment thresholds (decision 3c, opensrm-l33e): segments, stability,
+   calibration, audit_backlog and feedback_latency are error magnitudes, not
+-  SLOs. They parse to `JudgmentThreshold` (`models.py`; reuses
+-  `JudgmentMeasurement` for measurement/probe/segment fields) and land in
++  SLOs. They parse to `JudgmentThreshold` (`models.py`; its own
++  `ThresholdMeasurement` holds the measurement/probe/segment fields, not the
++  judgment-SLO `JudgmentMeasurement`) and land in
+   `ReliabilityManifest.judgment_thresholds`, never in `slos`. Bounds are stored
+   as declared, never converted. Vocabulary sets: `V2_JUDGMENT_SLO_TYPES` and
+   `V2_JUDGMENT_THRESHOLD_TYPES`. See `docs/upgrading-4.0.md`.
+diff --git a/docs/upgrading-4.0.md b/docs/upgrading-4.0.md
+index 6a9e0f3..eeb96a5 100644
+--- a/docs/upgrading-4.0.md
++++ b/docs/upgrading-4.0.md
+@@ -28,7 +28,12 @@ there: read `ReliabilityManifest.judgment_thresholds` instead.
+ 
+ A breach is the measured value exceeding ANY declared bound. Bounds are stored as
+ declared: Ratio bounds are floats in [0, 1], Duration bounds are strings such as
+-"24h" (`<integer><ms|s|m|h|d|w>`). There is no complement and no 0-100 conversion.
++"24h" (`<integer><ms|s|m|h|d|w>`); `duration_seconds("24h")` returns `86400.0`.
++There is no complement and no 0-100 conversion.
++
++Evaluate every entry, including several of the same type (CORE §5.5.6 E1): each
++entry is evaluated independently.
++
+ This parser does not evaluate anything. The evaluation rules (strictly-exceeds,
+ units, not-evaluable, precedence) are OPENSRM-CORE-v2.md section 5.5.6 E1-E4, for
+ evaluators such as nthlayer-workers.
+@@ -63,6 +68,9 @@ opensrm-r78t). The ai-gate requirement applies to the resolved manifest.
+ ## API
+ 
+ - `JudgmentThreshold`
++- `ThresholdMeasurement`
++- `duration_seconds(value: str) -> float` (Duration string to seconds; raises
++  `ValueError` for anything that is not `<integer><ms|s|m|h|d|w>`)
+ - `ReliabilityManifest.judgment_thresholds`
+ - `get_judgment_thresholds()`
+ - `V2_JUDGMENT_SLO_TYPES`
+@@ -75,14 +83,14 @@ opensrm-r78t). The ai-gate requirement applies to the resolved manifest.
+ |---|---|
+ | `type` | One of `V2_JUDGMENT_THRESHOLD_TYPES`. |
+ | `bounds` | Dict of bound name to value, stored as declared: a float for Ratio bounds, a duration string such as `"24h"` for Duration bounds. |
+-| `measurement` | A `JudgmentMeasurement`. calibration: `bins` (int) and `window`. stability: `probe` (`frozen_input_set`, `frequency`). segments: `segment_dimension` and `segment_values`. Other types: empty (all fields at their defaults). |
++| `measurement` | A `ThresholdMeasurement`. calibration: `bins` (int) and `window`. stability: `probe` (`frozen_input_set`, `frequency`). segments: `segment_dimension` and `segment_values`. Other types: empty (all fields at their defaults). It is not a `JudgmentMeasurement`: it has no `source`, `confidence_threshold`, `method`, `frequency` or `sampling` (those are judgment-SLO fields), so a probe's frequency is `measurement.probe.frequency`. |
+ 
+ Worked example. An srm/v1 `calibration: {target: 0.05, window: 30d}` becomes
+-`JudgmentThreshold(type="calibration", bounds={"maximum_expected_calibration_error": 0.05}, measurement=JudgmentMeasurement(window="30d", bins=10))`.
++`JudgmentThreshold(type="calibration", bounds={"maximum_expected_calibration_error": 0.05}, measurement=ThresholdMeasurement(bins=10, window="30d"))`.
+ The real repr from `parse_srm_v1` (unset fields shown as the parser leaves them):
+ 
+ ```
+-JudgmentThreshold(type='calibration', bounds={'maximum_expected_calibration_error': 0.05}, measurement=JudgmentMeasurement(source=None, confidence_threshold=None, bins=10, method=None, window='30d', frequency=None, probe=None, sampling=None, segment_dimension=None, segment_values=[]))
++JudgmentThreshold(type='calibration', bounds={'maximum_expected_calibration_error': 0.05}, measurement=ThresholdMeasurement(bins=10, window='30d', probe=None, segment_dimension=None, segment_values=[]))
+ ```
+ 
+ ## What consumers must change
+@@ -90,6 +98,10 @@ JudgmentThreshold(type='calibration', bounds={'maximum_expected_calibration_erro
+ - Replace `JUDGMENT_SLO_TYPES` imports with `V2_JUDGMENT_SLO_TYPES` (SLOs) or
+   `V2_JUDGMENT_THRESHOLD_TYPES` (thresholds).
+ - Read thresholds from `judgment_thresholds`, not `slos`.
++- `JudgmentThreshold.measurement` is a `ThresholdMeasurement`, not a
++  `JudgmentMeasurement`: read a stability probe's frequency from
++  `measurement.probe.frequency` (there is no `measurement.frequency`), and there is no
++  `measurement.method`.
+ - Widen the nthlayer-common requirement to `>=4.0.0,<5.0.0`.
+ - Evaluators implement OPENSRM-CORE-v2 §5.5.6 E1-E4.
+ - Reconcile local copies of the old vocabulary. For example nthlayer-generate
+diff --git a/src/nthlayer_common/manifest/__init__.py b/src/nthlayer_common/manifest/__init__.py
+index f91c16a..8b37370 100644
+--- a/src/nthlayer_common/manifest/__init__.py
++++ b/src/nthlayer_common/manifest/__init__.py
+@@ -61,6 +61,7 @@ from nthlayer_common.manifest.models import (
+     StatisticalRequirements,
+     StratifiedSample,
+     TelemetryEvent,
++    ThresholdMeasurement,
+     VolumeEstimate,
+     is_valid_service_type,
+     resolve_service_type,
+@@ -85,6 +86,7 @@ from nthlayer_common.manifest.scan import (
+     iter_manifest_files,
+     scan_manifest_files,
+ )
++from nthlayer_common.manifest.thresholds import duration_seconds
+ 
+ __all__ = [
+     # Loader
+@@ -126,6 +128,8 @@ __all__ = [
+     "SLODefinition",
+     "JudgmentMeasurement",
+     "JudgmentThreshold",
++    "ThresholdMeasurement",
++    "duration_seconds",
+     "BreachAction",
+     "StatisticalRequirements",
+     "ProbeConfig",
+diff --git a/src/nthlayer_common/manifest/models.py b/src/nthlayer_common/manifest/models.py
+index 3ac0d6b..2ea3e89 100644
+--- a/src/nthlayer_common/manifest/models.py
++++ b/src/nthlayer_common/manifest/models.py
+@@ -354,6 +354,36 @@ class JudgmentMeasurement:
+     segment_values: list[str] = field(default_factory=list)
+ 
+ 
++@dataclass
++class ThresholdMeasurement:
++    """Type-specific measurement fields of a JudgmentThreshold (opensrm-l33e).
++
++    Which fields each threshold type sets (schema.json JudgmentThresholdSpec):
++
++    - calibration: ``bins`` and ``window``
++    - stability: ``probe`` (``frozen_input_set``, ``frequency``)
++    - segments: ``segment_dimension`` and ``segment_values``
++    - audit_backlog, feedback_latency: none; every field stays at its default
++
++    Deliberately omits JudgmentMeasurement's SLO-only fields (``source``,
++    ``confidence_threshold``, ``method``, ``frequency``, ``sampling``). On a
++    threshold they were always None, so an evaluator reading ``.frequency``
++    instead of ``.probe.frequency`` got a silent None. Here it is an
++    AttributeError.
++
++    Nothing here enforces which fields go with which type: the parsers are the
++    only invariant enforcer, so a hand-built instance can pair any fields.
++    ``window`` keeps the declared Duration string (so it round-trips);
++    convert it with ``duration_seconds()``.
++    """
++
++    bins: int | None = None
++    window: str | None = None
++    probe: ProbeConfig | None = None
++    segment_dimension: str | None = None
++    segment_values: list[str] = field(default_factory=list)
++
++
+ @dataclass
+ class BreachAction:
+     """Structured breach action declaration (v2 spec §5.4).
+@@ -459,14 +489,16 @@ class JudgmentThreshold:
+     exactly as declared: floats for Ratio bounds, duration strings such as
+     ``"24h"`` for Duration bounds. Validated by manifest/thresholds.py.
+ 
+-    ``measurement`` reuses JudgmentMeasurement for the type-specific fields
+-    (calibration bins/window, stability probe, segments dimension/values) so
+-    consumers read them from the same place they did when these were SLOs.
++    ``measurement`` is a ThresholdMeasurement holding the type-specific
++    fields (calibration bins/window, stability probe, segments
++    dimension/values), not the judgment-SLO JudgmentMeasurement.
+     """
+ 
+-    type: str  # one of V2_JUDGMENT_THRESHOLD_TYPES
++    # A plain str by design, like every judgment_type in this module; the
++    # contract is membership in V2_JUDGMENT_THRESHOLD_TYPES.
++    type: str
+     bounds: dict[str, float | str]
+-    measurement: JudgmentMeasurement = field(default_factory=JudgmentMeasurement)
++    measurement: ThresholdMeasurement = field(default_factory=ThresholdMeasurement)
+ 
+ 
+ # =============================================================================
+diff --git a/src/nthlayer_common/manifest/parser/v2.py b/src/nthlayer_common/manifest/parser/v2.py
+index 8cce83d..dbf3656 100644
+--- a/src/nthlayer_common/manifest/parser/v2.py
++++ b/src/nthlayer_common/manifest/parser/v2.py
+@@ -45,6 +45,7 @@ from nthlayer_common.manifest.models import (
+     SourceFormat,
+     StatisticalRequirements,
+     StratifiedSample,
++    ThresholdMeasurement,
+     VolumeEstimate,
+     resolve_service_type,
+     valid_service_types_phrase,
+@@ -634,7 +635,7 @@ def _parse_judgment_threshold(index: int, data: dict[str, Any]) -> JudgmentThres
+     )
+ 
+ 
+-def _threshold_measurement(threshold_type: str, data: dict[str, Any]) -> JudgmentMeasurement:
++def _threshold_measurement(threshold_type: str, data: dict[str, Any]) -> ThresholdMeasurement:
+     """Build a threshold's measurement from the keys its type uses, only.
+ 
+     JudgmentThresholdSpec is open: ``measurement``, ``probe``, ``sampling`` and
+@@ -648,25 +649,25 @@ def _threshold_measurement(threshold_type: str, data: dict[str, Any]) -> Judgmen
+         m_data = data["measurement"]
+         # check_type_fields accepted bins (integral float allowed) but never
+         # rewrites it; the model carries an int.
+-        return JudgmentMeasurement(
++        return ThresholdMeasurement(
+             bins=normalise_bins(m_data["bins"]),
+             window=m_data["window"],
+         )
+     if threshold_type == "stability":
+         probe = data["probe"]
+-        return JudgmentMeasurement(
++        return ThresholdMeasurement(
+             probe=ProbeConfig(
+                 frozen_input_set=probe["frozen_input_set"],
+                 frequency=probe["frequency"],
+             ),
+         )
+     if threshold_type == "segments":
+-        return JudgmentMeasurement(
++        return ThresholdMeasurement(
+             segment_dimension=data["segment_dimension"],
+             segment_values=list(data["segment_values"]),
+         )
+     # audit_backlog, feedback_latency: bounds only.
+-    return JudgmentMeasurement()
++    return ThresholdMeasurement()
+ 
+ 
+ def _parse_breach_actions(actions_data: list[dict[str, Any]]) -> list[BreachAction]:
+diff --git a/src/nthlayer_common/manifest/thresholds.py b/src/nthlayer_common/manifest/thresholds.py
+index 5ceba71..1a9faf6 100644
+--- a/src/nthlayer_common/manifest/thresholds.py
++++ b/src/nthlayer_common/manifest/thresholds.py
+@@ -2,12 +2,15 @@
+ 
+ Not SLOs. A threshold has no population of good events, no complement and no
+ error budget; a breach is the measured value exceeding a declared bound. So
+-nothing here converts a bound: bounds are stored exactly as declared, which is
+-the opposite of target_validation.py's job for judgment SLO targets. (The one
+-coercion is normalise_bins(), which turns an integral float bins into an int.)
++the parsers never convert a v2 bound: bounds are stored exactly as declared,
++which is the opposite of target_validation.py's job for judgment SLO targets.
++The coercions are normalise_bins() (an integral float bins becomes an int) and
++srm_v1_threshold(), which builds a float ECE bound and a "<n>s" duration from
++srm/v1's bare numbers.
+ 
+-This module also holds the srm/v1 lift (srm_v1_threshold) and the v2 emit
+-(threshold_to_v2_entry).
++This module also holds the srm/v1 lift (srm_v1_threshold), the v2 emit
++(threshold_to_v2_entry), and duration_seconds(), which turns a Duration bound
++into seconds for evaluators.
+ 
+ The tables restate opensrm/spec/v2/schema.json's JudgmentThresholdSpec so the
+ parsers can enforce it without a JSON-Schema dependency. They are pinned against
+@@ -17,7 +20,7 @@ these, or that test fails.
+ 
+ Package-internal, cross-module (both parsers and v1_compat use it), and so not
+ re-exported from manifest/__init__.py (hard rule 3), the same as
+-target_validation.
++target_validation; except duration_seconds(), which is public and re-exported.
+ """
+ 
+ from __future__ import annotations
+@@ -25,7 +28,7 @@ from __future__ import annotations
+ import math
+ from typing import Any
+ 
+-from nthlayer_common.manifest.models import JudgmentMeasurement, JudgmentThreshold
++from nthlayer_common.manifest.models import JudgmentThreshold, ThresholdMeasurement
+ 
+ RATIO = "ratio"
+ DURATION = "duration"
+@@ -61,7 +64,19 @@ FORBIDDEN_THRESHOLD_KEYS: tuple[str, ...] = (
+ _PROBE_FREQUENCIES = ("hourly", "daily", "weekly")
+ 
+ # Longest suffix first: "5ms" must not be read as "5m" + a stray "s".
+-_DURATION_UNITS = ("ms", "s", "m", "h", "d", "w")
++# Values are seconds per unit; dict order is the match order.
++# Seconds per unit as an exact (numerator, denominator) pair. Multiplying by the
++# float 0.001 is not correctly rounded (671 of 1..4999 ms differ from n/1000), so
++# ms is divided instead: int / int true division in Python is correctly rounded.
++_DURATION_SECONDS: dict[str, tuple[int, int]] = {
++    "ms": (1, 1000),
++    "s": (1, 1),
++    "m": (60, 1),
++    "h": (3600, 1),
++    "d": (86400, 1),
++    "w": (604800, 1),
++}
++_DURATION_UNITS = tuple(_DURATION_SECONDS)
+ 
+ 
+ def is_duration(value: object) -> bool:
+@@ -79,6 +94,28 @@ def is_duration(value: object) -> bool:
+     return False
+ 
+ 
++def duration_seconds(value: str) -> float:
++    """Convert a Duration string such as ``"24h"`` to seconds, as a float.
++
++    Accepts exactly what is_duration accepts (``^[0-9]+(ms|s|m|h|d|w)$``) and
++    raises ValueError for anything else, including non-strings and bools. For
++    evaluators comparing a measured age or latency with a Duration bound.
++    """
++    if not is_duration(value):
++        raise ValueError(
++            f"not a duration such as '24h' (<integer><ms|s|m|h|d|w>): {value!r}"
++        )
++    for unit, (numerator, denominator) in _DURATION_SECONDS.items():
++        if value.endswith(unit):
++            try:
++                return int(value[: -len(unit)]) * numerator / denominator
++            # An absurdly long integer: OverflowError past float range, ValueError
++            # past CPython's int-digit limit. One message for both.
++            except (OverflowError, ValueError) as exc:
++                raise ValueError(f"duration too large to represent: {value!r}") from exc
++    raise AssertionError(f"unreachable: is_duration accepted {value!r}")  # pragma: no cover
++
++
+ def _ratio(name: str, value: object) -> float:
+     # bool first: it is an int subclass, and YAML 1.1 reads `yes` as True.
+     if isinstance(value, bool) or not isinstance(value, (int, float)):
+@@ -141,7 +178,7 @@ def normalise_bins(value: int | float) -> int:
+ 
+     ``check_type_fields`` accepts an integral float (10.0) because the schema's
+     ``type: integer`` does, but it never rewrites its input. Callers building a
+-    JudgmentMeasurement from a validated entry must pass bins through this.
++    ThresholdMeasurement from a validated entry must pass bins through this.
+     """
+     return int(value)
+ 
+@@ -261,7 +298,7 @@ def srm_v1_threshold(name: str, config: dict[str, Any]) -> JudgmentThreshold:
+         return JudgmentThreshold(
+             type="calibration",
+             bounds={"maximum_expected_calibration_error": bound},
+-            measurement=JudgmentMeasurement(window=window, bins=_SRM_V1_CALIBRATION_BINS),
++            measurement=ThresholdMeasurement(window=window, bins=_SRM_V1_CALIBRATION_BINS),
+         )
+     if name == "feedback_latency":
+         # An integral float (3600.0) is a whole number of seconds, as for bins.
+diff --git a/tests/test_manifest_models.py b/tests/test_manifest_models.py
+index 04ac3f9..f32294d 100644
+--- a/tests/test_manifest_models.py
++++ b/tests/test_manifest_models.py
+@@ -19,6 +19,7 @@ from nthlayer_common.manifest.models import (
+     SLODefinition,
+     SourceFormat,
+     StatisticalRequirements,
++    ThresholdMeasurement,
+ )
+ 
+ # =============================================================================
+@@ -272,4 +273,33 @@ def test_manifest_carries_thresholds_separately_from_slos():
+ 
+ def test_threshold_defaults_to_an_empty_measurement():
+     threshold = JudgmentThreshold(type="audit_backlog", bounds={"maximum_age": "24h"})
+-    assert threshold.measurement == JudgmentMeasurement()
++    assert threshold.measurement == ThresholdMeasurement()
++    assert type(threshold.measurement) is ThresholdMeasurement
++
++
++@pytest.mark.parametrize(
++    "slo_only_field", ["method", "frequency", "source", "sampling", "confidence_threshold"]
++)
++def test_threshold_measurement_has_no_slo_only_fields(slo_only_field):
++    """The trap ThresholdMeasurement exists to remove: on JudgmentMeasurement
++    these were always None for a threshold, so an evaluator reading
++    ``.frequency`` instead of ``.probe.frequency`` got None, not an error."""
++    assert not hasattr(ThresholdMeasurement(), slo_only_field)
++    assert slo_only_field not in ThresholdMeasurement.__dataclass_fields__
++    # Pins the premise: the judgment-SLO type still carries it.
++    assert slo_only_field in JudgmentMeasurement.__dataclass_fields__
++
++
++def test_threshold_measurement_is_exported_from_the_package():
++    from nthlayer_common import manifest
++
++    assert manifest.ThresholdMeasurement is ThresholdMeasurement
++    assert "ThresholdMeasurement" in manifest.__all__
++
++
++def test_threshold_measurement_defaults_are_not_shared():
++    a = JudgmentThreshold(type="segments", bounds={"maximum_variance_from_overall": 0.05})
++    b = JudgmentThreshold(type="segments", bounds={"maximum_variance_from_overall": 0.05})
++    a.measurement.segment_values.append("x")
++    assert b.measurement.segment_values == []
++    assert a.measurement is not b.measurement
+diff --git a/tests/test_manifest_parser_thresholds.py b/tests/test_manifest_parser_thresholds.py
+index e2a7cfe..88f1a31 100644
+--- a/tests/test_manifest_parser_thresholds.py
++++ b/tests/test_manifest_parser_thresholds.py
+@@ -15,6 +15,7 @@ import jsonschema
+ import pytest
+ import yaml
+ 
++from nthlayer_common.manifest.models import ThresholdMeasurement
+ from nthlayer_common.manifest.parser.v2 import (
+     OpenSRMV2ParseError,
+     parse_opensrm_v2,
+@@ -223,13 +224,10 @@ _STRAY_VALUES = (None, "x", [1])
+ 
+ def _assert_empty_measurement(threshold: Any) -> None:
+     m = threshold.measurement
+-    assert (m.source, m.confidence_threshold, m.bins, m.method, m.window, m.frequency) == (
+-        None, None, None, None, None, None,
+-    )
+-    assert m.probe is None
+-    assert m.sampling is None
+-    assert m.segment_dimension is None
++    assert type(m) is ThresholdMeasurement
++    assert (m.bins, m.window, m.probe, m.segment_dimension) == (None, None, None, None)
+     assert m.segment_values == []
++    assert m == ThresholdMeasurement()
+ 
+ 
+ @pytest.mark.parametrize("value", _STRAY_VALUES, ids=repr)
+@@ -259,9 +257,13 @@ def test_the_schema_accepts_stray_keys_on_a_type_that_does_not_use_them():
+ def test_stability_carries_only_its_probe():
+     entry = {**STABILITY, "measurement": "x", "sampling": "x", "segment_values": "abc"}
+     [threshold] = parse_opensrm_v2(_manifest(judgment_threshold=[entry])).judgment_thresholds
+-    assert threshold.measurement.probe is not None
+-    assert threshold.measurement.sampling is None
+-    assert threshold.measurement.segment_values == []
++    m = threshold.measurement
++    assert type(m) is ThresholdMeasurement
++    assert m.probe is not None
++    # A stray `sampling` has nowhere to land: the type has no such field.
++    assert not hasattr(m, "sampling")
++    assert (m.bins, m.window, m.segment_dimension) == (None, None, None)
++    assert m.segment_values == []
+ 
+ 
+ def test_forbidden_keys_were_derived():
+@@ -436,3 +438,19 @@ def test_mixed_type_override_keys_raise_the_parser_error(tmp_path):
+     )
+     with pytest.raises(OpenSRMV2ParseError, match="only 'append'"):
+         parse_opensrm_v2_file(path)
++
++
++ALL_FIVE_TYPES = SCHEMA_PATH.parent / "examples" / "judgment-thresholds" / "all-five-types.yaml"
++
++
++def test_every_parsed_threshold_carries_a_threshold_measurement():
++    """Read live from the spec: every type, not only those whose builder
++    branch a hand-written fixture happens to hit."""
++    declared = yaml.safe_load(ALL_FIVE_TYPES.read_text(encoding="utf-8"))
++    manifest = parse_opensrm_v2_file(ALL_FIVE_TYPES)
++
++    types = [t.type for t in manifest.judgment_thresholds]
++    assert types == [e["type"] for e in declared["spec"]["judgment_threshold"]]
++    assert len(set(types)) == 5, f"expected all five types, got {types}"
++    for threshold in manifest.judgment_thresholds:
++        assert type(threshold.measurement) is ThresholdMeasurement, threshold.type
+diff --git a/tests/test_thresholds.py b/tests/test_thresholds.py
+index 9f5103b..502f8aa 100644
+--- a/tests/test_thresholds.py
++++ b/tests/test_thresholds.py
+@@ -18,6 +18,7 @@ from nthlayer_common.manifest.thresholds import (
+     FORBIDDEN_THRESHOLD_KEYS,
+     THRESHOLD_BOUNDS,
+     check_type_fields,
++    duration_seconds,
+     is_duration,
+     normalise_bins,
+     parse_bounds,
+@@ -39,6 +40,38 @@ def test_is_duration_rejects_what_the_schema_pattern_rejects(value):
+     assert not is_duration(value)
+ 
+ 
++@pytest.mark.parametrize(
++    ("value", "seconds"),
++    [
++        ("1ms", 0.001),
++        ("30s", 30),
++        ("5m", 300),
++        ("24h", 86400),
++        ("30d", 2592000),
++        ("2w", 1209600),
++        ("0s", 0),
++    ],
++)
++def test_duration_seconds_converts_each_suffix(value, seconds):
++    result = duration_seconds(value)
++    assert isinstance(result, float)
++    assert result == pytest.approx(seconds)
++
++
++@pytest.mark.parametrize("value", ["24", "1.5h", 24, True, "24H", "", None, "²h"], ids=repr)
++def test_duration_seconds_rejects_what_is_duration_rejects(value):
++    assert not is_duration(value)
++    with pytest.raises(ValueError):
++        duration_seconds(value)
++
++
++def test_duration_seconds_is_exported_from_the_package():
++    from nthlayer_common import manifest
++
++    assert manifest.duration_seconds is duration_seconds
++    assert "duration_seconds" in manifest.__all__
++
++
+ def test_parse_bounds_returns_declared_values_untouched():
+     assert parse_bounds("stability", {"maximum_drift": 0.02}) == {"maximum_drift": 0.02}
+     assert parse_bounds("audit_backlog", {"maximum_age": "24h"}) == {"maximum_age": "24h"}
+@@ -203,3 +236,21 @@ def test_threshold_to_v2_entry_round_trips_all_five_types():
+     reparsed = parse_opensrm_v2(doc, base_dir=_ALL_FIVE.parent).judgment_thresholds
+     assert reparsed == originals
+ 
++
++
++def test_duration_seconds_reports_an_unrepresentable_duration_as_value_error():
++    """'1' + 400 zeros + 'd' passes is_duration but overflows a float; it must
++    surface as ValueError like every other rejected duration."""
++    with pytest.raises(ValueError, match="too large"):
++        duration_seconds("1" + "0" * 400 + "d")
++
++
++def test_duration_seconds_is_correctly_rounded_for_milliseconds():
++    """n * 0.001 is not correctly rounded (e.g. 9ms); n / 1000 is. A bound
++    compared at its edge must not be off by one ULP."""
++    assert all(duration_seconds(f"{n}ms") == n / 1000 for n in range(1, 5000))
++
++
++def test_duration_seconds_past_the_int_digit_limit_uses_the_same_message():
++    with pytest.raises(ValueError, match="too large"):
++        duration_seconds("1" + "0" * 5000 + "s")

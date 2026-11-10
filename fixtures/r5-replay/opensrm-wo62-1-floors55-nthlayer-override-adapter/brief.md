@@ -1,0 +1,3 @@
+PASS 1 (CORRECTNESS) sequential R5 review on bead opensrm-wo62.1 — nthlayer-common floor bumps to 5.5.0 in four repos.
+Lens: ~/.claude/skills/rule-of-five-review/correctness-reviewer.md (follow it). Scope: <claude-tmp>/scratchpad/wo62-gate-floors55-scope.md
+Check floor strings, uv.lock entries (open full uv.lock where truncated), WHY comment truth and history, own version unchanged. Read-only; no subagents. CRITICAL / IMPORTANT / MINOR with repo:file:line + fix; verdict. Under 200 words.

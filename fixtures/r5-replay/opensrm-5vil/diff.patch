@@ -1,0 +1,176 @@
+diff --git a/src/nthlayer_common/manifest/__init__.py b/src/nthlayer_common/manifest/__init__.py
+index 7dd7039..9e64ffe 100644
+--- a/src/nthlayer_common/manifest/__init__.py
++++ b/src/nthlayer_common/manifest/__init__.py
+@@ -20,6 +20,7 @@ from nthlayer_common.manifest.evaluation import (
+     evaluate_threshold,
+ )
+ from nthlayer_common.manifest.models import (
++    DEFAULT_TRACE_EMITTER,
+     SERVICE_TYPE_ALIASES,
+     SRM_V1_JUDGMENT_THRESHOLD_TYPES,
+     STANDARD_SLO_TYPES,
+@@ -28,6 +29,7 @@ from nthlayer_common.manifest.models import (
+     VALID_EXHAUSTION_BEHAVIORS,
+     VALID_SERVICE_TYPES,
+     VALID_TIERS,
++    VALID_TRACE_EMITTERS,
+     APIRef,
+     AuditConfig,
+     BreachAction,
+@@ -144,6 +146,8 @@ __all__ = [
+     "SERVICE_TYPE_ALIASES",
+     "VALID_EXHAUSTION_BEHAVIORS",
+     "VALID_SERVICE_TYPES",
++    "VALID_TRACE_EMITTERS",
++    "DEFAULT_TRACE_EMITTER",
+     "VALID_TIERS",
+     # Service-type helpers
+     "is_valid_service_type",
+diff --git a/src/nthlayer_common/manifest/models.py b/src/nthlayer_common/manifest/models.py
+index 9c0e3ae..bd3a980 100644
+--- a/src/nthlayer_common/manifest/models.py
++++ b/src/nthlayer_common/manifest/models.py
+@@ -803,12 +803,26 @@ class RequiredMetric:
+     labels: list[str] = field(default_factory=list)
+ 
+ 
++# required_traces[].emitted_by values and default (OpenSRM Addendum A1 §8;
++# schema.json Instrumentation). Kept equal to the schema by
++# tests/test_manifest_v2_archetypes.py.
++VALID_TRACE_EMITTERS = frozenset({"application", "provider"})
++DEFAULT_TRACE_EMITTER = "application"
++
++
+ @dataclass
+ class RequiredTrace:
+-    """Required trace span (v2 spec §8)."""
++    """Required trace span (v2 spec §8).
++
++    ``emitted_by`` (OpenSRM Addendum A1 §8) says who emits the span. Per the
++    spec, ``application`` spans (the default) are verified in the service's
++    code, and ``provider`` spans (model provider or agent runtime) at the
++    telemetry destination.
++    """
+ 
+     span_name: str
+     required_attributes: list[str] = field(default_factory=list)
++    emitted_by: str = DEFAULT_TRACE_EMITTER
+ 
+ 
+ @dataclass
+diff --git a/src/nthlayer_common/manifest/parser/v2.py b/src/nthlayer_common/manifest/parser/v2.py
+index 4da3c4d..664cadb 100644
+--- a/src/nthlayer_common/manifest/parser/v2.py
++++ b/src/nthlayer_common/manifest/parser/v2.py
+@@ -15,8 +15,10 @@ import structlog
+ import yaml
+ 
+ from nthlayer_common.manifest.models import (
++    DEFAULT_TRACE_EMITTER,
+     V2_JUDGMENT_SLO_TYPES,
+     V2_JUDGMENT_THRESHOLD_TYPES,
++    VALID_TRACE_EMITTERS,
+     APIRef,
+     BreachAction,
+     BreachSemantics,
+@@ -964,9 +966,18 @@ def _parse_instrumentation(instr_data: dict[str, Any] | None) -> Instrumentation
+     required_traces = []
+     for t in instr_data.get("required_traces", []):
+         if isinstance(t, dict):
++            emitted_by = t.get("emitted_by", DEFAULT_TRACE_EMITTER)
++            # isinstance first: a YAML list or mapping is unhashable.
++            if not isinstance(emitted_by, str) or emitted_by not in VALID_TRACE_EMITTERS:
++                raise OpenSRMV2ParseError(
++                    f"Invalid emitted_by {emitted_by!r} in spec.instrumentation.required_traces "
++                    f"(span {t.get('span_name', '')!r}). Must be one of: "
++                    f"{', '.join(sorted(VALID_TRACE_EMITTERS))}."
++                )
+             required_traces.append(RequiredTrace(
+                 span_name=t.get("span_name", ""),
+                 required_attributes=t.get("required_attributes", []),
++                emitted_by=emitted_by,
+             ))
+ 
+     required_logs = []
+diff --git a/tests/test_manifest_v2_archetypes.py b/tests/test_manifest_v2_archetypes.py
+index 64b90d0..295e57b 100644
+--- a/tests/test_manifest_v2_archetypes.py
++++ b/tests/test_manifest_v2_archetypes.py
+@@ -308,3 +308,76 @@ def test_aliases_resolve_to_something_the_schema_accepts():
+         assert alias not in enum, (
+             f"alias {alias!r} is also a standard type; it must not be aliased away"
+         )
++
++
++# --- required_traces[].emitted_by (Addendum A1 §8, opensrm-5vil) ------------
++
++
++def _emitted_by_definition() -> dict[str, Any]:
++    items = _schema()["definitions"]["Instrumentation"]["properties"]["required_traces"]["items"]
++    return items["properties"]["emitted_by"]
++
++
++def _instrumentation_block(path: Path) -> dict[str, Any]:
++    """The example's own instrumentation block, unparsed.
++
++    Neither example that declares emitted_by loads end to end today
++    (ai-gate.yaml: opensrm-a742; service-manifest-full.yaml: a missing $ref),
++    so these tests parse the real block with the function under test rather
++    than with load_manifest, or with a shape written for the test.
++    """
++    return yaml.safe_load(path.read_text())["spec"]["instrumentation"]
++
++
++def _parse_traces_by_name(block: dict[str, Any]) -> dict[str, Any]:
++    from nthlayer_common.manifest.parser.v2 import _parse_instrumentation
++
++    instrumentation = _parse_instrumentation(block)
++    return {t.span_name: t for t in instrumentation.required_traces}
++
++
++def test_trace_emitters_match_the_schema_enum():
++    from nthlayer_common.manifest.models import (
++        DEFAULT_TRACE_EMITTER,
++        VALID_TRACE_EMITTERS,
++        RequiredTrace,
++    )
++
++    definition = _emitted_by_definition()
++    assert set(definition["enum"]) == VALID_TRACE_EMITTERS
++    assert definition["default"] == DEFAULT_TRACE_EMITTER
++    # The dataclass default too: the parser always passes emitted_by, so
++    # nothing else exercises it.
++    assert RequiredTrace(span_name="x").emitted_by == definition["default"]
++
++
++def test_ai_gate_example_declares_a_provider_span_and_defaults_the_rest():
++    traces = _parse_traces_by_name(_instrumentation_block(EXAMPLES_DIR / "ai-gate.yaml"))
++    assert traces["anthropic.model_request"].emitted_by == "provider"
++    # refund.decide omits the field, so it takes the schema default.
++    assert traces["refund.decide"].emitted_by == "application"
++
++
++def test_full_example_declares_application_explicitly():
++    block = _instrumentation_block(SPEC_V2_DIR / "examples" / "service-manifest-full.yaml")
++    assert _parse_traces_by_name(block)["payment.authorise"].emitted_by == "application"
++
++
++# Each value is outside the schema's enum, which matches exactly and by type:
++# n93's unknown name, a case variant, the empty string, an explicit null, an
++# unquoted YAML bool, and a list (unhashable, so it needs the isinstance guard).
++@pytest.mark.parametrize(
++    "value", ["sdk", "Provider", "", None, True, ["provider"]], ids=repr
++)
++def test_unknown_emitter_is_rejected(value: Any):
++    from nthlayer_common.manifest.parser.v2 import OpenSRMV2ParseError
++
++    # The ai-gate example's block, which parses (the test above), with only
++    # emitted_by changed. "sdk" mirrors
++    # opensrm/spec/v2/tests/invalid/n93-required-trace-unknown-emitter.yaml.
++    block = _instrumentation_block(EXAMPLES_DIR / "ai-gate.yaml")
++    trace = next(t for t in block["required_traces"] if t["span_name"] == "anthropic.model_request")
++    trace["emitted_by"] = value
++
++    with pytest.raises(OpenSRMV2ParseError, match="emitted_by"):
++        _parse_traces_by_name(block)

@@ -1,0 +1,13 @@
+PASS 1 (CORRECTNESS) sequential R5 review on bead opensrm-7zpz. READ-ONLY: never modify files in the repo, never run git checkout/switch/stash/reset. Probes only in <claude-tmp>/scratchpad.
+
+Template: read ~/.claude/skills/rule-of-five-review/correctness-reviewer.md and follow it (adapt "code" to a JSON Schema + normative spec; the schema IS the implementation here).
+
+Scope is THE DIFF: git -C <workspace>/opensrm diff e48fd9b..675db67 (CORE §5.5 + §5.5.1 prose, spec/v2/schema.json JudgmentThresholdSpec, AUTHORING.md, CHANGELOG.md, three examples, eight modified + 13 new invalid fixtures).
+
+Decision being implemented (Rob, 2026-10-11): segments gains REQUIRED `metric` ∈ {reversal_rate, high_confidence_failure, outcomes, escalation} (not audit_sampling), defined as the judgment SLO type of that name (CORE §5.2.x). Optional `measurement` block mirrors that rate's parameters: window (Duration, default 30d), source (required for reversal_rate; same enum as the reversal_rate SLO), confidence_threshold (required for high_confidence_failure; Ratio). source/confidence_threshold rejected on other metrics. ALL judgment_threshold entries become closed (additionalProperties:false per type branch), as do segments measurement, stability probe and calibration measurement. Schema is draft-07 (no unevaluatedProperties).
+
+Check: does the schema implement exactly this (draft-07 semantics of additionalProperties inside if/then with properties listed only in `then`; the nested allOf if/else for metric; `"type": {}` placeholders; whether `else` branches misfire when metric is absent or invalid); do the explicit `not` keys (breach_actions/target/judgment_type/service) still work; do the parameter definitions match the judgment SLO measurement definitions in JudgmentSLOSpec; does the prose agree with the schema everywhere (CORE, AUTHORING, CHANGELOG); does anything else in the repo (other docs, schema descriptions, §5.5.6 evaluation rules, §5.3 statistics, templates/overrides.judgment_threshold paths) now contradict the change; are any previously valid constructs unintentionally broken (e.g. ServiceManifestTemplate / overrides paths that reuse JudgmentThresholdSpec).
+
+Run: bash spec/v2/validate.sh (from opensrm/). For error-level detail: uv run -q --with jsonschema --with pyyaml python <claude-tmp>/scratchpad/errs.py '<glob>' (run from opensrm/spec/v2).
+
+Focus: correctness only. Report CRITICAL / IMPORTANT / MINOR, under 400 words. End with `git -C <workspace>/opensrm status --short` verbatim.

@@ -1,0 +1,673 @@
+diff --git a/src/nthlayer_workers/learn/_trigger.py b/src/nthlayer_workers/learn/_trigger.py
+new file mode 100644
+index 0000000..f5d75b0
+--- /dev/null
++++ b/src/nthlayer_workers/learn/_trigger.py
+@@ -0,0 +1,40 @@
++"""Shared precedence rule for resolving the incident's trigger service.
++
++opensrm-dpws: used by both retrospective code paths (CLI
++``build_retrospective`` and worker ``LearnRetrospectiveModule``) so
++the precedence rule has a single home — the correlator's grouping
++is always preferred over the incident's primary-service field.
++"""
++from __future__ import annotations
++
++
++def resolve_trigger_service(
++    correlation_candidates: list[str | None],
++    fallback: str | None,
++) -> str | None:
++    """Return the first non-empty string from ``correlation_candidates``,
++    else ``fallback`` if non-empty, else ``None``.
++
++    Correlation-first reflects the correlator's grouping IS the trigger
++    context (its ``subject.service`` is literally "the service the
++    correlator anchored a session window on"). The ``fallback`` is the
++    incident verdict's ``subject.service`` (CLI) or the snapshot's
++    top-level ``service`` field (worker) — both name the primary service
++    of the incident when no correlation context exists.
++
++    Returning ``None`` is the signal to OMIT the trigger_service key
++    from the retrospective payload entirely (back-compat with jmy.21's
++    ``log.debug + []`` no-rec path in ``_add_dependency_recommendations``).
++
++    Whitespace-only strings (e.g. ``" "``) are normalised to ``None`` —
++    they cannot be a valid service identity, and treating them as
++    truthy would let pathological producer data poison the
++    ``declared_map.get(trigger)`` lookup downstream (no match, but
++    silent).
++    """
++    for candidate in correlation_candidates:
++        if candidate and candidate.strip():
++            return candidate.strip()
++    if fallback and fallback.strip():
++        return fallback.strip()
++    return None
+diff --git a/src/nthlayer_workers/learn/retrospective.py b/src/nthlayer_workers/learn/retrospective.py
+index 1d9282a..47583c0 100644
+--- a/src/nthlayer_workers/learn/retrospective.py
++++ b/src/nthlayer_workers/learn/retrospective.py
+@@ -7,7 +7,11 @@ from typing import Any
+ 
+ import structlog
+ 
+-from nthlayer_common.manifest import ManifestLoadError, load_manifest
++from nthlayer_common.manifest import (
++    ManifestLoadError,
++    extract_declared_dependencies,
++    load_manifest,
++)
+ from nthlayer_common.outcomes import (
+     compute_financial_impact,
+     estimate_decisions_in_window,
+@@ -16,6 +20,8 @@ from nthlayer_common.verdicts.core import create, link
+ from nthlayer_common.verdicts.models import Verdict
+ from nthlayer_common.verdicts.store import VerdictStore, VerdictFilter
+ 
++from nthlayer_workers.learn._trigger import resolve_trigger_service
++
+ log = structlog.get_logger(__name__)
+ 
+ 
+@@ -128,6 +134,32 @@ def build_retrospective(
+         evaluation_verdicts, correlation_verdicts, incident_custom
+     )
+ 
++    # opensrm-dpws: resolve trigger_service via correlation-first /
++    # subject-fallback precedence. None → key omitted (back-compat with
++    # jmy.21's _add_dependency_recommendations no-rec path).
++    trigger_service = resolve_trigger_service(
++        [v.subject.service for v in correlation_verdicts],
++        incident.subject.service,
++    )
++
++    retro_custom: dict[str, Any] = {
++        "incident_verdict_id": incident_verdict_id,
++        "duration_minutes": round(duration_minutes, 1),
++        "decisions_affected": decisions_affected,
++        "root_cause": root_cause,
++        "blast_radius": [
++            s.get("service", s) if isinstance(s, dict) else s
++            for s in blast_radius
++        ],
++        "verdict_count": len(all_verdicts),
++        "timeline": timeline[:20],  # Cap at 20 entries
++        "financial_impact": financial_impact,
++        "recommendations": recommendations,
++        "declared_dependencies_by_service": declared_dependencies_by_service,
++    }
++    if trigger_service is not None:
++        retro_custom["trigger_service"] = trigger_service
++
+     # Create retrospective verdict
+     retro = create(
+         subject={
+@@ -146,21 +178,7 @@ def build_retrospective(
+             "reasoning": f"{len(all_verdicts)} verdicts in chain, {duration_minutes:.0f}m duration",
+         },
+         producer={"system": "nthlayer-learn"},
+-        metadata={"custom": {
+-            "incident_verdict_id": incident_verdict_id,
+-            "duration_minutes": round(duration_minutes, 1),
+-            "decisions_affected": decisions_affected,
+-            "root_cause": root_cause,
+-            "blast_radius": [
+-                s.get("service", s) if isinstance(s, dict) else s
+-                for s in blast_radius
+-            ],
+-            "verdict_count": len(all_verdicts),
+-            "timeline": timeline[:20],  # Cap at 20 entries
+-            "financial_impact": financial_impact,
+-            "recommendations": recommendations,
+-            "declared_dependencies_by_service": declared_dependencies_by_service,
+-        }},
++        metadata={"custom": retro_custom},
+     )
+     link(retro, context=[incident_verdict_id])
+     verdict_store.put(retro)
+@@ -249,20 +267,10 @@ def _load_manifests_from_specs(specs_dir: str | None) -> dict[str, Any]:
+ def _extract_declared_dependencies(
+     loaded_manifests: dict[str, Any],
+ ) -> dict[str, list[str]]:
+-    """Build a {service_name: [dep_name, ...]} map from already-loaded manifests.
+-
+-    A manifest with ``dependencies = None`` produces an empty list for
+-    that service (the absence of declared deps is itself information
+-    downstream consumers want to record). opensrm-jmy.21 uses this map
+-    as the ground-truth side of the observed-vs-declared comparison that
+-    drives ``add_dependency`` recommendations.
++    """Wrapper around the shared helper (opensrm-dpws). The CLI path
++    works with Manifest dataclass instances loaded via load_manifest().
+     """
+-    declared: dict[str, list[str]] = {}
+-    for service_name, manifest in loaded_manifests.items():
+-        declared[service_name] = [
+-            dep.name for dep in (manifest.dependencies or [])
+-        ]
+-    return declared
++    return extract_declared_dependencies(from_manifests=loaded_manifests)
+ 
+ 
+ def _compute_financial_impact(
+diff --git a/src/nthlayer_workers/learn/worker.py b/src/nthlayer_workers/learn/worker.py
+index a231d0a..7f6d07a 100644
+--- a/src/nthlayer_workers/learn/worker.py
++++ b/src/nthlayer_workers/learn/worker.py
+@@ -16,6 +16,9 @@ import structlog
+ 
+ from nthlayer_common.api_client import CoreAPIClient
+ from nthlayer_common.cloudevents import wrap_assessment
++from nthlayer_common.manifest import extract_declared_dependencies
++
++from nthlayer_workers.learn._trigger import resolve_trigger_service
+ 
+ logger = structlog.get_logger()
+ 
+@@ -246,6 +249,16 @@ class LearnRetrospectiveModule:
+         domain = snapshot_data.get("domain", {})
+         service = snapshot.get("service", domain.get("service", "unknown"))
+ 
++        # opensrm-dpws: resolve trigger_service via correlation-first /
++        # snapshot-service-fallback precedence. The snapshot's
++        # data.domain.service IS the correlator's grouping anchor; the
++        # top-level service field is the same value emitted at submit
++        # time but kept independent for resilience.
++        trigger_service = resolve_trigger_service(
++            [domain.get("service")],
++            snapshot.get("service"),
++        )
++
+         # Build verdict chain by querying verdicts for the affected service
+         # during the snapshot window. Cannot use get_ancestors on an assessment
+         # ID — that endpoint operates on verdict IDs only.
+@@ -276,32 +289,84 @@ class LearnRetrospectiveModule:
+         # Extract root cause from correlation data
+         root_cause = snapshot_data.get("correlation_groups", [{}])[0] if snapshot_data.get("correlation_groups") else None
+ 
++        # opensrm-dpws: declared_dependencies_by_service — populate only
++        # when the trigger's own manifest is in the API result.
++        # _add_dependency_recommendations reads declared_map.get(trigger)
++        # so non-trigger gaps are harmless; trigger gap → over-broad recs.
++        declared_dependencies_by_service: dict[str, list[str]] | None = None
++        if trigger_service:
++            manifests_result = await self.client.get_manifests()
++            if not manifests_result.ok:
++                logger.warning(
++                    "learn_manifest_fetch_failed",
++                    error=manifests_result.error,
++                )
++            elif not manifests_result.data:
++                logger.info("learn_manifest_catalogue_empty")
++            else:
++                manifest_names = {
++                    m.get("name") for m in manifests_result.data if m.get("name")
++                }
++                if trigger_service not in manifest_names:
++                    logger.warning(
++                        "learn_trigger_manifest_absent",
++                        service=trigger_service,
++                    )
++                else:
++                    # Trigger-narrow per design § 3.4: downstream
++                    # _add_dependency_recommendations reads
++                    # declared_map.get(trigger) and never iterates other
++                    # entries, so emit a 1-key dict rather than the full
++                    # catalogue (smaller wire payload, intentional shape).
++                    trigger_matches = [
++                        m for m in manifests_result.data
++                        if m.get("name") == trigger_service
++                    ]
++                    if len(trigger_matches) > 1:
++                        # First-wins (matches the existing
++                        # _load_manifests_from_specs dedup behaviour
++                        # on the CLI side, retrospective.py line 238).
++                        logger.warning(
++                            "learn_manifest_duplicate_skipped",
++                            service=trigger_service,
++                            count=len(trigger_matches),
++                        )
++                    declared_dependencies_by_service = extract_declared_dependencies(
++                        from_dicts=[trigger_matches[0]],
++                    )
++
+         # Build recommendations
+         recommendations = _generate_recommendations(chain, snapshot_data)
+ 
+         now = datetime.now(timezone.utc)
+         duration = snapshot_data.get("window", {}).get("duration_seconds", 0)
+ 
++        data: dict[str, Any] = {
++            "correlation_snapshot_id": snapshot.get("id"),
++            "duration_minutes": duration / 60 if duration else 0,
++            "decisions_affected": sum(1 for v in chain if v.get("type") == "quality_breach"),
++            "verdict_count": len(chain),
++            "root_cause": root_cause,
++            "blast_radius": snapshot_data.get("affected_services", []),
++            "timeline": timeline[:20],
++            "recommendations": recommendations,
++            "outcome_coverage": {
++                "resolved": resolved_count,
++                "pending": pending_count,
++                "total": len(chain),
++            },
++        }
++        if trigger_service is not None:
++            data["trigger_service"] = trigger_service
++        if declared_dependencies_by_service is not None:
++            data["declared_dependencies_by_service"] = declared_dependencies_by_service
++
+         assessment = {
+             "id": f"retro-{service}-{uuid.uuid4().hex[:8]}",
+             "created_at": now.isoformat(),
+             "kind": "retrospective",
+             "service": service,
+-            "data": {
+-                "correlation_snapshot_id": snapshot.get("id"),
+-                "duration_minutes": duration / 60 if duration else 0,
+-                "decisions_affected": sum(1 for v in chain if v.get("type") == "quality_breach"),
+-                "verdict_count": len(chain),
+-                "root_cause": root_cause,
+-                "blast_radius": snapshot_data.get("affected_services", []),
+-                "timeline": timeline[:20],
+-                "recommendations": recommendations,
+-                "outcome_coverage": {
+-                    "resolved": resolved_count,
+-                    "pending": pending_count,
+-                    "total": len(chain),
+-                },
+-            },
++            "data": data,
+         }
+ 
+         result = await self.client.submit_assessment(wrap_assessment(assessment, component="learn"))
+diff --git a/tests/learn/test_learn_worker.py b/tests/learn/test_learn_worker.py
+index 721e4b6..fb23bd7 100644
+--- a/tests/learn/test_learn_worker.py
++++ b/tests/learn/test_learn_worker.py
+@@ -435,3 +435,257 @@ class TestGenerateRecommendations:
+     def test_no_recommendations_for_simple_chain(self):
+         recs = _generate_recommendations([{"type": "approval"}], {"affected_services": ["a"]})
+         assert recs == []
++
++
++# ---------------------------------------------------------------------------
++# TestRetrospectiveTriggerService — opensrm-dpws
++# ---------------------------------------------------------------------------
++
++
++class TestRetrospectiveTriggerService:
++    """opensrm-dpws: worker-path retrospective populates trigger_service
++    and (when trigger's manifest is present) declared_dependencies_by_service."""
++
++    async def test_retrospective_includes_trigger_service(self):
++        """snapshot.data.domain.service → data['trigger_service']."""
++        client = AsyncMock()
++        client.get_assessments.return_value = APIResult(
++            ok=True, status_code=200,
++            data=[{
++                "id": "csn-1",
++                "service": "fraud-detect",
++                "created_at": "2026-05-29T00:00:00+00:00",
++                "data": {
++                    "domain": {"service": "fraud-detect", "environment": "prod"},
++                    "window": {"opened_at": "2026-05-29T00:00:00+00:00",
++                               "closed_at": "2026-05-29T00:05:00+00:00",
++                               "duration_seconds": 300},
++                    "affected_services": ["fraud-detect", "svc-x"],
++                },
++            }],
++        )
++        client.get_verdicts.return_value = APIResult(ok=True, status_code=200, data=[])
++        client.get_manifests.return_value = APIResult(
++            ok=True, status_code=200,
++            data=[
++                {"name": "fraud-detect", "dependencies": [
++                    {"name": "svc-known", "type": "api"},
++                ]},
++            ],
++        )
++        client.submit_assessment.return_value = APIResult(ok=True, status_code=200, data={})
++
++        module = LearnRetrospectiveModule(client=client)
++        await module.process_cycle()
++
++        submitted = client.submit_assessment.call_args.args[0]
++        data = submitted["data"]["data"]
++        assert data["trigger_service"] == "fraud-detect"
++
++    async def test_retrospective_trigger_service_fallback_to_top_level_service(self):
++        """data.domain.service absent → uses snapshot['service']."""
++        client = AsyncMock()
++        client.get_assessments.return_value = APIResult(
++            ok=True, status_code=200,
++            data=[{
++                "id": "csn-2",
++                "service": "payments",
++                "created_at": "2026-05-29T00:00:00+00:00",
++                "data": {
++                    "domain": {},
++                    "window": {"opened_at": "2026-05-29T00:00:00+00:00",
++                               "closed_at": "2026-05-29T00:05:00+00:00",
++                               "duration_seconds": 300},
++                    "affected_services": ["payments"],
++                },
++            }],
++        )
++        client.get_verdicts.return_value = APIResult(ok=True, status_code=200, data=[])
++        client.get_manifests.return_value = APIResult(
++            ok=True, status_code=200,
++            data=[{"name": "payments", "dependencies": []}],
++        )
++        client.submit_assessment.return_value = APIResult(ok=True, status_code=200, data={})
++
++        module = LearnRetrospectiveModule(client=client)
++        await module.process_cycle()
++
++        submitted = client.submit_assessment.call_args.args[0]
++        data = submitted["data"]["data"]
++        assert data["trigger_service"] == "payments"
++
++    async def test_retrospective_includes_declared_dependencies(self):
++        """get_manifests returns trigger's manifest → declared_deps populated."""
++        client = AsyncMock()
++        client.get_assessments.return_value = APIResult(
++            ok=True, status_code=200,
++            data=[{
++                "id": "csn-3", "service": "fraud-detect",
++                "created_at": "2026-05-29T00:00:00+00:00",
++                "data": {
++                    "domain": {"service": "fraud-detect"},
++                    "window": {"opened_at": "2026-05-29T00:00:00+00:00",
++                               "closed_at": "2026-05-29T00:05:00+00:00",
++                               "duration_seconds": 300},
++                    "affected_services": ["fraud-detect"],
++                },
++            }],
++        )
++        client.get_verdicts.return_value = APIResult(ok=True, status_code=200, data=[])
++        client.get_manifests.return_value = APIResult(
++            ok=True, status_code=200,
++            data=[
++                {"name": "fraud-detect", "dependencies": [
++                    {"name": "svc-known", "type": "api"},
++                ]},
++                {"name": "svc-known", "dependencies": []},
++            ],
++        )
++        client.submit_assessment.return_value = APIResult(ok=True, status_code=200, data={})
++
++        module = LearnRetrospectiveModule(client=client)
++        await module.process_cycle()
++
++        submitted = client.submit_assessment.call_args.args[0]
++        data = submitted["data"]["data"]
++        # Trigger-narrow per design § 3.4: only trigger's entry emitted,
++        # not the full catalogue. svc-known's own manifest is in the API
++        # result but NOT in declared_dependencies_by_service.
++        assert data["declared_dependencies_by_service"] == {
++            "fraud-detect": ["svc-known"],
++        }
++
++    async def test_retrospective_omits_declared_deps_when_manifest_fetch_fails(self):
++        """get_manifests returns ok=False → declared_deps key absent, no crash.
++        trigger_service is still populated (decoupled per design § 3.6)."""
++        client = AsyncMock()
++        client.get_assessments.return_value = APIResult(
++            ok=True, status_code=200,
++            data=[{
++                "id": "csn-4", "service": "fraud-detect",
++                "created_at": "2026-05-29T00:00:00+00:00",
++                "data": {
++                    "domain": {"service": "fraud-detect"},
++                    "window": {"opened_at": "2026-05-29T00:00:00+00:00",
++                               "closed_at": "2026-05-29T00:05:00+00:00",
++                               "duration_seconds": 300},
++                    "affected_services": ["fraud-detect"],
++                },
++            }],
++        )
++        client.get_verdicts.return_value = APIResult(ok=True, status_code=200, data=[])
++        client.get_manifests.return_value = APIResult(
++            ok=False, status_code=503, data=None, error="connection_failed",
++        )
++        client.submit_assessment.return_value = APIResult(ok=True, status_code=200, data={})
++
++        module = LearnRetrospectiveModule(client=client)
++        await module.process_cycle()
++
++        submitted = client.submit_assessment.call_args.args[0]
++        data = submitted["data"]["data"]
++        assert "declared_dependencies_by_service" not in data
++        assert data["trigger_service"] == "fraud-detect"
++
++    async def test_retrospective_omits_declared_deps_when_trigger_manifest_absent(self):
++        """get_manifests succeeds but trigger's own manifest missing → declared_deps omitted."""
++        client = AsyncMock()
++        client.get_assessments.return_value = APIResult(
++            ok=True, status_code=200,
++            data=[{
++                "id": "csn-5", "service": "fraud-detect",
++                "created_at": "2026-05-29T00:00:00+00:00",
++                "data": {
++                    "domain": {"service": "fraud-detect"},
++                    "window": {"opened_at": "2026-05-29T00:00:00+00:00",
++                               "closed_at": "2026-05-29T00:05:00+00:00",
++                               "duration_seconds": 300},
++                    "affected_services": ["fraud-detect", "svc-x"],
++                },
++            }],
++        )
++        client.get_verdicts.return_value = APIResult(ok=True, status_code=200, data=[])
++        # Catalogue has svc-x but NOT fraud-detect (the trigger)
++        client.get_manifests.return_value = APIResult(
++            ok=True, status_code=200,
++            data=[{"name": "svc-x", "dependencies": []}],
++        )
++        client.submit_assessment.return_value = APIResult(ok=True, status_code=200, data={})
++
++        module = LearnRetrospectiveModule(client=client)
++        await module.process_cycle()
++
++        submitted = client.submit_assessment.call_args.args[0]
++        data = submitted["data"]["data"]
++        assert "declared_dependencies_by_service" not in data
++        assert data["trigger_service"] == "fraud-detect"
++
++    async def test_retrospective_duplicate_trigger_manifest_first_wins(self):
++        """R5 edge-cases: two manifests with the same name in the API
++        response → first-wins selection, warning logged."""
++        client = AsyncMock()
++        client.get_assessments.return_value = APIResult(
++            ok=True, status_code=200,
++            data=[{
++                "id": "csn-6", "service": "fraud-detect",
++                "created_at": "2026-05-29T00:00:00+00:00",
++                "data": {
++                    "domain": {"service": "fraud-detect"},
++                    "window": {"opened_at": "2026-05-29T00:00:00+00:00",
++                               "closed_at": "2026-05-29T00:05:00+00:00",
++                               "duration_seconds": 300},
++                    "affected_services": ["fraud-detect"],
++                },
++            }],
++        )
++        client.get_verdicts.return_value = APIResult(ok=True, status_code=200, data=[])
++        client.get_manifests.return_value = APIResult(
++            ok=True, status_code=200,
++            data=[
++                {"name": "fraud-detect", "dependencies": [{"name": "svc-first"}]},
++                {"name": "fraud-detect", "dependencies": [{"name": "svc-second"}]},
++            ],
++        )
++        client.submit_assessment.return_value = APIResult(ok=True, status_code=200, data={})
++
++        module = LearnRetrospectiveModule(client=client)
++        await module.process_cycle()
++
++        submitted = client.submit_assessment.call_args.args[0]
++        data = submitted["data"]["data"]
++        # First-wins: svc-first, not svc-second
++        assert data["declared_dependencies_by_service"] == {
++            "fraud-detect": ["svc-first"],
++        }
++
++    async def test_retrospective_handles_get_manifests_data_none(self):
++        """R5 edge-cases: get_manifests returns ok=True but data=None
++        (no catalogue) → treated as empty, declared_deps omitted, no crash."""
++        client = AsyncMock()
++        client.get_assessments.return_value = APIResult(
++            ok=True, status_code=200,
++            data=[{
++                "id": "csn-7", "service": "fraud-detect",
++                "created_at": "2026-05-29T00:00:00+00:00",
++                "data": {
++                    "domain": {"service": "fraud-detect"},
++                    "window": {"opened_at": "2026-05-29T00:00:00+00:00",
++                               "closed_at": "2026-05-29T00:05:00+00:00",
++                               "duration_seconds": 300},
++                    "affected_services": ["fraud-detect"],
++                },
++            }],
++        )
++        client.get_verdicts.return_value = APIResult(ok=True, status_code=200, data=[])
++        client.get_manifests.return_value = APIResult(
++            ok=True, status_code=200, data=None,
++        )
++        client.submit_assessment.return_value = APIResult(ok=True, status_code=200, data={})
++
++        module = LearnRetrospectiveModule(client=client)
++        await module.process_cycle()
++
++        submitted = client.submit_assessment.call_args.args[0]
++        data = submitted["data"]["data"]
++        assert "declared_dependencies_by_service" not in data
++        assert data["trigger_service"] == "fraud-detect"
+diff --git a/tests/learn/test_retrospective_trigger.py b/tests/learn/test_retrospective_trigger.py
+new file mode 100644
+index 0000000..2d4833a
+--- /dev/null
++++ b/tests/learn/test_retrospective_trigger.py
+@@ -0,0 +1,122 @@
++"""CLI-path retrospective trigger_service wiring (opensrm-dpws)."""
++from __future__ import annotations
++
++from nthlayer_common.verdicts.core import create
++from nthlayer_common.verdicts.store import MemoryStore
++from nthlayer_workers.learn.retrospective import build_retrospective
++
++
++def _make_incident(service: str | None):
++    """Create an incident-like verdict with the given subject.service.
++
++    Uses subject.type='custom' because nthlayer_common's VALID_SUBJECT_TYPES
++    doesn't have a dedicated 'incident' bucket; 'custom' is the canonical
++    catch-all and build_retrospective doesn't inspect the incident's own
++    subject.type (only filters lineage verdicts by type).
++    """
++    return create(
++        subject={
++            "type": "custom",
++            "ref": "INC-1",
++            "service": service,
++            "summary": "test incident",
++        },
++        judgment={"action": "flag", "confidence": 0.9, "reasoning": "test"},
++        producer={"system": "test"},
++        metadata={"custom": {"incident_id": "INC-1"}},
++    )
++
++
++def _make_correlation(service: str | None):
++    return create(
++        subject={
++            "type": "correlation",
++            "ref": "csn-1",
++            "service": service,
++            "summary": "correlation snapshot",
++        },
++        judgment={"action": "flag", "confidence": 0.7, "reasoning": "test"},
++        producer={"system": "nthlayer-correlate"},
++        metadata={"custom": {"root_causes": []}},
++    )
++
++
++class TestTriggerServiceResolution:
++    """opensrm-dpws: build_retrospective populates metadata.custom['trigger_service']."""
++
++    def test_trigger_service_from_correlation_verdict(self):
++        """Correlation verdict's subject.service wins over incident's."""
++        store = MemoryStore()
++        incident = _make_incident("fallback-service")
++        correlation = _make_correlation("fraud-detect")
++        store.put(incident)
++        store.put(correlation)
++        # Link correlation as ancestor of incident
++        incident.lineage.context = [correlation.id]
++        store.put(incident)
++
++        retro = build_retrospective(incident.id, store)
++        assert retro.metadata.custom["trigger_service"] == "fraud-detect"
++
++    def test_trigger_service_fallback_to_incident_subject(self):
++        """No correlation in lineage → falls back to incident.subject.service."""
++        store = MemoryStore()
++        incident = _make_incident("payments")
++        store.put(incident)
++
++        retro = build_retrospective(incident.id, store)
++        assert retro.metadata.custom["trigger_service"] == "payments"
++
++    def test_trigger_service_omitted_when_neither(self):
++        """Both correlation absent and incident.subject.service empty → key absent."""
++        store = MemoryStore()
++        incident = _make_incident(None)
++        store.put(incident)
++
++        retro = build_retrospective(incident.id, store)
++        assert "trigger_service" not in retro.metadata.custom
++
++    def test_trigger_service_skips_empty_correlation_subject_to_fallback(self):
++        """Correlation present but subject.service is empty → fallback wins."""
++        store = MemoryStore()
++        incident = _make_incident("payments")
++        correlation = _make_correlation(None)
++        store.put(incident)
++        store.put(correlation)
++        incident.lineage.context = [correlation.id]
++        store.put(incident)
++
++        retro = build_retrospective(incident.id, store)
++        assert retro.metadata.custom["trigger_service"] == "payments"
++
++    def test_trigger_service_skips_whitespace_correlation_subject_to_fallback(self):
++        """Correlation subject.service is whitespace-only → fallback wins.
++        R5 edge-cases: whitespace strings are not valid service identities."""
++        store = MemoryStore()
++        incident = _make_incident("payments")
++        correlation = _make_correlation("   ")
++        store.put(incident)
++        store.put(correlation)
++        incident.lineage.context = [correlation.id]
++        store.put(incident)
++
++        retro = build_retrospective(incident.id, store)
++        assert retro.metadata.custom["trigger_service"] == "payments"
++
++    def test_trigger_service_whitespace_fallback_omits_key(self):
++        """Both correlation and fallback are whitespace-only → key omitted."""
++        store = MemoryStore()
++        incident = _make_incident("   ")
++        store.put(incident)
++
++        retro = build_retrospective(incident.id, store)
++        assert "trigger_service" not in retro.metadata.custom
++
++    def test_trigger_service_stripped_when_padded(self):
++        """Padded service name is stripped before write — no `' fraud-detect '` keys."""
++        store = MemoryStore()
++        incident = _make_incident("  fraud-detect  ")
++        store.put(incident)
++
++        retro = build_retrospective(incident.id, store)
++        assert retro.metadata.custom["trigger_service"] == "fraud-detect"

@@ -1,0 +1,105 @@
+{
+ "schema_version": 1,
+ "entry": "opensrm-jmy.19",
+ "bead": "opensrm-jmy.19",
+ "record": "jmy.19",
+ "archive": "r5-state-jmy.19-completed.json",
+ "record_repos": [
+  "nthlayer-bench"
+ ],
+ "repo": "nthlayer-bench",
+ "part": null,
+ "base": "dbf2d3974f63a6494632723a6b74e8a7f6e0cd5c",
+ "head": "a13431eb2a7913dbacb633614ec39a3ca3f39463",
+ "record_head": null,
+ "synthetic_base": "53e143d7946e9cde117cf6f968ba6ada04260a0b",
+ "synthetic_head": "27018c18960ad2ced8dac26c9f554c303a972868",
+ "base_tree": "fac60792afbf12a2fb85361b82b37278f8037dd3",
+ "tree_sha": "e1cd11f10ec0c6892d447774f9621475932161c4",
+ "unavailable": null,
+ "bundle": {
+  "repo": "nthlayer-bench",
+  "sha256": "724b8f7c7a4661d645338a07b87ecd5db63c84acff948cb6c9bf9b2a1da0439b"
+ },
+ "sequential_steps": 7,
+ "record_sequential_steps": 7,
+ "bead_sequential_steps": 7,
+ "fidelity": "counts_only",
+ "blocking_findings": 1,
+ "escape": false,
+ "brief_source": "bead",
+ "roster": {
+  "record_version": 1,
+  "passes": [
+   "correctness",
+   "clarity",
+   "edge-cases",
+   "excellence"
+  ]
+ },
+ "lens_order": [
+  "correctness",
+  "clarity",
+  "edge-cases",
+  "excellence"
+ ],
+ "counts": {
+  "correctness": [
+   {
+    "critical": 0,
+    "important": 0,
+    "minor": 2
+   }
+  ],
+  "clarity": [
+   {
+    "important": 1,
+    "minor": 2
+   },
+   {}
+  ],
+  "edge-cases": [
+   {
+    "critical": 0,
+    "important": 0,
+    "minor": 5
+   }
+  ],
+  "excellence": [
+   {
+    "critical": 0,
+    "minor": 2
+   }
+  ]
+ },
+ "baseline": {
+  "correctness": {
+   "reviews": 1,
+   "fix_rounds": 0,
+   "findings_first_review": 2,
+   "unattributed": 0,
+   "steps": 1
+  },
+  "clarity": {
+   "reviews": 2,
+   "fix_rounds": 1,
+   "findings_first_review": 3,
+   "unattributed": 0,
+   "steps": 3
+  },
+  "edge-cases": {
+   "reviews": 1,
+   "fix_rounds": 1,
+   "findings_first_review": 5,
+   "unattributed": 0,
+   "steps": 2
+  },
+  "excellence": {
+   "reviews": 1,
+   "fix_rounds": 0,
+   "findings_first_review": 2,
+   "unattributed": 0,
+   "steps": 1
+  }
+ }
+}

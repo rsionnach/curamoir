@@ -1,0 +1,903 @@
+diff --git a/CLAUDE.md b/CLAUDE.md
+index 94b14d8..f9cedda 100644
+--- a/CLAUDE.md
++++ b/CLAUDE.md
+@@ -11,8 +11,8 @@ nthlayer-core/
+     __init__.py   # Package marker
+     cli.py        # CLI entry point: nthlayer serve [--host 0.0.0.0] [--port 8000]
+     catalogue.py  # ManifestCatalogue: loads/caches OpenSRM manifests from dir, mtime-based polling (load, poll, get, list_all, to_dict_list); _manifest_to_dict() serialises to JSON-safe dict
+-    server.py     # Starlette app; full verdict+assessment+case+change-freeze+heartbeat+component-state+manifests HTTP API; set_store()/set_catalogue() injection; _derive_priority(); run_server(host, port) via uvicorn; CloudEvents auto-detect (opensrm-saun.1.2): body with top-level specversion → unwrap envelope before validation; without → raw dict (back-compat; v2 will require envelope); _ENVELOPE_REQUIRED_ATTRS=("specversion","type","source","id"); error split: 400 envelope_invalid (cannot unwrap) vs 422 record_invalid (inner record fails validation); both carry envelope_version field (None=envelope-level, "1.0"=inner record validated); helpers: _looks_like_envelope(), _unwrap_envelope(), _validate_required(); _store_error_response(handler, exc, **context) — logs full exception server-side via structlog (core_store_error event), returns generic {"error": "internal_error"} 500 to client (no raw SQLite strings leak, opensrm-9uow.1); TestStoreErrorOpacity (3 tests in test_api.py) validates opacity
+-    store.py      # Unified SQLite store: Store class, 10-table schema v1.5.0, WAL mode
++    server.py     # Starlette app; full verdict+assessment+case+change-freeze+heartbeat+component-state+manifests HTTP API; set_store()/set_catalogue() injection; _derive_priority(); run_server(host, port) via uvicorn; CloudEvents auto-detect (opensrm-saun.1.2): body with top-level specversion → unwrap envelope before validation; without → raw dict (back-compat; v2 will require envelope); _ENVELOPE_REQUIRED_ATTRS=("specversion","type","source","id"); error split: 400 envelope_invalid (cannot unwrap) vs 422 record_invalid (inner record fails validation); both carry envelope_version field (None=envelope-level, "1.0"=inner record validated); helpers: _looks_like_envelope(), _unwrap_envelope(), _validate_required(); _store_error_response(handler, exc, **context) — logs full exception server-side via structlog (core_store_error event), returns generic {"error": "internal_error"} 500 to client (no raw SQLite strings leak, opensrm-9uow.1); TestStoreErrorOpacity (3 tests in test_api.py) validates opacity; post_verdict_override handler (opensrm-jmy.18): mutation-style POST /verdicts/{verdict_id}/override — coerces ISO timestamp string to datetime, calls apply_override_to_verdict with pre_redacted=True (privacy applied once at sidecar boundary), returns 200 {id, status:"overridden"} / 404 verdict_not_found / 409 conflict / 422 validation_error / 400 decision_id_mismatch (path vs body decision_id mismatch guard)
++    store.py      # Unified SQLite store: Store class formally implements VerdictStore ABC (opensrm-jmy.18 B0); 10-table schema v1.5.0, WAL mode; VerdictStore methods: put(verdict), get(id)->Verdict|None, update_outcome(id, outcome, expected_status=None)->Verdict (CAS; raises KeyError/OutcomeStatusMismatch), query(VerdictFilter)->list[Verdict], by_lineage(id, direction)->list[Verdict]; accuracy() and expire() raise NotImplementedError (schema unification in opensrm-jmy.20)
+   tests/
+     test_health.py      # Async ASGI test: GET /health returns 200 {"status": "ok"}
+     test_api.py         # Full HTTP API test suite: TestHealth, TestPostVerdict, TestGetVerdicts (incl. time_range_filter_with_timezone_offset), TestLineage, TestOutcomeResolution, TestAssessments
+@@ -20,8 +20,10 @@ nthlayer-core/
+     test_api_heartbeats.py      # Heartbeat + monitoring API: TestPostHeartbeat, TestGetHeartbeats, TestStuckActionRequests
+     test_api_component_state.py # Component state persistence API: TestPutComponentState (save, overwrite, invalid_body), TestGetComponentState (get_existing, get_nonexistent, empty_dict_roundtrip, roundtrip_preserves_state)
+     test_api_suppressions.py    # Suppressions API: TestPostSuppression (create_suppression, create_without_related_verdict, missing_component/reason/suppressed_verdict_id → 422), TestGetSuppressions (query_all, filter_by_component, filter_by_time_range, empty_result, suppression_contains_all_fields)
++    test_api_overrides.py       # Override handler (opensrm-jmy.18): 8 async tests — happy_path_returns_200_and_mutates_outcome, idempotent_reapply_returns_200, verdict_not_found_returns_404, decision_id_mismatch_returns_400, schema_failure_returns_422 (missing corrected_action), conflict_with_existing_returns_409, terminal_status_returns_422 (confirmed verdict), override_persists_to_real_sqlite_store (B3 — real Store not MemoryStore; verifies fresh read persistence + idempotent re-apply + CAS conflict); uses Store.put(Verdict) + Store.get(id) VerdictStore ABC methods; pre_redacted=True means reviewer stored plaintext in outcome.override.by
+     test_api_manifests.py   # Manifest catalogue API: TestGetManifests (list_all, expected_fields, slo_includes_judgment_type), TestGetManifest (get_existing, get_nonexistent → 404), TestManifestsReload (new/modified/deleted file detection, no_changes), TestCatalogueUnit (empty/nonexistent dir, invalid yaml skipped)
+     test_store.py           # Store test suite: schema, verdicts, lineage, cases, freezes, heartbeats, component state
++    test_store_verdictstore.py  # VerdictStore ABC compliance (opensrm-jmy.18 B0): TestStoreIsVerdictStore, TestPutAndGet, TestUpdateOutcomeUnconditional, TestUpdateOutcomeCAS (CAS success/mismatch/race), TestQuery (filter/limit), TestByLineage (up/down/both/unknown direction); all tests use real SQLite Store(tmp_path)
+     test_retention.py       # Retention test suite: TestVerdictRetention, TestAssessmentRetention, TestCaseRetention, TestChangeFreezeRetention, TestHeartbeatRetention, TestRekorAnchorsNeverPruned, TestRetentionGuards
+   tests/smoke/
+     __init__.py             # Package marker
+@@ -44,6 +46,7 @@ Env vars: `NTHLAYER_STORE_PATH` — path to SQLite db (default `nthlayer.db`); `
+ | `GET` | `/verdicts/{verdict_id}/ancestors` | list; query param: `max_hops` |
+ | `GET` | `/verdicts/{verdict_id}/descendants` | list |
+ | `POST` | `/verdicts/{verdict_id}/outcome` | 201 `{id}` — creates NEW `outcome_resolution` verdict with `parent_ids=[original_id]`; original never mutated |
++| `POST` | `/verdicts/{verdict_id}/override` | 200 `{id, status:"overridden"}` — mutation-style; mutates original verdict's outcome in place (opensrm-jmy.18) \| 400 `decision_id_mismatch` \| 404 `verdict_not_found` \| 409 `conflict` (existing override differs) \| 422 `validation_error` (terminal status / schema failure) |
+ 
+ **Assessments:**
+ 
+@@ -152,6 +155,13 @@ Unified SQLite store owned exclusively by the core process. Workers and bench ac
+ - Retention: verdicts only pruned when old AND no younger descendant in lineage AND not referenced by a surviving case; `rekor_anchors` never pruned; active change freezes always preserved
+ 
+ **Public API (`Store`):**
++- **VerdictStore ABC methods** (opensrm-jmy.18 B0 — used by `apply_override_to_verdict` and nthlayer-common callers):
++  - `put(verdict: Verdict) -> None` — serialises via `to_dict()` and writes; also populates lineage index
++  - `get(id: str) -> Verdict | None` — deserialises via `from_dict()`; returns `None` if not found
++  - `update_outcome(id, new_outcome, expected_status=None) -> Verdict` — CAS write; raises `KeyError` if verdict not found; raises `OutcomeStatusMismatch` if `expected_status` is set and doesn't match current status; returns updated `Verdict`
++  - `query(filter: VerdictFilter) -> list[Verdict]` — uses `subject_service`, `verdict_type`, `limit` from filter
++  - `by_lineage(id, direction) -> list[Verdict]` — direction: `"up"` (ancestors), `"down"` (descendants), `"both"`; raises `ValueError` on unknown direction
++  - `accuracy()` / `expire()` — raise `NotImplementedError` (schema unification tracked in opensrm-jmy.20)
+ - `put_verdict(verdict)` → `str` — writes verdict + populates lineage index
+ - `get_verdict(id)` → `dict | None`
+ - `query_verdicts(*, service, verdict_type, created_after, created_before, limit=100)` → `list[dict]`
+diff --git a/src/nthlayer_core/server.py b/src/nthlayer_core/server.py
+index d0f129f..02dab36 100644
+--- a/src/nthlayer_core/server.py
++++ b/src/nthlayer_core/server.py
+@@ -19,6 +19,11 @@ from starlette.responses import JSONResponse
+ from starlette.routing import Route
+ import uvicorn
+ 
++from nthlayer_common.overrides import (
++    OverrideEvent,
++    OverridePrivacyConfig,
++    apply_override_to_verdict,
++)
+ from nthlayer_core.catalogue import ManifestCatalogue, manifest_to_dict
+ from nthlayer_core.store import Store
+ 
+@@ -345,6 +350,67 @@ async def post_verdict_outcome(request: Request) -> JSONResponse:
+         )
+ 
+ 
++async def post_verdict_override(request: Request) -> JSONResponse:
++    """Apply an operator override to a verdict (mutation-style, opensrm-jmy.18).
++
++    Calls apply_override_to_verdict on the verdict store, mutating the
++    original verdict's outcome in place. Distinct from POST /outcome
++    which creates an outcome_resolution child verdict (lineage-style).
++    """
++    verdict_id = request.path_params["verdict_id"]
++    body, err = await _parse_json_body(request)
++    if err:
++        return err
++
++    # Coerce ISO timestamp string to datetime so OverrideEvent.__post_init__
++    # can validate tzinfo. JSON wire format sends strings; OverrideEvent
++    # expects a tz-aware datetime object.
++    parsed_body = dict(body)
++    if isinstance(parsed_body.get("timestamp"), str):
++        try:
++            parsed_body["timestamp"] = datetime.fromisoformat(parsed_body["timestamp"])
++        except ValueError as exc:
++            return JSONResponse(
++                {"error": "validation_error", "detail": str(exc)},
++                status_code=422,
++            )
++
++    try:
++        event = OverrideEvent(**parsed_body)
++    except (TypeError, ValueError) as exc:
++        return JSONResponse(
++            {"error": "validation_error", "detail": str(exc)},
++            status_code=422,
++        )
++
++    if event.decision_id != verdict_id:
++        return JSONResponse(
++            {"error": "decision_id_mismatch",
++             "detail": {"path": verdict_id, "body": event.decision_id}},
++            status_code=400,
++        )
++
++    store = _get_store()
++    privacy = OverridePrivacyConfig(pre_redacted=True, exclude_reason=False)
++    result = apply_override_to_verdict(store, event, privacy=privacy)
++
++    if result is not None:
++        return JSONResponse(
++            {"id": verdict_id, "status": "overridden"},
++            status_code=200,
++        )
++
++    # None-path: read the verdict back to map cause -> HTTP status.
++    verdict = store.get(verdict_id)
++    if verdict is None:
++        return JSONResponse({"error": "verdict_not_found"}, status_code=404)
++
++    current = (getattr(verdict.outcome, "status", None) or "").lower()
++    if current == "overridden":
++        return JSONResponse({"error": "conflict"}, status_code=409)
++    return JSONResponse({"error": "validation_error"}, status_code=422)
++
++
+ # -- Assessments --
+ 
+ async def post_assessment(request: Request) -> JSONResponse:
+@@ -823,6 +889,7 @@ routes = [
+     Route("/verdicts/{verdict_id}/ancestors", get_verdict_ancestors, methods=["GET"]),
+     Route("/verdicts/{verdict_id}/descendants", get_verdict_descendants, methods=["GET"]),
+     Route("/verdicts/{verdict_id}/outcome", post_verdict_outcome, methods=["POST"]),
++    Route("/verdicts/{verdict_id}/override", post_verdict_override, methods=["POST"]),
+     # Assessments
+     Route("/assessments", post_assessment, methods=["POST"]),
+     Route("/assessments", get_assessments, methods=["GET"]),
+diff --git a/src/nthlayer_core/store.py b/src/nthlayer_core/store.py
+index 555ca65..be788f7 100644
+--- a/src/nthlayer_core/store.py
++++ b/src/nthlayer_core/store.py
+@@ -18,6 +18,15 @@ from datetime import datetime, timedelta, timezone
+ from pathlib import Path
+ from typing import Any
+ 
++from nthlayer_common.verdicts.models import AccuracyReport, Outcome, Verdict
++from nthlayer_common.verdicts.serialise import from_dict, to_dict
++from nthlayer_common.verdicts.store import (
++    AccuracyFilter,
++    OutcomeStatusMismatch,
++    VerdictFilter,
++    VerdictStore,
++)
++
+ SCHEMA_VERSION = "1.5.0"
+ 
+ _SCHEMA = """
+@@ -135,10 +144,15 @@ CREATE TABLE IF NOT EXISTS schema_meta (
+ """
+ 
+ 
+-class Store:
++class Store(VerdictStore):
+     """Unified SQLite store for the core process.
+ 
+     WAL mode, BEGIN IMMEDIATE for writes, connection pool via thread-local storage.
++
++    Formally implements the VerdictStore ABC (opensrm-jmy.18 B0). The
++    ``accuracy`` and ``expire`` methods raise NotImplementedError: Store's
++    content-blob schema lacks the denormalised columns SQLiteVerdictStore
++    requires. Schema unification is tracked in opensrm-jmy.20.
+     """
+ 
+     def __init__(self, path: str | Path):
+@@ -178,6 +192,176 @@ class Store:
+             conn.execute("ROLLBACK")
+             raise
+ 
++    # -- VerdictStore ABC implementation (opensrm-jmy.18 B0) --
++    # These methods satisfy the VerdictStore interface used by
++    # apply_override_to_verdict and other nthlayer-common callers.
++    # They delegate to or wrap the existing dict-based verdict methods.
++
++    def put(self, verdict: Verdict) -> None:
++        """Implement VerdictStore.put: serialise Verdict and delegate to put_verdict."""
++        self.put_verdict(to_dict(verdict))
++
++    def get(self, verdict_id: str) -> Verdict | None:
++        """Implement VerdictStore.get: read via get_verdict and deserialise."""
++        d = self.get_verdict(verdict_id)
++        if d is None:
++            return None
++        return from_dict(d)
++
++    def query(self, criteria: VerdictFilter) -> list[Verdict]:
++        """Implement VerdictStore.query: map VerdictFilter to query_verdicts kwargs.
++
++        Field mapping:
++        - ``subject_service`` → ``service`` (Store's denormalised top-level column)
++        - ``subject_type`` → ``verdict_type`` (the ``type`` column)
++        - ``from_time`` / ``to_time`` → ``created_after`` / ``created_before``
++        - ``limit`` → ``limit``
++
++        Unmapped VerdictFilter fields (producer_system, subject_agent, status, tags)
++        are not filterable at the SQL layer against Store's content-blob schema;
++        they are applied as a Python post-filter pass.
++        """
++        created_after: str | None = None
++        created_before: str | None = None
++        if criteria.from_time is not None:
++            created_after = criteria.from_time.isoformat()
++        if criteria.to_time is not None:
++            created_before = criteria.to_time.isoformat()
++
++        rows = self.query_verdicts(
++            # subject_service is the denormalised service column in Store's schema
++            service=criteria.subject_service,
++            verdict_type=criteria.subject_type,
++            created_after=created_after,
++            created_before=created_before,
++            limit=criteria.limit,
++        )
++        verdicts = [from_dict(r) for r in rows]
++
++        # Python post-filter for fields not expressible as Store SQL predicates.
++        if criteria.producer_system:
++            verdicts = [v for v in verdicts if v.producer.system == criteria.producer_system]
++        if criteria.subject_agent:
++            verdicts = [v for v in verdicts if v.subject.agent == criteria.subject_agent]
++        if criteria.status:
++            verdicts = [v for v in verdicts if v.outcome.status == criteria.status]
++        if criteria.tags:
++            verdicts = [
++                v for v in verdicts
++                if v.judgment.tags and set(criteria.tags) & set(v.judgment.tags)
++            ]
++
++        return verdicts
++
++    def update_outcome(
++        self,
++        verdict_id: str,
++        outcome: Outcome,
++        *,
++        expected_status: str | None = None,
++    ) -> Verdict:
++        """Implement VerdictStore.update_outcome with CAS support.
++
++        CAS via ``json_extract(content, '$.outcome.status')`` with IFNULL
++        coalescing so that verdicts stored without an explicit outcome.status
++        are treated as 'pending' (the dataclass default).
++        """
++        conn = self._get_conn()
++        row = conn.execute(
++            "SELECT content FROM verdicts WHERE id = ?",
++            (verdict_id,),
++        ).fetchone()
++        if row is None:
++            raise KeyError(f"Verdict {verdict_id} not found")
++
++        # Deserialise the full content blob — get_verdict returns exactly
++        # json.loads(row["content"]), which is what from_dict expects.
++        content_dict = json.loads(row["content"])
++        verdict = from_dict(content_dict)
++        verdict.outcome = outcome
++
++        new_content = json.dumps(to_dict(verdict))
++
++        if expected_status is None:
++            # Unconditional last-writer-wins (mirrors SQLiteVerdictStore).
++            conn.execute(
++                "UPDATE verdicts SET content = ? WHERE id = ?",
++                (new_content, verdict_id),
++            )
++            conn.commit()
++            return verdict
++
++        # CAS path: cheap pre-check on the value we just read.
++        current_outcome = content_dict.get("outcome") or {}
++        current_status = current_outcome.get("status", "pending")
++        if current_status != expected_status:
++            raise OutcomeStatusMismatch(
++                f"Verdict {verdict_id}: outcome.status is {current_status!r}, "
++                f"expected {expected_status!r}"
++            )
++
++        # Conditional UPDATE: only succeeds if outcome.status still matches.
++        # IFNULL coalesces absent outcome.status to 'pending' (dataclass default).
++        cursor = conn.execute(
++            "UPDATE verdicts SET content = ? "
++            "WHERE id = ? "
++            "AND IFNULL(json_extract(content, '$.outcome.status'), 'pending') "
++            "= IFNULL(?, 'pending')",
++            (new_content, verdict_id, expected_status),
++        )
++        conn.commit()
++        if cursor.rowcount == 0:
++            # CAS lost — a concurrent writer transitioned the verdict.
++            after = conn.execute(
++                "SELECT json_extract(content, '$.outcome.status') AS s "
++                "FROM verdicts WHERE id = ?",
++                (verdict_id,),
++            ).fetchone()
++            current = after["s"] if after else "<deleted>"
++            raise OutcomeStatusMismatch(
++                f"Verdict {verdict_id}: outcome.status raced to {current!r}, "
++                f"expected {expected_status!r}"
++            )
++        return verdict
++
++    def accuracy(self, criteria: AccuracyFilter) -> AccuracyReport:
++        """Not implemented: Store's content-blob schema lacks the required columns.
++
++        Use SQLiteVerdictStore for verdict accuracy reporting.
++        Schema unification is tracked in opensrm-jmy.20.
++        """
++        raise NotImplementedError(
++            "Store does not implement accuracy queries. "
++            "Use SQLiteVerdictStore for verdict accuracy reporting. "
++            "Schema unification is tracked in opensrm-jmy.20."
++        )
++
++    def by_lineage(self, verdict_id: str, direction: str = "both") -> list[Verdict]:
++        """Implement VerdictStore.by_lineage: wrap ancestors_of / descendants_of."""
++        if direction == "up":
++            rows = self.ancestors_of(verdict_id)
++        elif direction == "down":
++            rows = self.descendants_of(verdict_id)
++        elif direction == "both":
++            rows = [*self.ancestors_of(verdict_id), *self.descendants_of(verdict_id)]
++        else:
++            raise ValueError(f"unknown direction {direction!r}")
++        return [from_dict(r) for r in rows]
++
++    def expire(self) -> int:
++        """Not implemented: Store has run_retention with a different semantic.
++
++        Use SQLiteVerdictStore for VerdictStore.expire semantics,
++        or Store.run_retention for the core retention model.
++        Schema unification is tracked in opensrm-jmy.20.
++        """
++        raise NotImplementedError(
++            "Store does not implement TTL expiration. "
++            "Use SQLiteVerdictStore for VerdictStore.expire semantics, "
++            "or Store.run_retention for the core retention model. "
++            "Schema unification is tracked in opensrm-jmy.20."
++        )
++
+     # -- Verdict operations --
+ 
+     def put_verdict(self, verdict: dict[str, Any]) -> str:
+diff --git a/tests/test_api_overrides.py b/tests/test_api_overrides.py
+new file mode 100644
+index 0000000..1974cbf
+--- /dev/null
++++ b/tests/test_api_overrides.py
+@@ -0,0 +1,250 @@
++"""opensrm-jmy.18: POST /verdicts/{id}/override handler tests."""
++from __future__ import annotations
++
++from datetime import datetime, timezone
++
++import httpx
++import pytest
++from httpx import ASGITransport
++
++from nthlayer_common.verdicts.models import (
++    Judgment,
++    Outcome,
++    Producer,
++    Subject,
++    Verdict,
++)
++from nthlayer_core import server
++from nthlayer_core.store import Store
++
++
++def _make_verdict(vid: str, *, outcome_status: str = "pending") -> Verdict:
++    """Build a Verdict dataclass for seeding into Store."""
++    return Verdict(
++        id=vid,
++        version=1,
++        timestamp=datetime(2026, 5, 20, 10, 0, tzinfo=timezone.utc),
++        producer=Producer(system="fraud-detect"),
++        subject=Subject(
++            type="agent_output",
++            ref="fraud-detect",
++            summary="test",
++            service="fraud-detect",
++        ),
++        judgment=Judgment(action="approve", confidence=0.9),
++        outcome=Outcome(status=outcome_status),
++        service="fraud-detect",
++        verdict_type="action_request",
++    )
++
++
++def _seed_pending(store: Store, vid: str) -> None:
++    """Place a pending Verdict in the store keyed by vid."""
++    store.put(_make_verdict(vid, outcome_status="pending"))
++
++
++def _build_confirmed_verdict(vid: str) -> Verdict:
++    """Build a confirmed Verdict (terminal — cannot be overridden)."""
++    return _make_verdict(vid, outcome_status="confirmed")
++
++
++def _body(decision_id: str = "dec-1", **overrides) -> dict:
++    body = {
++        "decision_id": decision_id,
++        "service": "fraud-detect",
++        "corrected_action": "approve",
++        "reviewer": "reviewer-hash",
++        "timestamp": "2026-05-20T10:33:00+00:00",
++    }
++    body.update(overrides)
++    return body
++
++
++@pytest.mark.asyncio
++async def test_override_happy_path_returns_200_and_mutates_outcome(tmp_path):
++    store = Store(str(tmp_path / "test.db"))
++    _seed_pending(store, "dec-1")
++    server.set_store(store)
++
++    transport = ASGITransport(app=server.app)
++    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
++        resp = await client.post("/verdicts/dec-1/override", json=_body())
++
++    assert resp.status_code == 200
++    assert resp.json()["status"] == "overridden"
++    v = store.get("dec-1")
++    assert v.outcome.status == "overridden"
++    assert v.outcome.override.by == "reviewer-hash"  # pre_redacted=True; no re-hash
++
++    server.set_store(None)
++
++
++@pytest.mark.asyncio
++async def test_override_idempotent_reapply_returns_200(tmp_path):
++    store = Store(str(tmp_path / "test.db"))
++    _seed_pending(store, "dec-2")
++    server.set_store(store)
++
++    transport = ASGITransport(app=server.app)
++    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
++        r1 = await client.post("/verdicts/dec-2/override", json=_body("dec-2"))
++        r2 = await client.post("/verdicts/dec-2/override", json=_body("dec-2"))
++
++    assert r1.status_code == 200
++    assert r2.status_code == 200
++
++    server.set_store(None)
++
++
++@pytest.mark.asyncio
++async def test_override_verdict_not_found_returns_404(tmp_path):
++    store = Store(str(tmp_path / "test.db"))
++    server.set_store(store)
++
++    transport = ASGITransport(app=server.app)
++    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
++        resp = await client.post("/verdicts/dec-missing/override", json=_body("dec-missing"))
++
++    assert resp.status_code == 404
++    assert resp.json()["error"] == "verdict_not_found"
++
++    server.set_store(None)
++
++
++@pytest.mark.asyncio
++async def test_override_decision_id_mismatch_returns_400(tmp_path):
++    store = Store(str(tmp_path / "test.db"))
++    _seed_pending(store, "dec-real")
++    server.set_store(store)
++
++    transport = ASGITransport(app=server.app)
++    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
++        resp = await client.post("/verdicts/dec-real/override", json=_body("dec-different"))
++
++    assert resp.status_code == 400
++    assert resp.json()["error"] == "decision_id_mismatch"
++
++    server.set_store(None)
++
++
++@pytest.mark.asyncio
++async def test_override_schema_failure_returns_422(tmp_path):
++    store = Store(str(tmp_path / "test.db"))
++    _seed_pending(store, "dec-3")
++    server.set_store(store)
++
++    transport = ASGITransport(app=server.app)
++    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
++        bad = {
++            "decision_id": "dec-3",
++            "service": "fraud-detect",
++            "reviewer": "h",
++            "timestamp": "2026-05-20T10:33:00+00:00",
++        }  # missing corrected_action
++        resp = await client.post("/verdicts/dec-3/override", json=bad)
++
++    assert resp.status_code == 422
++    assert resp.json()["error"] == "validation_error"
++
++    server.set_store(None)
++
++
++@pytest.mark.asyncio
++async def test_override_conflict_with_existing_returns_409(tmp_path):
++    store = Store(str(tmp_path / "test.db"))
++    _seed_pending(store, "dec-4")
++    server.set_store(store)
++
++    transport = ASGITransport(app=server.app)
++    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
++        r1 = await client.post("/verdicts/dec-4/override", json=_body("dec-4", reviewer="alice"))
++        r2 = await client.post("/verdicts/dec-4/override", json=_body("dec-4", reviewer="bob"))
++
++    assert r1.status_code == 200
++    assert r2.status_code == 409
++    assert r2.json()["error"] == "conflict"
++
++    server.set_store(None)
++
++
++@pytest.mark.asyncio
++async def test_override_terminal_status_returns_422(tmp_path):
++    """A confirmed verdict cannot be overridden."""
++    store = Store(str(tmp_path / "test.db"))
++    v = _build_confirmed_verdict("dec-5")
++    store.put(v)
++    server.set_store(store)
++
++    transport = ASGITransport(app=server.app)
++    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
++        resp = await client.post("/verdicts/dec-5/override", json=_body("dec-5"))
++
++    assert resp.status_code == 422
++    assert resp.json()["error"] == "validation_error"
++
++    server.set_store(None)
++
++
++@pytest.mark.asyncio
++async def test_override_persists_to_real_sqlite_store(tmp_path):
++    """opensrm-jmy.18 B3: end-to-end override against real Store(tmp_path)."""
++    store = Store(str(tmp_path / "real-store.db"))
++    _seed_pending(store, "real-1")
++    server.set_store(store)
++
++    transport = ASGITransport(app=server.app)
++    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
++        resp = await client.post(
++            "/verdicts/real-1/override",
++            json={
++                "decision_id": "real-1",
++                "service": "fraud-detect",
++                "corrected_action": "approve",
++                "reviewer": "operator-hash",
++                "timestamp": "2026-05-21T09:00:00+00:00",
++            },
++        )
++
++    assert resp.status_code == 200
++    assert resp.json() == {"id": "real-1", "status": "overridden"}
++
++    # Verify persistence with a FRESH read (not the in-memory object).
++    fresh = store.get("real-1")
++    assert fresh is not None
++    assert fresh.outcome.status == "overridden"
++    assert fresh.outcome.override is not None
++    assert fresh.outcome.override.by == "operator-hash"
++    assert fresh.outcome.override.action == "approve"
++
++    # Verify CAS — a second override with same content is idempotent.
++    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
++        resp2 = await client.post(
++            "/verdicts/real-1/override",
++            json={
++                "decision_id": "real-1",
++                "service": "fraud-detect",
++                "corrected_action": "approve",
++                "reviewer": "operator-hash",
++                "timestamp": "2026-05-21T09:00:00+00:00",
++            },
++        )
++    assert resp2.status_code == 200  # idempotent re-apply
++
++    # Verify CAS conflict — a different reviewer on the same already-overridden verdict.
++    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
++        resp3 = await client.post(
++            "/verdicts/real-1/override",
++            json={
++                "decision_id": "real-1",
++                "service": "fraud-detect",
++                "corrected_action": "approve",
++                "reviewer": "different-hash",
++                "timestamp": "2026-05-21T09:00:00+00:00",
++            },
++        )
++    assert resp3.status_code == 409
++    assert resp3.json()["error"] == "conflict"
++
++    server.set_store(None)
++    if hasattr(store, "close"):
++        store.close()
+diff --git a/tests/test_store_verdictstore.py b/tests/test_store_verdictstore.py
+new file mode 100644
+index 0000000..2d0ed0a
+--- /dev/null
++++ b/tests/test_store_verdictstore.py
+@@ -0,0 +1,265 @@
++"""opensrm-jmy.18 B0: Store implements VerdictStore ABC."""
++from __future__ import annotations
++
++from datetime import datetime, timezone
++
++import pytest
++
++from nthlayer_common.verdicts.models import (
++    Judgment,
++    Outcome,
++    Producer,
++    Subject,
++    Verdict,
++)
++from nthlayer_common.verdicts.store import (
++    AccuracyFilter,
++    OutcomeStatusMismatch,
++    VerdictFilter,
++    VerdictStore,
++)
++from nthlayer_core.store import Store
++
++
++@pytest.fixture
++def store(tmp_path):
++    s = Store(str(tmp_path / "test.db"))
++    yield s
++    s.close()
++
++
++def _build_pending(vid: str = "dec-1", service: str = "fraud-detect") -> Verdict:
++    """Construct a minimal pending Verdict."""
++    return Verdict(
++        id=vid,
++        version=1,
++        timestamp=datetime(2026, 5, 21, 10, 0, tzinfo=timezone.utc),
++        producer=Producer(system="fraud-detect"),
++        subject=Subject(
++            type="agent_output",
++            ref="fraud-detect",
++            summary="test verdict",
++            service=service,
++        ),
++        judgment=Judgment(action="approve", confidence=0.9),
++        outcome=Outcome(status="pending"),
++        service=service,
++        verdict_type="action_request",
++    )
++
++
++class TestStoreIsVerdictStore:
++    def test_store_inherits_verdictstore(self):
++        assert issubclass(Store, VerdictStore)
++
++    def test_store_instance_is_verdictstore(self, store):
++        assert isinstance(store, VerdictStore)
++
++
++class TestPutAndGet:
++    def test_put_then_get_roundtrips(self, store):
++        v = _build_pending("rt-1")
++        store.put(v)
++        got = store.get("rt-1")
++        assert got is not None
++        assert got.id == "rt-1"
++        assert got.outcome.status == "pending"
++        assert got.service == "fraud-detect"
++        assert got.verdict_type == "action_request"
++
++    def test_get_missing_returns_none(self, store):
++        assert store.get("does-not-exist") is None
++
++    def test_put_then_get_judgment_preserved(self, store):
++        v = _build_pending("rt-2")
++        store.put(v)
++        got = store.get("rt-2")
++        assert got.judgment.action == "approve"
++        assert got.judgment.confidence == pytest.approx(0.9)
++
++    def test_put_then_get_producer_preserved(self, store):
++        v = _build_pending("rt-3")
++        store.put(v)
++        got = store.get("rt-3")
++        assert got.producer.system == "fraud-detect"
++
++
++class TestUpdateOutcomeUnconditional:
++    def test_update_outcome_without_expected_status_overwrites(self, store):
++        v = _build_pending("uo-1")
++        store.put(v)
++        new_outcome = Outcome(status="confirmed")
++        result = store.update_outcome("uo-1", new_outcome)
++        assert result.outcome.status == "confirmed"
++        # Verify persisted
++        assert store.get("uo-1").outcome.status == "confirmed"
++
++    def test_update_outcome_unknown_id_raises_keyerror(self, store):
++        with pytest.raises(KeyError):
++            store.update_outcome("missing", Outcome(status="confirmed"))
++
++    def test_update_outcome_returns_verdict(self, store):
++        v = _build_pending("uo-2")
++        store.put(v)
++        result = store.update_outcome("uo-2", Outcome(status="overridden"))
++        assert isinstance(result, Verdict)
++        assert result.id == "uo-2"
++
++
++class TestUpdateOutcomeCAS:
++    def test_cas_succeeds_when_expected_matches(self, store):
++        v = _build_pending("cas-1")
++        store.put(v)
++        new_outcome = Outcome(status="overridden")
++        result = store.update_outcome("cas-1", new_outcome, expected_status="pending")
++        assert result.outcome.status == "overridden"
++        # Verify persisted
++        assert store.get("cas-1").outcome.status == "overridden"
++
++    def test_cas_raises_on_status_mismatch_pre_check(self, store):
++        """Pre-check: expected_status does not match the current status."""
++        v = _build_pending("cas-2")
++        store.put(v)
++        # Unconditionally transition to confirmed first
++        store.update_outcome("cas-2", Outcome(status="confirmed"))
++        # Now expect "pending" — should raise because status is "confirmed"
++        with pytest.raises(OutcomeStatusMismatch):
++            store.update_outcome("cas-2", Outcome(status="overridden"), expected_status="pending")
++
++    def test_cas_raises_on_concurrent_race(self, store):
++        """Race scenario: first writer wins, second CAS fails."""
++        v = _build_pending("cas-3")
++        store.put(v)
++        # First writer transitions to "confirmed"
++        store.update_outcome("cas-3", Outcome(status="confirmed"))
++        # Second writer expected "pending" (stale read scenario)
++        with pytest.raises(OutcomeStatusMismatch):
++            store.update_outcome("cas-3", Outcome(status="overridden"), expected_status="pending")
++
++
++class TestQuery:
++    def test_query_returns_verdict_dataclasses(self, store):
++        v = _build_pending("q-1", service="svc-a")
++        store.put(v)
++        f = VerdictFilter(subject_service="svc-a")
++        results = store.query(f)
++        assert len(results) >= 1
++        assert all(isinstance(r, Verdict) for r in results)
++
++    def test_query_filters_by_service(self, store):
++        store.put(_build_pending("q-2", service="svc-alpha"))
++        store.put(_build_pending("q-3", service="svc-beta"))
++        results = store.query(VerdictFilter(subject_service="svc-alpha"))
++        ids = {v.id for v in results}
++        assert "q-2" in ids
++        assert "q-3" not in ids
++
++    def test_query_empty_result(self, store):
++        results = store.query(VerdictFilter(subject_service="nonexistent-svc"))
++        assert results == []
++
++    def test_query_limit_respected(self, store):
++        for i in range(5):
++            store.put(_build_pending(f"ql-{i}", service="svc-limit"))
++        results = store.query(VerdictFilter(subject_service="svc-limit", limit=3))
++        assert len(results) == 3
++
++
++class TestByLineage:
++    def test_by_lineage_returns_list(self, store):
++        v = _build_pending("ln-1")
++        store.put(v)
++        results = store.by_lineage("ln-1", direction="both")
++        assert isinstance(results, list)
++
++    def test_by_lineage_all_items_are_verdicts(self, store):
++        v = _build_pending("ln-2")
++        store.put(v)
++        results = store.by_lineage("ln-2", direction="both")
++        assert all(isinstance(r, Verdict) for r in results)
++
++    def test_by_lineage_unknown_direction_raises(self, store):
++        v = _build_pending("ln-3")
++        store.put(v)
++        with pytest.raises(ValueError):
++            store.by_lineage("ln-3", direction="sideways")
++
++    def test_by_lineage_up_direction(self, store):
++        v = _build_pending("ln-4")
++        store.put(v)
++        # No ancestors; should return empty list
++        results = store.by_lineage("ln-4", direction="up")
++        assert results == []
++
++    def test_by_lineage_down_direction(self, store):
++        v = _build_pending("ln-5")
++        store.put(v)
++        # No descendants; should return empty list
++        results = store.by_lineage("ln-5", direction="down")
++        assert results == []
++
++
++class TestUnimplementedSemantics:
++    def test_accuracy_raises_notimplementederror(self, store):
++        with pytest.raises(NotImplementedError, match="opensrm-jmy.20"):
++            store.accuracy(AccuracyFilter(producer_system="anything"))
++
++    def test_expire_raises_notimplementederror(self, store):
++        with pytest.raises(NotImplementedError, match="opensrm-jmy.20"):
++            store.expire()
++
++
++class TestAppliesWithApplyOverrideToVerdict:
++    """End-to-end: apply_override_to_verdict works against real Store."""
++
++    def test_apply_override_to_verdict_works_on_store(self, store):
++        from nthlayer_common.overrides import (
++            OverrideEvent,
++            OverridePrivacyConfig,
++            apply_override_to_verdict,
++        )
++
++        v = _build_pending("ovr-1")
++        store.put(v)
++
++        event = OverrideEvent(
++            decision_id="ovr-1",
++            service="fraud-detect",
++            corrected_action="approve",
++            reviewer="reviewer-hash",
++        )
++        result = apply_override_to_verdict(
++            store, event, privacy=OverridePrivacyConfig(pre_redacted=True),
++        )
++        assert result is not None
++        assert result.outcome.status == "overridden"
++        assert result.outcome.override.by == "reviewer-hash"
++
++        # Verify persisted in DB by reading back fresh.
++        got = store.get("ovr-1")
++        assert got is not None
++        assert got.outcome.status == "overridden"
++        assert got.outcome.override.by == "reviewer-hash"
++
++    def test_apply_override_idempotent_on_store(self, store):
++        """Idempotent re-apply returns the same verdict without error."""
++        from nthlayer_common.overrides import (
++            OverrideEvent,
++            OverridePrivacyConfig,
++            apply_override_to_verdict,
++        )
++
++        v = _build_pending("ovr-2")
++        store.put(v)
++        event = OverrideEvent(
++            decision_id="ovr-2",
++            service="fraud-detect",
++            corrected_action="approve",
++            reviewer="reviewer-hash",
++        )
++        privacy = OverridePrivacyConfig(pre_redacted=True)
++        r1 = apply_override_to_verdict(store, event, privacy=privacy)
++        r2 = apply_override_to_verdict(store, event, privacy=privacy)
++        assert r1 is not None
++        assert r2 is not None
++        assert r2.outcome.status == "overridden"
+diff --git a/uv.lock b/uv.lock
+index 8fe1bb0..2f41e10 100644
+--- a/uv.lock
++++ b/uv.lock
+@@ -845,7 +845,7 @@ wheels = [
+ 
+ [[package]]
+ name = "nthlayer-common"
+-version = "1.5.0"
++version = "1.6.0"
+ source = { editable = "../nthlayer-common" }
+ dependencies = [
+     { name = "anthropic" },
+@@ -888,7 +888,7 @@ provides-extras = ["dev"]
+ 
+ [[package]]
+ name = "nthlayer-core"
+-version = "1.5.0"
++version = "1.6.0"
+ source = { editable = "." }
+ dependencies = [
+     { name = "httpx" },

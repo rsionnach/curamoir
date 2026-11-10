@@ -1,0 +1,1819 @@
+diff --git a/pyproject.toml b/pyproject.toml
+index a6dbe6e..038e2e4 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -44,6 +44,12 @@ dev = [
+ [tool.setuptools.packages.find]
+ where = ["src"]
+ 
++# The legacy-format built-in templates are YAML package data, loaded via
++# importlib.resources (opensrm-wo62.4.1). Without this they are missing from
++# the wheel and every legacy `service.template` fails as unknown.
++[tool.setuptools.package-data]
++"nthlayer_common.manifest.legacy_templates" = ["*.yaml"]
++
+ [tool.pytest.ini_options]
+ testpaths = ["tests"]
+ asyncio_mode = "auto"
+diff --git a/src/nthlayer_common/manifest/legacy_templates/__init__.py b/src/nthlayer_common/manifest/legacy_templates/__init__.py
+new file mode 100644
+index 0000000..18b4e84
+--- /dev/null
++++ b/src/nthlayer_common/manifest/legacy_templates/__init__.py
+@@ -0,0 +1,9 @@
++"""Built-in templates for the legacy ``service:`` + ``resources:`` format.
++
++Package data only: the ``*.yaml`` files here are loaded through
++importlib.resources by ``manifest/parser/legacy.py`` (opensrm-wo62.4.1).
++They are verbatim copies of nthlayer-generate's
++``src/nthlayer_generate/specs/builtin_templates/*.yaml`` at d2adc78.
++Shipped in the wheel by ``[tool.setuptools.package-data]`` in
++pyproject.toml.
++"""
+diff --git a/src/nthlayer_common/manifest/legacy_templates/background-job.yaml b/src/nthlayer_common/manifest/legacy_templates/background-job.yaml
+new file mode 100644
+index 0000000..1c4912f
+--- /dev/null
++++ b/src/nthlayer_common/manifest/legacy_templates/background-job.yaml
+@@ -0,0 +1,40 @@
++name: background-job
++description: Background worker service with success rate SLO
++tier: standard
++type: background-job
++
++resources:
++  # Success rate SLO - 99.0%
++  - kind: SLO
++    name: success-rate
++    spec:
++      objective: 99.0
++      window: 30d
++      indicator:
++        type: availability
++        query: |
++          sum(rate(job_success_total{service="${service}"}[5m]))
++          /
++          sum(rate(job_total{service="${service}"}[5m]))
++  
++  # Processing latency SLO - p95 under 60s
++  - kind: SLO
++    name: processing-latency-p95
++    spec:
++      objective: 95.0
++      window: 30d
++      indicator:
++        type: latency
++        percentile: 95
++        threshold_ms: 60000
++        query: |
++          histogram_quantile(0.95,
++            rate(job_duration_seconds_bucket{service="${service}"}[5m])
++          )
++  
++  # PagerDuty integration with low urgency
++  - kind: PagerDuty
++    name: primary
++    spec:
++      urgency: low
++      auto_create: true
+diff --git a/src/nthlayer_common/manifest/legacy_templates/critical-api.yaml b/src/nthlayer_common/manifest/legacy_templates/critical-api.yaml
+new file mode 100644
+index 0000000..3e5886d
+--- /dev/null
++++ b/src/nthlayer_common/manifest/legacy_templates/critical-api.yaml
+@@ -0,0 +1,40 @@
++name: critical-api
++description: High-traffic API with 99.9% availability SLO and critical PagerDuty escalation
++tier: critical
++type: api
++
++resources:
++  # Availability SLO - 99.9%
++  - kind: SLO
++    name: availability
++    spec:
++      objective: 99.9
++      window: 30d
++      indicator:
++        type: availability
++        query: |
++          sum(rate(http_requests_total{service="${service}",code!~"5.."}[5m]))
++          /
++          sum(rate(http_requests_total{service="${service}"}[5m]))
++  
++  # Latency SLO - p95 under 500ms
++  - kind: SLO
++    name: latency-p95
++    spec:
++      objective: 99.0
++      window: 30d
++      indicator:
++        type: latency
++        percentile: 95
++        threshold_ms: 500
++        query: |
++          histogram_quantile(0.95,
++            rate(http_request_duration_seconds_bucket{service="${service}"}[5m])
++          )
++  
++  # PagerDuty integration with high urgency
++  - kind: PagerDuty
++    name: primary
++    spec:
++      urgency: high
++      auto_create: true
+diff --git a/src/nthlayer_common/manifest/legacy_templates/low-api.yaml b/src/nthlayer_common/manifest/legacy_templates/low-api.yaml
+new file mode 100644
+index 0000000..f66f592
+--- /dev/null
++++ b/src/nthlayer_common/manifest/legacy_templates/low-api.yaml
+@@ -0,0 +1,33 @@
++name: low-api
++description: Low-priority API with 99.0% availability SLO
++tier: low
++type: api
++
++resources:
++  # Availability SLO - 99.0%
++  - kind: SLO
++    name: availability
++    spec:
++      objective: 99.0
++      window: 30d
++      indicator:
++        type: availability
++        query: |
++          sum(rate(http_requests_total{service="${service}",code!~"5.."}[5m]))
++          /
++          sum(rate(http_requests_total{service="${service}"}[5m]))
++  
++  # Latency SLO - p95 under 2000ms (relaxed)
++  - kind: SLO
++    name: latency-p95
++    spec:
++      objective: 90.0
++      window: 30d
++      indicator:
++        type: latency
++        percentile: 95
++        threshold_ms: 2000
++        query: |
++          histogram_quantile(0.95,
++            rate(http_request_duration_seconds_bucket{service="${service}"}[5m])
++          )
+diff --git a/src/nthlayer_common/manifest/legacy_templates/pipeline.yaml b/src/nthlayer_common/manifest/legacy_templates/pipeline.yaml
+new file mode 100644
+index 0000000..f09b373
+--- /dev/null
++++ b/src/nthlayer_common/manifest/legacy_templates/pipeline.yaml
+@@ -0,0 +1,33 @@
++name: pipeline
++description: Data pipeline with 95% success rate SLO
++tier: standard
++type: pipeline
++
++resources:
++  # Success rate SLO - 95.0% (more tolerance for pipelines)
++  - kind: SLO
++    name: success-rate
++    spec:
++      objective: 95.0
++      window: 30d
++      indicator:
++        type: availability
++        query: |
++          sum(rate(pipeline_success_total{service="${service}"}[5m]))
++          /
++          sum(rate(pipeline_runs_total{service="${service}"}[5m]))
++  
++  # Data freshness SLO - p95 under 6 hours
++  - kind: SLO
++    name: freshness-p95
++    spec:
++      objective: 95.0
++      window: 30d
++      indicator:
++        type: latency
++        percentile: 95
++        threshold_ms: 21600000
++        query: |
++          histogram_quantile(0.95,
++            rate(pipeline_duration_seconds_bucket{service="${service}"}[5m])
++          )
+diff --git a/src/nthlayer_common/manifest/legacy_templates/standard-api.yaml b/src/nthlayer_common/manifest/legacy_templates/standard-api.yaml
+new file mode 100644
+index 0000000..974c581
+--- /dev/null
++++ b/src/nthlayer_common/manifest/legacy_templates/standard-api.yaml
+@@ -0,0 +1,40 @@
++name: standard-api
++description: Standard API with 99.5% availability SLO and low urgency PagerDuty
++tier: standard
++type: api
++
++resources:
++  # Availability SLO - 99.5%
++  - kind: SLO
++    name: availability
++    spec:
++      objective: 99.5
++      window: 30d
++      indicator:
++        type: availability
++        query: |
++          sum(rate(http_requests_total{service="${service}",code!~"5.."}[5m]))
++          /
++          sum(rate(http_requests_total{service="${service}"}[5m]))
++  
++  # Latency SLO - p95 under 1000ms
++  - kind: SLO
++    name: latency-p95
++    spec:
++      objective: 95.0
++      window: 30d
++      indicator:
++        type: latency
++        percentile: 95
++        threshold_ms: 1000
++        query: |
++          histogram_quantile(0.95,
++            rate(http_request_duration_seconds_bucket{service="${service}"}[5m])
++          )
++  
++  # PagerDuty integration with low urgency
++  - kind: PagerDuty
++    name: primary
++    spec:
++      urgency: low
++      auto_create: true
+diff --git a/src/nthlayer_common/manifest/models.py b/src/nthlayer_common/manifest/models.py
+index b7b1bd8..11bb82c 100644
+--- a/src/nthlayer_common/manifest/models.py
++++ b/src/nthlayer_common/manifest/models.py
+@@ -226,6 +226,11 @@ class PagerDutyConfig:
+ 
+     service_id: str | None = None
+     escalation_policy_id: str | None = None
++    # Legacy-format PagerDuty resource keys (opensrm-wo62.4.1), read by
++    # nthlayer-generate's setup-pagerduty. srm/v1 and v2 never set them.
++    urgency: str | None = None
++    auto_resolve_timeout: int | None = None
++    create_escalation_policy: dict[str, Any] | None = None
+ 
+ 
+ @dataclass
+diff --git a/src/nthlayer_common/manifest/parser/legacy.py b/src/nthlayer_common/manifest/parser/legacy.py
+new file mode 100644
+index 0000000..791c647
+--- /dev/null
++++ b/src/nthlayer_common/manifest/parser/legacy.py
+@@ -0,0 +1,354 @@
++"""Legacy-format preprocessing: environment overlay, template expansion and
++``${var}`` substitution (opensrm-wo62.4.1, rulings D1-D3).
++
++Applies to the legacy ``service:`` + ``resources:`` format only. The loader
++runs the three steps in this order, before ``_parse_legacy_to_manifest``,
++which is the order nthlayer-generate's ``specs/parser.py`` applied them:
++
++1. :func:`apply_environment_overlay` — ports generate's
++   ``specs/environments.py`` (lookup order, env-name validation) and
++   ``specs/environment_merger.py`` (deep merge).
++2. :func:`expand_template` — ports generate's ``specs/parser.py``
++   ``_merge_resources`` and the template loading in ``template_loader.py``
++   / ``custom_templates.py``. One deliberate change: custom templates are
++   found by walking up from the manifest, not from the current directory.
++3. :func:`substitute_variables` — ports generate's ``specs/template.py``
++   over the context ``ServiceContext.to_dict`` built.
++
++Errors are raised as ValueError; the loader wraps them in ManifestLoadError
++(this module cannot import it without a cycle).
++"""
++
++from __future__ import annotations
++
++import re
++from copy import deepcopy
++from importlib.resources import files
++from pathlib import Path
++from typing import Any
++
++import structlog
++import yaml
++
++from nthlayer_common.manifest.models import resolve_service_type
++from nthlayer_common.tiers import TIER_NAMES
++
++logger = structlog.get_logger()
++
++# generate specs/environments.py VALID_ENVIRONMENT_PATTERN.
++_ENVIRONMENT_NAME = re.compile(r"^[a-z0-9][a-z0-9\-]*[a-z0-9]$|^[a-z0-9]$")
++# generate specs/template.py VARIABLE_PATTERN.
++_VARIABLE = re.compile(r"\$\{(\w+)\}")
++
++BUILTIN_TEMPLATES_PACKAGE = "nthlayer_common.manifest.legacy_templates"
++
++_TEMPLATE_REQUIRED_FIELDS = ("name", "description", "tier", "type")
++
++ResourceKey = tuple[Any, Any]
++
++
++# =============================================================================
++# 1. Environment overlay
++# =============================================================================
++
++
++def validate_environment_name(environment: str) -> str:
++    """Return the lowercased, stripped environment name; ValueError if invalid.
++
++    Rejects path traversal and anything outside ``[a-z0-9-]`` with no
++    leading or trailing hyphen, as generate's validate_environment_name did.
++    """
++    env = environment.lower().strip()
++    if ".." in env or "/" in env or "\\" in env:
++        raise ValueError(f"Invalid environment name (path traversal attempt): {environment!r}")
++    if not _ENVIRONMENT_NAME.match(env):
++        raise ValueError(
++            f"Invalid environment name format: {environment!r}. Must be alphanumeric "
++            "with optional hyphens (e.g. 'dev', 'staging', 'prod-us')."
++        )
++    return env
++
++
++def find_environment_file(manifest_path: Path, environment: str) -> Path | None:
++    """Return the first overlay that exists, most specific first, or None.
++
++    ``environment`` must already be validated. Lookup order:
++
++    1. ``{dir}/environments/{stem}-{env}.yaml``
++    2. ``{dir}/environments/{env}.yaml``
++    3. ``{dir}/.nthlayer/environments/{stem}-{env}.yaml``
++    """
++    base_dir = manifest_path.parent
++    stem = manifest_path.stem
++    candidates = (
++        base_dir / "environments" / f"{stem}-{environment}.yaml",
++        base_dir / "environments" / f"{environment}.yaml",
++        base_dir / ".nthlayer" / "environments" / f"{stem}-{environment}.yaml",
++    )
++    for candidate in candidates:
++        if candidate.exists():
++            return candidate
++    return None
++
++
++def apply_environment_overlay(
++    data: dict[str, Any], manifest_path: Path, environment: str | None
++) -> dict[str, Any]:
++    """Deep-merge the environment overlay for ``environment`` into ``data``.
++
++    No environment (None or "") or no overlay file is a no-op. A malformed
++    overlay raises ValueError naming the overlay file.
++    """
++    if not environment:
++        return data
++    overlay_path = find_environment_file(manifest_path, validate_environment_name(environment))
++    if overlay_path is None:
++        return data
++
++    overlay = _load_overlay(overlay_path)
++    _require_mergeable_base(data, manifest_path)
++    return _merge_service_config(data, overlay)
++
++
++def _load_overlay(path: Path) -> dict[str, Any]:
++    try:
++        overlay = yaml.safe_load(path.read_text())
++    except yaml.YAMLError as exc:
++        raise ValueError(f"Invalid YAML in environment overlay {path}: {exc}") from exc
++
++    def malformed(why: str) -> ValueError:
++        return ValueError(f"Malformed environment overlay {path}: {why}")
++
++    if not isinstance(overlay, dict):
++        raise malformed("expected a YAML mapping at the top level")
++    if "service" in overlay and not isinstance(overlay["service"], dict):
++        raise malformed("'service' must be a mapping")
++    if "resources" in overlay:
++        _require_resource_list(overlay["resources"], malformed)
++    return overlay
++
++
++def _require_mergeable_base(data: dict[str, Any], manifest_path: Path) -> None:
++    def malformed(why: str) -> ValueError:
++        return ValueError(f"{why} in {manifest_path}")
++
++    if "service" in data and not isinstance(data["service"], dict):
++        raise malformed("'service' must be a mapping")
++    if data.get("resources") is not None:
++        _require_resource_list(data["resources"], malformed)
++
++
++def _require_resource_list(resources: Any, error: Any) -> None:
++    if not isinstance(resources, list):
++        raise error("'resources' must be a list")
++    for i, resource in enumerate(resources):
++        if not isinstance(resource, dict):
++            raise error(f"resource {i} must be a mapping")
++
++
++def _merge_service_config(base: dict[str, Any], overlay: dict[str, Any]) -> dict[str, Any]:
++    """generate EnvironmentMerger.merge_service_config."""
++    result = deepcopy(base)
++    if "service" in overlay:
++        result["service"] = _merge_dict(result.get("service") or {}, overlay["service"])
++    if "resources" in overlay:
++        result["resources"] = _merge_overlay_resources(
++            result.get("resources") or [], overlay["resources"]
++        )
++    return result
++
++
++def _merge_dict(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
++    """Deep merge; ``override`` wins, nested mappings merge recursively."""
++    result = deepcopy(base)
++    for key, value in override.items():
++        if isinstance(result.get(key), dict) and isinstance(value, dict):
++            result[key] = _merge_dict(result[key], value)
++        else:
++            result[key] = deepcopy(value)
++    return result
++
++
++def _key(resource: dict[str, Any]) -> ResourceKey:
++    return (resource.get("kind"), resource.get("name"))
++
++
++def _merge_overlay_resources(
++    base: list[dict[str, Any]], overlay: list[dict[str, Any]]
++) -> list[dict[str, Any]]:
++    """generate EnvironmentMerger._merge_resources.
++
++    Resources match on (kind, name). A matched resource has its ``spec``
++    deep-merged and every other overlay key ignored; an unmatched overlay
++    resource is appended. Base order is kept, new resources follow in
++    overlay order.
++    """
++    indexed: dict[ResourceKey, dict[str, Any]] = {_key(r): deepcopy(r) for r in base}
++    for resource in overlay:
++        key = _key(resource)
++        if key not in indexed:
++            indexed[key] = deepcopy(resource)
++        elif "spec" in resource:
++            indexed[key]["spec"] = _merge_dict(indexed[key].get("spec") or {}, resource["spec"])
++
++    base_keys = [_key(r) for r in base]
++    seen = set(base_keys)
++    new_keys = [_key(r) for r in overlay if _key(r) not in seen]
++    return [indexed[k] for k in base_keys + new_keys]
++
++
++# =============================================================================
++# 2. Template expansion
++# =============================================================================
++
++
++def load_templates(template_dir: Path | None) -> dict[str, list[dict[str, Any]]]:
++    """Return {template name: resources}: built-ins, then custom ones over them.
++
++    A template is registered under its ``name`` field, not its file name. A
++    template file that fails to load is skipped with a warning, as in
++    generate, so one bad custom file cannot hide the others.
++    """
++    templates: dict[str, list[dict[str, Any]]] = {}
++    builtin = files(BUILTIN_TEMPLATES_PACKAGE)
++    for entry in sorted(builtin.iterdir(), key=lambda e: e.name):
++        if entry.name.endswith(".yaml"):
++            _register(templates, entry.read_text(), f"built-in {entry.name}")
++    if template_dir is not None:
++        for path in sorted(template_dir.glob("*.yaml")):
++            _register(templates, path.read_text(), str(path))
++    return templates
++
++
++def _register(templates: dict[str, list[dict[str, Any]]], text: str, origin: str) -> None:
++    try:
++        name, resources = _parse_template(text, origin)
++    except (ValueError, yaml.YAMLError) as exc:
++        logger.warning("legacy_template_skipped", template=origin, error=str(exc))
++        return
++    templates[name] = resources
++
++
++def _parse_template(text: str, origin: str) -> tuple[str, list[dict[str, Any]]]:
++    """Validate one template file as generate's TemplateLoader/ServiceTemplate did."""
++    data = yaml.safe_load(text)
++    if not data:
++        raise ValueError(f"Empty template file: {origin}")
++    if not isinstance(data, dict):
++        raise ValueError(f"Template must be a YAML mapping: {origin}")
++    for field in _TEMPLATE_REQUIRED_FIELDS:
++        if field not in data:
++            raise ValueError(f"Missing required field '{field}' in template: {origin}")
++    if data["tier"] not in TIER_NAMES:
++        raise ValueError(f"Invalid tier {data['tier']!r} in template: {origin}")
++    if resolve_service_type(data["type"]) is None:
++        raise ValueError(f"Invalid type {data['type']!r} in template: {origin}")
++    if not isinstance(data["name"], str):
++        raise ValueError(f"Template name must be a string: {origin}")
++
++    raw_resources = data.get("resources", [])
++    if not isinstance(raw_resources, list):
++        raise ValueError(f"'resources' must be a list in template: {origin}")
++    resources = []
++    for i, resource in enumerate(raw_resources):
++        if not isinstance(resource, dict):
++            raise ValueError(f"Resource {i} must be a mapping in template: {origin}")
++        spec = resource.get("spec", {})
++        if not resource.get("kind") or not resource.get("name") or spec is None:
++            raise ValueError(f"Resource {i} needs kind, name and spec in template: {origin}")
++        # Only kind, name and spec survive, as generate's Resource kept them.
++        resources.append({"kind": resource["kind"], "name": resource["name"], "spec": spec})
++    return data["name"], resources
++
++
++def expand_template(
++    data: dict[str, Any], manifest_path: Path, template_dir: Path | None
++) -> dict[str, Any]:
++    """Merge ``service.template``'s resources into ``data['resources']``.
++
++    Template resources come first; a user resource with the same
++    (kind, name) replaces the template one WHOLE (no spec merge); new user
++    resources follow. No template set is a no-op. An unknown template
++    raises ValueError listing the available ones.
++    """
++    service = data.get("service")
++    template_name = service.get("template") if isinstance(service, dict) else None
++    if not template_name:
++        return data
++
++    templates = load_templates(template_dir)
++    if not isinstance(template_name, str) or template_name not in templates:
++        raise ValueError(
++            f"Unknown template {template_name!r} in {manifest_path}. "
++            f"Available templates: {', '.join(sorted(templates))}"
++        )
++
++    user_resources = data.get("resources")
++    if user_resources is None:
++        user_resources = []
++    _require_resource_list(user_resources, lambda why: ValueError(f"{why} in {manifest_path}"))
++
++    result = dict(data)
++    result["resources"] = _merge_template_resources(
++        deepcopy(templates[template_name]), user_resources
++    )
++    return result
++
++
++def _merge_template_resources(
++    template: list[dict[str, Any]], user: list[dict[str, Any]]
++) -> list[dict[str, Any]]:
++    """generate specs/parser.py _merge_resources."""
++    merged: dict[ResourceKey, dict[str, Any]] = {}
++    for resource in template + user:
++        merged[_key(resource)] = resource
++
++    template_keys = [_key(r) for r in template]
++    seen = set(template_keys)
++    return [merged[k] for k in template_keys] + [r for r in user if _key(r) not in seen]
++
++
++# =============================================================================
++# 3. ${var} substitution
++# =============================================================================
++
++
++def substitute_variables(data: dict[str, Any], environment: str | None) -> dict[str, Any]:
++    """Replace ``${var}`` throughout ``data`` (values only, not keys).
++
++    Variables are generate's ServiceContext.to_dict: service, team, tier,
++    type (as authored, not alias-resolved), support_model (default
++    ``self``), language and framework (``""`` when unset), and env (only
++    when an environment is given, exactly as passed). An unknown variable,
++    or one whose value is None, is left as written.
++    """
++    service = data.get("service")
++    if not isinstance(service, dict):
++        service = {}
++    context: dict[str, Any] = {
++        "service": service.get("name"),
++        "team": service.get("team"),
++        "tier": service.get("tier"),
++        "type": service.get("type"),
++        "support_model": service.get("support_model", "self"),
++        "language": service.get("language") or "",
++        "framework": service.get("framework") or "",
++    }
++    if environment:
++        context["env"] = environment
++    return _substitute(data, context)
++
++
++def _substitute(value: Any, context: dict[str, Any]) -> Any:
++    if isinstance(value, str):
++        return _VARIABLE.sub(lambda m: _lookup(m, context), value)
++    if isinstance(value, dict):
++        return {k: _substitute(v, context) for k, v in value.items()}
++    if isinstance(value, list):
++        return [_substitute(item, context) for item in value]
++    return value
++
++
++def _lookup(match: re.Match[str], context: dict[str, Any]) -> str:
++    value = context.get(match.group(1))
++    return match.group(0) if value is None else str(value)
+diff --git a/src/nthlayer_common/manifest/parser/loader.py b/src/nthlayer_common/manifest/parser/loader.py
+index 6732354..9d5efec 100644
+--- a/src/nthlayer_common/manifest/parser/loader.py
++++ b/src/nthlayer_common/manifest/parser/loader.py
+@@ -33,6 +33,7 @@ from nthlayer_common.manifest.models import (
+     SourceFormat,
+ )
+ from nthlayer_common.manifest.opensrm_v1 import OPENSRM_V1_REJECTION, is_opensrm_v1_format
++from nthlayer_common.manifest.parser import legacy
+ from nthlayer_common.manifest.parser._shared import judgment_slo_fields
+ from nthlayer_common.manifest.parser.v1 import (
+     OpenSRMParseError,
+@@ -74,6 +75,12 @@ def load_manifest(
+       - srm/v1 → v1 parser
+       - opensrm.nthlayer.io/v2 → v2 parser
+       - service: section → legacy parser
++
++    For the legacy format only, ``environment`` selects an overlay
++    (``environments/{stem}-{env}.yaml``, ``environments/{env}.yaml``,
++    ``.nthlayer/environments/{stem}-{env}.yaml``) deep-merged before parsing;
++    ``service.template`` is then expanded and ``${var}`` substituted
++    (parser/legacy.py, opensrm-wo62.4.1). srm/v1 and v2 only record it.
+     """
+     path = Path(file_path)
+ 
+@@ -135,6 +142,14 @@ def load_manifest(
+                 LegacyFormatWarning,
+                 stacklevel=2,
+             )
++        # Overlay, then template, then ${var} — generate's legacy order
++        # (opensrm-wo62.4.1). See parser/legacy.py.
++        try:
++            data = legacy.apply_environment_overlay(data, path, environment)
++            data = legacy.expand_template(data, path, _find_template_dir(path))
++            data = legacy.substitute_variables(data, environment)
++        except ValueError as e:
++            raise ManifestLoadError(str(e)) from e
+         manifest = _parse_legacy_to_manifest(data, str(path), environment)
+ 
+     # Cross-subsystem target-convention drift check (opensrm-pa2w). Emits
+@@ -510,6 +525,9 @@ def _extract_ownership(
+             ownership.pagerduty = PagerDutyConfig(
+                 service_id=spec.get("service_id"),
+                 escalation_policy_id=spec.get("escalation_policy"),
++                urgency=spec.get("urgency"),
++                auto_resolve_timeout=spec.get("auto_resolve_timeout"),
++                create_escalation_policy=spec.get("create_escalation_policy"),
+             )
+             ownership.escalation = spec.get("escalation_policy")
+             break
+diff --git a/tests/fixtures/legacy_loader/custom_templates/critical-api.yaml b/tests/fixtures/legacy_loader/custom_templates/critical-api.yaml
+new file mode 100644
+index 0000000..8567648
+--- /dev/null
++++ b/tests/fixtures/legacy_loader/custom_templates/critical-api.yaml
+@@ -0,0 +1,22 @@
++# Adapted from nthlayer-generate src/nthlayer_generate/specs/builtin_templates/critical-api.yaml
++# (opensrm-wo62.4.1): an organisation's custom override of the built-in.
++# Availability objective 99.9 -> 99.95 and the description changed; the
++# latency SLO and PagerDuty resource are dropped. A custom template is
++# registered by its `name` field, not its file name (generate
++# custom_templates.py / template_loader.py), so this file is installed
++# under a different file name by the tests.
++
++name: critical-api
++description: Org-wide critical API with 99.95% availability
++tier: critical
++type: api
++
++resources:
++  - kind: SLO
++    name: availability
++    spec:
++      objective: 99.95
++      window: 30d
++      indicator:
++        type: availability
++        query: sum(rate(http_requests_total{service="${service}"}[5m]))
+diff --git a/tests/fixtures/legacy_loader/opensrm-v2-payment-api.yaml b/tests/fixtures/legacy_loader/opensrm-v2-payment-api.yaml
+new file mode 100644
+index 0000000..1a100e9
+--- /dev/null
++++ b/tests/fixtures/legacy_loader/opensrm-v2-payment-api.yaml
+@@ -0,0 +1,43 @@
++# opensrm.nthlayer.io/v2 manifest copied from the v2_manifest_data fixture
++# in tests/test_manifest_parser.py (opensrm-wo62.4.1), with the service
++# description changed to carry a literal ${team}. Used to prove the
++# legacy-only preprocessing does not touch v2.
++
++apiVersion: opensrm.nthlayer.io/v2
++kind: ServiceManifest
++metadata:
++  name: payment-service
++  namespace: payments
++  labels:
++    tier: critical
++    type: api
++spec:
++  owner:
++    group: group:default/sre-payments
++  service:
++    name: payment-service
++    type: api
++    description: "Payments for ${team}"
++  slo:
++    - apiVersion: openslo/v1
++      kind: SLO
++      metadata:
++        name: payment-availability
++      spec:
++        indicator:
++          metadata:
++            name: availability
++          spec:
++            ratioMetric:
++              total:
++                metricSource:
++                  type: Prometheus
++                  spec:
++                    query: rate(http_requests_total[5m])
++              good:
++                metricSource:
++                  type: Prometheus
++                  spec:
++                    query: 'rate(http_requests_total{status=~"2.."}[5m])'
++        objectives:
++          - target: 0.9999
+diff --git a/tests/fixtures/legacy_loader/services/.nthlayer/environments/payment-api-canary.yaml b/tests/fixtures/legacy_loader/services/.nthlayer/environments/payment-api-canary.yaml
+new file mode 100644
+index 0000000..cc1bbae
+--- /dev/null
++++ b/tests/fixtures/legacy_loader/services/.nthlayer/environments/payment-api-canary.yaml
+@@ -0,0 +1,19 @@
++# Adapted from nthlayer-generate examples/environments/payment-api-dev.yaml
++# (opensrm-wo62.4.1): environment renamed to canary (so that no step 1 or
++# step 2 file exists), metadata trimmed to one key plus one ${env}
++# reference, and the availability SLO kept unchanged.
++
++environment: canary
++
++service:
++  tier: standard
++  metadata:
++    testing_mode: true
++    deployment: "${service}-${env}"
++
++resources:
++  - kind: SLO
++    name: availability
++    spec:
++      objective: 99.0
++      window: 7d
+diff --git a/tests/fixtures/legacy_loader/services/.nthlayer/environments/payment-api-staging.yaml b/tests/fixtures/legacy_loader/services/.nthlayer/environments/payment-api-staging.yaml
+new file mode 100644
+index 0000000..35f59f5
+--- /dev/null
++++ b/tests/fixtures/legacy_loader/services/.nthlayer/environments/payment-api-staging.yaml
+@@ -0,0 +1,9 @@
++# Adapted from nthlayer-generate examples/environments/payment-api-dev.yaml
++# (opensrm-wo62.4.1): environment renamed to staging and tier set to low.
++# Lookup step 3 ({dir}/.nthlayer/environments/{stem}-{env}.yaml); it must
++# LOSE to step 2 (environments/staging.yaml), which sets tier standard.
++
++environment: staging
++
++service:
++  tier: low
+diff --git a/tests/fixtures/legacy_loader/services/api-minimal.yaml b/tests/fixtures/legacy_loader/services/api-minimal.yaml
+new file mode 100644
+index 0000000..e2856bd
+--- /dev/null
++++ b/tests/fixtures/legacy_loader/services/api-minimal.yaml
+@@ -0,0 +1,9 @@
++# Copy of nthlayer-generate examples/services/api-minimal.yaml
++# (opensrm-wo62.4.1), unchanged below this header.
++
++service:
++  name: api-minimal
++  team: platform
++  tier: critical
++  type: api
++  template: critical-api
+diff --git a/tests/fixtures/legacy_loader/services/auth-api.yaml b/tests/fixtures/legacy_loader/services/auth-api.yaml
+new file mode 100644
+index 0000000..246ed01
+--- /dev/null
++++ b/tests/fixtures/legacy_loader/services/auth-api.yaml
+@@ -0,0 +1,42 @@
++# Minimal copy of nthlayer-generate examples/services/auth-api.yaml
++# (opensrm-wo62.4.1). The Dependencies resource is trimmed to one service;
++# the SLO resources are unchanged.
++
++service:
++  name: auth-api
++  team: platform
++  tier: critical
++  type: api
++  language: go
++  framework: gin
++  template: critical-api
++
++resources:
++  # Override: Auth needs to be faster than default
++  - kind: SLO
++    name: latency-p95
++    spec:
++      threshold_ms: 200
++      objective: 99.5
++
++  # Add: Token generation latency
++  - kind: SLO
++    name: token-generation-latency
++    spec:
++      objective: 99.0
++      window: 30d
++      indicator:
++        type: latency
++        percentile: 95
++        threshold_ms: 100
++        query: |
++          histogram_quantile(0.95,
++            rate(token_generation_duration_seconds_bucket{service="${service}"}[5m])
++          )
++
++  - kind: Dependencies
++    name: upstream
++    spec:
++      services:
++        - name: user-service
++          criticality: critical
+diff --git a/tests/fixtures/legacy_loader/services/email-worker.yaml b/tests/fixtures/legacy_loader/services/email-worker.yaml
+new file mode 100644
+index 0000000..0056970
+--- /dev/null
++++ b/tests/fixtures/legacy_loader/services/email-worker.yaml
+@@ -0,0 +1,19 @@
++# Minimal copy of nthlayer-generate examples/services/email-worker.yaml
++# (opensrm-wo62.4.1). The Dependencies resource is dropped; the service
++# block and the SLO override are unchanged.
++
++service:
++  name: email-worker
++  team: notifications
++  tier: standard
++  type: background-job
++  language: python
++  framework: celery
++  template: background-job
++
++resources:
++  # Override: Email sending can take longer than default 60s
++  - kind: SLO
++    name: processing-latency-p95
++    spec:
++      threshold_ms: 120000
+diff --git a/tests/fixtures/legacy_loader/services/environments/dev.yaml b/tests/fixtures/legacy_loader/services/environments/dev.yaml
+new file mode 100644
+index 0000000..92bf4f6
+--- /dev/null
++++ b/tests/fixtures/legacy_loader/services/environments/dev.yaml
+@@ -0,0 +1,24 @@
++# Copy of nthlayer-generate examples/services/environments/dev.yaml
++# (opensrm-wo62.4.1), unchanged below this header except comments removed.
++
++environment: dev
++
++service:
++  tier: low
++
++resources:
++  - kind: SLO
++    name: availability
++    spec:
++      objective: 99.0
++
++  - kind: SLO
++    name: latency-p95
++    spec:
++      objective: 90.0
++      threshold_ms: 2000
++
++  - kind: PagerDuty
++    name: primary
++    spec:
++      urgency: low
+diff --git a/tests/fixtures/legacy_loader/services/environments/payment-api-prod.yaml b/tests/fixtures/legacy_loader/services/environments/payment-api-prod.yaml
+new file mode 100644
+index 0000000..01602b3
+--- /dev/null
++++ b/tests/fixtures/legacy_loader/services/environments/payment-api-prod.yaml
+@@ -0,0 +1,52 @@
++# Minimal copy of nthlayer-generate examples/environments/payment-api-prod.yaml
++# (opensrm-wo62.4.1). Metadata is trimmed to two keys, the latency-p95/p99
++# SLOs and PagerDuty resource are unchanged, and the Dependencies resource
++# keeps one database.
++
++environment: prod
++
++service:
++  tier: critical
++  metadata:
++    criticality: mission-critical
++    compliance: pci-dss
++
++resources:
++  - kind: SLO
++    name: availability
++    spec:
++      objective: 99.99
++      window: 30d
++      indicator:
++        success_rate:
++          total_query: 'sum(rate(http_requests_total{service="payment-api"}[5m]))'
++          error_query: 'sum(rate(http_requests_total{service="payment-api",status=~"5.."}[5m]))'
++
++  - kind: SLO
++    name: latency-p95
++    spec:
++      objective: 99.5
++      window: 30d
++      threshold_ms: 300
++
++  - kind: SLO
++    name: latency-p99
++    spec:
++      objective: 99.0
++      window: 30d
++      threshold_ms: 500
++
++  - kind: Dependencies
++    name: databases
++    spec:
++      databases:
++        - type: postgres
++          instance: payment-db-prod
++
++  - kind: PagerDuty
++    name: primary
++    spec:
++      escalation_policy: payment-critical
++      urgency: high
++      auto_resolve: false
++      acknowledgement_timeout: 5m
+diff --git a/tests/fixtures/legacy_loader/services/environments/prod.yaml b/tests/fixtures/legacy_loader/services/environments/prod.yaml
+new file mode 100644
+index 0000000..6f99151
+--- /dev/null
++++ b/tests/fixtures/legacy_loader/services/environments/prod.yaml
+@@ -0,0 +1,10 @@
++# Minimal copy of nthlayer-generate examples/environments/prod.yaml
++# (opensrm-wo62.4.1). Metadata is trimmed to two keys.
++
++environment: prod
++
++service:
++  tier: critical
++  metadata:
++    environment: prod
++    monitoring_level: comprehensive
+diff --git a/tests/fixtures/legacy_loader/services/environments/staging.yaml b/tests/fixtures/legacy_loader/services/environments/staging.yaml
+new file mode 100644
+index 0000000..6339118
+--- /dev/null
++++ b/tests/fixtures/legacy_loader/services/environments/staging.yaml
+@@ -0,0 +1,24 @@
++# Copy of nthlayer-generate examples/services/environments/staging.yaml
++# (opensrm-wo62.4.1), unchanged below this header except comments removed.
++
++environment: staging
++
++service:
++  tier: standard
++
++resources:
++  - kind: SLO
++    name: availability
++    spec:
++      objective: 99.5
++
++  - kind: SLO
++    name: latency-p95
++    spec:
++      objective: 95.0
++      threshold_ms: 1000
++
++  - kind: PagerDuty
++    name: primary
++    spec:
++      urgency: low
+diff --git a/tests/fixtures/legacy_loader/services/full-pagerduty.yaml b/tests/fixtures/legacy_loader/services/full-pagerduty.yaml
+new file mode 100644
+index 0000000..d07d249
+--- /dev/null
++++ b/tests/fixtures/legacy_loader/services/full-pagerduty.yaml
+@@ -0,0 +1,21 @@
++# Adapted from nthlayer-generate tests/test_cli_pagerduty.py, fixture
++# service_with_full_pagerduty (opensrm-wo62.4.1). Only change: tier
++# "tier-1" -> "critical", because nthlayer-common's manifest model rejects
++# tier-1 and the PagerDuty spec is what this fixture is for.
++
++service:
++  name: critical-api
++  team: platform-team
++  tier: critical
++  type: api
++resources:
++  - kind: PagerDuty
++    name: primary
++    spec:
++      escalation_policy: platform-oncall
++      urgency: high
++      auto_resolve_timeout: 14400
++      create_escalation_policy:
++        name: auto-created-policy
++        users:
++          - user@example.com
+diff --git a/tests/fixtures/legacy_loader/services/payment-api-pagerduty-demo.yaml b/tests/fixtures/legacy_loader/services/payment-api-pagerduty-demo.yaml
+new file mode 100644
+index 0000000..cd84d2a
+--- /dev/null
++++ b/tests/fixtures/legacy_loader/services/payment-api-pagerduty-demo.yaml
+@@ -0,0 +1,20 @@
++# Minimal copy of nthlayer-generate examples/services/payment-api-pagerduty-demo.yaml
++# (opensrm-wo62.4.1). Only the service block and the PagerDuty resource are
++# kept, unchanged.
++
++service:
++  name: payment-api
++  team: payments
++  tier: critical
++  type: api
++  support_model: shared
++  language: java
++  framework: spring-boot
++
++resources:
++  - kind: PagerDuty
++    name: primary
++    spec:
++      urgency: high
++      auto_resolve_timeout: 14400
++      auto_create: true
+diff --git a/tests/fixtures/legacy_loader/services/payment-api-with-envs.yaml b/tests/fixtures/legacy_loader/services/payment-api-with-envs.yaml
+new file mode 100644
+index 0000000..292993c
+--- /dev/null
++++ b/tests/fixtures/legacy_loader/services/payment-api-with-envs.yaml
+@@ -0,0 +1,9 @@
++# Copy of nthlayer-generate examples/services/payment-api-with-envs.yaml
++# (opensrm-wo62.4.1), unchanged below this header.
++
++service:
++  name: payment-api
++  team: payments
++  tier: critical
++  type: api
++  template: critical-api
+diff --git a/tests/fixtures/legacy_loader/services/payment-api.yaml b/tests/fixtures/legacy_loader/services/payment-api.yaml
+new file mode 100644
+index 0000000..f8fdb8c
+--- /dev/null
++++ b/tests/fixtures/legacy_loader/services/payment-api.yaml
+@@ -0,0 +1,50 @@
++# Minimal copy of nthlayer-generate examples/services/payment-api.yaml
++# (opensrm-wo62.4.1). Trimmed to the resources the overlay tests read:
++# latency-p99, the Observability resource and the latency-p95 query are
++# dropped; nothing else is changed.
++
++service:
++  name: payment-api
++  team: payments
++  tier: critical
++  type: api
++  language: java
++  framework: spring-boot
++
++resources:
++  - kind: SLO
++    name: availability
++    spec:
++      objective: 99.95
++      window: 30d
++      indicator:
++        type: availability
++        query: |
++          sum(rate(http_requests{service="${service}",code!~"5.."}[5m]))
++          /
++          sum(rate(http_requests{service="${service}"}[5m]))
++
++  - kind: SLO
++    name: latency-p95
++    spec:
++      objective: 99.0
++      window: 30d
++      indicator:
++        type: latency
++        percentile: 95
++        threshold_ms: 500
++
++  - kind: PagerDuty
++    name: primary
++    spec:
++      escalation_policy: payments-critical
++      urgency: high
++      auto_create: true
++
++  - kind: Dependencies
++    name: upstream
++    spec:
++      databases:
++        - name: payments-db
++          type: postgresql
++          criticality: high
+diff --git a/tests/fixtures/legacy_loader/services/substitution-defaults.yaml b/tests/fixtures/legacy_loader/services/substitution-defaults.yaml
+new file mode 100644
+index 0000000..3570c7f
+--- /dev/null
++++ b/tests/fixtures/legacy_loader/services/substitution-defaults.yaml
+@@ -0,0 +1,18 @@
++# Adapted from nthlayer-generate examples/services/email-worker.yaml
++# (opensrm-wo62.4.1). language, framework and template are removed so the
++# defaults apply, and one SLO's description names the variables whose
++# value is a default or the authored (unresolved) type.
++
++service:
++  name: email-worker
++  team: notifications
++  tier: standard
++  type: background-job
++
++resources:
++  - kind: SLO
++    name: success-rate
++    spec:
++      objective: 99.0
++      window: 30d
++      description: "${type}|${support_model}|${language}|${framework}"
+diff --git a/tests/fixtures/legacy_loader/services/substitution-demo.yaml b/tests/fixtures/legacy_loader/services/substitution-demo.yaml
+new file mode 100644
+index 0000000..d7792a2
+--- /dev/null
++++ b/tests/fixtures/legacy_loader/services/substitution-demo.yaml
+@@ -0,0 +1,25 @@
++# Adapted from nthlayer-generate examples/services/payment-api-pagerduty-demo.yaml
++# (opensrm-wo62.4.1). The service block is unchanged except for the added
++# description; the availability SLO gains a description naming every legacy
++# substitution variable (nthlayer-generate specs/models.py
++# ServiceContext.to_dict, plus env) and one unknown variable.
++
++service:
++  name: payment-api
++  team: payments
++  tier: critical
++  type: api
++  support_model: shared
++  language: java
++  framework: spring-boot
++  description: "${team} own ${service}"
++
++resources:
++  - kind: SLO
++    name: availability
++    spec:
++      objective: 99.95
++      window: 30d
++      description: "${service}|${team}|${tier}|${type}|${support_model}|${language}|${framework}|${env}|${unknown}"
++      indicator:
++        type: availability
+diff --git a/tests/fixtures/legacy_loader/srm-v1-payment-api.yaml b/tests/fixtures/legacy_loader/srm-v1-payment-api.yaml
+new file mode 100644
+index 0000000..e191045
+--- /dev/null
++++ b/tests/fixtures/legacy_loader/srm-v1-payment-api.yaml
+@@ -0,0 +1,26 @@
++# srm/v1 manifest copied from the v1_manifest_data fixture in
++# tests/test_manifest_parser.py (opensrm-wo62.4.1), plus an
++# ownership.pagerduty block (srm/v1 parser shape, parser/v1.py
++# _parse_ownership) and a literal ${service} in the indicator query.
++# Used to prove the legacy-only preprocessing does not touch srm/v1.
++
++apiVersion: srm/v1
++kind: ServiceReliabilityManifest
++metadata:
++  name: payment-api
++  team: payments
++  tier: critical
++spec:
++  type: api
++  slos:
++    availability:
++      target: 99.99
++      window: 30d
++      indicator:
++        type: availability
++        query: 'sum(rate(http_requests_total{service="${service}",status=~"2.."}[5m])) / sum(rate(http_requests_total[5m]))'
++  ownership:
++    team: payments
++    pagerduty:
++      service_id: PABC123
++      escalation_policy_id: PEP456
+diff --git a/tests/smoke/test_package_data.py b/tests/smoke/test_package_data.py
+new file mode 100644
+index 0000000..aea8972
+--- /dev/null
++++ b/tests/smoke/test_package_data.py
+@@ -0,0 +1,25 @@
++"""Smoke test: non-Python package data is present in the installed wheel.
++
++The legacy built-in templates are YAML loaded through importlib.resources
++(opensrm-wo62.4.1). The dev tree always has them, so only a check against
++the installed wheel catches a missing ``[tool.setuptools.package-data]``
++entry, which would make every legacy ``service.template`` fail as unknown.
++"""
++
++from __future__ import annotations
++
++from importlib.resources import files
++
++LEGACY_TEMPLATES = {
++    "background-job.yaml",
++    "critical-api.yaml",
++    "low-api.yaml",
++    "pipeline.yaml",
++    "standard-api.yaml",
++}
++
++
++def test_legacy_builtin_templates_are_in_the_wheel():
++    package = files("nthlayer_common.manifest.legacy_templates")
++    names = {entry.name for entry in package.iterdir() if entry.name.endswith(".yaml")}
++    assert names == LEGACY_TEMPLATES
+diff --git a/tests/test_legacy_loader_overlays.py b/tests/test_legacy_loader_overlays.py
+new file mode 100644
+index 0000000..96c4eb3
+--- /dev/null
++++ b/tests/test_legacy_loader_overlays.py
+@@ -0,0 +1,558 @@
++"""Legacy-format load: environment overlays, template expansion, ${var}
++substitution and PagerDuty keys (opensrm-wo62.4.1, rulings D1-D4).
++
++Every expected value below is derived from nthlayer-generate's legacy
++semantics, not from nthlayer-common's implementation:
++
++- overlay lookup order and env-name rules: generate specs/environments.py
++  (EnvironmentLoader.find_environment_file, validate_environment_name);
++- overlay merge: generate specs/environment_merger.py (merge_service_config:
++  the service block is deep-merged; resources are keyed by (kind, name) and
++  only their spec is deep-merged; new resources are appended);
++- template expansion: generate specs/parser.py (parse_service_file applies
++  the overlay FIRST, then _merge_resources: template resources first, a user
++  resource with the same (kind, name) REPLACES the template one whole, new
++  user resources follow) and custom_templates.py / template_loader.py
++  (custom templates are keyed by their `name` field and override built-ins;
++  an invalid template file is skipped);
++- substitution: generate specs/template.py over ServiceContext.to_dict
++  (type as authored, support_model default "self", language/framework ""
++  when unset, env only when an environment is given; unknown left as-is).
++
++The fixture tree (tests/fixtures/legacy_loader) is copied into tmp_path
++for each test so that the .nthlayer/templates walk-up cannot reach a
++directory outside the test.
++"""
++
++from __future__ import annotations
++
++import shutil
++import warnings
++from importlib.resources import files
++from pathlib import Path
++
++import pytest
++
++from nthlayer_common.manifest import ManifestLoadError, PagerDutyConfig, load_manifest
++from nthlayer_common.manifest.models import SourceFormat
++from nthlayer_common.manifest.parser.loader import _find_template_dir
++
++FIXTURES = Path(__file__).parent / "fixtures" / "legacy_loader"
++
++BUILTIN_TEMPLATE_NAMES = {
++    "background-job",
++    "critical-api",
++    "low-api",
++    "pipeline",
++    "standard-api",
++}
++
++# Template query from builtin critical-api.yaml with ${service} = api-minimal.
++CRITICAL_API_AVAILABILITY_QUERY = (
++    'sum(rate(http_requests_total{service="api-minimal",code!~"5.."}[5m]))\n'
++    "/\n"
++    'sum(rate(http_requests_total{service="api-minimal"}[5m]))\n'
++)
++
++# payment-api.yaml's availability query with ${service} = payment-api.
++PAYMENT_API_AVAILABILITY_QUERY = (
++    'sum(rate(http_requests{service="payment-api",code!~"5.."}[5m]))\n'
++    "/\n"
++    'sum(rate(http_requests{service="payment-api"}[5m]))\n'
++)
++
++
++@pytest.fixture
++def tree(tmp_path: Path) -> Path:
++    """A private copy of the fixture tree; returns its services/ dir."""
++    expected = [
++        "services/payment-api.yaml",
++        "services/payment-api-with-envs.yaml",
++        "services/api-minimal.yaml",
++        "services/auth-api.yaml",
++        "services/email-worker.yaml",
++        "services/environments/payment-api-prod.yaml",
++        "services/environments/prod.yaml",
++        "services/environments/staging.yaml",
++        "services/environments/dev.yaml",
++        "services/.nthlayer/environments/payment-api-staging.yaml",
++        "services/.nthlayer/environments/payment-api-canary.yaml",
++        "custom_templates/critical-api.yaml",
++    ]
++    for rel in expected:
++        assert (FIXTURES / rel).is_file(), f"fixture missing: {rel}"
++    root = tmp_path / "legacy_loader"
++    shutil.copytree(FIXTURES, root)
++    services = root / "services"
++    # The copies must not pick up a template dir from outside the test.
++    assert _find_template_dir(services / "api-minimal.yaml") is None
++    return services
++
++
++def _load(path: Path, environment: str | None = None):
++    with warnings.catch_warnings():
++        warnings.simplefilter("ignore")
++        return load_manifest(path, environment=environment)
++
++
++def _slos(manifest) -> dict:
++    return {s.name: s for s in manifest.slos}
++
++
++def _resource_keys(manifest) -> list[tuple[str, str]]:
++    return [(r["kind"], r["name"]) for r in manifest.raw_data["resources"]]
++
++
++def _resource(manifest, kind: str, name: str) -> dict:
++    matches = [r for r in manifest.raw_data["resources"] if (r["kind"], r["name"]) == (kind, name)]
++    assert len(matches) == 1
++    return matches[0]
++
++
++# =============================================================================
++# D1 — environment overlay: lookup order
++# =============================================================================
++
++
++class TestOverlayLookupOrder:
++    def test_step1_service_specific_file_beats_shared(self, tree):
++        # environments/payment-api-prod.yaml and environments/prod.yaml both exist.
++        m = _load(tree / "payment-api.yaml", "prod")
++        metadata = m.raw_data["service"]["metadata"]
++        assert metadata == {"criticality": "mission-critical", "compliance": "pci-dss"}
++        assert "monitoring_level" not in metadata  # prod.yaml was not read
++        assert _slos(m)["availability"].target == 99.99
++
++    def test_step2_shared_file_when_no_service_specific(self, tree):
++        # Stem payment-api-with-envs has no {stem}-prod.yaml -> environments/prod.yaml.
++        m = _load(tree / "payment-api-with-envs.yaml", "prod")
++        assert m.raw_data["service"]["metadata"] == {
++            "environment": "prod",
++            "monitoring_level": "comprehensive",
++        }
++
++    def test_step2_beats_step3(self, tree):
++        # environments/staging.yaml (tier standard) and
++        # .nthlayer/environments/payment-api-staging.yaml (tier low) both exist.
++        m = _load(tree / "payment-api.yaml", "staging")
++        assert m.tier == "standard"
++        assert _slos(m)["availability"].target == 99.5
++
++    def test_step3_nthlayer_dir_when_nothing_else(self, tree):
++        m = _load(tree / "payment-api.yaml", "canary")
++        assert m.tier == "standard"
++        assert m.raw_data["service"]["metadata"]["testing_mode"] is True
++
++    def test_step3_is_only_service_specific(self, tree):
++        # .nthlayer/environments has payment-api-staging.yaml only; a stem with
++        # no matching file there and no environments/ match gets no overlay.
++        (tree / "environments" / "staging.yaml").unlink()
++        m = _load(tree / "payment-api-with-envs.yaml", "staging")
++        assert m.tier == "critical"
++
++    def test_lookup_uses_lowercased_name(self, tree):
++        m = _load(tree / "payment-api.yaml", "PROD")
++        assert _slos(m)["availability"].target == 99.99
++        # The manifest records the environment as given (legacy stored the raw arg).
++        assert m.environment == "PROD"
++
++    def test_missing_overlay_is_a_no_op(self, tree):
++        base = _load(tree / "payment-api.yaml")
++        m = _load(tree / "payment-api.yaml", "qa")
++        assert m.environment == "qa"
++        assert m.tier == base.tier == "critical"
++        assert m.raw_data == base.raw_data
++
++    def test_no_environment_reads_no_overlay(self, tree):
++        m = _load(tree / "payment-api.yaml")
++        assert m.environment is None
++        assert _slos(m)["availability"].target == 99.95
++
++    def test_empty_environment_is_treated_as_none(self, tree):
++        # Legacy guarded with `if environment:`, so "" neither validates nor looks up.
++        m = _load(tree / "payment-api.yaml", "")
++        assert _slos(m)["availability"].target == 99.95
++
++
++# =============================================================================
++# D1 — environment overlay: merge
++# =============================================================================
++
++
++class TestOverlayMerge:
++    def test_service_block_is_deep_merged(self, tree):
++        m = _load(tree / "payment-api.yaml", "canary")
++        service = m.raw_data["service"]
++        assert service["tier"] == "standard"  # overridden
++        assert service["language"] == "java"  # kept from base
++        assert service["framework"] == "spring-boot"
++        assert m.language == "java"
++
++    def test_resource_spec_is_deep_merged(self, tree):
++        m = _load(tree / "payment-api.yaml", "prod")
++        spec = _resource(m, "SLO", "availability")["spec"]
++        assert spec["objective"] == 99.99
++        assert spec["window"] == "30d"
++        # Base indicator keys survive; the overlay's success_rate is added.
++        assert spec["indicator"]["type"] == "availability"
++        assert set(spec["indicator"]["success_rate"]) == {"total_query", "error_query"}
++        assert _slos(m)["availability"].indicator_query == PAYMENT_API_AVAILABILITY_QUERY
++
++    def test_nested_spec_keys_survive_a_partial_override(self, tree):
++        m = _load(tree / "payment-api.yaml", "prod")
++        spec = _resource(m, "SLO", "latency-p95")["spec"]
++        assert spec["objective"] == 99.5
++        assert spec["threshold_ms"] == 300
++        assert spec["indicator"] == {"type": "latency", "percentile": 95, "threshold_ms": 500}
++
++    def test_overlay_pagerduty_spec_is_merged(self, tree):
++        m = _load(tree / "payment-api.yaml", "prod")
++        spec = _resource(m, "PagerDuty", "primary")["spec"]
++        assert spec == {
++            "escalation_policy": "payment-critical",
++            "urgency": "high",
++            "auto_create": True,
++            "auto_resolve": False,
++            "acknowledgement_timeout": "5m",
++        }
++        assert m.ownership.pagerduty.escalation_policy_id == "payment-critical"
++        assert m.ownership.escalation == "payment-critical"
++
++    def test_new_overlay_resources_are_appended_in_order(self, tree):
++        m = _load(tree / "payment-api.yaml", "prod")
++        assert _resource_keys(m) == [
++            ("SLO", "availability"),
++            ("SLO", "latency-p95"),
++            ("PagerDuty", "primary"),
++            ("Dependencies", "upstream"),
++            ("SLO", "latency-p99"),
++            ("Dependencies", "databases"),
++        ]
++        assert [s.name for s in m.slos] == ["availability", "latency-p95", "latency-p99"]
++        assert _slos(m)["latency-p99"].target == 99.0
++
++    def test_overlay_does_not_mutate_the_fixture(self, tree):
++        before = (tree / "payment-api.yaml").read_text()
++        _load(tree / "payment-api.yaml", "prod")
++        assert (tree / "payment-api.yaml").read_text() == before
++
++
++# =============================================================================
++# D1 — environment overlay: errors
++# =============================================================================
++
++
++class TestOverlayErrors:
++    @pytest.mark.parametrize(
++        "content",
++        [
++            "service: [unclosed\n",  # invalid YAML
++            "- environment: broken\n",  # top level is a list
++            "",  # empty document
++            "environment: broken\nservice: standard\n",  # service not a mapping
++            "environment: broken\nservice:\n",  # service null
++            "environment: broken\nresources:\n  kind: SLO\n",  # resources not a list
++            "environment: broken\nresources:\n  - SLO\n",  # resource not a mapping
++        ],
++        ids=[
++            "invalid-yaml",
++            "list-top-level",
++            "empty",
++            "service-scalar",
++            "service-null",
++            "resources-mapping",
++            "resource-scalar",
++        ],
++    )
++    def test_malformed_overlay_names_the_overlay_file(self, tree, content):
++        overlay = tree / "environments" / "broken.yaml"
++        overlay.write_text(content)
++        with pytest.raises(ManifestLoadError) as exc:
++            _load(tree / "payment-api.yaml", "broken")
++        assert str(overlay) in str(exc.value)
++
++    @pytest.mark.parametrize(
++        "name",
++        ["../prod", "prod/eu", "prod\\eu", "-prod", "prod-", "prod_eu", "pr od", "prod.eu"],
++    )
++    def test_invalid_environment_name_is_rejected(self, tree, name):
++        with pytest.raises(ManifestLoadError):
++            _load(tree / "payment-api.yaml", name)
++
++    @pytest.mark.parametrize("name", ["p", "prod", "prod-us", "eu-west-1", "  Prod  "])
++    def test_valid_environment_names_load(self, tree, name):
++        m = _load(tree / "payment-api.yaml", name)
++        assert m.name == "payment-api"
++
++
++# =============================================================================
++# D2 — template expansion
++# =============================================================================
++
++
++class TestTemplateExpansion:
++    def test_builtin_template_supplies_resources(self, tree):
++        m = _load(tree / "api-minimal.yaml")
++        slos = _slos(m)
++        assert [s.name for s in m.slos] == ["availability", "latency-p95"]
++        assert slos["availability"].target == 99.9
++        assert slos["availability"].window == "30d"
++        assert slos["availability"].indicator_query == CRITICAL_API_AVAILABILITY_QUERY
++        assert slos["latency-p95"].target == 99.0
++        assert m.ownership.pagerduty.urgency == "high"
++        assert m.template == "critical-api"
++
++    def test_user_resource_replaces_template_resource_whole(self, tree):
++        # auth-api's latency-p95 has objective + threshold_ms only. Legacy
++        # replaces the template resource by (kind, name) without merging,
++        # so the template's window and indicator are gone.
++        m = _load(tree / "auth-api.yaml")
++        assert _resource(m, "SLO", "latency-p95")["spec"] == {
++            "threshold_ms": 200,
++            "objective": 99.5,
++        }
++        p95 = _slos(m)["latency-p95"]
++        assert p95.target == 99.5
++        assert p95.indicator_query is None
++        assert _resource_keys(m) == [
++            ("SLO", "availability"),
++            ("SLO", "latency-p95"),
++            ("PagerDuty", "primary"),
++            ("SLO", "token-generation-latency"),
++            ("Dependencies", "upstream"),
++        ]
++        assert _slos(m)["availability"].target == 99.9
++        assert 'service="auth-api"' in _slos(m)["token-generation-latency"].indicator_query
++
++    def test_user_override_without_objective_drops_the_template_slo(self, tree):
++        # email-worker overrides processing-latency-p95 with threshold_ms only.
++        m = _load(tree / "email-worker.yaml")
++        assert _resource(m, "SLO", "processing-latency-p95")["spec"] == {"threshold_ms": 120000}
++        assert [s.name for s in m.slos] == ["success-rate"]
++        assert m.ownership.pagerduty.urgency == "low"
++
++    def test_overlay_applies_before_template_expansion(self, tree):
++        # payment-api-with-envs has no resources; environments/dev.yaml's
++        # resources therefore become user resources and replace the
++        # critical-api template resources whole (generate parser.py order).
++        m = _load(tree / "payment-api-with-envs.yaml", "dev")
++        assert m.tier == "low"
++        assert _resource_keys(m) == [
++            ("SLO", "availability"),
++            ("SLO", "latency-p95"),
++            ("PagerDuty", "primary"),
++        ]
++        slos = _slos(m)
++        assert slos["availability"].target == 99.0
++        assert slos["availability"].indicator_query is None
++        assert slos["latency-p95"].target == 90.0
++        assert _resource(m, "PagerDuty", "primary")["spec"] == {"urgency": "low"}
++
++    def test_template_without_overlay(self, tree):
++        m = _load(tree / "payment-api-with-envs.yaml")
++        assert _slos(m)["availability"].target == 99.9
++        assert 'service="payment-api"' in _slos(m)["availability"].indicator_query
++
++    def test_custom_template_overrides_builtin_by_name_field(self, tree):
++        custom_dir = tree / ".nthlayer" / "templates"
++        custom_dir.mkdir()
++        # Installed under a different file name: registration is by `name`.
++        shutil.copy(tree.parent / "custom_templates" / "critical-api.yaml", custom_dir / "org.yaml")
++        m = _load(tree / "api-minimal.yaml")
++        assert [s.name for s in m.slos] == ["availability"]
++        assert _slos(m)["availability"].target == 99.95
++        assert m.ownership.pagerduty is None
++
++    def test_custom_template_found_by_walking_up(self, tree):
++        custom_dir = tree.parent / ".nthlayer" / "templates"
++        custom_dir.mkdir(parents=True)
++        shutil.copy(tree.parent / "custom_templates" / "critical-api.yaml", custom_dir / "a.yaml")
++        m = _load(tree / "api-minimal.yaml")
++        assert _slos(m)["availability"].target == 99.95
++
++    def test_invalid_custom_template_is_skipped(self, tree):
++        custom_dir = tree / ".nthlayer" / "templates"
++        custom_dir.mkdir()
++        # Missing the required `description` (template_loader.py) -> skipped,
++        # so the built-in critical-api stays in force.
++        (custom_dir / "bad.yaml").write_text("name: critical-api\ntier: critical\ntype: api\n")
++        m = _load(tree / "api-minimal.yaml")
++        assert _slos(m)["availability"].target == 99.9
++
++    def test_unknown_template_lists_available_templates(self, tree):
++        manifest = tree / "unknown.yaml"
++        manifest.write_text(
++            (tree / "api-minimal.yaml").read_text().replace("critical-api", "no-such-template")
++        )
++        with pytest.raises(ManifestLoadError) as exc:
++            _load(manifest)
++        message = str(exc.value)
++        assert "no-such-template" in message
++        for name in BUILTIN_TEMPLATE_NAMES:
++            assert name in message
++
++    def test_unknown_template_lists_custom_templates_too(self, tree):
++        custom_dir = tree / ".nthlayer" / "templates"
++        custom_dir.mkdir()
++        (custom_dir / "team.yaml").write_text(
++            "name: team-api\ndescription: d\ntier: low\ntype: api\nresources: []\n"
++        )
++        manifest = tree / "unknown.yaml"
++        manifest.write_text(
++            (tree / "api-minimal.yaml").read_text().replace("critical-api", "no-such-template")
++        )
++        with pytest.raises(ManifestLoadError) as exc:
++            _load(manifest)
++        assert "team-api" in str(exc.value)
++
++
++class TestBuiltinTemplatesShipAsPackageData:
++    def test_all_five_builtin_templates_are_package_resources(self):
++        package = files("nthlayer_common.manifest.legacy_templates")
++        names = {p.name for p in package.iterdir() if p.name.endswith(".yaml")}
++        assert names == {f"{n}.yaml" for n in BUILTIN_TEMPLATE_NAMES}
++
++    @pytest.mark.parametrize("name", sorted(BUILTIN_TEMPLATE_NAMES))
++    def test_each_builtin_template_expands(self, tree, name):
++        manifest = tree / f"uses-{name}.yaml"
++        manifest.write_text(
++            f"service:\n  name: svc\n  team: t\n  tier: standard\n  type: api\n  template: {name}\n"
++        )
++        m = _load(manifest)
++        assert m.slos, name
++        assert all("${service}" not in (s.indicator_query or "") for s in m.slos)
++
++
++# =============================================================================
++# D3 — ${var} substitution
++# =============================================================================
++
++
++class TestSubstitution:
++    def test_every_variable_with_environment(self, tree):
++        m = _load(tree / "substitution-demo.yaml", "qa")
++        assert _slos(m)["availability"].description == (
++            "payment-api|payments|critical|api|shared|java|spring-boot|qa|${unknown}"
++        )
++
++    def test_env_left_literal_without_environment(self, tree):
++        m = _load(tree / "substitution-demo.yaml")
++        assert _slos(m)["availability"].description == (
++            "payment-api|payments|critical|api|shared|java|spring-boot|${env}|${unknown}"
++        )
++
++    def test_env_is_the_environment_as_given(self, tree):
++        m = _load(tree / "substitution-demo.yaml", "QA")
++        assert "|QA|" in _slos(m)["availability"].description
++
++    def test_service_block_is_substituted(self, tree):
++        m = _load(tree / "substitution-demo.yaml")
++        assert m.description == "payments own payment-api"
++
++    def test_type_as_authored_and_defaults(self, tree):
++        m = _load(tree / "substitution-defaults.yaml")
++        assert m.type == "worker"  # resolved by the model
++        assert m.authored_type == "background-job"
++        # ${type} is the authored spelling; support_model defaults to self;
++        # unset language/framework substitute as "" (ServiceContext.to_dict).
++        assert _slos(m)["success-rate"].description == "background-job|self||"
++
++    def test_overlay_content_is_substituted(self, tree):
++        m = _load(tree / "payment-api.yaml", "canary")
++        assert m.raw_data["service"]["metadata"]["deployment"] == "payment-api-canary"
++
++    def test_tier_after_overlay_is_substituted(self, tree):
++        # Substitution runs after the overlay, so ${tier} is the merged tier.
++        overlay = tree / "environments" / "qa.yaml"
++        overlay.write_text(
++            "environment: qa\nservice:\n  tier: low\n  metadata:\n    t: '${tier}'\n"
++        )
++        m = _load(tree / "payment-api.yaml", "qa")
++        assert m.raw_data["service"]["metadata"]["t"] == "low"
++
++    def test_non_string_values_are_untouched(self, tree):
++        m = _load(tree / "substitution-demo.yaml", "qa")
++        assert _resource(m, "SLO", "availability")["spec"]["objective"] == 99.95
++
++
++# =============================================================================
++# D4 — PagerDuty keys
++# =============================================================================
++
++
++class TestPagerDutyKeys:
++    def test_new_fields_default_to_none(self):
++        pd = PagerDutyConfig()
++        assert pd.urgency is None
++        assert pd.auto_resolve_timeout is None
++        assert pd.create_escalation_policy is None
++
++    def test_urgency_and_auto_resolve_timeout(self):
++        m = _load(FIXTURES / "services" / "payment-api-pagerduty-demo.yaml")
++        assert m.ownership.pagerduty == PagerDutyConfig(
++            service_id=None,
++            escalation_policy_id=None,
++            urgency="high",
++            auto_resolve_timeout=14400,
++            create_escalation_policy=None,
++        )
++
++    def test_create_escalation_policy(self):
++        m = _load(FIXTURES / "services" / "full-pagerduty.yaml")
++        pd = m.ownership.pagerduty
++        assert pd.escalation_policy_id == "platform-oncall"
++        assert pd.urgency == "high"
++        assert pd.auto_resolve_timeout == 14400
++        assert pd.create_escalation_policy == {
++            "name": "auto-created-policy",
++            "users": ["user@example.com"],
++        }
++
++
++# =============================================================================
++# srm/v1 and v2 are unaffected
++# =============================================================================
++
++
++class TestOtherFormatsUnaffected:
++    @pytest.fixture
++    def v1(self, tree) -> Path:
++        # Same stem as the legacy fixture, so environments/staging.yaml and the
++        # .nthlayer overlays would apply if the v1 branch read them.
++        path = tree / "payment-api.yaml"
++        shutil.copy(FIXTURES / "srm-v1-payment-api.yaml", path)
++        return path
++
++    @pytest.fixture
++    def v2(self, tree) -> Path:
++        path = tree / "payment-api.yaml"
++        shutil.copy(FIXTURES / "opensrm-v2-payment-api.yaml", path)
++        return path
++
++    def test_v1_ignores_overlay_and_substitution(self, v1):
++        m = _load(v1, "staging")
++        assert m.source_format == SourceFormat.SRM_V1
++        assert m.tier == "critical"
++        slo = _slos(m)["availability"]
++        assert slo.target == 99.99
++        assert '{service="${service}"' in slo.indicator_query
++
++    def test_v1_pagerduty_has_no_legacy_keys(self, v1):
++        m = _load(v1)
++        assert m.ownership.pagerduty == PagerDutyConfig(
++            service_id="PABC123", escalation_policy_id="PEP456"
++        )
++
++    @pytest.mark.parametrize("name", ["../prod", "prod_eu"])
++    def test_v1_does_not_validate_environment_name(self, v1, name):
++        assert _load(v1, name).source_format == SourceFormat.SRM_V1
++
++    def test_v2_ignores_overlay_and_substitution(self, v2):
++        m = _load(v2, "staging")
++        assert m.source_format == SourceFormat.OPENSRM_V2
++        assert m.tier == "critical"
++        assert m.description == "Payments for ${team}"
++
++    @pytest.mark.parametrize("name", ["../prod", "prod_eu"])
++    def test_v2_does_not_validate_environment_name(self, v2, name):
++        assert _load(v2, name).source_format == SourceFormat.OPENSRM_V2

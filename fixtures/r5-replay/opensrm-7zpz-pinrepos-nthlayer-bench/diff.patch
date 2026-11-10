@@ -1,0 +1,64 @@
+diff --git a/pyproject.toml b/pyproject.toml
+index ffdddb8..cde3423 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -14,7 +14,7 @@ dependencies = [
+     # tests/test_dependency_declarations.py and
+     # tests/smoke/test_resolved_dependencies.py; see CLAUDE.md hard rule 11
+     # for why both are needed [opensrm-p3bm].
+-    "nthlayer-common>=4.0.0,<5.0.0",
++    "nthlayer-common>=5.0.0,<6.0.0",
+     "textual>=1.0",
+     "httpx>=0.27",
+ ]
+diff --git a/tests/smoke/test_resolved_dependencies.py b/tests/smoke/test_resolved_dependencies.py
+index 5fa5a28..c9d602f 100644
+--- a/tests/smoke/test_resolved_dependencies.py
++++ b/tests/smoke/test_resolved_dependencies.py
+@@ -43,7 +43,7 @@ FRONT_DOOR = "nthlayer"
+ # fails if a sibling appears in the metadata without an entry here — so adding a
+ # dependency forces someone to state its expected major rather than quietly
+ # leaving it unguarded.
+-EXPECTED_MAJORS = {"nthlayer-common": 4}
++EXPECTED_MAJORS = {"nthlayer-common": 5}
+ 
+ 
+ def _sibling_requirements() -> dict[str, Requirement]:
+diff --git a/tests/test_dependency_declarations.py b/tests/test_dependency_declarations.py
+index 48b0435..899f186 100644
+--- a/tests/test_dependency_declarations.py
++++ b/tests/test_dependency_declarations.py
+@@ -242,8 +242,9 @@ def test_declared_ceiling_is_exactly_the_next_major(name):
+     """The ceiling must exclude the first release of the NEXT major, and nothing more.
+ 
+     test_declared_range_has_an_upper_bound only asks that SOME bound exists, so
+-    `<6.0.0` while 4.x is under test passes it (measured: suite stays green) and
+-    admits all of major 5, which nothing here has run. Mirror image of the floor
++    a ceiling two majors up (`<N+2.0.0` while N.x is under test) passes it
++    (measured: suite stays green) and admits all of major N+1, which nothing
++    here has run. Mirror image of the floor
+     test: the floor admits nothing below the tested version, this admits nothing
+     above its major. Like the floor, it must be bumped deliberately when the
+     sibling's major advances.
+diff --git a/uv.lock b/uv.lock
+index 6f23862..698dc17 100644
+--- a/uv.lock
++++ b/uv.lock
+@@ -874,7 +874,7 @@ wheels = [
+ 
+ [[package]]
+ name = "nthlayer-bench"
+-version = "1.7.2"
++version = "1.7.3"
+ source = { editable = "." }
+ dependencies = [
+     { name = "httpx" },
+@@ -904,7 +904,7 @@ provides-extras = ["dev"]
+ 
+ [[package]]
+ name = "nthlayer-common"
+-version = "4.0.0"
++version = "5.0.0"
+ source = { editable = "../nthlayer-common" }
+ dependencies = [
+     { name = "anthropic" },

@@ -1,0 +1,87 @@
+diff --git a/pyproject.toml b/pyproject.toml
+index a413c81..c32aa83 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -14,7 +14,10 @@ dependencies = [
+     # tests/test_dependency_declarations.py and
+     # tests/smoke/test_resolved_dependencies.py; see CLAUDE.md hard rule 16
+     # for why both are needed [opensrm-p3bm].
+-    "nthlayer-common>=5.0.0,<6.0.0",
++    # WHY 5.2.0 (opensrm-g35i): the version this repo is now built and tested
++    # against (rule 16: the floor is the installed sibling). Bump it on
++    # every nthlayer-common minor release: the floor guard fails until you do.
++    "nthlayer-common>=5.2.0,<6.0.0",
+     "starlette>=0.40",
+     "uvicorn>=0.30",
+     "opentelemetry-api>=1.28",
+diff --git a/release-please-config.json b/release-please-config.json
+index d5a70ed..4b7dba2 100644
+--- a/release-please-config.json
++++ b/release-please-config.json
+@@ -3,6 +3,13 @@
+   "packages": {
+     ".": {
+       "package-name": "nthlayer-override-adapter",
++      "extra-files": [
++        {
++          "type": "toml",
++          "path": "uv.lock",
++          "jsonpath": "$.package[?(@.name.value==='nthlayer-override-adapter')].version"
++        }
++      ],
+       "changelog-path": "CHANGELOG.md",
+       "include-component-in-tag": false,
+       "changelog-sections": [
+diff --git a/tests/test_dependency_declarations.py b/tests/test_dependency_declarations.py
+index c5a3d54..0c6bf63 100644
+--- a/tests/test_dependency_declarations.py
++++ b/tests/test_dependency_declarations.py
+@@ -264,3 +264,26 @@ def test_declared_ceiling_is_exactly_the_next_major(name):
+         f"is {installed}, so the ceiling must be '<{expected}'. A wider ceiling "
+         f"publishes a major nothing here has run."
+     )
++
++
++def test_uv_lock_records_this_projects_version():
++    """uv.lock's own [[package]] entry must carry pyproject's version.
++
++    release-please bumps pyproject.toml; a toml extra-files updater in
++    release-please-config.json bumps this entry in the same release PR. That
++    updater only WARNS when its jsonpath matches nothing (a renamed package, a
++    lock-format change), so without this test the lock would silently go stale
++    again and every `uv sync` after a release would dirty it [opensrm-g35i].
++    Release PRs run CI, so a skipped bump fails here, on the release PR.
++    """
++    root = Path(__file__).resolve().parents[1]
++    project = tomllib.loads((root / "pyproject.toml").read_text())["project"]
++    lock = tomllib.loads((root / "uv.lock").read_text())
++    entries = [p for p in lock.get("package", []) if p.get("name") == project["name"]]
++    assert len(entries) == 1, (
++        f"uv.lock has {len(entries)} [[package]] entries named {project['name']!r}"
++    )
++    assert entries[0].get("version") == project["version"], (
++        f"uv.lock records {project['name']} {entries[0].get('version')}, pyproject says "
++        f"{project['version']}: run `uv lock` (and check release-please-config.json extra-files)"
++    )
+diff --git a/uv.lock b/uv.lock
+index bcc1f0b..fca97c5 100644
+--- a/uv.lock
++++ b/uv.lock
+@@ -913,7 +913,7 @@ wheels = [
+ 
+ [[package]]
+ name = "nthlayer-common"
+-version = "5.0.0"
++version = "5.2.0"
+ source = { editable = "../nthlayer-common" }
+ dependencies = [
+     { name = "anthropic" },
+@@ -957,7 +957,7 @@ provides-extras = ["dev"]
+ 
+ [[package]]
+ name = "nthlayer-override-adapter"
+-version = "0.2.3"
++version = "0.2.4"
+ source = { editable = "." }
+ dependencies = [
+     { name = "nthlayer-common" },

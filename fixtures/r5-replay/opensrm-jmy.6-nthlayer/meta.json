@@ -1,0 +1,108 @@
+{
+ "schema_version": 1,
+ "entry": "opensrm-jmy.6-nthlayer",
+ "bead": "opensrm-jmy.6",
+ "record": "jmy.6",
+ "archive": "r5-state-jmy.6-completed.json",
+ "record_repos": [
+  "nthlayer-workers",
+  "nthlayer"
+ ],
+ "repo": "nthlayer",
+ "part": null,
+ "base": "57000509864b3f7a036d3ef53e8b7777d585939b",
+ "head": "79f5de3800c88608b9f73ee34ff9c907bc8fd5d7",
+ "record_head": null,
+ "synthetic_base": "a2aa530c58247512ccced98d2d02e47d4b4278e3",
+ "synthetic_head": "38340b6382782e4236a8199922f9534df5d58d70",
+ "base_tree": "85ca7a62cc934f31f6ef986f8b13d3b1d606cdc3",
+ "tree_sha": "d420a9f22aab596e9767992d710741a99d8556c8",
+ "unavailable": null,
+ "bundle": {
+  "repo": "nthlayer",
+  "sha256": "46087845a4b5b8e2275091e728f99e5dd635bd712a9d9344386afe3a8f045272"
+ },
+ "sequential_steps": null,
+ "record_sequential_steps": 11,
+ "bead_sequential_steps": 11,
+ "fidelity": "counts_only",
+ "blocking_findings": 9,
+ "escape": false,
+ "brief_source": "bead",
+ "roster": {
+  "record_version": 1,
+  "passes": [
+   "correctness",
+   "clarity",
+   "edge-cases",
+   "excellence"
+  ]
+ },
+ "lens_order": [
+  "correctness",
+  "clarity",
+  "edge-cases",
+  "excellence"
+ ],
+ "counts": {
+  "correctness": [
+   {
+    "critical": 1,
+    "important": 2,
+    "minor": 1
+   },
+   {}
+  ],
+  "clarity": [
+   {
+    "important": 4,
+    "minor": 5
+   },
+   {}
+  ],
+  "edge-cases": [
+   {
+    "critical": 0,
+    "important": 2,
+    "minor": 3
+   },
+   {}
+  ],
+  "excellence": [
+   {
+    "critical": 0,
+    "minor": 3
+   }
+  ]
+ },
+ "baseline": {
+  "correctness": {
+   "reviews": 2,
+   "fix_rounds": 1,
+   "findings_first_review": 4,
+   "unattributed": 0,
+   "steps": 3
+  },
+  "clarity": {
+   "reviews": 2,
+   "fix_rounds": 1,
+   "findings_first_review": 9,
+   "unattributed": 0,
+   "steps": 3
+  },
+  "edge-cases": {
+   "reviews": 2,
+   "fix_rounds": 1,
+   "findings_first_review": 5,
+   "unattributed": 0,
+   "steps": 3
+  },
+  "excellence": {
+   "reviews": 1,
+   "fix_rounds": 1,
+   "findings_first_review": 3,
+   "unattributed": 0,
+   "steps": 2
+  }
+ }
+}

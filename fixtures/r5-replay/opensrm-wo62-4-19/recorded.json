@@ -1,0 +1,324 @@
+{
+ "schema_version": 1,
+ "entry": "opensrm-wo62-4-19",
+ "fidelity": "recorded",
+ "lens_order": [
+  "correctness",
+  "clarity",
+  "edge-cases",
+  "provenance",
+  "excellence"
+ ],
+ "iterations": {
+  "correctness": 4,
+  "clarity": 1,
+  "edge-cases": 1,
+  "provenance": 2
+ },
+ "rounds": [
+  {
+   "lens": "correctness",
+   "iteration": 1,
+   "recorded_iteration": null,
+   "counts": {
+    "critical": 0,
+    "important": 4,
+    "minor": 2
+   },
+   "findings": [
+    {
+     "lens": "correctness",
+     "severity": "IMPORTANT",
+     "path": "src/nthlayer_generate/specs/validator.py",
+     "start_line": 281,
+     "end_line": 281,
+     "claim": "nameless or empty-name resources now pass",
+     "evidence": null,
+     "fix": null,
+     "fingerprint": "95769f714cf1c515",
+     "verification_level": "asserted",
+     "resolves": null,
+     "regression": false,
+     "status": null,
+     "derived_from": "reviewer_transcript",
+     "extracted_by": "model",
+     "handback_sha256": "316d1d7f7fae39111004f5a5fb80836a86ec9f2963f2c537d20848aa7f90b830",
+     "fix_commit": "bf341b0da8986ce3ee888cc681ad8573e566348f",
+     "reported_path": "src/nthlayer_generate/specs/validator.py",
+     "path_in_tree": true
+    },
+    {
+     "lens": "correctness",
+     "severity": "IMPORTANT",
+     "path": "src/nthlayer_generate/specs/validator.py",
+     "start_line": 291,
+     "end_line": 291,
+     "claim": "crash on a non-hashable kind",
+     "evidence": null,
+     "fix": null,
+     "fingerprint": "a88478c58562427c",
+     "verification_level": "asserted",
+     "resolves": null,
+     "regression": false,
+     "status": null,
+     "derived_from": "reviewer_transcript",
+     "extracted_by": "model",
+     "handback_sha256": "316d1d7f7fae39111004f5a5fb80836a86ec9f2963f2c537d20848aa7f90b830",
+     "fix_commit": "bf341b0da8986ce3ee888cc681ad8573e566348f",
+     "reported_path": "src/nthlayer_generate/specs/validator.py",
+     "path_in_tree": true
+    },
+    {
+     "lens": "correctness",
+     "severity": "IMPORTANT",
+     "path": "src/nthlayer_generate/specs/validator.py",
+     "start_line": 209,
+     "end_line": 209,
+     "claim": "OSError from the environment overlay is not caught",
+     "evidence": null,
+     "fix": null,
+     "fingerprint": "5cebcc6f51f52209",
+     "verification_level": "asserted",
+     "resolves": null,
+     "regression": false,
+     "status": null,
+     "derived_from": "reviewer_transcript",
+     "extracted_by": "model",
+     "handback_sha256": "316d1d7f7fae39111004f5a5fb80836a86ec9f2963f2c537d20848aa7f90b830",
+     "fix_commit": "bf341b0da8986ce3ee888cc681ad8573e566348f",
+     "reported_path": "src/nthlayer_generate/specs/validator.py",
+     "path_in_tree": true
+    },
+    {
+     "lens": "correctness",
+     "severity": "IMPORTANT",
+     "path": "src/nthlayer_generate/specs/validator.py",
+     "start_line": 202,
+     "end_line": 211,
+     "claim": "several errors now collapse into one",
+     "evidence": null,
+     "fix": null,
+     "fingerprint": "18bc2eff859a884b",
+     "verification_level": "asserted",
+     "resolves": null,
+     "regression": false,
+     "status": null,
+     "derived_from": "reviewer_transcript",
+     "extracted_by": "model",
+     "handback_sha256": "316d1d7f7fae39111004f5a5fb80836a86ec9f2963f2c537d20848aa7f90b830",
+     "fix_commit": "bf341b0da8986ce3ee888cc681ad8573e566348f",
+     "reported_path": "src/nthlayer_generate/specs/validator.py",
+     "path_in_tree": true
+    }
+   ]
+  },
+  {
+   "lens": "correctness",
+   "iteration": 2,
+   "recorded_iteration": 2,
+   "counts": {
+    "critical": 0,
+    "important": 2,
+    "minor": 0
+   },
+   "findings": [
+    {
+     "lens": "correctness",
+     "severity": "IMPORTANT",
+     "path": "src/nthlayer_generate/specs/validator.py",
+     "start_line": 203,
+     "end_line": 206,
+     "claim": "name: null on an SLO never reaches the new nameless check.",
+     "evidence": null,
+     "fix": null,
+     "fingerprint": "32ab9c2ec775e8b3",
+     "verification_level": "asserted",
+     "resolves": null,
+     "regression": false,
+     "status": null,
+     "derived_from": "reviewer_transcript",
+     "extracted_by": "model",
+     "handback_sha256": "1a0876c8f5225b47a1af4111060837ba534c72ba2d7ca65f9b39af6d98c4483f",
+     "fix_commit": "d4b4df2ea20559f37bd95ed6cdc3c27aede6b4a8",
+     "reported_path": "<workspace>/nthlayer-generate-wo62-4-6/src/nthlayer_generate/specs/validator.py",
+     "path_in_tree": true
+    },
+    {
+     "lens": "correctness",
+     "severity": "IMPORTANT",
+     "path": "validator.py",
+     "start_line": 271,
+     "end_line": 277,
+     "claim": "The resource index in the nameless message is wrong when a template is used.",
+     "evidence": null,
+     "fix": null,
+     "fingerprint": "85ccbbce7f85bd71",
+     "verification_level": "asserted",
+     "resolves": null,
+     "regression": false,
+     "status": null,
+     "derived_from": "reviewer_transcript",
+     "extracted_by": "model",
+     "handback_sha256": "1a0876c8f5225b47a1af4111060837ba534c72ba2d7ca65f9b39af6d98c4483f",
+     "fix_commit": "d4b4df2ea20559f37bd95ed6cdc3c27aede6b4a8",
+     "reported_path": "validator.py",
+     "path_in_tree": false
+    }
+   ]
+  },
+  {
+   "lens": "correctness",
+   "iteration": 3,
+   "recorded_iteration": 3,
+   "counts": {
+    "critical": 0,
+    "important": 1,
+    "minor": 1
+   },
+   "findings": [
+    {
+     "lens": "correctness",
+     "severity": "IMPORTANT",
+     "path": "src/nthlayer_generate/specs/validator.py",
+     "start_line": 109,
+     "end_line": 125,
+     "claim": "a nameless resource that only the env overlay adds now passes validation. This is a regression added by d4b4df2.",
+     "evidence": null,
+     "fix": null,
+     "fingerprint": "8d2c8ff245808934",
+     "verification_level": "asserted",
+     "resolves": null,
+     "regression": false,
+     "status": null,
+     "derived_from": "reviewer_transcript",
+     "extracted_by": "model",
+     "handback_sha256": "410f8203a4d6496348d170d2c595ac3623715e993a96377bc5339803da90a1cf",
+     "fix_commit": "3efe06f5cb8a0614d9adf985bfb5f12d539988fa",
+     "reported_path": "src/nthlayer_generate/specs/validator.py",
+     "path_in_tree": true
+    }
+   ]
+  },
+  {
+   "lens": "correctness",
+   "iteration": 4,
+   "recorded_iteration": 4,
+   "counts": {
+    "critical": 0,
+    "important": 0,
+    "minor": 0
+   },
+   "findings": null
+  },
+  {
+   "lens": "clarity",
+   "iteration": 1,
+   "recorded_iteration": null,
+   "counts": {
+    "critical": 0,
+    "important": 0,
+    "minor": 4
+   },
+   "findings": null
+  },
+  {
+   "lens": "edge_cases",
+   "iteration": 1,
+   "recorded_iteration": null,
+   "counts": {
+    "critical": 0,
+    "important": 0,
+    "minor": 3
+   },
+   "findings": null
+  },
+  {
+   "lens": "provenance",
+   "iteration": 1,
+   "recorded_iteration": null,
+   "counts": {
+    "critical": 2,
+    "important": 1,
+    "minor": 0
+   },
+   "findings": [
+    {
+     "lens": "provenance",
+     "severity": "CRITICAL",
+     "path": null,
+     "start_line": null,
+     "end_line": null,
+     "claim": "Nothing tests the known-variable filter (M1 GREEN).",
+     "evidence": null,
+     "fix": null,
+     "fingerprint": "5c6691a19031888d",
+     "verification_level": "asserted",
+     "resolves": null,
+     "regression": false,
+     "status": null,
+     "derived_from": "reviewer_transcript",
+     "extracted_by": "model",
+     "handback_sha256": "50b390a5a22e196c80ebae4a477120beb060ba36868b816180d6ea0e498516bc",
+     "fix_commit": "5c9b5c36ae0ef39a7814fe3f4f1fd4f99635e399",
+     "reported_path": null,
+     "path_in_tree": false
+    },
+    {
+     "lens": "provenance",
+     "severity": "CRITICAL",
+     "path": null,
+     "start_line": null,
+     "end_line": null,
+     "claim": "Nothing tests the list-recursion arm (M3 GREEN).",
+     "evidence": null,
+     "fix": null,
+     "fingerprint": "651074fb3cce6e8f",
+     "verification_level": "asserted",
+     "resolves": null,
+     "regression": false,
+     "status": null,
+     "derived_from": "reviewer_transcript",
+     "extracted_by": "model",
+     "handback_sha256": "50b390a5a22e196c80ebae4a477120beb060ba36868b816180d6ea0e498516bc",
+     "fix_commit": "5c9b5c36ae0ef39a7814fe3f4f1fd4f99635e399",
+     "reported_path": null,
+     "path_in_tree": false
+    },
+    {
+     "lens": "provenance",
+     "severity": "IMPORTANT",
+     "path": null,
+     "start_line": null,
+     "end_line": null,
+     "claim": "A resource with no kind now gets a different error message.",
+     "evidence": null,
+     "fix": null,
+     "fingerprint": "e3c6bfce5ea0019b",
+     "verification_level": "asserted",
+     "resolves": null,
+     "regression": false,
+     "status": null,
+     "derived_from": "reviewer_transcript",
+     "extracted_by": "model",
+     "handback_sha256": "50b390a5a22e196c80ebae4a477120beb060ba36868b816180d6ea0e498516bc",
+     "fix_commit": "5c9b5c36ae0ef39a7814fe3f4f1fd4f99635e399",
+     "reported_path": null,
+     "path_in_tree": false
+    }
+   ]
+  },
+  {
+   "lens": "provenance",
+   "iteration": 2,
+   "recorded_iteration": 2,
+   "counts": {
+    "critical": 0,
+    "important": 0,
+    "minor": 1
+   },
+   "findings": null
+  }
+ ],
+ "cross_repo_findings": [],
+ "escaped": []
+}

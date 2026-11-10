@@ -1,0 +1,91 @@
+{
+ "schema_version": 1,
+ "entry": "opensrm-jmy.23-nthlayer",
+ "bead": "opensrm-jmy.23",
+ "record": "jmy.23",
+ "archive": "r5-state-jmy.23-completed.json",
+ "record_repos": [
+  "nthlayer-workers",
+  "nthlayer"
+ ],
+ "repo": "nthlayer",
+ "part": null,
+ "base": "79f5de3800c88608b9f73ee34ff9c907bc8fd5d7",
+ "head": "3735c010c030809c8dfe714f725667456be50367",
+ "record_head": null,
+ "synthetic_base": "0d466f3f917b2832d3f36160b66cb666eb76d27d",
+ "synthetic_head": "87828f5b1d4d564ea95bc8d167e657ef2c9509e7",
+ "base_tree": "d420a9f22aab596e9767992d710741a99d8556c8",
+ "tree_sha": "f367ac342c79eec9f5681f0710074d95cc020b91",
+ "unavailable": null,
+ "bundle": {
+  "repo": "nthlayer",
+  "sha256": "46087845a4b5b8e2275091e728f99e5dd635bd712a9d9344386afe3a8f045272"
+ },
+ "sequential_steps": null,
+ "record_sequential_steps": 6,
+ "bead_sequential_steps": 6,
+ "fidelity": "counts_only",
+ "blocking_findings": 2,
+ "escape": false,
+ "brief_source": "bead",
+ "roster": {
+  "record_version": 1,
+  "passes": [
+   "correctness",
+   "clarity",
+   "edge-cases",
+   "excellence"
+  ]
+ },
+ "lens_order": [
+  "correctness",
+  "clarity",
+  "edge-cases",
+  "excellence"
+ ],
+ "counts": {
+  "edge-cases": [
+   {
+    "critical": 0,
+    "important": 2,
+    "minor": 1
+   }
+  ],
+  "excellence": [
+   {
+    "minor": 2
+   }
+  ]
+ },
+ "baseline": {
+  "correctness": {
+   "reviews": 1,
+   "fix_rounds": 0,
+   "findings_first_review": 0,
+   "unattributed": 0,
+   "steps": 1
+  },
+  "clarity": {
+   "reviews": 1,
+   "fix_rounds": 0,
+   "findings_first_review": 0,
+   "unattributed": 0,
+   "steps": 1
+  },
+  "edge-cases": {
+   "reviews": 1,
+   "fix_rounds": 1,
+   "findings_first_review": 3,
+   "unattributed": 0,
+   "steps": 2
+  },
+  "excellence": {
+   "reviews": 1,
+   "fix_rounds": 1,
+   "findings_first_review": 2,
+   "unattributed": 0,
+   "steps": 2
+  }
+ }
+}

@@ -1,0 +1,383 @@
+diff --git a/src/nthlayer_common/manifest/__init__.py b/src/nthlayer_common/manifest/__init__.py
+index 1ed83e1..995c668 100644
+--- a/src/nthlayer_common/manifest/__init__.py
++++ b/src/nthlayer_common/manifest/__init__.py
+@@ -75,8 +75,11 @@ from nthlayer_common.manifest.parser.v1 import OpenSRMParseError
+ from nthlayer_common.manifest.parser.v2 import OpenSRMV2ParseError
+ from nthlayer_common.manifest.scan import (
+     MANIFEST_SUFFIXES,
++    ManifestScan,
++    SuffixCollision,
+     foreign_yaml_reason,
+     iter_manifest_files,
++    scan_manifest_files,
+ )
+ 
+ __all__ = [
+@@ -102,8 +105,11 @@ __all__ = [
+     "valid_service_types_phrase",
+     # Directory scanning
+     "MANIFEST_SUFFIXES",
++    "ManifestScan",
++    "SuffixCollision",
+     "foreign_yaml_reason",
+     "iter_manifest_files",
++    "scan_manifest_files",
+     # Enums
+     "DependencyCriticality",
+     "SourceFormat",
+diff --git a/src/nthlayer_common/manifest/scan.py b/src/nthlayer_common/manifest/scan.py
+index 0a9beda..4dd0090 100644
+--- a/src/nthlayer_common/manifest/scan.py
++++ b/src/nthlayer_common/manifest/scan.py
+@@ -23,6 +23,7 @@ consumer appeared, so the call sites stop reaching into one another
+ from __future__ import annotations
+ 
+ from pathlib import Path
++from typing import NamedTuple
+ 
+ import yaml
+ 
+@@ -36,21 +37,89 @@ from nthlayer_common.manifest.parser.v2 import is_opensrm_v2_format
+ MANIFEST_SUFFIXES = (".yaml", ".yml")
+ 
+ 
+-def iter_manifest_files(specs_dir: str | Path) -> list[Path]:
+-    """Every ``.yaml``/``.yml`` file directly under ``specs_dir``, sorted.
++def _resolve_collision(group: list[Path]) -> tuple[Path, list[Path]]:
++    """Which of several same-stem manifests to keep, and which to report.
+ 
+-    Sorted so the order is stable across machines. That matters to any
+-    caller that dedupes first-wins — learn/retrospective does; observe's
+-    spec_loader does not, and whether it should is opensrm-3470's follow-up
+-    rather than a property this function can assume.
++    A separate named function so the rule can be exercised WITHOUT a
++    filesystem. The three-way case needs `svc.yaml` and `svc.YAML` to coexist,
++    which a case-insensitive filesystem cannot do — so a temp-directory
++    fixture skipped on macOS and ran in Linux CI, and the skip hid an
++    assertion that was wrong. See
++    tests/test_manifest_scan.py::test_collision_precedence_is_deterministic.
+ 
+-    Returns empty for a path that is not a directory rather than raising,
+-    so a caller that wants its own error message for that case keeps the
+-    decision.
++    Three ranks, in order:
++
++    1. MANIFEST_SUFFIXES order IS the precedence, so the rule and the tuple
++       cannot drift apart. ``.yaml`` is what the ecosystem writes.
++    2. The EXACTLY-lowercase spelling beats a case variant. Without this rank
++       the name tiebreak kept ``svc.YAML`` over ``svc.yaml``, because
++       ``"svc.YAML" < "svc.yaml"`` in ASCII.
++    3. Name, so the choice is never filesystem-order dependent.
++    """
++    kept, *dropped = sorted(
++        group,
++        key=lambda p: (
++            MANIFEST_SUFFIXES.index(p.suffix.lower()),
++            0 if p.suffix == p.suffix.lower() else 1,
++            p.name,
++        ),
++    )
++    return kept, dropped
++
++
++class SuffixCollision(NamedTuple):
++    """One service declared twice, once per manifest suffix [opensrm-xvwt]."""
++
++    stem: str
++    kept: Path
++    dropped: Path
++
++
++class ManifestScan(NamedTuple):
++    """What a directory scan found, and what it had to choose between."""
++
++    files: list[Path]
++    suffix_collisions: list[SuffixCollision]
++
++
++def scan_manifest_files(specs_dir: str | Path) -> ManifestScan:
++    """Manifest files under *specs_dir*, with same-stem collisions resolved.
++
++    A directory holding BOTH ``svc.yaml`` and ``svc.yml`` — the ordinary
++    result of an editor default changing, or two people adding the same
++    service — previously yielded both [opensrm-xvwt]. Neither is foreign
++    YAML, so foreign_yaml_reason() passes them and both parse, and the
++    consequences were silent in two places:
++
++    - measure's load_specs appended the service's SLOs twice, so
++      evaluate_slos wrote two verdicts per window for one service/SLO. Since
++      count_consecutive_breaches counts VERDICTS rather than windows, a
++      3-window hysteresis threshold was reached in 2 real windows or fewer.
++      A judgment SLO firing early is the same class of wrong as one that
++      never fires.
++    - observe's per-service SLO counts, and any budget arithmetic derived
++      from them, were inflated.
++
++    Nothing errored and nothing warned, because both files are valid
++    manifests.
++
++    ``.yaml`` wins, deterministically — it is the suffix the ecosystem
++    writes — with the name as tiebreak so the choice cannot vary by
++    filesystem order. The dropped path is RETURNED rather than only logged,
++    which is the same reason opensrm-3470 added a parse-failure report: this
++    is a partial view of the directory, and the operator reading SLO output
++    is who needs to know a manifest was set aside.
++
++    STEM, not parsed service name. Two files can declare the same service
++    under unrelated names, and scan.py deliberately does not parse — that is
++    what foreign_yaml_reason() exists to avoid. So this catches the common
++    shape the bead describes and not every possible duplicate; a caller that
++    needs the stronger property has to compare parsed names itself.
+     """
+     path = Path(specs_dir)
+     if not path.is_dir():
+-        return []
++        return ManifestScan([], [])
++
+     # `not p.is_dir()` rather than `p.is_file()`: excluding DIRECTORIES was
+     # the point — a directory named `foo.yaml` would be counted as a broken
+     # manifest by every caller. is_file() also excludes a dangling symlink,
+@@ -61,12 +130,53 @@ def iter_manifest_files(specs_dir: str | Path) -> list[Path]:
+     # loaded, never counted, never logged — which is the silent-subset-by-
+     # extension failure MANIFEST_SUFFIXES exists to prevent, one case-fold
+     # away.
+-    return sorted(
++    candidates = sorted(
+         p
+         for p in path.iterdir()
+         if not p.is_dir() and p.suffix.lower() in MANIFEST_SUFFIXES
+     )
+ 
++    by_stem: dict[str, list[Path]] = {}
++    for candidate in candidates:
++        by_stem.setdefault(candidate.stem, []).append(candidate)
++
++    files: list[Path] = []
++    collisions: list[SuffixCollision] = []
++    for stem, group in by_stem.items():
++        if len(group) == 1:
++            files.append(group[0])
++            continue
++        kept, dropped = _resolve_collision(group)
++        files.append(kept)
++        collisions.extend(SuffixCollision(stem, kept, d) for d in dropped)
++
++    return ManifestScan(
++        sorted(files),
++        sorted(collisions, key=lambda c: (c.stem, c.dropped.name)),
++    )
++
++
++def iter_manifest_files(specs_dir: str | Path) -> list[Path]:
++    """Manifest files under ``specs_dir``, sorted, one per stem.
++
++    Sorted so the order is stable across machines. That matters to any
++    caller that dedupes first-wins — learn/retrospective does; observe's
++    spec_loader does not, and whether it should is opensrm-3470's follow-up
++    rather than a property this function can assume.
++
++    Returns empty for a path that is not a directory rather than raising,
++    so a caller that wants its own error message for that case keeps the
++    decision.
++
++    SAME-STEM COLLISIONS ARE RESOLVED HERE and the report is dropped
++    [opensrm-xvwt]. That is deliberate: every existing caller gets the fix
++    without changing, and de-duplicating silently is strictly better than
++    double-counting silently. But a caller that should SURFACE the set-aside
++    file — observe and measure both should — wants scan_manifest_files()
++    instead, which returns the collisions alongside the files.
++    """
++    return scan_manifest_files(specs_dir).files
++
+ 
+ def foreign_yaml_reason(spec_file: str | Path) -> str | None:
+     """Why a file that failed to load should NOT count as a broken manifest.
+diff --git a/tests/test_manifest_scan.py b/tests/test_manifest_scan.py
+index 0478f2d..edc66ef 100644
+--- a/tests/test_manifest_scan.py
++++ b/tests/test_manifest_scan.py
+@@ -25,9 +25,16 @@ demonstrated rather than asserted.
+ """
+ from __future__ import annotations
+ 
++from pathlib import Path
++
+ import pytest
+ 
+-from nthlayer_common.manifest import foreign_yaml_reason, iter_manifest_files
++from nthlayer_common.manifest import (
++    foreign_yaml_reason,
++    iter_manifest_files,
++    scan_manifest_files,
++)
++from nthlayer_common.manifest.scan import _resolve_collision
+ 
+ 
+ def _write(tmp_path, name: str, body: str):
+@@ -299,3 +306,165 @@ def test_backstage_component_is_not_a_manifest(tmp_path):
+     )
+ 
+     assert foreign_yaml_reason(path) is not None
++
++
++# =============================================================================
++# Same-stem collisions — one service, two suffixes [opensrm-xvwt]
++# =============================================================================
++#
++# FIXTURE PROVENANCE, per the bead: both bodies are REAL manifests the parser
++# accepts, verified below by load_manifest, not shapes picked to trip the
++# collision check. A fixture chosen to trip it would agree with the detector
++# including its bugs — and the detector's whole job is to notice files that
++# parse perfectly well.
++#
++# Taken from _AIMING above, which is itself derived from the canonical v1/v2
++# format predicates rather than from what the parser happens to tolerate.
++
++_V2_BODY = (
++    "apiVersion: opensrm.nthlayer.io/v2\nkind: ServiceManifest\n"
++    "metadata: {name: checkout, labels: {tier: critical}}\n"
++    "spec:\n"
++    "  owner: {group: 'group:default/payments'}\n"
++    "  service: {name: checkout, type: api}\n"
++)
++_V1_BODY = (
++    "apiVersion: srm/v1\nkind: ServiceReliabilityManifest\n"
++    "metadata: {name: checkout, team: payments, tier: critical}\n"
++    "spec: {type: api, slos: {availability: {target: 99.9}}}\n"
++)
++
++
++def test_both_collision_fixtures_are_real_loadable_manifests(tmp_path):
++    """Asserted FIRST, because every test below is about files that PARSE.
++
++    If either body stopped being a valid manifest the collision tests would
++    still pass — the scan never parses — while no longer describing the
++    situation the bead is about: two files that both load, so nothing errors
++    and nothing warns.
++    """
++    from nthlayer_common.manifest import load_manifest
++
++    for name, body in (("a.yaml", _V2_BODY), ("b.yml", _V1_BODY)):
++        path = _write(tmp_path, name, body)
++        manifest = load_manifest(path)
++        assert manifest.name == "checkout"
++
++
++def test_same_stem_pair_yields_one_file(tmp_path):
++    """The bug: both were returned, so measure appended the SLOs twice and
++    counted two verdicts per window for one service — reaching a 3-window
++    hysteresis threshold in 2 real windows."""
++    _write(tmp_path, "checkout.yaml", _V2_BODY)
++    _write(tmp_path, "checkout.yml", _V1_BODY)
++
++    found = iter_manifest_files(tmp_path)
++
++    assert [p.name for p in found] == ["checkout.yaml"]
++
++
++def test_yaml_wins_regardless_of_which_was_written_first(tmp_path):
++    """Deterministic, and not a function of filesystem order.
++
++    Written in both orders because `sorted()` over `iterdir()` would make
++    either pass on its own on a filesystem that happened to agree.
++    """
++    first = tmp_path / "one"
++    first.mkdir()
++    _write(first, "svc.yml", _V1_BODY)
++    _write(first, "svc.yaml", _V2_BODY)
++
++    second = tmp_path / "two"
++    second.mkdir()
++    _write(second, "svc.yaml", _V2_BODY)
++    _write(second, "svc.yml", _V1_BODY)
++
++    assert [p.name for p in iter_manifest_files(first)] == ["svc.yaml"]
++    assert [p.name for p in iter_manifest_files(second)] == ["svc.yaml"]
++
++
++def test_the_collision_is_reported_not_merely_resolved(tmp_path):
++    """Returning it is the point, per opensrm-3470's precedent.
++
++    De-duplicating silently is strictly better than double-counting
++    silently, but it is still a partial view of the directory, and the
++    operator reading SLO output is who needs to know a manifest was set
++    aside.
++    """
++    _write(tmp_path, "checkout.yaml", _V2_BODY)
++    _write(tmp_path, "checkout.yml", _V1_BODY)
++
++    scan = scan_manifest_files(tmp_path)
++
++    assert [p.name for p in scan.files] == ["checkout.yaml"]
++    assert len(scan.suffix_collisions) == 1
++    collision = scan.suffix_collisions[0]
++    assert collision.stem == "checkout"
++    assert collision.kept.name == "checkout.yaml"
++    assert collision.dropped.name == "checkout.yml"
++
++
++def test_no_collision_reported_when_there_is_none(tmp_path):
++    """The other half — otherwise the assertion above passes for any input."""
++    _write(tmp_path, "checkout.yaml", _V2_BODY)
++    _write(tmp_path, "payments.yml", _V1_BODY)
++
++    scan = scan_manifest_files(tmp_path)
++
++    assert len(scan.files) == 2
++    assert scan.suffix_collisions == []
++
++
++def test_distinct_stems_are_untouched_by_the_dedupe(tmp_path):
++    """Guards the OVER-reach direction: `.yml` visibility is itself a fix
++    this repo already made, and collapsing distinct services would
++    reintroduce the silent-subset failure MANIFEST_SUFFIXES exists to
++    prevent — one stem comparison away instead of one case-fold away."""
++    for name in ("a.yaml", "b.yml", "c.yaml", "d.yml"):
++        _write(tmp_path, name, _V2_BODY)
++
++    found = {p.name for p in iter_manifest_files(tmp_path)}
++
++    assert found == {"a.yaml", "b.yml", "c.yaml", "d.yml"}
++
++
++@pytest.mark.parametrize(
++    ("group", "expected_kept"),
++    [
++        (["svc.yaml", "svc.yml"], "svc.yaml"),
++        (["svc.yml", "svc.yaml"], "svc.yaml"),
++        # The case variant. `.YAML` is a manifest suffix — MANIFEST_SUFFIXES is
++        # compared case-folded precisely so a `.YAML` file is not silently
++        # invisible — so it collides, and the EXACTLY-lowercase spelling must
++        # win. Without that rank the name tiebreak kept `svc.YAML`, because
++        # "svc.YAML" < "svc.yaml" in ASCII.
++        (["svc.yaml", "svc.YAML"], "svc.yaml"),
++        (["svc.YAML", "svc.yaml"], "svc.yaml"),
++        (["svc.YAML", "svc.yml"], "svc.YAML"),
++        (["svc.yaml", "svc.YAML", "svc.yml"], "svc.yaml"),
++    ],
++)
++def test_collision_precedence_is_deterministic(group, expected_kept):
++    """Exercised through the resolver directly, NOT through a temp directory.
++
++    The three-way case cannot be built on a case-insensitive filesystem —
++    macOS collapses `svc.yaml` and `svc.YAML` — so a filesystem fixture
++    skipped here and would have RUN in Linux CI. The first version of this
++    test did exactly that, and the skip hid an assertion that was wrong:
++    it expected `svc.yaml` to be kept while the sort then kept `svc.YAML`.
++    A platform-conditional skip on the one platform that cannot reach the
++    case is indistinguishable from coverage until CI disagrees.
++
++    Driving the resolver with constructed paths removes the filesystem from
++    the question entirely, so every row runs everywhere.
++    """
++    kept, dropped = _resolve_collision([Path(n) for n in group])
++
++    assert kept.name == expected_kept
++    assert {p.name for p in dropped} == {n for n in group if n != expected_kept}
++
++
++def test_iter_manifest_files_still_returns_empty_for_a_non_directory(tmp_path):
++    """Unchanged contract, re-pinned because the body was rewritten."""
++    assert iter_manifest_files(tmp_path / "missing") == []
++    assert scan_manifest_files(tmp_path / "missing") == ([], [])

@@ -1,0 +1,374 @@
+{
+ "schema_version": 1,
+ "entry": "opensrm-wo62-4-2",
+ "fidelity": "recorded",
+ "lens_order": [
+  "correctness",
+  "clarity",
+  "edge-cases",
+  "provenance",
+  "excellence"
+ ],
+ "iterations": {
+  "correctness": 1,
+  "clarity": 2,
+  "edge-cases": 2,
+  "provenance": 4
+ },
+ "rounds": [
+  {
+   "lens": "correctness",
+   "iteration": 1,
+   "recorded_iteration": 1,
+   "counts": {
+    "critical": 0,
+    "important": 0,
+    "minor": 3
+   },
+   "findings": null
+  },
+  {
+   "lens": "clarity",
+   "iteration": 1,
+   "recorded_iteration": 1,
+   "counts": {
+    "critical": 0,
+    "important": 3,
+    "minor": 8
+   },
+   "findings": [
+    {
+     "lens": "clarity",
+     "severity": "IMPORTANT",
+     "path": "tests/golden/test_golden_legacy_generators.py",
+     "start_line": 204,
+     "end_line": 206,
+     "claim": "The test name says non-empty but the assertion does not check it",
+     "evidence": null,
+     "fix": null,
+     "fingerprint": "15f7e5cf68141935",
+     "verification_level": "asserted",
+     "resolves": null,
+     "regression": false,
+     "status": null,
+     "derived_from": "reviewer_transcript",
+     "extracted_by": "model",
+     "handback_sha256": "29ee6f1e5e91d348a0385468aaf5d7e9ed645026fca693507f4abf9509cb421b",
+     "fix_commit": "6fa3e94a5421db81a9c292383a1ff6ef546610c2",
+     "reported_path": "test_golden_legacy_generators.py",
+     "path_in_tree": true
+    },
+    {
+     "lens": "clarity",
+     "severity": "IMPORTANT",
+     "path": "tests/golden/test_golden_legacy_cli.py",
+     "start_line": 148,
+     "end_line": 148,
+     "claim": "rules_as_sets runs on every YAML file, but its docstring only justifies the alerts and loki extractors",
+     "evidence": null,
+     "fix": null,
+     "fingerprint": "4075252e8beb103c",
+     "verification_level": "asserted",
+     "resolves": null,
+     "regression": false,
+     "status": null,
+     "derived_from": "reviewer_transcript",
+     "extracted_by": "model",
+     "handback_sha256": "29ee6f1e5e91d348a0385468aaf5d7e9ed645026fca693507f4abf9509cb421b",
+     "fix_commit": "6fa3e94a5421db81a9c292383a1ff6ef546610c2",
+     "reported_path": "test_golden_legacy_cli.py",
+     "path_in_tree": true
+    },
+    {
+     "lens": "clarity",
+     "severity": "IMPORTANT",
+     "path": "tests/golden/test_golden_legacy_cli.py",
+     "start_line": 100,
+     "end_line": 151,
+     "claim": "The legacy Env has the same name as the existing one but behaves differently",
+     "evidence": null,
+     "fix": null,
+     "fingerprint": "8db3ac70598aa8be",
+     "verification_level": "asserted",
+     "resolves": null,
+     "regression": false,
+     "status": null,
+     "derived_from": "reviewer_transcript",
+     "extracted_by": "model",
+     "handback_sha256": "29ee6f1e5e91d348a0385468aaf5d7e9ed645026fca693507f4abf9509cb421b",
+     "fix_commit": "6fa3e94a5421db81a9c292383a1ff6ef546610c2",
+     "reported_path": "test_golden_legacy_cli.py",
+     "path_in_tree": true
+    }
+   ]
+  },
+  {
+   "lens": "clarity",
+   "iteration": 2,
+   "recorded_iteration": 2,
+   "counts": {
+    "critical": 0,
+    "important": 0,
+    "minor": 4
+   },
+   "findings": null
+  },
+  {
+   "lens": "edge_cases",
+   "iteration": 1,
+   "recorded_iteration": 1,
+   "counts": {
+    "critical": 0,
+    "important": 1,
+    "minor": 2
+   },
+   "findings": [
+    {
+     "lens": "edge_cases",
+     "severity": "IMPORTANT",
+     "path": "tests/golden/test_golden_legacy_cli.py",
+     "start_line": 250,
+     "end_line": 522,
+     "claim": "A .nthlayer/templates dir above the cwd changes the CLI goldens.",
+     "evidence": null,
+     "fix": null,
+     "fingerprint": "d2505c2f0794706d",
+     "verification_level": "asserted",
+     "resolves": null,
+     "regression": false,
+     "status": null,
+     "derived_from": "reviewer_transcript",
+     "extracted_by": "model",
+     "handback_sha256": "d2c0d6aea93f6e00f679d5b4b2f938e2df1ae56766b7b468972aba861cfe7ff1",
+     "fix_commit": "9e96f92a0d4a8399b37e5b7b1aa85d4737bd3689",
+     "reported_path": "test_golden_legacy_cli.py",
+     "path_in_tree": true
+    }
+   ]
+  },
+  {
+   "lens": "edge_cases",
+   "iteration": 2,
+   "recorded_iteration": 2,
+   "counts": {
+    "critical": 0,
+    "important": 0,
+    "minor": 1
+   },
+   "findings": null
+  },
+  {
+   "lens": "provenance",
+   "iteration": 1,
+   "recorded_iteration": 1,
+   "counts": {
+    "critical": 1,
+    "important": 4,
+    "minor": 3
+   },
+   "findings": [
+    {
+     "lens": "provenance",
+     "severity": "CRITICAL",
+     "path": "src/nthlayer_generate/specs/parser.py",
+     "start_line": 105,
+     "end_line": 113,
+     "claim": "Parse-time ${env}/${service}/${team} substitution is not pinned",
+     "evidence": null,
+     "fix": null,
+     "fingerprint": "3b95ecd48a08cefd",
+     "verification_level": "asserted",
+     "resolves": null,
+     "regression": false,
+     "status": null,
+     "derived_from": "reviewer_transcript",
+     "extracted_by": "model",
+     "handback_sha256": "51e74c155eac7213bd16221b2d806755225bb668b2cbe64d8ebdbc5b60b76d74",
+     "fix_commit": "eb3601764fa2093ce5654bb87c4cc1a54b158f77",
+     "reported_path": "src/nthlayer_generate/specs/parser.py",
+     "path_in_tree": true
+    },
+    {
+     "lens": "provenance",
+     "severity": "IMPORTANT",
+     "path": "src/nthlayer_generate/generators/alerts.py",
+     "start_line": 45,
+     "end_line": 48,
+     "claim": "inferring the db type from its name (no untyped database in the corpus)",
+     "evidence": null,
+     "fix": null,
+     "fingerprint": "3126142ac3af506b",
+     "verification_level": "asserted",
+     "resolves": null,
+     "regression": false,
+     "status": null,
+     "derived_from": "reviewer_transcript",
+     "extracted_by": "model",
+     "handback_sha256": "51e74c155eac7213bd16221b2d806755225bb668b2cbe64d8ebdbc5b60b76d74",
+     "fix_commit": "eb3601764fa2093ce5654bb87c4cc1a54b158f77",
+     "reported_path": "generators/alerts.py",
+     "path_in_tree": true
+    },
+    {
+     "lens": "provenance",
+     "severity": "IMPORTANT",
+     "path": "src/nthlayer_generate/generators/alerts.py",
+     "start_line": 74,
+     "end_line": 74,
+     "claim": "removing dedup (no duplicate dependency types in the corpus)",
+     "evidence": null,
+     "fix": null,
+     "fingerprint": "11dc833f52f99369",
+     "verification_level": "asserted",
+     "resolves": null,
+     "regression": false,
+     "status": null,
+     "derived_from": "reviewer_transcript",
+     "extracted_by": "model",
+     "handback_sha256": "51e74c155eac7213bd16221b2d806755225bb668b2cbe64d8ebdbc5b60b76d74",
+     "fix_commit": "eb3601764fa2093ce5654bb87c4cc1a54b158f77",
+     "reported_path": "generators/alerts.py",
+     "path_in_tree": true
+    },
+    {
+     "lens": "provenance",
+     "severity": "IMPORTANT",
+     "path": "src/nthlayer_generate/metrics/recommender.py",
+     "start_line": 110,
+     "end_line": 110,
+     "claim": "coverage when there are no required metrics",
+     "evidence": null,
+     "fix": null,
+     "fingerprint": "332a4cef31bd4bdf",
+     "verification_level": "asserted",
+     "resolves": null,
+     "regression": false,
+     "status": null,
+     "derived_from": "reviewer_transcript",
+     "extracted_by": "model",
+     "handback_sha256": "51e74c155eac7213bd16221b2d806755225bb668b2cbe64d8ebdbc5b60b76d74",
+     "fix_commit": "eb3601764fa2093ce5654bb87c4cc1a54b158f77",
+     "reported_path": "metrics/recommender.py",
+     "path_in_tree": true
+    },
+    {
+     "lens": "provenance",
+     "severity": "IMPORTANT",
+     "path": "src/nthlayer_generate/cli/validate_slo.py",
+     "start_line": 417,
+     "end_line": 419,
+     "claim": "exit 1 is never produced; goldens hold only exit 0 or 2",
+     "evidence": null,
+     "fix": null,
+     "fingerprint": "75df3c8e4f5d29d2",
+     "verification_level": "asserted",
+     "resolves": null,
+     "regression": false,
+     "status": null,
+     "derived_from": "reviewer_transcript",
+     "extracted_by": "model",
+     "handback_sha256": "51e74c155eac7213bd16221b2d806755225bb668b2cbe64d8ebdbc5b60b76d74",
+     "fix_commit": "eb3601764fa2093ce5654bb87c4cc1a54b158f77",
+     "reported_path": "cli/validate_slo.py",
+     "path_in_tree": true
+    }
+   ]
+  },
+  {
+   "lens": "provenance",
+   "iteration": 2,
+   "recorded_iteration": 2,
+   "counts": {
+    "critical": 2,
+    "important": 0,
+    "minor": 1
+   },
+   "findings": [
+    {
+     "lens": "provenance",
+     "severity": "CRITICAL",
+     "path": "src/nthlayer_generate/orchestrator.py",
+     "start_line": 79,
+     "end_line": 79,
+     "claim": "changing if index[\"Observability\"] or self._has_dependencies(index): to if self._has_dependencies(index): leaves the suite GREEN",
+     "evidence": null,
+     "fix": null,
+     "fingerprint": "ef06b8e9f1e4ea07",
+     "verification_level": "asserted",
+     "resolves": null,
+     "regression": false,
+     "status": null,
+     "derived_from": "reviewer_transcript",
+     "extracted_by": "model",
+     "handback_sha256": "fbed25587397154fc301626161ba833f91bbfface943c15c686ef64b72e6b794",
+     "fix_commit": "8dbdfb1bc88d00615ccda3445e5d33e284462828",
+     "reported_path": "src/nthlayer_generate/orchestrator.py",
+     "path_in_tree": true
+    },
+    {
+     "lens": "provenance",
+     "severity": "CRITICAL",
+     "path": "src/nthlayer_generate/orchestrator.py",
+     "start_line": 234,
+     "end_line": 236,
+     "claim": "changing if skip: to if False: leaves the suite GREEN",
+     "evidence": null,
+     "fix": null,
+     "fingerprint": "3e403c655c77e909",
+     "verification_level": "asserted",
+     "resolves": null,
+     "regression": false,
+     "status": null,
+     "derived_from": "reviewer_transcript",
+     "extracted_by": "model",
+     "handback_sha256": "fbed25587397154fc301626161ba833f91bbfface943c15c686ef64b72e6b794",
+     "fix_commit": "8dbdfb1bc88d00615ccda3445e5d33e284462828",
+     "reported_path": "src/nthlayer_generate/orchestrator.py",
+     "path_in_tree": true
+    }
+   ]
+  },
+  {
+   "lens": "provenance",
+   "iteration": 3,
+   "recorded_iteration": 3,
+   "counts": {},
+   "findings": null
+  },
+  {
+   "lens": "provenance",
+   "iteration": 4,
+   "recorded_iteration": 3,
+   "counts": {
+    "critical": 1,
+    "important": 0,
+    "minor": 0
+   },
+   "findings": [
+    {
+     "lens": "provenance",
+     "severity": "CRITICAL",
+     "path": "src/nthlayer_generate/cli/ownership.py",
+     "start_line": 196,
+     "end_line": 196,
+     "claim": "tests/golden/test_golden_legacy_cli.py:391-397 calls ownership_command only with output_format=json, so the table renderer (the default output format) is never pinned. The fixtures also never produce a BACKSTAGE signal, because the Backstage env vars are cleared and no URL is passed.",
+     "evidence": null,
+     "fix": null,
+     "fingerprint": "dac59792676bd4ca",
+     "verification_level": "asserted",
+     "resolves": null,
+     "regression": false,
+     "status": null,
+     "derived_from": "reviewer_transcript",
+     "extracted_by": "model",
+     "handback_sha256": "ec0fd8d2e212f2374835411fc664d8375f5db557957e74eebebae7f2354aac38",
+     "fix_commit": "1a40b547fa3547c4ff08af463ed1e40a12c7c488",
+     "reported_path": "src/nthlayer_generate/cli/ownership.py",
+     "path_in_tree": true
+    }
+   ]
+  }
+ ],
+ "cross_repo_findings": [],
+ "escaped": []
+}

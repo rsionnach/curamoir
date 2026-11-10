@@ -1,0 +1,336 @@
+{
+ "schema_version": 1,
+ "entry": "opensrm-wo62-4-3",
+ "fidelity": "recorded",
+ "lens_order": [
+  "correctness",
+  "clarity",
+  "edge-cases",
+  "provenance",
+  "excellence"
+ ],
+ "iterations": {
+  "correctness": 3,
+  "clarity": 2,
+  "edge-cases": 2,
+  "provenance": 2
+ },
+ "rounds": [
+  {
+   "lens": "correctness",
+   "iteration": 1,
+   "recorded_iteration": null,
+   "counts": {
+    "critical": 0,
+    "important": 2,
+    "minor": 1
+   },
+   "findings": [
+    {
+     "lens": "correctness",
+     "severity": "IMPORTANT",
+     "path": "src/nthlayer_generate/cli/generate.py",
+     "start_line": 62,
+     "end_line": 70,
+     "claim": "generate-slo now crashes with a traceback on inputs that used to exit 1. Before, generate_sloth_spec caught every exception and returned success=False. The new except only catches (FileNotFoundError, ManifestLoadError, ValueError), so other errors from load_manifest escape.",
+     "evidence": null,
+     "fix": null,
+     "fingerprint": "6d1ff3f0ee97e0e7",
+     "verification_level": "asserted",
+     "resolves": null,
+     "regression": false,
+     "status": null,
+     "derived_from": "reviewer_transcript",
+     "extracted_by": "model",
+     "handback_sha256": "5094a109c969dfe2308a74df470a60483311bfa5c41118cac7416baf4e4131fe",
+     "fix_commit": "cd49f83d0eeb1d663e4cd4bf633e67c16fcf0eeb",
+     "reported_path": "src/nthlayer_generate/cli/generate.py",
+     "path_in_tree": true
+    },
+    {
+     "lens": "correctness",
+     "severity": "IMPORTANT",
+     "path": "src/nthlayer_generate/cli/generate_alerts.py",
+     "start_line": 121,
+     "end_line": 128,
+     "claim": "the same malformed-spec file now crashes generate-alerts. Base exits 1, because the legacy parser raised an error the tuple already caught. The new tuple has no AttributeError.",
+     "evidence": null,
+     "fix": null,
+     "fingerprint": "20b5859fec65ebce",
+     "verification_level": "asserted",
+     "resolves": null,
+     "regression": false,
+     "status": null,
+     "derived_from": "reviewer_transcript",
+     "extracted_by": "model",
+     "handback_sha256": "5094a109c969dfe2308a74df470a60483311bfa5c41118cac7416baf4e4131fe",
+     "fix_commit": "cd49f83d0eeb1d663e4cd4bf633e67c16fcf0eeb",
+     "reported_path": "src/nthlayer_generate/cli/generate_alerts.py",
+     "path_in_tree": true
+    }
+   ]
+  },
+  {
+   "lens": "correctness",
+   "iteration": 2,
+   "recorded_iteration": 1,
+   "counts": {
+    "critical": 0,
+    "important": 1,
+    "minor": 1
+   },
+   "findings": [
+    {
+     "lens": "correctness",
+     "severity": "IMPORTANT",
+     "path": "src/nthlayer_generate/cli/dashboard.py",
+     "start_line": 131,
+     "end_line": 131,
+     "claim": "generate-dashboard crashes on malformed legacy Dependencies inputs that base handled.",
+     "evidence": null,
+     "fix": null,
+     "fingerprint": "08b28608cc8b95ec",
+     "verification_level": "asserted",
+     "resolves": null,
+     "regression": false,
+     "status": null,
+     "derived_from": "reviewer_transcript",
+     "extracted_by": "model",
+     "handback_sha256": "86b55449336d71afe35d0d1171ceed52af9593b4be67e3cb28260955f59dcb30",
+     "fix_commit": "b69758890da405751a3c9d707c31d5fcb79b8712",
+     "reported_path": "src/nthlayer_generate/cli/dashboard.py",
+     "path_in_tree": true
+    }
+   ]
+  },
+  {
+   "lens": "correctness",
+   "iteration": 3,
+   "recorded_iteration": 2,
+   "counts": {
+    "critical": 0,
+    "important": 0,
+    "minor": 0
+   },
+   "findings": null
+  },
+  {
+   "lens": "clarity",
+   "iteration": 1,
+   "recorded_iteration": null,
+   "counts": {
+    "critical": 0,
+    "important": 2,
+    "minor": 6
+   },
+   "findings": [
+    {
+     "lens": "clarity",
+     "severity": "IMPORTANT",
+     "path": "tests/test_cli_generate.py",
+     "start_line": 260,
+     "end_line": 268,
+     "claim": "The invalid-type case is stale. It passes for an unrelated reason.",
+     "evidence": null,
+     "fix": null,
+     "fingerprint": "ad71734179f80d0c",
+     "verification_level": "asserted",
+     "resolves": null,
+     "regression": false,
+     "status": null,
+     "derived_from": "reviewer_transcript",
+     "extracted_by": "model",
+     "handback_sha256": "b83fc42fe0e20f4056fe8c0f018c0c421b161fac8b1c37be523421c51fb229bc",
+     "fix_commit": "dbd909379d72e153705062e695b949444ac472b7",
+     "reported_path": "tests/test_cli_generate.py",
+     "path_in_tree": true
+    },
+    {
+     "lens": "clarity",
+     "severity": "IMPORTANT",
+     "path": "src/nthlayer_generate/dashboards/manifest_builder.py",
+     "start_line": 127,
+     "end_line": 129,
+     "claim": "The legacy builder's redis/kafka defaults is misattributed.",
+     "evidence": null,
+     "fix": null,
+     "fingerprint": "8aa703dde7eb0c22",
+     "verification_level": "asserted",
+     "resolves": null,
+     "regression": false,
+     "status": null,
+     "derived_from": "reviewer_transcript",
+     "extracted_by": "model",
+     "handback_sha256": "b83fc42fe0e20f4056fe8c0f018c0c421b161fac8b1c37be523421c51fb229bc",
+     "fix_commit": "dbd909379d72e153705062e695b949444ac472b7",
+     "reported_path": "src/nthlayer_generate/dashboards/manifest_builder.py",
+     "path_in_tree": true
+    }
+   ]
+  },
+  {
+   "lens": "clarity",
+   "iteration": 2,
+   "recorded_iteration": 1,
+   "counts": {
+    "critical": 0,
+    "important": 0,
+    "minor": 3
+   },
+   "findings": null
+  },
+  {
+   "lens": "edge_cases",
+   "iteration": 1,
+   "recorded_iteration": null,
+   "counts": {
+    "critical": 0,
+    "important": 1,
+    "minor": 5
+   },
+   "findings": [
+    {
+     "lens": "edge_cases",
+     "severity": "IMPORTANT",
+     "path": "src/nthlayer_generate/dashboards/manifest_builder.py",
+     "start_line": 126,
+     "end_line": 136,
+     "claim": "One unrecognised declared cache technology fails the whole dashboard",
+     "evidence": null,
+     "fix": null,
+     "fingerprint": "16d6ea8bc9225e2d",
+     "verification_level": "asserted",
+     "resolves": null,
+     "regression": false,
+     "status": null,
+     "derived_from": "reviewer_transcript",
+     "extracted_by": "model",
+     "handback_sha256": "4a70e5839598c5f5f7b6ce09a9aa25c3430a6113a71f1269b91a65dfb7a9fb7c",
+     "fix_commit": "03f1e5f84dc32c7ed77456fd64b21de6b1fd3a03",
+     "reported_path": "src/nthlayer_generate/dashboards/manifest_builder.py",
+     "path_in_tree": true
+    }
+   ]
+  },
+  {
+   "lens": "edge_cases",
+   "iteration": 2,
+   "recorded_iteration": 1,
+   "counts": {
+    "critical": 0,
+    "important": 0,
+    "minor": 3
+   },
+   "findings": null
+  },
+  {
+   "lens": "provenance",
+   "iteration": 1,
+   "recorded_iteration": null,
+   "counts": {
+    "critical": 1,
+    "important": 3,
+    "minor": 0
+   },
+   "findings": [
+    {
+     "lens": "provenance",
+     "severity": "CRITICAL",
+     "path": "src/nthlayer_generate/specs/helpers.py",
+     "start_line": null,
+     "end_line": null,
+     "claim": "The memcache and rabbit name inference in dependency_technology is untested.",
+     "evidence": null,
+     "fix": null,
+     "fingerprint": "83bfc45bd29b7f75",
+     "verification_level": "asserted",
+     "resolves": null,
+     "regression": false,
+     "status": null,
+     "derived_from": "reviewer_transcript",
+     "extracted_by": "model",
+     "handback_sha256": "fd6a9a09fd799eb524a81fe28c4ec205d7ba06e046295be14b6a05dbd82251c1",
+     "fix_commit": "088ea039490c3f09a895446197f02a39ac00e169",
+     "reported_path": "src/nthlayer_generate/specs/helpers.py",
+     "path_in_tree": true
+    },
+    {
+     "lens": "provenance",
+     "severity": "IMPORTANT",
+     "path": "tests/test_legacy_threshold_technology_consumers.py",
+     "start_line": null,
+     "end_line": null,
+     "claim": "The legacy-default recording-rule case misstates its source.",
+     "evidence": null,
+     "fix": null,
+     "fingerprint": "b307fae126544470",
+     "verification_level": "asserted",
+     "resolves": null,
+     "regression": false,
+     "status": null,
+     "derived_from": "reviewer_transcript",
+     "extracted_by": "model",
+     "handback_sha256": "fd6a9a09fd799eb524a81fe28c4ec205d7ba06e046295be14b6a05dbd82251c1",
+     "fix_commit": "088ea039490c3f09a895446197f02a39ac00e169",
+     "reported_path": "tests/test_legacy_threshold_technology_consumers.py",
+     "path_in_tree": true
+    },
+    {
+     "lens": "provenance",
+     "severity": "IMPORTANT",
+     "path": null,
+     "start_line": null,
+     "end_line": null,
+     "claim": "The api-critical elasticache fixture's shape is not in the spec.",
+     "evidence": null,
+     "fix": null,
+     "fingerprint": "2db57734533699cd",
+     "verification_level": "asserted",
+     "resolves": null,
+     "regression": false,
+     "status": null,
+     "derived_from": "reviewer_transcript",
+     "extracted_by": "model",
+     "handback_sha256": "fd6a9a09fd799eb524a81fe28c4ec205d7ba06e046295be14b6a05dbd82251c1",
+     "fix_commit": "088ea039490c3f09a895446197f02a39ac00e169",
+     "reported_path": null,
+     "path_in_tree": false
+    },
+    {
+     "lens": "provenance",
+     "severity": "IMPORTANT",
+     "path": "tests/test_cli_dashboard.py",
+     "start_line": null,
+     "end_line": null,
+     "claim": "Some malformed-spec negatives come from loader behaviour, not the format.",
+     "evidence": null,
+     "fix": null,
+     "fingerprint": "4a73836322522842",
+     "verification_level": "asserted",
+     "resolves": null,
+     "regression": false,
+     "status": null,
+     "derived_from": "reviewer_transcript",
+     "extracted_by": "model",
+     "handback_sha256": "fd6a9a09fd799eb524a81fe28c4ec205d7ba06e046295be14b6a05dbd82251c1",
+     "fix_commit": "088ea039490c3f09a895446197f02a39ac00e169",
+     "reported_path": "test_cli_dashboard.py",
+     "path_in_tree": true
+    }
+   ]
+  },
+  {
+   "lens": "provenance",
+   "iteration": 2,
+   "recorded_iteration": 1,
+   "counts": {
+    "critical": 0,
+    "important": 0,
+    "minor": 1
+   },
+   "findings": null
+  }
+ ],
+ "cross_repo_findings": [],
+ "escaped": []
+}

@@ -1,0 +1,1588 @@
+diff --git a/CLAUDE.md b/CLAUDE.md
+index 0bd0bbb..ca94d8c 100644
+--- a/CLAUDE.md
++++ b/CLAUDE.md
+@@ -77,6 +77,8 @@ These are load-bearing — wrong-side mistakes cause silent breakage.
+        (`manifest/thresholds.py`, decision 3c, opensrm-l33e), stored as
+        declared and never converted, and they are not in
+        `SLODefinition.target` at all.
++   - opensrm/v1 targets are 0-1 ratios and `convert_opensrm_v1_to_v2`
++     writes them as ratios — never ÷100; the v2 parser converts on load.
+    - Load-time validator in `manifest/target_validation.py` flags
+      targets in `(0, 1)` as likely ratio author errors via
+      `TargetConventionWarning(UserWarning)`. Tests in
+diff --git a/docs/architecture.md b/docs/architecture.md
+index 9feaa40..cf7c8eb 100644
+--- a/docs/architecture.md
++++ b/docs/architecture.md
+@@ -45,6 +45,8 @@ src/nthlayer_common/
+     overrides/           # Human override ingestion (gen_ai.override, opensrm-jmy.4)
+     governance_bridge/   # External governance webhook protocol (opensrm-jmy.5)
+     manifest/            # Unified OpenSRM manifest parsing (v1, v2, OpenSLO, legacy)
++                         #   + opensrm_v1.py: opensrm/v1 -> v2 converter (public,
++                         #     re-exported); load_manifest rejects opensrm/v1
+                          #   + scan.py: walking a directory that holds
+                          #     manifests alongside other YAML
+                          #   + evaluation.py: pure threshold evaluation (E1-E4);
+@@ -224,8 +226,16 @@ integration and the inbound adapter sidecar are tracked in follow-ups
+ 
+ Unified OpenSRM manifest parsing — v1 (srm/v1), v2
+ (opensrm.nthlayer.io/v2), OpenSLO subpackage, legacy NthLayer formats.
++The published `opensrm/v1` schema is migrate-only: `load_manifest` rejects it.
+ Implements C-X.2 (manifest format migration).
+ 
++- `manifest/opensrm_v1.py` — `convert_opensrm_v1_to_v2(data, *,
++  service_type=None) -> MigrationResult(manifest, unmapped)` converts an
++  `opensrm/v1` document to v2 (AUTHORING §7); `unmapped` lists every field with
++  no v2 home. `load_manifest` raises `ManifestLoadError` naming
++  `nthlayer migrate-manifest` for any `opensrm/v1` document, whatever `format=`
++  says (opensrm-pnmv).
++
+ **Scanning a mixed directory** (`manifest/scan.py`). `load_manifest`
+ raises for any YAML it cannot parse as a manifest, including files that
+ never claimed to be one. Callers walking a specs directory need to
+diff --git a/docs/upgrading-5.0.md b/docs/upgrading-5.0.md
+index f49e015..fb7627a 100644
+--- a/docs/upgrading-5.0.md
++++ b/docs/upgrading-5.0.md
+@@ -139,6 +139,12 @@ no `method`, `frequency` or `sampling`.
+   `beyond_top_bucket`; `ThresholdOutcome.from_dict` preserves reason strings it
+   does not know, so a reader survives a newer writer. `Status`, `MissingReason`
+   and `ResultReason` are exported for typing.
++- **New in 5.3.0:** `load_manifest` rejects `apiVersion: opensrm/v1` (the
++  published v1 schema) with an error naming `nthlayer migrate-manifest`, instead
++  of "service.name is required". `convert_opensrm_v1_to_v2(data, *,
++  service_type=None) -> MigrationResult(manifest, unmapped)` converts it to v2
++  following AUTHORING §7; `unmapped` lists every field with no v2 home. v2
++  `spec.dependencies[].service` now accepts `resource:` refs.
+ - Evaluators compare the rate `metric` names, per CORE §5.5.1. For `outcomes`,
+   count only decisions in `measurement.window` whose `outcome_signal.window` has
+   elapsed; a listed segment with none is not evaluable (CORE §5.5.6 E3).
+diff --git a/src/nthlayer_common/manifest/__init__.py b/src/nthlayer_common/manifest/__init__.py
+index 5337017..9c2442c 100644
+--- a/src/nthlayer_common/manifest/__init__.py
++++ b/src/nthlayer_common/manifest/__init__.py
+@@ -82,6 +82,13 @@ from nthlayer_common.manifest.models import (
+     valid_service_types_phrase,
+ )
+ from nthlayer_common.manifest.openslo.parser import OpenSLOParseError
++from nthlayer_common.manifest.opensrm_v1 import (
++    OPENSRM_V1_API_VERSION,
++    MigrationResult,
++    UnmappedField,
++    convert_opensrm_v1_to_v2,
++    is_opensrm_v1_format,
++)
+ from nthlayer_common.manifest.parser._shared import extract_declared_dependencies
+ from nthlayer_common.manifest.parser.loader import (
+     LegacyFormatWarning,
+@@ -117,6 +124,12 @@ __all__ = [
+     "OpenSLOParseError",
+     "OpenSRMParseError",
+     "OpenSRMV2ParseError",
++    # opensrm/v1 migration
++    "convert_opensrm_v1_to_v2",
++    "is_opensrm_v1_format",
++    "MigrationResult",
++    "UnmappedField",
++    "OPENSRM_V1_API_VERSION",
+     # Constants
+     "V2_JUDGMENT_SLO_TYPES",
+     "V2_JUDGMENT_THRESHOLD_TYPES",
+diff --git a/src/nthlayer_common/manifest/opensrm_v1.py b/src/nthlayer_common/manifest/opensrm_v1.py
+new file mode 100644
+index 0000000..b5a1bba
+--- /dev/null
++++ b/src/nthlayer_common/manifest/opensrm_v1.py
+@@ -0,0 +1,571 @@
++"""opensrm/v1 → opensrm.nthlayer.io/v2 migration (opensrm-pnmv).
++
++``opensrm/v1`` is the published OpenSRM v1 schema (opensrm/spec/v1/schema.json).
++NthLayer does not load it — its own v1 dialect is ``srm/v1`` (parser/v1.py),
++which differs from the schema in nearly every section. This module converts a
++schema-shaped ``opensrm/v1`` document to v2 following
++opensrm/spec/v2/AUTHORING.md §7, and never drops a field silently: anything
++with no v2 home is returned in ``MigrationResult.unmapped`` for the caller to
++refuse or accept. Targets are 0–1 ratios on both sides; nothing here
++multiplies by 100. See docs/superpowers/decisions/opensrm-v1-support.md in the
++nthlayer front door.
++"""
++
++from __future__ import annotations
++
++import re
++from collections.abc import Callable
++from dataclasses import dataclass, field
++from typing import Any
++
++from nthlayer_common.manifest.models import (
++    VALID_TIERS,
++    JudgmentThreshold,
++    ThresholdMeasurement,
++    resolve_service_type,
++    valid_service_types_phrase,
++)
++from nthlayer_common.manifest.openslo.parser import OpenSLOParseError, _infer_openslo_type
++from nthlayer_common.manifest.thresholds import (
++    _SRM_V1_CALIBRATION_BINS,
++    is_duration,
++    threshold_to_v2_entry,
++)
++
++OPENSRM_V1_API_VERSION = "opensrm/v1"
++_V1_KIND = "ServiceReliabilityManifest"
++_V2_NAME = re.compile(r"^[a-z0-9]([a-z0-9-]*[a-z0-9])?$")
++_ENTITY_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
++_NOT_IN_SCHEMA = "not part of the opensrm/v1 schema"
++
++OPENSRM_V1_REJECTION = (
++    "{path}: apiVersion 'opensrm/v1' is the published OpenSRM v1 schema, which "
++    "NthLayer does not load. NthLayer reads opensrm.nthlayer.io/v2 (and srm/v1, "
++    "its own v1 dialect). Convert it with: nthlayer migrate-manifest {path}"
++)
++
++# Per opensrm/spec/v1/schema.json definition: (keys converted, {key: why not}).
++# tests/test_opensrm_v1_schema_completeness.py checks every definition's
++# properties are covered, both ways.
++_SECTIONS: dict[str, tuple[frozenset[str], dict[str, str]]] = {
++    "Metadata": (
++        frozenset({"name", "team", "tier", "description", "labels", "annotations"}),
++        {"template": "v2 templates are a different mechanism (AUTHORING §4.9); re-declare by hand"},
++    ),
++    "Spec": (
++        frozenset({"type", "slos", "contract", "dependencies", "ownership",
++                   "observability", "instrumentation"}),
++        {
++            "notifications": "no v2 equivalent (AUTHORING §7.6)",
++            "deployment": "no v2 equivalent (AUTHORING §7.6)",
++        },
++    ),
++}
++
++
++@dataclass(frozen=True)
++class UnmappedField:
++    """A v1 field with no v2 home. *path* is dotted into the v1 document."""
++
++    path: str
++    reason: str
++
++
++@dataclass(frozen=True)
++class MigrationResult:
++    manifest: dict[str, Any]
++    unmapped: tuple[UnmappedField, ...]
++
++
++@dataclass
++class _Ctx:
++    service: str
++    unmapped: list[UnmappedField] = field(default_factory=list)
++    annotations: dict[str, str] = field(default_factory=dict)
++
++    def skip(self, path: str, reason: str) -> None:
++        self.unmapped.append(UnmappedField(path, reason))
++
++
++def is_opensrm_v1_format(data: object) -> bool:
++    return isinstance(data, dict) and data.get("apiVersion") == OPENSRM_V1_API_VERSION
++
++
++def _mapping(path: str, value: object) -> dict[str, Any]:
++    if not isinstance(value, dict):
++        raise ValueError(f"{path} must be a mapping, got {type(value).__name__}")
++    return value
++
++
++def _entity_name(path: str, value: object) -> str:
++    if not isinstance(value, str) or not _ENTITY_NAME.fullmatch(value):
++        raise ValueError(
++            f"{path} must be a name usable in an entity ref ([A-Za-z0-9._-], "
++            f"starting alphanumeric), got {value!r}"
++        )
++    return value
++
++
++def _string_map(path: str, value: object) -> dict[str, str]:
++    m = _mapping(path, value)
++    for k, v in m.items():
++        if not isinstance(k, str) or not isinstance(v, str):
++            raise ValueError(f"{path} must map strings to strings, got {k!r}: {v!r}")
++    return dict(m)
++
++
++def _service_type(declared: object, supplied: str | None) -> str:
++    if declared is None:
++        if supplied is None:
++            raise ValueError(
++                "spec.type is absent: it is optional in opensrm/v1 but required in "
++                "v2 (spec.service.type). Supply it (migrate-manifest --service-type). "
++                f"Must be one of: {valid_service_types_phrase()}."
++            )
++        declared_type = supplied
++    else:
++        declared_type = declared
++        if supplied is not None and resolve_service_type(supplied) != resolve_service_type(declared):
++            raise ValueError(
++                f"spec.type is {declared!r} but {supplied!r} was supplied; "
++                "a supplied service type only fills an absent spec.type"
++            )
++    resolved = resolve_service_type(declared_type) if isinstance(declared_type, str) else None
++    if resolved is None:
++        raise ValueError(
++            f"spec.type {declared_type!r} is not a valid v2 service type. "
++            f"Must be one of: {valid_service_types_phrase()}."
++        )
++    return resolved
++
++
++def convert_opensrm_v1_to_v2(
++    data: dict[str, Any], *, service_type: str | None = None
++) -> MigrationResult:
++    """Convert an ``opensrm/v1`` document to an ``opensrm.nthlayer.io/v2`` dict.
++
++    Raises ValueError only for a document that cannot be converted at all
++    (wrong apiVersion or kind, unusable name/team/tier/type, a malformed value on
++    a field that is converted). Fields with no v2 home are reported in
++    ``unmapped``, never raised and never dropped.
++    """
++    if not is_opensrm_v1_format(data):
++        got = data.get("apiVersion") if isinstance(data, dict) else type(data).__name__
++        raise ValueError(f"expects apiVersion {OPENSRM_V1_API_VERSION!r}, got {got!r}")
++    if data.get("kind") != _V1_KIND:
++        raise ValueError(
++            f"only kind {_V1_KIND!r} converts, got {data.get('kind')!r} "
++            "(a v1 Template has no v2 equivalent)"
++        )
++    metadata = _mapping("metadata", data.get("metadata"))
++    spec = _mapping("spec", data.get("spec", {}))
++
++    name = metadata.get("name")
++    if not isinstance(name, str) or not _V2_NAME.fullmatch(name):
++        raise ValueError(
++            f"metadata.name must match ^[a-z0-9]([a-z0-9-]*[a-z0-9])?$ in v2, got {name!r}"
++        )
++    ctx = _Ctx(service=name)
++
++    tier = metadata.get("tier")
++    if not isinstance(tier, str) or tier not in VALID_TIERS:
++        raise ValueError(f"metadata.tier must be one of {sorted(VALID_TIERS)}, got {tier!r}")
++    labels = _string_map("metadata.labels", metadata.get("labels", {}))
++    if labels.get("tier", tier) != tier:
++        raise ValueError(f"metadata.labels.tier {labels['tier']!r} disagrees with metadata.tier {tier!r}")
++    labels["tier"] = tier
++    if "annotations" in metadata:
++        ctx.annotations.update(_string_map("metadata.annotations", metadata["annotations"]))
++
++    for key in metadata:
++        converted, unmapped = _SECTIONS["Metadata"]
++        if key in unmapped:
++            ctx.skip(f"metadata.{key}", unmapped[key])
++        elif key not in converted:
++            ctx.skip(f"metadata.{key}", _NOT_IN_SCHEMA)
++
++    team = _entity_name("metadata.team", metadata.get("team"))
++    service: dict[str, Any] = {"name": name, "type": _service_type(spec.get("type"), service_type)}
++    if "description" in metadata:
++        if not isinstance(metadata["description"], str):
++            raise ValueError(
++                f"metadata.description must be a string, got {type(metadata['description']).__name__}"
++            )
++        service["description"] = metadata["description"]
++
++    out_spec: dict[str, Any] = {"owner": {"group": f"group:default/{team}"}, "service": service}
++    _convert_spec(spec, out_spec, ctx)
++
++    out_metadata: dict[str, Any] = {"name": name, "labels": labels}
++    if ctx.annotations:
++        out_metadata["annotations"] = ctx.annotations
++    manifest = {
++        "apiVersion": "opensrm.nthlayer.io/v2",
++        "kind": "ServiceManifest",
++        "metadata": out_metadata,
++        "spec": out_spec,
++    }
++    return MigrationResult(manifest=manifest, unmapped=tuple(ctx.unmapped))
++
++
++def _convert_spec(spec: dict[str, Any], out: dict[str, Any], ctx: _Ctx) -> None:
++    converted, unmapped = _SECTIONS["Spec"]
++    for key, value in spec.items():
++        if key == "type":
++            continue
++        if key in unmapped:
++            ctx.skip(f"spec.{key}", unmapped[key])
++        elif key not in converted:
++            ctx.skip(f"spec.{key}", _NOT_IN_SCHEMA)
++        else:
++            _SPEC_HANDLERS[key](value, out, ctx)
++
++
++_SPEC_HANDLERS: dict[str, Callable[[object, dict[str, Any], _Ctx], None]] = {}
++
++
++# v1 classical SLO key → the slo_type common's OpenSLO parser must infer.
++_CLASSICAL = {
++    "availability": "availability", "connection_availability": "availability",
++    "error_rate": "error_rate",
++    "latency": "latency", "duration": "latency", "query_latency": "latency",
++}
++# spec/v1/schema.json window defaults for the converted types (all 30d).
++_WINDOW_DEFAULT = dict.fromkeys(_CLASSICAL, "30d")
++# Percentile properties per v1 definition (spec/v1/schema.json): DurationSLO has no p999.
++_PERCENTILES_BY_DEFN = {
++    "LatencySLO": ("p50", "p90", "p95", "p99", "p999"),
++    "DurationSLO": ("p50", "p90", "p95", "p99"),
++    "QueryLatencySLO": ("p50", "p90", "p95", "p99", "p999"),
++}
++_DEFN_FOR_KEY = {"latency": "LatencySLO", "duration": "DurationSLO", "query_latency": "QueryLatencySLO"}
++_PERCENTILE_WHY = ("kept only in the OpenSLO displayName: an objective without an "
++                   "indicator carries no machine-readable percentile")
++
++_SECTIONS["SLOs"] = (
++    frozenset({*_CLASSICAL, "openslo", "judgment"}),
++    {
++        "throughput": "v1 declares a rate (e.g. 1000 rps); an OpenSLO objective needs a ratio target (AUTHORING §7.3)",
++        "success_rate": "common's v2 parser cannot infer this SLO's type (opensrm-47tt)",
++        "processing_time": "common's v2 parser cannot infer this SLO's type (opensrm-47tt)",
++        "lag": "common's v2 parser cannot infer this SLO's type (opensrm-47tt)",
++        "schedule_adherence": "maximum-only SLO (max_delay) with no target; an OpenSLO objective needs one",
++        "data_freshness": "maximum-only SLO (max_age) with no target; an OpenSLO objective needs one",
++        "replication_lag": "maximum-only SLO (max_lag) with no target; an OpenSLO objective needs one",
++        "custom": "custom SLOs have no v2 mapping",
++    },
++)
++for _defn, _pcts in _PERCENTILES_BY_DEFN.items():
++    _SECTIONS[_defn] = (frozenset({"target", "window"}), dict.fromkeys(_pcts, _PERCENTILE_WHY))
++for _defn in ("AvailabilitySLO", "ErrorRateSLO", "ConnectionAvailabilitySLO"):
++    _SECTIONS[_defn] = (frozenset({"target", "window"}), {})
++
++
++def _ratio(path: str, value: object) -> float:
++    if isinstance(value, bool) or not isinstance(value, (int, float)) or not 0.0 <= value <= 1.0:
++        raise ValueError(f"{path} must be a ratio in [0, 1], got {value!r}")
++    return float(value)
++
++
++def _duration(path: str, value: object) -> str:
++    if not is_duration(value):
++        raise ValueError(f"{path} must be a duration like '30d' or '200ms', got {value!r}")
++    return str(value)
++
++
++def _pct(ratio: float) -> str:
++    return f"{ratio * 100:g}%"
++
++
++def _openslo(key: str, cfg: object, ctx: _Ctx) -> dict[str, Any]:
++    path = f"spec.slos.{key}"
++    cfg = _mapping(path, cfg)
++    target = _ratio(f"{path}.target", cfg.get("target"))
++    window = _duration(f"{path}.window", cfg.get("window", _WINDOW_DEFAULT[key]))
++    kind = _CLASSICAL[key]
++    if kind == "error_rate":
++        # v1 ErrorRateSLO.target is a MAXIMUM error ratio; OpenSLO targets are
++        # good-ratios (the spec's reference output turns 0.001 into 0.999).
++        good = round(1.0 - target, 12)
++        display = f"Error rate under {_pct(target)} over {window}"
++    elif kind == "latency":
++        pct_keys = _PERCENTILES_BY_DEFN[_DEFN_FOR_KEY[key]]
++        pcts = [(p, _duration(f"{path}.{p}", cfg[p])) for p in pct_keys if p in cfg]
++        for p, _ in pcts:
++            ctx.skip(f"{path}.{p}", _PERCENTILE_WHY)
++        good = target
++        bits = ", ".join(f"{p} under {v}" for p, v in pcts)
++        display = f"{_pct(target)} of requests {bits} over {window}" if bits else f"{_pct(target)} {key.replace('_', ' ')} over {window}"
++    else:
++        good = target
++        display = f"{_pct(target)} {key.replace('_', ' ')} over {window}"
++    for extra in cfg:
++        if extra not in ("target", "window", *_PERCENTILES_BY_DEFN.get(_DEFN_FOR_KEY.get(key, ""), ())):
++            ctx.skip(f"{path}.{extra}", _NOT_IN_SCHEMA)
++
++    slo_name = f"{ctx.service}-{key.replace('_', '-')}"
++    objective = {"displayName": display, "target": good}
++    try:
++        inferred: str | None = _infer_openslo_type(slo_name, good * 100, None, None, None, objective)
++    except OpenSLOParseError:
++        inferred = None
++    if inferred != kind:
++        raise ValueError(
++            f"SLO '{slo_name}' would be read as {inferred!r}, not {kind!r}: common's v2 "
++            "parser infers the type from the SLO name and the service name contains "
++            "another type's word (opensrm-47tt). Rename the service or migrate this SLO by hand."
++        )
++    return {
++        "apiVersion": "openslo/v1",
++        "kind": "SLO",
++        "metadata": {"name": slo_name},
++        "spec": {
++            "service": ctx.service,
++            "timeWindow": [{"duration": window, "isRolling": True}],
++            "objectives": [objective],
++        },
++    }
++
++
++def _convert_slos(value: object, out: dict[str, Any], ctx: _Ctx) -> None:
++    slos = _mapping("spec.slos", value)
++    converted, unmapped = _SECTIONS["SLOs"]
++    docs: list[dict[str, Any]] = []
++    for key, cfg in slos.items():
++        if key in unmapped:
++            ctx.skip(f"spec.slos.{key}", unmapped[key])
++        elif key not in converted:
++            ctx.skip(f"spec.slos.{key}", _NOT_IN_SCHEMA)
++        elif key == "openslo":
++            if not isinstance(cfg, list):
++                raise ValueError(f"spec.slos.openslo must be a list, got {type(cfg).__name__}")
++            for i, item in enumerate(cfg):
++                item = _mapping(f"spec.slos.openslo[{i}]", item)
++                for extra in item:
++                    if extra != "path":
++                        ctx.skip(f"spec.slos.openslo[{i}].{extra}", _NOT_IN_SCHEMA)
++                ref = item.get("path")
++                if not isinstance(ref, str) or not ref:
++                    raise ValueError(f"spec.slos.openslo[{i}].path must be a non-empty string")
++                docs.append({"$ref": ref})
++        elif key == "judgment":
++            _convert_judgment(cfg, out, ctx)
++        else:
++            docs.append(_openslo(key, cfg, ctx))
++    if docs:
++        out["slo"] = docs
++
++
++_JUDGMENT_SLO_WHY = (
++    "judgment_slo is new capability, not migration (AUTHORING §7.7 step 8), and no "
++    "v2 judgment-SLO shape passes both the schema and common's parser (opensrm-a742)"
++)
++_SECTIONS["JudgmentSLOs"] = (
++    frozenset({"calibration", "feedback_latency"}),
++    {"reversal_rate": _JUDGMENT_SLO_WHY, "high_confidence_failure": _JUDGMENT_SLO_WHY},
++)
++_SECTIONS["FlatCalibrationSLO"] = (frozenset({"target", "window"}), {})
++_SECTIONS["FeedbackLatencySLO"] = (frozenset({"p50", "p90"}), {})
++
++
++def _report_extra_keys(path: str, cfg: dict[str, Any], defn: str, ctx: _Ctx) -> None:
++    converted, unmapped = _SECTIONS[defn]
++    for extra in cfg:
++        if extra in unmapped:
++            ctx.skip(f"{path}.{extra}", unmapped[extra])
++        elif extra not in converted:
++            ctx.skip(f"{path}.{extra}", _NOT_IN_SCHEMA)
++
++
++def _convert_judgment(value: object, out: dict[str, Any], ctx: _Ctx) -> None:
++    judgment = _mapping("spec.slos.judgment", value)
++    if out["service"]["type"] != "ai-gate":
++        ctx.skip("spec.slos.judgment",
++                 "v2 allows judgment blocks only on spec.service.type ai-gate (AUTHORING §3.1)")
++        return
++    converted, unmapped = _SECTIONS["JudgmentSLOs"]
++    entries: list[dict[str, Any]] = []
++    for key, cfg in judgment.items():
++        path = f"spec.slos.judgment.{key}"
++        if key in unmapped:
++            ctx.skip(path, unmapped[key])
++        elif key not in converted:
++            ctx.skip(path, _NOT_IN_SCHEMA)
++        elif key == "calibration":
++            cfg = _mapping(path, cfg)
++            threshold = JudgmentThreshold(
++                type="calibration",
++                bounds={"maximum_expected_calibration_error": _ratio(f"{path}.target", cfg.get("target"))},
++                measurement=ThresholdMeasurement(
++                    window=_duration(f"{path}.window", cfg.get("window")),
++                    bins=_SRM_V1_CALIBRATION_BINS,
++                ),
++            )
++            entries.append(threshold_to_v2_entry(threshold))
++            ctx.skip(path, f"converted with measurement.bins: {_SRM_V1_CALIBRATION_BINS}, "
++                           "a value opensrm/v1 does not declare; check it")
++            _report_extra_keys(path, cfg, "FlatCalibrationSLO", ctx)
++        else:  # feedback_latency
++            cfg = _mapping(path, cfg)
++            bounds = {f"maximum_{p}": _duration(f"{path}.{p}", cfg[p]) for p in ("p50", "p90") if p in cfg}
++            _report_extra_keys(path, cfg, "FeedbackLatencySLO", ctx)
++            if not bounds:
++                ctx.skip(path, "declares neither p50 nor p90, so there is no bound to convert")
++                continue
++            entries.append(threshold_to_v2_entry(JudgmentThreshold(type="feedback_latency", bounds=bounds)))
++    if entries:
++        out["judgment_threshold"] = entries
++
++
++_SECTIONS["Contract"] = (frozenset({"availability", "latency", "throughput"}),
++                         {"judgment": "v2 contracts[].promise has availability, latency_p99 and throughput only (AUTHORING §7.4)"})
++_SECTIONS["ContractLatency"] = (frozenset({"p99"}), dict.fromkeys(
++    ("p50", "p999"), "v2 contracts[].promise has latency_p99 only (AUTHORING §7.4)"))
++_SECTIONS["ContractThroughput"] = (frozenset({"max_rps"}),
++                                   {"burst": "v2 contracts[].promise.throughput is a single rate (AUTHORING §7.4)"})
++_SECTIONS["Dependency"] = (frozenset({"service", "type", "expects"}), {
++    "critical": "v2 expresses this as a fallback, which only the author can choose (AUTHORING §7.5)",
++    "manifest": "v2 resolves dependencies through the catalogue (AUTHORING §7.5)"})
++# spec/v1/schema.json Dependency.expects and its inline latency object.
++_SECTIONS["Dependency.expects"] = (frozenset({"availability", "latency"}), {})
++_SECTIONS["Dependency.expects.latency"] = (frozenset({"p99"}), {})
++_SECTIONS["Ownership"] = (frozenset({"team", "slack", "escalation", "pagerduty", "runbook", "documentation"}), {
++    "email": "no v2 field or AUTHORING §7.2 annotation key",
++    "oncall_required": "no v2 field"})
++# spec/v1/schema.json Ownership.pagerduty (inline).
++_SECTIONS["Ownership.pagerduty"] = (frozenset({"service_id"}), {
++    "escalation_policy_id": "no AUTHORING §7.2 annotation key"})
++_SECTIONS["Observability"] = (frozenset(), {
++    "metrics": "v2 instrumentation needs a type per metric (AUTHORING §7.7 step 6)",
++    "dashboards": "no v2 equivalent (AUTHORING §7.6)",
++    "alerts": "no v2 equivalent (AUTHORING §7.6)",
++    "tracing": "no v2 equivalent (AUTHORING §7.6)"})
++_SECTIONS["Instrumentation"] = (frozenset({"events"}), {"attributes": "v2 instrumentation has no attribute list"})
++# spec/v1/schema.json Instrumentation.events: each key maps to an event-name string.
++_SECTIONS["Instrumentation.events"] = (frozenset({"decision", "reversal", "outcome", "audit_result"}), {})
++
++_RESOURCE_TYPES = ("database", "cache", "queue")
++_OWNERSHIP_ANNOTATIONS = {   # AUTHORING §7.2
++    "slack": "slack.com/channel",
++    "runbook": "opensrm.nthlayer.io/runbook",
++    "documentation": "opensrm.nthlayer.io/documentation",
++}
++
++
++def _keys(section: str, path: str, value: dict[str, Any], ctx: _Ctx) -> list[str]:
++    """Report the unmapped and unknown keys of *value*; return the converted ones, in order."""
++    converted, unmapped = _SECTIONS[section]
++    keep = []
++    for key in value:
++        if key in unmapped:
++            ctx.skip(f"{path}.{key}", unmapped[key])
++        elif key not in converted:
++            ctx.skip(f"{path}.{key}", _NOT_IN_SCHEMA)
++        else:
++            keep.append(key)
++    return keep
++
++
++def _annotate(ctx: _Ctx, key: str, value: object, path: str) -> None:
++    if not isinstance(value, str):
++        raise ValueError(f"{path} must be a string, got {value!r}")
++    if ctx.annotations.get(key, value) != value:
++        raise ValueError(f"{path} would set annotation {key} to {value!r}, but metadata.annotations has {ctx.annotations[key]!r}")
++    ctx.annotations[key] = value
++
++
++def _convert_contract(value: object, out: dict[str, Any], ctx: _Ctx) -> None:
++    contract = _mapping("spec.contract", value)
++    promise: dict[str, Any] = {}
++    for key in _keys("Contract", "spec.contract", contract, ctx):
++        if key == "availability":
++            promise["availability"] = _ratio("spec.contract.availability", contract[key])
++        elif key == "latency":
++            latency = _mapping("spec.contract.latency", contract[key])
++            if "p99" in _keys("ContractLatency", "spec.contract.latency", latency, ctx):
++                promise["latency_p99"] = _duration("spec.contract.latency.p99", latency["p99"])
++        else:  # throughput
++            throughput = _mapping("spec.contract.throughput", contract[key])
++            if "max_rps" in _keys("ContractThroughput", "spec.contract.throughput", throughput, ctx):
++                rps = throughput["max_rps"]
++                if isinstance(rps, bool) or not isinstance(rps, int) or rps < 1:
++                    raise ValueError(f"spec.contract.throughput.max_rps must be an integer >= 1, got {rps!r}")
++                promise["throughput"] = f"{rps}rps"
++    if promise:
++        out["contracts"] = [{"name": ctx.service, "promise": promise,
++                             "contract_owner": out["owner"]["group"]}]
++
++
++def _convert_dependencies(value: object, out: dict[str, Any], ctx: _Ctx) -> None:
++    if not isinstance(value, list):
++        raise ValueError(f"spec.dependencies must be a list, got {type(value).__name__}")
++    deps = []
++    for i, raw in enumerate(value):
++        path = f"spec.dependencies[{i}]"
++        dep = _mapping(path, raw)
++        keys = _keys("Dependency", path, dep, ctx)
++        name = _entity_name(f"{path}.service", dep.get("service"))
++        dtype = dep.get("type", "service")
++        if dtype in _RESOURCE_TYPES:
++            ref = f"resource:default/{name}"
++        elif dtype == "external":
++            ref = f"component:external/{name}"
++        elif dtype == "service":
++            ref = f"component:default/{name}"
++        else:
++            raise ValueError(f"{path}.type must be one of service, database, cache, queue, external; got {dtype!r}")
++        entry: dict[str, Any] = {"service": ref}
++        if "expects" in keys:
++            expects = _mapping(f"{path}.expects", dep["expects"])
++            for key in _keys("Dependency.expects", f"{path}.expects", expects, ctx):
++                if key == "availability":
++                    entry["expected_availability"] = _ratio(f"{path}.expects.availability", expects[key])
++                else:  # latency
++                    latency = _mapping(f"{path}.expects.latency", expects[key])
++                    if "p99" in _keys("Dependency.expects.latency", f"{path}.expects.latency", latency, ctx):
++                        entry["expected_latency_p99"] = _duration(f"{path}.expects.latency.p99", latency["p99"])
++        deps.append(entry)
++    if deps:
++        out["dependencies"] = deps
++
++
++def _convert_ownership(value: object, out: dict[str, Any], ctx: _Ctx) -> None:
++    own = _mapping("spec.ownership", value)
++    for key in _keys("Ownership", "spec.ownership", own, ctx):
++        path = f"spec.ownership.{key}"
++        if key == "team":
++            team = _entity_name(path, own[key])
++            if f"group:default/{team}" != out["owner"]["group"]:
++                raise ValueError(f"spec.ownership.team {team!r} disagrees with metadata.team ({out['owner']['group']})")
++        elif key == "escalation":
++            out["owner"]["escalation"] = f"group:default/{_entity_name(path, own[key])}"
++        elif key == "pagerduty":
++            pd = _mapping(path, own[key])
++            if "service_id" in _keys("Ownership.pagerduty", path, pd, ctx):
++                _annotate(ctx, "pagerduty.com/service-id", pd["service_id"], f"{path}.service_id")
++        else:
++            _annotate(ctx, _OWNERSHIP_ANNOTATIONS[key], own[key], path)
++
++
++def _convert_observability(value: object, out: dict[str, Any], ctx: _Ctx) -> None:
++    _keys("Observability", "spec.observability", _mapping("spec.observability", value), ctx)
++
++
++def _convert_instrumentation(value: object, out: dict[str, Any], ctx: _Ctx) -> None:
++    inst = _mapping("spec.instrumentation", value)
++    if "events" in _keys("Instrumentation", "spec.instrumentation", inst, ctx):
++        path = "spec.instrumentation.events"
++        events = _mapping(path, inst["events"])
++        required = []
++        for key in _keys("Instrumentation.events", path, events, ctx):
++            if not isinstance(events[key], str):
++                raise ValueError(f"{path}.{key} must be an event-name string, got {events[key]!r}")
++            required.append({"type": events[key]})
++        if required:
++            out["instrumentation"] = {"required_events": required}
++
++
++_SPEC_HANDLERS.update(
++    slos=_convert_slos, contract=_convert_contract, dependencies=_convert_dependencies, ownership=_convert_ownership,
++    observability=_convert_observability, instrumentation=_convert_instrumentation,
++)
+diff --git a/src/nthlayer_common/manifest/parser/loader.py b/src/nthlayer_common/manifest/parser/loader.py
+index 26205bf..8253ce9 100644
+--- a/src/nthlayer_common/manifest/parser/loader.py
++++ b/src/nthlayer_common/manifest/parser/loader.py
+@@ -29,6 +29,7 @@ from nthlayer_common.manifest.models import (
+     SLODefinition,
+     SourceFormat,
+ )
++from nthlayer_common.manifest.opensrm_v1 import OPENSRM_V1_REJECTION, is_opensrm_v1_format
+ from nthlayer_common.manifest.parser.v1 import (
+     OpenSRMParseError,
+     is_srm_v1_format,
+@@ -83,6 +84,13 @@ def load_manifest(
+     if not isinstance(data, dict):
+         raise ManifestLoadError(f"Expected YAML object in {file_path}")
+ 
++    # The published OpenSRM v1 schema is migrate-only: NthLayer's v1 dialect is
++    # srm/v1. Rejected before format dispatch so no explicit format= can push it
++    # into a parser that misreads it (opensrm-pnmv). See
++    # docs/superpowers/decisions/opensrm-v1-support.md in the nthlayer front door.
++    if is_opensrm_v1_format(data):
++        raise ManifestLoadError(OPENSRM_V1_REJECTION.format(path=file_path))
++
+     # Detect format
+     detected_format = _detect_format(data)
+ 
+@@ -185,6 +193,10 @@ def is_manifest_file(file_path: str | Path) -> bool:
+             return True
+         if is_srm_v1_format(data):
+             return True
++        # Counts as a manifest so a scan reaches load_manifest and its
++        # migrate-manifest rejection instead of skipping the file silently.
++        if is_opensrm_v1_format(data):
++            return True
+ 
+         if "service" in data and isinstance(data["service"], dict):
+             service = data["service"]
+diff --git a/src/nthlayer_common/manifest/parser/v2.py b/src/nthlayer_common/manifest/parser/v2.py
+index 9aaf85f..a593388 100644
+--- a/src/nthlayer_common/manifest/parser/v2.py
++++ b/src/nthlayer_common/manifest/parser/v2.py
+@@ -352,22 +352,24 @@ def _parse_v2_owner(owner_data: dict[str, Any]) -> Ownership | None:
+     )
+ 
+ 
+-def _resolve_backstage_ref(ref: str, expected_kind: str) -> str:
++def _resolve_backstage_ref(ref: str, expected_kind: str | tuple[str, ...]) -> str:
+     """Extract the name from a Backstage entity reference.
+ 
+     Format: "kind:namespace/name" or "kind:name" (default namespace).
++    *expected_kind* is one kind or a tuple of accepted kinds.
+     Raises OpenSRMV2ParseError on invalid format.
+     """
++    kinds = (expected_kind,) if isinstance(expected_kind, str) else expected_kind
+     if ":" not in ref:
+         raise OpenSRMV2ParseError(
+             f"Invalid Backstage entity reference: '{ref}'. "
+-            f"Expected format: '{expected_kind}:namespace/name'"
++            f"Expected format: '{kinds[0]}:namespace/name'"
+         )
+ 
+     kind, rest = ref.split(":", 1)
+-    if kind != expected_kind:
++    if kind not in kinds:
+         raise OpenSRMV2ParseError(
+-            f"Expected {expected_kind} reference, got '{kind}' in '{ref}'"
++            f"Expected {' or '.join(kinds)} reference, got '{kind}' in '{ref}'"
+         )
+ 
+     if "/" in rest:
+@@ -885,8 +887,10 @@ def _parse_dependencies(deps_data: list[dict[str, Any]]) -> list[Dependency]:
+         if not service_ref:
+             raise OpenSRMV2ParseError("Dependency missing 'service' field")
+ 
+-        # Extract name from Backstage entity ref
+-        name = _resolve_backstage_ref(service_ref, "component")
++        # A dependency is a component (a service) or a resource (a database,
++        # cache or queue) — the spec's migration reference uses both
++        # (opensrm-pnmv).
++        name = _resolve_backstage_ref(service_ref, ("component", "resource"))
+ 
+         # Map expected guarantees into DependencySLO
+         slo = None
+diff --git a/tests/test_opensrm_v1_against_spec.py b/tests/test_opensrm_v1_against_spec.py
+new file mode 100644
+index 0000000..641536f
+--- /dev/null
++++ b/tests/test_opensrm_v1_against_spec.py
+@@ -0,0 +1,118 @@
++"""The spec's own opensrm/v1 examples convert, validate and parse (opensrm-pnmv).
++
++The EXPECTED unmapped lists are derived from each example file's keys and the
++§4 mapping table of the pnmv design, not from the converter's output.
++"""
++import json
++from pathlib import Path
++
++import jsonschema
++import pytest
++import yaml
++
++from nthlayer_common.manifest import ManifestLoadError, load_manifest
++from nthlayer_common.manifest.opensrm_v1 import convert_opensrm_v1_to_v2
++from nthlayer_common.manifest.parser.v2 import parse_opensrm_v2
++
++# parents: [0]=tests/ [1]=nthlayer-common/ [2]=<ecosystem>/
++OPENSRM = Path(__file__).resolve().parents[2] / "opensrm"
++EXAMPLES = OPENSRM / "examples"
++V2_SCHEMA = OPENSRM / "spec" / "v2" / "schema.json"
++REFERENCE = OPENSRM / "spec" / "v2" / "examples" / "migration" / "api-full-v2.yaml"
++
++_OBS = ["spec.observability.metrics", "spec.observability.dashboards", "spec.observability.alerts"]
++EXPECTED: dict[str, tuple[str | None, list[str]]] = {
++    # file: (service_type to supply, unmapped paths in document order)
++    "ai-gate-full.yaml": (None, [
++        "spec.contract.judgment", "spec.slos.latency.p99",
++        "spec.slos.judgment.reversal_rate", "spec.slos.judgment.high_confidence_failure",
++        "spec.slos.judgment.calibration", "spec.instrumentation.attributes",
++        "spec.dependencies[0].critical", "spec.dependencies[1].critical", "spec.dependencies[2].critical",
++        *_OBS]),
++    "ai-gate-minimal.yaml": (None, ["spec.observability.metrics", "spec.slos.judgment.reversal_rate"]),
++    "ai-gate-security-scanner.yaml": (None, [
++        "spec.observability.metrics", "spec.slos.judgment.reversal_rate",
++        "spec.slos.judgment.high_confidence_failure", "spec.instrumentation.attributes"]),
++    "api-full.yaml": ("api", [
++        "spec.slos.latency.p50", "spec.slos.latency.p99", "spec.slos.throughput",
++        "spec.dependencies[0].critical", "spec.dependencies[1].critical",
++        "spec.dependencies[2].critical", "spec.dependencies[2].manifest", "spec.dependencies[3].critical",
++        "spec.ownership.email", "spec.ownership.pagerduty.escalation_policy_id",
++        "spec.notifications", *_OBS, "spec.observability.tracing", "spec.deployment"]),
++    "api-internal.yaml": ("api", [
++        "spec.slos.latency.p95", "spec.dependencies[0].critical", "spec.dependencies[1].critical",
++        "spec.ownership.email", *_OBS, "spec.observability.tracing", "spec.deployment"]),
++    "api-minimal.yaml": (None, ["spec.observability.metrics"]),
++    "batch-etl.yaml": (None, [
++        "spec.slos.success_rate", "spec.slos.duration.p95", "spec.slos.schedule_adherence",
++        "spec.slos.data_freshness", "spec.slos.throughput",
++        "spec.dependencies[0].critical", "spec.dependencies[1].critical", "spec.dependencies[2].critical",
++        "spec.ownership.email", *_OBS, "spec.deployment"]),
++    "database-mysql.yaml": (None, [
++        "spec.slos.query_latency.p50", "spec.slos.query_latency.p99", "spec.slos.replication_lag",
++        "spec.slos.throughput", "spec.dependencies[0].critical", "spec.dependencies[1].critical",
++        "spec.ownership.email", "spec.ownership.pagerduty.escalation_policy_id", *_OBS, "spec.deployment"]),
++}
++
++
++def test_the_spec_examples_are_present():
++    found = sorted(p.name for p in EXAMPLES.glob("*.yaml")
++                   if yaml.safe_load(p.read_text()).get("apiVersion") == "opensrm/v1")
++    assert found == sorted(EXPECTED), "the opensrm sibling is missing or its v1 examples changed"
++    assert V2_SCHEMA.is_file() and REFERENCE.is_file()
++
++
++@pytest.mark.parametrize("name", sorted(EXPECTED))
++def test_example_converts_validates_and_parses(name):
++    service_type, unmapped = EXPECTED[name]
++    doc = yaml.safe_load((EXAMPLES / name).read_text())
++    r = convert_opensrm_v1_to_v2(doc, service_type=service_type)
++    assert sorted(f.path for f in r.unmapped) == sorted(unmapped)
++    jsonschema.validate(r.manifest, json.loads(V2_SCHEMA.read_text()))
++    parse_opensrm_v2(r.manifest)
++
++
++@pytest.mark.parametrize("name", sorted(EXPECTED))
++def test_load_manifest_rejects_every_example(name):
++    with pytest.raises(ManifestLoadError, match="nthlayer migrate-manifest"):
++        load_manifest(EXAMPLES / name)
++
++
++def test_api_full_matches_the_spec_reference_on_mapped_fields():
++    """Excluded (the reference author's decisions or inventions, or unmapped by
++    §4): fallback, api_ref, technical_contact, the backstage.io/component-ref
++    annotation, metadata.namespace, instrumentation, and the throughput SLO.
++
++    SLO documents are compared whole except for two keys:
++    ``objectives[].displayName`` (wording) and ``spec.timeWindow``. The
++    reference omits timeWindow, which is a defect in the spec's reference file:
++    its 7d error-rate SLO would parse as the parser's 30d default. timeWindow is
++    pinned separately in test_opensrm_v1_slos.py."""
++    got = convert_opensrm_v1_to_v2(yaml.safe_load((EXAMPLES / "api-full.yaml").read_text()),
++                                   service_type="api").manifest
++    ref = yaml.safe_load(REFERENCE.read_text())
++    assert (got["apiVersion"], got["kind"]) == (ref["apiVersion"], ref["kind"])
++    assert got["metadata"]["name"] == ref["metadata"]["name"]
++    assert got["metadata"]["labels"] == ref["metadata"]["labels"]
++    ref_ann = {k: v for k, v in ref["metadata"]["annotations"].items() if k != "backstage.io/component-ref"}
++    assert got["metadata"]["annotations"] == ref_ann
++    assert {k: got["spec"]["owner"][k] for k in ("group", "escalation")} == \
++           {k: ref["spec"]["owner"][k] for k in ("group", "escalation")}
++    assert got["spec"]["service"] == ref["spec"]["service"]
++
++    def slo_docs(slos):
++        def comparable(d):
++            spec = {k: v for k, v in d["spec"].items() if k != "timeWindow"}
++            spec["objectives"] = [{k: v for k, v in o.items() if k != "displayName"}
++                                  for o in spec["objectives"]]
++            return {**d, "spec": spec}
++        return {d["metadata"]["name"]: comparable(d)
++                for d in slos if not d["metadata"]["name"].endswith("throughput")}
++    assert slo_docs(got["spec"]["slo"]) == slo_docs(ref["spec"]["slo"])
++    (c,) = got["spec"]["contracts"]
++    (rc,) = ref["spec"]["contracts"]
++    assert (c["name"], c["promise"], c["contract_owner"]) == (rc["name"], rc["promise"], rc["contract_owner"])
++
++    def strip(deps):
++        return [{k: v for k, v in d.items() if k != "fallback"} for d in deps]
++    assert got["spec"]["dependencies"] == strip(ref["spec"]["dependencies"])
+diff --git a/tests/test_opensrm_v1_envelope.py b/tests/test_opensrm_v1_envelope.py
+new file mode 100644
+index 0000000..06b1a72
+--- /dev/null
++++ b/tests/test_opensrm_v1_envelope.py
+@@ -0,0 +1,132 @@
++"""opensrm/v1 → v2: envelope, metadata, owner, service type (opensrm-pnmv).
++
++Shapes follow opensrm/spec/v1/schema.json (Metadata: name/team/tier required;
++name ^[a-z0-9-]+$; tier critical|high|standard|low) and AUTHORING.md §7.1-7.2.
++"""
++import pytest
++
++from nthlayer_common.manifest.opensrm_v1 import (
++    MigrationResult,
++    UnmappedField,
++    convert_opensrm_v1_to_v2,
++    is_opensrm_v1_format,
++)
++
++
++def _v1(**spec) -> dict:
++    return {
++        "apiVersion": "opensrm/v1",
++        "kind": "ServiceReliabilityManifest",
++        "metadata": {"name": "payment-api", "team": "payments", "tier": "critical",
++                     "description": "Handles payments"},
++        "spec": {"type": "api", **spec},
++    }
++
++
++def test_detects_only_opensrm_v1():
++    assert is_opensrm_v1_format(_v1())
++    assert not is_opensrm_v1_format({"apiVersion": "srm/v1"})
++    assert not is_opensrm_v1_format([])
++
++
++def test_envelope_metadata_owner_and_service():
++    r = convert_opensrm_v1_to_v2(_v1())
++    assert isinstance(r, MigrationResult) and r.unmapped == ()
++    m = r.manifest
++    assert (m["apiVersion"], m["kind"]) == ("opensrm.nthlayer.io/v2", "ServiceManifest")
++    assert m["metadata"] == {"name": "payment-api", "labels": {"tier": "critical"}}
++    assert m["spec"]["owner"] == {"group": "group:default/payments"}
++    assert m["spec"]["service"] == {"name": "payment-api", "type": "api",
++                                    "description": "Handles payments"}
++
++
++def test_labels_and_annotations_are_copied_and_tier_joins_labels():
++    d = _v1()
++    d["metadata"]["labels"] = {"domain": "payments"}
++    d["metadata"]["annotations"] = {"backstage.io/techdocs-ref": "dir:."}
++    m = convert_opensrm_v1_to_v2(d).manifest
++    assert m["metadata"]["labels"] == {"domain": "payments", "tier": "critical"}
++    assert m["metadata"]["annotations"] == {"backstage.io/techdocs-ref": "dir:."}
++
++
++def test_template_is_reported_unmapped():
++    d = _v1()
++    d["metadata"]["template"] = "standard-api"
++    assert [f.path for f in convert_opensrm_v1_to_v2(d).unmapped] == ["metadata.template"]
++
++
++@pytest.mark.parametrize("mutate, match", [
++    (lambda d: d.update(apiVersion="srm/v1"), "opensrm/v1"),
++    (lambda d: d.update(kind="Template"), "ServiceReliabilityManifest"),
++    (lambda d: d["metadata"].pop("name"), "metadata.name"),
++    (lambda d: d["metadata"].update(name="-payment-api"), "metadata.name"),
++    (lambda d: d["metadata"].pop("team"), "team"),
++    (lambda d: d["metadata"].update(team="pay ments"), "team"),
++    (lambda d: d["spec"].update(type="mainframe"), "spec.type"),
++    (lambda d: d["metadata"].update(tier="gold"), "tier"),
++    (lambda d: d["metadata"].update(labels={"tier": "low"}), "tier"),
++])
++def test_unconvertible_documents_raise(mutate, match):
++    d = _v1()
++    mutate(d)
++    with pytest.raises(ValueError, match=match):
++        convert_opensrm_v1_to_v2(d)
++
++
++def test_missing_type_needs_service_type():
++    d = _v1()
++    del d["spec"]["type"]
++    with pytest.raises(ValueError, match="service-type"):
++        convert_opensrm_v1_to_v2(d)
++    assert convert_opensrm_v1_to_v2(d, service_type="api").manifest["spec"]["service"]["type"] == "api"
++
++
++def test_supplied_type_must_agree_with_a_declared_one():
++    assert convert_opensrm_v1_to_v2(_v1(), service_type="api").manifest["spec"]["service"]["type"] == "api"
++    with pytest.raises(ValueError, match="spec.type"):
++        convert_opensrm_v1_to_v2(_v1(), service_type="worker")
++
++
++def test_unknown_spec_keys_are_reported_not_dropped():
++    r = convert_opensrm_v1_to_v2(_v1(sla={"x": 1}))
++    assert r.unmapped == (UnmappedField("spec.sla", "not part of the opensrm/v1 schema"),)
++
++
++@pytest.mark.parametrize("tier", ["critical", "high", "standard", "low"])
++def test_every_schema_tier_converts(tier):
++    d = _v1()
++    d["metadata"]["tier"] = tier
++    assert convert_opensrm_v1_to_v2(d).manifest["metadata"]["labels"]["tier"] == tier
++
++
++@pytest.mark.parametrize("tier", ["tier-1", ["critical"], None, 1])
++def test_non_schema_or_non_string_tier_raises_value_error(tier):
++    d = _v1()
++    d["metadata"]["tier"] = tier
++    with pytest.raises(ValueError, match="tier"):
++        convert_opensrm_v1_to_v2(d)
++
++
++def test_non_string_description_raises():
++    d = _v1()
++    d["metadata"]["description"] = 5
++    with pytest.raises(ValueError, match="metadata.description"):
++        convert_opensrm_v1_to_v2(d)
++
++
++def test_non_mapping_document_raises_value_error():
++    with pytest.raises(ValueError, match="opensrm/v1"):
++        convert_opensrm_v1_to_v2([])  # type: ignore[arg-type]
++
++
++def test_unknown_metadata_key_is_reported():
++    d = _v1()
++    d["metadata"]["owner"] = "x"
++    r = convert_opensrm_v1_to_v2(d)
++    assert r.unmapped == (UnmappedField("metadata.owner", "not part of the opensrm/v1 schema"),)
++
++
++@pytest.mark.parametrize("key", ["notifications", "deployment"])
++def test_unmapped_spec_sections_carry_their_reason(key):
++    r = convert_opensrm_v1_to_v2(_v1(**{key: {"x": 1}}))
++    assert r.unmapped == (UnmappedField(f"spec.{key}", "no v2 equivalent (AUTHORING §7.6)"),)
+diff --git a/tests/test_opensrm_v1_judgment.py b/tests/test_opensrm_v1_judgment.py
+new file mode 100644
+index 0000000..d376a5b
+--- /dev/null
++++ b/tests/test_opensrm_v1_judgment.py
+@@ -0,0 +1,82 @@
++"""opensrm/v1 slos.judgment (opensrm-pnmv).
++
++Shapes: spec/v1/schema.json JudgmentSLOs — calibration {target, window}
++(FlatCalibrationSLO, both required), feedback_latency {p50, p90} durations,
++reversal_rate / high_confidence_failure. Mapping: AUTHORING.md §7.6 (calibration
++and feedback_latency → judgment_threshold) and §7.7 step 8 (judgment_slo is not
++migration). v2 allows judgment blocks only on ai-gate (§3.1).
++"""
++import pytest
++
++from nthlayer_common.manifest.opensrm_v1 import convert_opensrm_v1_to_v2
++from nthlayer_common.manifest.parser.v2 import parse_opensrm_v2
++
++
++def _v1(judgment: dict, stype: str = "ai-gate") -> dict:
++    return {"apiVersion": "opensrm/v1", "kind": "ServiceReliabilityManifest",
++            "metadata": {"name": "pr-review-agent", "team": "platform", "tier": "critical"},
++            "spec": {"type": stype, "slos": {"judgment": judgment}}}
++
++
++def test_calibration_and_feedback_latency_become_thresholds():
++    r = convert_opensrm_v1_to_v2(_v1({
++        "calibration": {"target": 0.10, "window": "30d"},
++        "feedback_latency": {"p50": "48h", "p90": "168h"},
++    }))
++    assert r.manifest["spec"]["judgment_threshold"] == [
++        {"type": "calibration", "bounds": {"maximum_expected_calibration_error": 0.10},
++         "measurement": {"bins": 10, "window": "30d"}},
++        {"type": "feedback_latency", "bounds": {"maximum_p50": "48h", "maximum_p90": "168h"}},
++    ]
++    # bins is a value v1 never declares: reported so the author checks it.
++    assert [f.path for f in r.unmapped] == ["spec.slos.judgment.calibration"]
++    parse_opensrm_v2(r.manifest)
++
++
++@pytest.mark.parametrize("key", ["reversal_rate", "high_confidence_failure"])
++def test_judgment_slos_are_reported_unmapped(key):
++    r = convert_opensrm_v1_to_v2(_v1({key: {"target": 0.03, "window": "30d"}}))
++    assert "judgment_slo" not in r.manifest["spec"]
++    assert [f.path for f in r.unmapped] == [f"spec.slos.judgment.{key}"]
++    assert "a742" in r.unmapped[0].reason
++
++
++def test_a_non_ai_gate_manifest_reports_the_whole_judgment_block():
++    r = convert_opensrm_v1_to_v2(_v1({"calibration": {"target": 0.1, "window": "30d"}}, stype="api"))
++    assert "judgment_threshold" not in r.manifest["spec"]
++    assert [f.path for f in r.unmapped] == ["spec.slos.judgment"]
++    parse_opensrm_v2(r.manifest)
++
++
++@pytest.mark.parametrize("cfg, match", [
++    ({"calibration": {"window": "30d"}}, "target"),
++    ({"calibration": {"target": 0.1}}, "window"),
++    ({"calibration": {"target": 2, "window": "30d"}}, "target"),
++    ({"feedback_latency": {"p50": "two days"}}, "p50"),
++])
++def test_malformed_converted_judgment_fields_raise(cfg, match):
++    with pytest.raises(ValueError, match=match):
++        convert_opensrm_v1_to_v2(_v1(cfg))
++
++
++def test_feedback_latency_without_bounds_is_reported():
++    r = convert_opensrm_v1_to_v2(_v1({"feedback_latency": {}}))
++    assert [f.path for f in r.unmapped] == ["spec.slos.judgment.feedback_latency"]
++
++
++def test_unknown_judgment_key_is_reported_not_dropped():
++    r = convert_opensrm_v1_to_v2(_v1({"mystery": {"target": 1}}))
++    assert [f.path for f in r.unmapped] == ["spec.slos.judgment.mystery"]
++    assert "judgment_threshold" not in r.manifest["spec"]
++
++
++def test_unknown_key_inside_calibration_is_reported_not_dropped():
++    r = convert_opensrm_v1_to_v2(_v1({"calibration": {"target": 0.1, "window": "30d", "bogus": 1}}))
++    assert "spec.slos.judgment.calibration.bogus" in [f.path for f in r.unmapped]
++    assert r.manifest["spec"]["judgment_threshold"][0]["type"] == "calibration"
++
++
++def test_unknown_key_inside_feedback_latency_is_reported_not_dropped():
++    r = convert_opensrm_v1_to_v2(_v1({"feedback_latency": {"p50": "48h", "p99": "9h"}}))
++    assert [f.path for f in r.unmapped] == ["spec.slos.judgment.feedback_latency.p99"]
++    assert r.manifest["spec"]["judgment_threshold"][0]["bounds"] == {"maximum_p50": "48h"}
+diff --git a/tests/test_opensrm_v1_loader.py b/tests/test_opensrm_v1_loader.py
+new file mode 100644
+index 0000000..5351908
+--- /dev/null
++++ b/tests/test_opensrm_v1_loader.py
+@@ -0,0 +1,45 @@
++"""load_manifest rejects opensrm/v1 clearly (opensrm-pnmv)."""
++import warnings
++
++import pytest
++import yaml
++
++from nthlayer_common import manifest
++from nthlayer_common.manifest import LegacyFormatWarning, ManifestLoadError, load_manifest
++
++_DOC = {"apiVersion": "opensrm/v1", "kind": "ServiceReliabilityManifest",
++        "metadata": {"name": "my-service", "team": "t", "tier": "standard"},
++        "spec": {"type": "api"}}
++
++
++@pytest.mark.parametrize("fmt", ["auto", "srm_v1", "opensrm_v2", "legacy", None])
++def test_opensrm_v1_is_rejected_with_the_migrate_command(tmp_path, fmt):
++    path = tmp_path / "svc.yaml"
++    path.write_text(yaml.safe_dump(_DOC))
++    with warnings.catch_warnings():
++        warnings.simplefilter("error", LegacyFormatWarning)   # never reaches the legacy branch
++        with pytest.raises(ManifestLoadError) as exc:
++            load_manifest(path, format=fmt)
++    msg = str(exc.value)
++    assert "opensrm/v1" in msg and "nthlayer migrate-manifest" in msg
++    assert "service.name is required" not in msg
++
++
++def test_migration_api_is_public():
++    for name in ("convert_opensrm_v1_to_v2", "is_opensrm_v1_format", "MigrationResult",
++                 "UnmappedField", "OPENSRM_V1_API_VERSION"):
++        assert name in manifest.__all__ and hasattr(manifest, name), name
++
++
++def test_is_manifest_file_counts_opensrm_v1_so_scans_reach_the_rejection(tmp_path):
++    path = tmp_path / "svc.yaml"          # not *.reliability.yaml, not service.yaml
++    path.write_text(yaml.safe_dump(_DOC))
++    assert manifest.is_manifest_file(path)
++    with pytest.raises(ManifestLoadError, match="nthlayer migrate-manifest"):
++        load_manifest(path)
++
++
++def test_foreign_yaml_reason_does_not_treat_opensrm_v1_as_foreign(tmp_path):
++    path = tmp_path / "svc.yaml"
++    path.write_text(yaml.safe_dump(_DOC))
++    assert manifest.foreign_yaml_reason(path) is None
+diff --git a/tests/test_opensrm_v1_schema_completeness.py b/tests/test_opensrm_v1_schema_completeness.py
+new file mode 100644
+index 0000000..1b9f1ae
+--- /dev/null
++++ b/tests/test_opensrm_v1_schema_completeness.py
+@@ -0,0 +1,59 @@
++"""Every opensrm/v1 schema property is converted or reported (opensrm-pnmv).
++
++Read from opensrm/spec/v1/schema.json, so a field the schema gains is caught
++here rather than dropped silently by the converter. Both ways: the converter
++may not claim a key the schema does not define.
++
++A ``_SECTIONS`` key is a schema definition name, optionally followed by a
++dotted path of inline properties (``"Instrumentation.events"`` is the
++``events`` property of the ``Instrumentation`` definition).
++"""
++import json
++from pathlib import Path
++
++import pytest
++
++from nthlayer_common.manifest.opensrm_v1 import _SECTIONS
++
++V1_SCHEMA = Path(__file__).resolve().parents[2] / "opensrm" / "spec" / "v1" / "schema.json"
++DEFINITIONS = json.loads(V1_SCHEMA.read_text())["definitions"] if V1_SCHEMA.is_file() else {}
++
++
++def _deref(node: dict) -> dict:
++    while "$ref" in node:
++        node = DEFINITIONS[node["$ref"].removeprefix("#/definitions/")]
++    return node
++
++
++def _schema_properties(section: str) -> set[str]:
++    """The property names the schema defines at *section*; KeyError if it does not resolve."""
++    head, *rest = section.split(".")
++    node = _deref(DEFINITIONS[head])
++    for key in rest:
++        node = _deref(node["properties"][key])
++    return set(node.get("properties", {}))
++
++
++def test_the_v1_schema_is_present_and_the_sections_are_not_vacuous():
++    # Every section resolving in the schema is asserted per section below.
++    assert V1_SCHEMA.is_file()
++    assert len(_SECTIONS) >= 23
++
++
++@pytest.mark.parametrize("section", sorted(_SECTIONS))
++def test_section_covers_the_schema_both_ways(section):
++    converted, unmapped = _SECTIONS[section]
++    assert not converted & set(unmapped)
++    assert converted | set(unmapped) == _schema_properties(section), section
++
++
++@pytest.mark.parametrize("definition", ["Spec", "Metadata", "SLOs", "JudgmentSLOs", "Contract",
++                                        "Dependency", "Ownership", "Observability", "Instrumentation"])
++def test_the_sections_the_spec_names_are_covered(definition):
++    assert definition in _SECTIONS
++
++
++@pytest.mark.parametrize("section", ["Ownership.pagerduty", "Dependency.expects",
++                                     "Dependency.expects.latency", "Instrumentation.events"])
++def test_the_inline_sections_the_converter_walks_are_covered(section):
++    assert section in _SECTIONS
+diff --git a/tests/test_opensrm_v1_sections.py b/tests/test_opensrm_v1_sections.py
+new file mode 100644
+index 0000000..ac24cad
+--- /dev/null
++++ b/tests/test_opensrm_v1_sections.py
+@@ -0,0 +1,179 @@
++"""opensrm/v1 contract / dependencies / ownership / observability /
++instrumentation (opensrm-pnmv). Shapes: spec/v1/schema.json; mapping:
++AUTHORING.md §7.2 (ownership → owner + annotations), §7.4 (contract →
++contracts), §7.5 (dependencies), §7.6 (homeless blocks).
++"""
++import pytest
++
++from nthlayer_common.manifest.opensrm_v1 import convert_opensrm_v1_to_v2
++from nthlayer_common.manifest.parser.v2 import parse_opensrm_v2
++
++
++def _v1(**spec) -> dict:
++    return {"apiVersion": "opensrm/v1", "kind": "ServiceReliabilityManifest",
++            "metadata": {"name": "payment-api", "team": "payments", "tier": "critical"},
++            "spec": {"type": "api", **spec}}
++
++
++def _paths(r):
++    return sorted(f.path for f in r.unmapped)
++
++
++def test_contract_becomes_contracts():
++    r = convert_opensrm_v1_to_v2(_v1(contract={
++        "availability": 0.9995, "latency": {"p99": "300ms"}, "throughput": {"max_rps": 5000}}))
++    assert r.manifest["spec"]["contracts"] == [{
++        "name": "payment-api",
++        "promise": {"availability": 0.9995, "latency_p99": "300ms", "throughput": "5000rps"},
++        "contract_owner": "group:default/payments",
++    }]
++    assert r.unmapped == ()
++    parse_opensrm_v2(r.manifest)
++
++
++def test_contract_fields_with_no_promise_slot_are_reported():
++    r = convert_opensrm_v1_to_v2(_v1(contract={
++        "latency": {"p50": "50ms", "p999": "1s"}, "throughput": {"burst": 100},
++        "judgment": {"max_reversal_rate": 0.05}}))
++    assert "contracts" not in r.manifest["spec"]
++    assert _paths(r) == sorted(["spec.contract.latency.p50", "spec.contract.latency.p999", "spec.contract.throughput.burst", "spec.contract.judgment"])
++
++
++@pytest.mark.parametrize("dtype, ref", [
++    ("database", "resource:default/postgresql"), ("cache", "resource:default/postgresql"),
++    ("queue", "resource:default/postgresql"), ("external", "component:external/postgresql"),
++    ("service", "component:default/postgresql"), (None, "component:default/postgresql"),
++])
++def test_dependency_ref_kind_follows_the_v1_type(dtype, ref):
++    dep = {"service": "postgresql", "expects": {"availability": 0.9995, "latency": {"p99": "20ms"}}}
++    if dtype:
++        dep["type"] = dtype
++    r = convert_opensrm_v1_to_v2(_v1(dependencies=[dep]))
++    assert r.manifest["spec"]["dependencies"] == [
++        {"service": ref, "expected_availability": 0.9995, "expected_latency_p99": "20ms"}]
++    parse_opensrm_v2(r.manifest)
++
++
++def test_dependency_critical_and_manifest_are_reported():
++    r = convert_opensrm_v1_to_v2(_v1(dependencies=[
++        {"service": "user-service", "type": "service", "critical": True,
++         "manifest": "https://example.com/user-service.yaml"}]))
++    assert _paths(r) == sorted(["spec.dependencies[0].critical", "spec.dependencies[0].manifest"])
++
++
++def test_ownership_becomes_owner_and_annotations():
++    r = convert_opensrm_v1_to_v2(_v1(ownership={
++        "team": "payments", "slack": "#payments-team", "email": "p@example.com",
++        "escalation": "payments-oncall", "runbook": "https://wiki/rb", "documentation": "https://docs",
++        "pagerduty": {"service_id": "PXXXXXX", "escalation_policy_id": "PYYY"},
++        "oncall_required": True}))
++    m = r.manifest
++    assert m["spec"]["owner"] == {"group": "group:default/payments",
++                                  "escalation": "group:default/payments-oncall"}
++    assert m["metadata"]["annotations"] == {
++        "slack.com/channel": "#payments-team",
++        "opensrm.nthlayer.io/runbook": "https://wiki/rb",
++        "opensrm.nthlayer.io/documentation": "https://docs",
++        "pagerduty.com/service-id": "PXXXXXX",
++    }
++    assert _paths(r) == sorted(["spec.ownership.email", "spec.ownership.pagerduty.escalation_policy_id", "spec.ownership.oncall_required"])
++    parse_opensrm_v2(m)
++
++
++def test_ownership_team_must_agree_with_metadata_team():
++    with pytest.raises(ValueError, match="ownership.team"):
++        convert_opensrm_v1_to_v2(_v1(ownership={"team": "billing"}))
++
++
++def test_an_annotation_collision_raises():
++    d = _v1(ownership={"team": "payments", "slack": "#new"})
++    d["metadata"]["annotations"] = {"slack.com/channel": "#old"}
++    with pytest.raises(ValueError, match="slack.com/channel"):
++        convert_opensrm_v1_to_v2(d)
++
++
++def test_observability_notifications_and_deployment_are_reported():
++    r = convert_opensrm_v1_to_v2(_v1(
++        observability={"metrics": {"required": ["x"]}, "dashboards": {"required": True},
++                       "alerts": {"required": True}, "tracing": {"required": True}},
++        notifications={"slack": {"channel": "#x"}}, deployment={"gates": {}}))
++    assert _paths(r) == sorted(["spec.observability.metrics", "spec.observability.dashboards", "spec.observability.alerts", "spec.observability.tracing", "spec.notifications", "spec.deployment"])
++
++
++def test_instrumentation_events_become_required_events():
++    r = convert_opensrm_v1_to_v2(_v1(instrumentation={
++        "events": {"decision": "pr_review.decision", "reversal": "pr_review.reversal"}, "attributes": {"decision_id": "string"}}))
++    assert r.manifest["spec"]["instrumentation"] == {
++        "required_events": [{"type": "pr_review.decision"}, {"type": "pr_review.reversal"}]}
++    assert _paths(r) == sorted(["spec.instrumentation.attributes"])
++
++
++def test_instrumentation_event_value_must_be_a_string():
++    with pytest.raises(ValueError, match=r"spec\.instrumentation\.events\.decision"):
++        convert_opensrm_v1_to_v2(_v1(instrumentation={"events": {"decision": {}}}))
++
++
++def test_instrumentation_unknown_event_key_is_reported():
++    r = convert_opensrm_v1_to_v2(_v1(instrumentation={
++        "events": {"decision": "d", "bogus": "b"}}))
++    assert r.manifest["spec"]["instrumentation"] == {"required_events": [{"type": "d"}]}
++    assert _paths(r) == ["spec.instrumentation.events.bogus"]
++
++
++@pytest.mark.parametrize("rps", [0, 1.5, -3, True, "5"])
++def test_max_rps_below_the_schema_minimum_or_non_integer_raises(rps):
++    with pytest.raises(ValueError, match=r"spec\.contract\.throughput\.max_rps"):
++        convert_opensrm_v1_to_v2(_v1(contract={"throughput": {"max_rps": rps}}))
++
++
++def test_max_rps_of_one_converts():
++    r = convert_opensrm_v1_to_v2(_v1(contract={"throughput": {"max_rps": 1}}))
++    assert r.manifest["spec"]["contracts"][0]["promise"] == {"throughput": "1rps"}
++
++
++def test_dependency_type_outside_the_enum_raises():
++    with pytest.raises(ValueError, match=r"spec\.dependencies\[0\]\.type"):
++        convert_opensrm_v1_to_v2(_v1(dependencies=[{"service": "db", "type": "mainframe"}]))
++
++
++@pytest.mark.parametrize("name", ["", "-lead", "has space", 7, None])
++def test_dependency_service_name_must_be_usable_in_a_ref(name):
++    with pytest.raises(ValueError, match=r"spec\.dependencies\[0\]\.service"):
++        convert_opensrm_v1_to_v2(_v1(dependencies=[{"service": name}]))
++
++
++def test_unknown_keys_in_pagerduty_and_expects_are_reported_as_outside_the_schema():
++    r = convert_opensrm_v1_to_v2(_v1(
++        ownership={"team": "payments", "pagerduty": {"service_id": "PX", "routing_key": "k"}},
++        dependencies=[{"service": "db", "expects": {"availability": 0.999, "error_rate": 0.01,
++                                                    "latency": {"p99": "20ms", "p50": "5ms"}}}]))
++    assert {(f.path, f.reason) for f in r.unmapped} == {
++        ("spec.ownership.pagerduty.routing_key", "not part of the opensrm/v1 schema"),
++        ("spec.dependencies[0].expects.error_rate", "not part of the opensrm/v1 schema"),
++        ("spec.dependencies[0].expects.latency.p50", "not part of the opensrm/v1 schema"),
++    }
++    assert r.manifest["spec"]["dependencies"] == [
++        {"service": "component:default/db", "expected_availability": 0.999, "expected_latency_p99": "20ms"}]
++
++
++@pytest.mark.parametrize(("section", "path", "dep", "own"), [
++    ("Ownership.pagerduty", "spec.ownership.pagerduty.service_id", None, {"pagerduty": {"service_id": "PX"}}),
++    ("Dependency.expects", "spec.dependencies[0].expects.availability",
++     {"expects": {"availability": 0.999}}, None),
++    ("Dependency.expects.latency", "spec.dependencies[0].expects.latency.p99",
++     {"expects": {"latency": {"p99": "20ms"}}}, None),
++])
++def test_pagerduty_and_expects_take_their_reasons_from_sections(monkeypatch, section, path, dep, own):
++    """The inline handlers read _SECTIONS, so the schema-completeness test governs them too."""
++    from nthlayer_common.manifest import opensrm_v1
++
++    key = path.rsplit(".", 1)[1]
++    converted, unmapped = opensrm_v1._SECTIONS[section]
++    monkeypatch.setitem(opensrm_v1._SECTIONS, section, (converted - {key}, {**unmapped, key: "probe"}))
++    spec = {}
++    if dep is not None:
++        spec["dependencies"] = [{"service": "db", **dep}]
++    if own is not None:
++        spec["ownership"] = {"team": "payments", **own}
++    r = convert_opensrm_v1_to_v2(_v1(**spec))
++    assert (path, "probe") in {(f.path, f.reason) for f in r.unmapped}
+diff --git a/tests/test_opensrm_v1_slos.py b/tests/test_opensrm_v1_slos.py
+new file mode 100644
+index 0000000..503dcce
+--- /dev/null
++++ b/tests/test_opensrm_v1_slos.py
+@@ -0,0 +1,129 @@
++"""opensrm/v1 classical SLOs → OpenSLO (opensrm-pnmv).
++
++Expected values follow opensrm/spec/v1/schema.json (targets are 0-1 ratios;
++ErrorRateSLO.target is a MAXIMUM error ratio; window defaults are 30d for the
++converted types) and AUTHORING.md §7.3, whose reference output
++(spec/v2/examples/migration/api-full-v2.yaml) names SLOs <service>-<key>.
++"""
++import pytest
++
++from nthlayer_common.manifest.opensrm_v1 import convert_opensrm_v1_to_v2
++from nthlayer_common.manifest.parser.v2 import parse_opensrm_v2
++
++
++def _v1(slos: dict, name: str = "payment-api", stype: str = "api") -> dict:
++    return {"apiVersion": "opensrm/v1", "kind": "ServiceReliabilityManifest",
++            "metadata": {"name": name, "team": "payments", "tier": "critical"},
++            "spec": {"type": stype, "slos": slos}}
++
++
++def _slo(result, key):
++    (doc,) = [d for d in result.manifest["spec"]["slo"] if d["metadata"]["name"].endswith(key)]
++    return doc
++
++
++def test_availability_keeps_target_and_window():
++    r = convert_opensrm_v1_to_v2(_v1({"availability": {"target": 0.9995, "window": "30d"}}))
++    doc = _slo(r, "availability")
++    assert doc["metadata"]["name"] == "payment-api-availability"
++    assert doc["spec"]["service"] == "payment-api"
++    assert doc["spec"]["timeWindow"] == [{"duration": "30d", "isRolling": True}]
++    assert doc["spec"]["objectives"][0]["target"] == 0.9995
++    assert "indicator" not in doc["spec"]
++    assert r.unmapped == ()
++
++
++def test_error_rate_is_complemented_and_keeps_a_7d_window():
++    r = convert_opensrm_v1_to_v2(_v1({"error_rate": {"target": 0.001, "window": "7d"}}))
++    doc = _slo(r, "error-rate")
++    assert doc["spec"]["objectives"][0]["target"] == 0.999
++    assert doc["spec"]["timeWindow"] == [{"duration": "7d", "isRolling": True}]
++    (slo,) = parse_opensrm_v2(r.manifest).slos
++    assert (slo.slo_type, slo.window) == ("error_rate", "7d")
++
++
++def test_absent_window_uses_the_v1_schema_default():
++    r = convert_opensrm_v1_to_v2(_v1({"availability": {"target": 0.999}}))
++    assert _slo(r, "availability")["spec"]["timeWindow"] == [{"duration": "30d", "isRolling": True}]
++
++
++def test_latency_percentiles_go_to_display_name_and_are_reported():
++    r = convert_opensrm_v1_to_v2(_v1({"latency": {"p50": "50ms", "p99": "200ms", "target": 0.99}}))
++    obj = _slo(r, "latency")["spec"]["objectives"][0]
++    assert obj["target"] == 0.99 and "p50 under 50ms" in obj["displayName"] and "p99 under 200ms" in obj["displayName"]
++    assert [f.path for f in r.unmapped] == ["spec.slos.latency.p50", "spec.slos.latency.p99"]
++
++
++@pytest.mark.parametrize("key, expected_type", [
++    ("duration", "latency"), ("query_latency", "latency"),
++    ("connection_availability", "availability"),
++])
++def test_other_converted_types_parse_as_intended(key, expected_type):
++    r = convert_opensrm_v1_to_v2(_v1({key: {"target": 0.99}}, stype="database"))
++    (slo,) = parse_opensrm_v2(r.manifest).slos
++    assert slo.slo_type == expected_type
++
++
++@pytest.mark.parametrize("key, cfg", [
++    ("throughput", {"target": 1000, "unit": "rps"}),
++    ("success_rate", {"target": 0.995}),
++    ("processing_time", {"target": 0.95, "p95": "5m"}),
++    ("lag", {"target": 0.99, "max": "1m"}),
++    ("schedule_adherence", {"max_delay": "10m"}),
++    ("data_freshness", {"max_age": "2h"}),
++    ("replication_lag", {"max_lag": "1s"}),
++])
++def test_unconvertible_slo_types_are_reported_not_dropped(key, cfg):
++    r = convert_opensrm_v1_to_v2(_v1({key: cfg}, stype="batch"))
++    assert "slo" not in r.manifest["spec"]
++    assert [f.path for f in r.unmapped] == [f"spec.slos.{key}"]
++
++
++def test_custom_is_reported_and_openslo_paths_become_refs():
++    r = convert_opensrm_v1_to_v2(_v1({"custom": [{"name": "x"}], "openslo": [{"path": "slos/a.yaml"}]}))
++    assert r.manifest["spec"]["slo"] == [{"$ref": "slos/a.yaml"}]
++    assert [f.path for f in r.unmapped] == ["spec.slos.custom"]
++
++
++@pytest.mark.parametrize("cfg, match", [
++    ({"target": 1.5}, "target"), ({"target": "0.99"}, "target"), ({"target": True}, "target"),
++    ({"target": 0.99, "window": "30 days"}, "window"), ({}, "target"),
++])
++def test_malformed_converted_slos_raise(cfg, match):
++    with pytest.raises(ValueError, match=match):
++        convert_opensrm_v1_to_v2(_v1({"availability": cfg}))
++
++
++def test_a_type_hint_word_in_the_service_name_raises_instead_of_mistyping():
++    # "error-tracker-availability" would be typed error_rate by the parser.
++    with pytest.raises(ValueError, match="error-tracker-availability"):
++        convert_opensrm_v1_to_v2(_v1({"availability": {"target": 0.999}}, name="error-tracker"))
++
++
++@pytest.mark.parametrize("value", [{"path": "a.yaml"}, None, "a.yaml"])
++def test_openslo_must_be_a_list(value):
++    with pytest.raises(ValueError, match=r"spec\.slos\.openslo"):
++        convert_opensrm_v1_to_v2(_v1({"openslo": value}))
++
++
++def test_openslo_item_extra_keys_are_reported():
++    from nthlayer_common.manifest.opensrm_v1 import _NOT_IN_SCHEMA
++    r = convert_opensrm_v1_to_v2(_v1({"openslo": [{"path": "a.yaml", "inline": 1}]}))
++    assert r.manifest["spec"]["slo"] == [{"$ref": "a.yaml"}]
++    assert [(f.path, f.reason) for f in r.unmapped] == [("spec.slos.openslo[0].inline", _NOT_IN_SCHEMA)]
++
++
++@pytest.mark.parametrize("name", ["rps-svc", "latency-svc"])
++def test_other_type_hint_words_in_service_name_raise(name):
++    with pytest.raises(ValueError, match=f"{name}-availability"):
++        convert_opensrm_v1_to_v2(_v1({"availability": {"target": 0.999}}, name=name))
++
++
++def test_unconvertible_reasons_are_the_specific_ones():
++    from nthlayer_common.manifest.opensrm_v1 import _NOT_IN_SCHEMA, _SECTIONS
++    for key in _SECTIONS["SLOs"][1]:
++        if key == "custom":
++            continue
++        r = convert_opensrm_v1_to_v2(_v1({key: {"target": 0.9}}, stype="batch"))
++        (f,) = r.unmapped
++        assert f.reason == _SECTIONS["SLOs"][1][key] != _NOT_IN_SCHEMA
+diff --git a/tests/test_v2_dependency_refs.py b/tests/test_v2_dependency_refs.py
+new file mode 100644
+index 0000000..facf486
+--- /dev/null
++++ b/tests/test_v2_dependency_refs.py
+@@ -0,0 +1,45 @@
++"""spec.dependencies[].service accepts resource: refs (opensrm-pnmv).
++
++The v2 spec's own migration reference (opensrm/spec/v2/examples/migration/
++api-full-v2.yaml) declares databases and caches as resource: entities, and
++spec/v2/schema.json's EntityRef allows any kind.
++"""
++import pytest
++
++from nthlayer_common.manifest.parser.v2 import OpenSRMV2ParseError, parse_opensrm_v2
++
++
++def _manifest(service_ref: str) -> dict:
++    return {
++        "apiVersion": "opensrm.nthlayer.io/v2",
++        "kind": "ServiceManifest",
++        "metadata": {"name": "payment-api", "labels": {"tier": "critical"}},
++        "spec": {
++            "owner": {"group": "group:default/payments"},
++            "service": {"name": "payment-api", "type": "api"},
++            "dependencies": [{"service": service_ref, "expected_availability": 0.9995}],
++        },
++    }
++
++
++@pytest.mark.parametrize("ref, name", [
++    ("resource:default/postgresql", "postgresql"),
++    ("component:default/user-service", "user-service"),
++    ("component:external/stripe-api", "stripe-api"),
++])
++def test_dependency_accepts_component_and_resource_refs(ref, name):
++    (dep,) = parse_opensrm_v2(_manifest(ref)).dependencies
++    assert dep.name == name
++
++
++@pytest.mark.parametrize("ref", ["group:default/payments", "user:default/alice", "system:default/x"])
++def test_dependency_rejects_other_kinds(ref):
++    with pytest.raises(OpenSRMV2ParseError, match="reference"):
++        parse_opensrm_v2(_manifest(ref))
++
++
++def test_owner_escalation_still_requires_a_group_ref():
++    m = _manifest("component:default/user-service")
++    m["spec"]["owner"]["escalation"] = "resource:default/pager"
++    with pytest.raises(OpenSRMV2ParseError):
++        parse_opensrm_v2(m)

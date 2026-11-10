@@ -1,0 +1,433 @@
+diff --git a/scripts/eco_doctor.py b/scripts/eco_doctor.py
+index c512593..34f5eb0 100644
+--- a/scripts/eco_doctor.py
++++ b/scripts/eco_doctor.py
+@@ -241,15 +241,83 @@ def version_at(path: Path) -> str | None:
+     return data.get("project", {}).get("version")
+ 
+ 
+-def duplicate_name_findings(repos: list[Path]) -> list[str]:
+-    """Report directories that declare the same package name.
++def repo_identity(repo: Path) -> str:
++    """What repository a checkout belongs to, shared by all its worktrees.
++
++    ``git rev-parse --git-common-dir`` resolves to the same location for a repo
++    and every worktree of it — the same key ``.claude/hooks/r5-lock.sh`` uses to
++    make the supervisor mutex per repo rather than per directory.
++
++    NO ``--path-format=absolute``, deliberately. That flag needs git >= 2.31
++    (Ubuntu 20.04 ships 2.25, Debian bullseye 2.30) and ``git rev-parse``
++    ECHOES an unrecognised flag and exits 0 rather than failing:
++
++        $ git rev-parse --bogus-flag=x --git-common-dir
++        --bogus-flag=x
++        .git
++        $ echo $?
++        0
++
++    So on older git the identity became the constant string
++    ``"--path-format=absolute\n.git"`` for every main checkout, merging all
++    distinct repositories into one and silencing genuine duplicates — a false
++    negative, the dangerous direction. And it did not even buy the worktree fix,
++    because a worktree reports its parent's absolute path regardless.
++
++    A bare ``--git-common-dir`` returns ``.git`` for a main checkout and an
++    absolute path for a worktree, so resolving it against *repo* converges both
++    without depending on any git version. The output is validated rather than
++    trusted: one line, and a path that is a GIT DIRECTORY.
++
++    ``(candidate / "HEAD").exists()``, not ``candidate.exists()``. Before 2.31,
++    ``--git-common-dir`` inside a linked worktree could print the raw contents of
++    ``.git/worktrees/<name>/commondir``, which is the relative string ``../..``.
++    Resolved against *repo* that is the workspace's PARENT directory — which
++    exists, so a mere existence check accepts it. Two worktrees of two DIFFERENT
++    repos then resolve to the same ancestor and are silently MERGED, so a genuine
++    duplicate goes unreported: the false-negative direction this function's
++    fallback exists to avoid. Requiring a ``HEAD`` beneath the candidate rejects
++    any path that is not a git directory, whatever produced it.
++
++    The one-line check is now SUBSUMED by that: with the flag reinstated the
++    first line is ``--path-format=absolute``, which has no ``HEAD`` beneath it
++    either. Mutating ``len(lines) == 1`` therefore survives the suite by design,
++    and it is kept as defence in depth rather than removed — a git that printed
++    an unexpected second line should not have its first one trusted on the
++    strength of one guard alone.
++    """
++    out = git(repo, "rev-parse", "--git-common-dir")
++    if out:
++        lines = [line for line in out.splitlines() if line.strip()]
++        if len(lines) == 1:
++            candidate = (repo / lines[0]).resolve()
++            if (candidate / "HEAD").exists():
++                return str(candidate)
++    # Unreadable, or output we do not recognise: treat this checkout as
++    # DISTINCT. A wrong merge silences a real ambiguity; a wrong split reports
++    # one that is easy to dismiss.
++    return str(repo.resolve())
+ 
+-    A safety net beneath path_sources(): if two checkouts claim one name, any
+-    name-based reasoning anywhere is ambiguous, and saying so is better than
+-    picking one. Worktrees are the common cause and are exactly what defeated
+-    the earlier flat-map approach.
++
++def duplicate_name_findings(repos: list[Path]) -> list[str]:
++    """Report DISTINCT repositories that declare the same package name.
++
++    A safety net beneath path_sources(): if two unrelated checkouts claim one
++    name, any name-based reasoning is ambiguous and saying so beats picking one.
++
++    Worktrees are excluded, and that exclusion is the point [opensrm-bnal]. A
++    worktree always declares its parent's ``project.name``, and CLAUDE.md
++    MANDATES sibling worktrees for parallel work — so reporting them made this
++    finding fire on every correct workflow. The /r5-supervise pre-flight
++    (opensrm-px23) classifies DUPLICATE-NAME as blocking, so it then refused
++    every R5 gate in the workspace. Caught on that pre-flight's first real use.
++
++    The net was written beneath NAME-BASED sibling resolution, and the same
++    change that added it replaced that with ``[tool.uv.sources]`` path
++    resolution — so it had been sitting beneath a mechanism that no longer used
++    names at all.
+     """
+-    seen: dict[str, list[str]] = {}
++    seen: dict[str, dict[str, str]] = {}
+     for repo in repos:
+         pj = repo / "pyproject.toml"
+         if not pj.is_file():
+@@ -258,13 +326,23 @@ def duplicate_name_findings(repos: list[Path]) -> list[str]:
+             name = tomllib.loads(pj.read_text()).get("project", {}).get("name")
+         except (OSError, tomllib.TOMLDecodeError):
+             continue
+-        if name:
+-            seen.setdefault(canonical(name), []).append(repo.name)
++        if not name:
++            continue
++        # Keyed by repository identity, so a repo and its worktrees collapse to
++        # one entry while genuinely separate checkouts stay separate.
++        # setdefault, not assignment: last-wins named whichever directory came
++        # last, so a worktree — which declares nothing independently — could be
++        # reported in place of the checkout actually in conflict.
++        seen.setdefault(canonical(name), {}).setdefault(
++            repo_identity(repo), repo.name
++        )
++
+     out = []
+-    for name, dirs in sorted(seen.items()):
+-        if len(dirs) > 1:
++    for name, by_identity in sorted(seen.items()):
++        if len(by_identity) > 1:
++            dirs = ", ".join(sorted(by_identity.values()))
+             out.append(
+-                f"DUPLICATE-NAME   {'(workspace)':28} {name} declared by {', '.join(sorted(dirs))}"
++                f"DUPLICATE-NAME   {'(workspace)':28} {name} declared by {dirs}"
+             )
+     return out
+ 
+diff --git a/test/test_eco_doctor.sh b/test/test_eco_doctor.sh
+index dae826e..318d6ea 100755
+--- a/test/test_eco_doctor.sh
++++ b/test/test_eco_doctor.sh
+@@ -95,6 +95,92 @@ make_consumer() {
+     git -C "$dir" -c user.email=t@t -c user.name=t commit -qm init
+ }
+ 
++# make_worktree <existing-repo-dir> <new-worktree-dir>
++#
++# A REAL `git worktree add`, not a second `git init`. That distinction is the
++# whole point of test 17: two independent repos claiming one name is a genuine
++# ambiguity, while one repo checked out twice is the workspace's mandated
++# working mode (.claude/bin/eco-worktree.sh).
++make_worktree() {
++    local parent="$1" dest="$2"
++    git -C "$parent" worktree add -q --detach "$dest" HEAD
++}
++
++# --- git shims: reproducing older git, because the suite cannot otherwise ----
++#
++# Two of this bead's hazards only bite on git < 2.31, so on any machine that
++# runs this suite the real git hides them and a reinstated flag or a weakened
++# guard passes unopposed. eco_doctor.py invokes ["git", ...] without a shell, so
++# prepending a shim directory to PATH is enough to substitute an older git for
++# the doctor's own calls while the fixtures are still built by the real one.
++#
++# Each shim is self-checked at its point of use before anything is asserted
++# through it. A shim that quietly stopped reproducing the old behaviour would
++# otherwise turn these tests green for the wrong reason — the fixture-provenance
++# failure this file's header already describes.
++
++# shim_preamble <dir> — an executable `git` in *dir* that knows the real one.
++shim_preamble() {
++    mkdir -p "$1"
++    printf '#!/usr/bin/env bash\n' > "$1/git"
++    printf 'REAL=%q\n' "$(command -v git)" >> "$1/git"
++}
++
++# make_old_git_shim <dir>
++#
++# git < 2.31 does not know `--path-format`, and `git rev-parse` ECHOES an
++# unrecognised argument to stdout and exits 0 rather than failing. Verified
++# against the real git before this shim was written:
++#
++#     $ git -C repo rev-parse --bogus-flag=x --git-common-dir
++#     --bogus-flag=x
++#     .git
++#     $ echo $?
++#     0
++#
++# Echoed before delegating, which is where the real git prints it: the flag
++# precedes --git-common-dir in the call under test.
++make_old_git_shim() {
++    shim_preamble "$1"
++    cat >> "$1/git" <<'SHIM'
++args=(); unknown=()
++for a in "$@"; do
++    case "$a" in
++        --path-format=*) unknown+=("$a") ;;
++        *) args+=("$a") ;;
++    esac
++done
++if (( ${#unknown[@]} )) && [[ " $* " == *" rev-parse "* ]]; then
++    printf '%s\n' "${unknown[@]}"
++fi
++exec "$REAL" "${args[@]}"
++SHIM
++    chmod +x "$1/git"
++}
++
++# make_relative_commondir_shim <dir>
++#
++# Before 2.31, `rev-parse --git-common-dir` inside a linked worktree could print
++# the raw contents of .git/worktrees/<name>/commondir — the relative string
++# `../..` — rather than a path resolved for the caller. Reproduced by reading
++# that file directly. Only the doctor's exact call is intercepted; everything
++# else reaches the real git untouched.
++make_relative_commondir_shim() {
++    shim_preamble "$1"
++    cat >> "$1/git" <<'SHIM'
++if [[ "${1:-}" == -C && "${3:-}" == rev-parse && " $* " == *" --git-common-dir "* \
++      && -f "$2/.git" ]]; then
++    gitdir="$(sed -n 's/^gitdir: //p' "$2/.git")"
++    if [[ -n "$gitdir" && -f "$gitdir/commondir" ]]; then
++        cat "$gitdir/commondir"
++        exit 0
++    fi
++fi
++exec "$REAL" "$@"
++SHIM
++    chmod +x "$1/git"
++}
++
+ run_doctor() {
+     # Prints output, returns the exit code without tripping set -e.
+     local rc=0
+@@ -311,8 +397,9 @@ echo "=== Test 9: a sibling worktree does not hide findings ==="
+ SHADOW="$WORK/shadow"
+ mkdir -p "$SHADOW"
+ make_sibling "$SHADOW/nthlayer-common" nthlayer-common 3.5.0
+-# A worktree-shaped duplicate declaring the same package name at a version that
+-# would look fine. Sorts after the real one.
++# A second independent repo declaring the same package name at a version that
++# would look fine, sorting after the real one. NOT a worktree — see
++# make_worktree and test 17 for that case, which must NOT be reported.
+ make_sibling "$SHADOW/nthlayer-common-wip" nthlayer-common 2.1.2
+ make_consumer "$SHADOW/nthlayer-core" nthlayer-core ">=2.1.2,<3.0.0" 2.1.2
+ 
+@@ -529,6 +616,199 @@ else
+     fail "silently skipped a missing sibling: $out"
+ fi
+ 
++# --- Test 17: a worktree of the same repo is not a duplicate ---------------
++
++echo
++echo "=== Test 17: a git worktree does not trigger DUPLICATE-NAME ==="
++# opensrm-bnal. DUPLICATE-NAME was added as a safety net beneath NAME-BASED
++# sibling resolution, but the same change replaced that with [tool.uv.sources]
++# path resolution — so the net sits beneath a mechanism that no longer uses
++# names. Meanwhile CLAUDE.md MANDATES sibling worktrees, and a worktree always
++# declares its parent's project.name, so the finding fired on every correct
++# workflow and (classified as blocking by the opensrm-px23 pre-flight) refused
++# every R5 gate in the workspace. Found on that pre-flight's first real use.
++WT="$WORK/worktree-dup"
++mkdir -p "$WT"
++make_sibling "$WT/nthlayer-common" nthlayer-common 2.1.2
++make_consumer "$WT/nthlayer-core" nthlayer-core ">=2.1.2,<3.0.0" 2.1.2
++make_worktree "$WT/nthlayer-common" "$WT/nthlayer-common-wip"
++
++rc=0
++out="$(cd "$WT" && run_doctor)" || rc=$?
++if ! grep -q "DUPLICATE-NAME" <<<"$out"; then
++    pass "a worktree of the same repo is not reported as a duplicate"
++else
++    fail "worktree reported as DUPLICATE-NAME — blocks every gate: $out"
++fi
++if (( rc == 0 )); then
++    pass "clean workspace with a worktree present still exits 0"
++else
++    fail "exited $rc with only a worktree present — output: $out"
++fi
++
++echo
++echo "=== Test 18: two DISTINCT repos claiming one name still report ==="
++# The other side. Test 9 already covers the shadowing protection; this asserts
++# the finding survives for the case it was actually written for, so the bnal fix
++# cannot be mistaken for deleting the check.
++DIST="$WORK/distinct-dup"
++mkdir -p "$DIST"
++make_sibling "$DIST/nthlayer-common" nthlayer-common 2.1.2
++make_sibling "$DIST/nthlayer-common-rival" nthlayer-common 3.5.0
++make_consumer "$DIST/nthlayer-core" nthlayer-core ">=2.1.2,<3.0.0" 2.1.2
++# A worktree of the real one MUST be present for the naming assertion below to
++# mean anything: without it every identity appears exactly once and first-wins
++# is indistinguishable from last-wins. The first version of this fixture had no
++# worktree, so the assertion passed against the bug it was written to catch.
++make_worktree "$DIST/nthlayer-common" "$DIST/nthlayer-common-wt"
++
++rc=0
++out="$(cd "$DIST" && run_doctor)" || rc=$?
++if grep -q "DUPLICATE-NAME" <<<"$out"; then
++    pass "two independent repos claiming one name still reported"
++else
++    fail "the genuine duplicate case was lost: $out"
++fi
++# The finding must name the checkout actually in conflict. Keying last-wins
++# reported whichever directory came last, which could be a worktree that
++# declares nothing of its own.
++# The worktree shares the real repo's identity, so last-wins would name
++# nthlayer-common-wt — which declares nothing of its own — instead of
++# nthlayer-common, the checkout actually in conflict with the rival.
++if grep "DUPLICATE-NAME" <<<"$out" | grep -qv "nthlayer-common-wt"; then
++    pass "names the real conflicting checkout, not the worktree bystander"
++else
++    fail "named a worktree instead of the conflicting checkout: $(grep DUPLICATE-NAME <<<"$out")"
++fi
++
++echo
++echo "=== Test 19: an unreadable repo is treated as distinct, not merged ==="
++# The fallback. A wrong MERGE silences a real ambiguity; a wrong SPLIT reports
++# one that is easy to dismiss.
++#
++# The .git must still EXIST or discover_repos skips the directory entirely and
++# there is no duplicate to find — the first version of this fixture deleted it
++# and the test failed for that reason, not the one intended. Replacing it with
++# an unreadable file keeps the directory discoverable while making rev-parse
++# fail, which is the path under test.
++ORPH="$WORK/orphan"; mkdir -p "$ORPH"
++# BOTH must be unreadable. With only one, a fallback that merged every failure
++# into a single identity would still leave two distinct identities overall and
++# the finding would appear anyway — the first version of this fixture had one
++# and passed against the bug it was written to catch.
++make_sibling "$ORPH/nthlayer-common-broken-a" nthlayer-common 2.1.2
++make_sibling "$ORPH/nthlayer-common-broken-b" nthlayer-common 3.5.0
++for broken in a b; do
++    rm -rf "$ORPH/nthlayer-common-broken-$broken/.git"
++    printf 'not a git directory\n' > "$ORPH/nthlayer-common-broken-$broken/.git"
++done
++make_consumer "$ORPH/nthlayer-core" nthlayer-core ">=2.1.2,<3.0.0" 2.1.2
++
++out="$(cd "$ORPH" && run_doctor)" || true
++if grep -q "DUPLICATE-NAME" <<<"$out"; then
++    pass "an unreadable checkout stays distinct and is still reported"
++else
++    fail "unreadable checkout merged into another identity: $out"
++fi
++
++# --- Test 20: the worktree fix must hold on git < 2.31 ---------------------
++
++echo
++echo "=== Test 20: identity survives a git that does not know --path-format ==="
++# opensrm-bnal, round-1 CRITICAL. Reinstating `--path-format=absolute` in
++# repo_identity() survives every other test in this file, because the flag works
++# on git >= 2.31 and that is what any machine running this suite has. The failure
++# is invisible without an older git, so someone tidying the flag back in would
++# meet a green suite — and on the old git the identity collapses to the constant
++# "--path-format=absolute\n.git" for every main checkout, merging all distinct
++# repositories into one and silencing genuine duplicates.
++#
++# Re-runs the fixtures from tests 17 and 18 with an older git substituted for the
++# doctor's calls, so BOTH directions are covered on the version that breaks.
++SHIMBIN="$WORK/oldgit-bin"
++make_old_git_shim "$SHIMBIN"
++
++# Shim self-check FIRST. If the shim does not reproduce the hazard — echoing the
++# unknown flag and still exiting 0 — the two assertions below pass for the wrong
++# reason and prove nothing.
++shim_rc=0
++shim_out="$(PATH="$SHIMBIN:$PATH" git -C "$WT/nthlayer-common" \
++    rev-parse --path-format=absolute --git-common-dir 2>&1)" || shim_rc=$?
++if (( shim_rc == 0 )) && [[ "$(head -1 <<<"$shim_out")" == "--path-format=absolute" ]] \
++   && (( $(wc -l <<<"$shim_out") == 2 )); then
++    pass "shim reproduces pre-2.31 rev-parse: echoes the unknown flag, exits 0"
++else
++    fail "shim does not reproduce pre-2.31 rev-parse (rc=$shim_rc): $shim_out"
++fi
++
++rc=0
++out="$(cd "$WT" && PATH="$SHIMBIN:$PATH" run_doctor)" || rc=$?
++if ! grep -q "DUPLICATE-NAME" <<<"$out" && (( rc == 0 )); then
++    pass "on git < 2.31 a worktree is still not a duplicate (exit $rc)"
++else
++    fail "old git reintroduced the bnal bug (exit $rc): $out"
++fi
++
++rc=0
++out="$(cd "$DIST" && PATH="$SHIMBIN:$PATH" run_doctor)" || rc=$?
++if grep -q "DUPLICATE-NAME" <<<"$out" \
++   && grep "DUPLICATE-NAME" <<<"$out" | grep -qv "nthlayer-common-wt"; then
++    pass "on git < 2.31 the genuine duplicate is still reported, named correctly"
++else
++    fail "old git lost or misnamed the genuine duplicate (exit $rc): $out"
++fi
++
++# --- Test 21: a bogus-but-existing common-dir must not merge two repos ------
++
++echo
++echo "=== Test 21: a relative --git-common-dir must not merge distinct repos ==="
++# opensrm-bnal. `candidate.exists()` was both untested — when git succeeds the
++# path always exists, so `if True:` survived — and too weak. Before 2.31,
++# --git-common-dir inside a linked worktree could print the raw contents of
++# .git/worktrees/<name>/commondir, the relative string `../..`. Resolved against
++# the checkout that is the workspace's PARENT, which exists, so an existence
++# check accepts it as an identity.
++#
++# Two worktrees of two DIFFERENT repos then land on the same ancestor and are
++# merged, so the duplicate they genuinely are goes unreported — the false
++# negative the fallback exists to prevent. Requiring (candidate / "HEAD") rejects
++# any path that is not a git directory.
++#
++# The parent repos live OUTSIDE the scanned workspace deliberately: with a parent
++# present, its own identity resolves correctly and the name still maps to more
++# than one identity, so the finding appears either way and the fixture proves
++# nothing.
++REL="$WORK/rel-commondir"
++RELPARENTS="$WORK/rel-parents"
++mkdir -p "$REL" "$RELPARENTS"
++make_sibling "$RELPARENTS/upstream-a" nthlayer-common 2.1.2
++make_sibling "$RELPARENTS/upstream-b" nthlayer-common 3.5.0
++make_worktree "$RELPARENTS/upstream-a" "$REL/nthlayer-common-wt-a"
++make_worktree "$RELPARENTS/upstream-b" "$REL/nthlayer-common-wt-b"
++
++RELBIN="$WORK/relgit-bin"
++make_relative_commondir_shim "$RELBIN"
++
++# Shim self-check, and a check that the fixture's own premise holds: the string
++# must be relative, and must resolve to a directory that EXISTS but is NOT a git
++# directory. If either stops being true the assertion below is vacuous.
++probe="$(PATH="$RELBIN:$PATH" git -C "$REL/nthlayer-common-wt-a" \
++    rev-parse --git-common-dir 2>&1)"
++resolved="$(cd "$REL/nthlayer-common-wt-a" && cd "$probe" 2>/dev/null && pwd)"
++if [[ "$probe" == "../.." && -n "$resolved" && ! -e "$resolved/HEAD" ]]; then
++    pass "shim yields a relative common-dir resolving to a non-git directory"
++else
++    fail "fixture premise broken: probe='$probe' resolved='$resolved'"
++fi
++
++rc=0
++out="$(cd "$REL" && PATH="$RELBIN:$PATH" run_doctor)" || rc=$?
++if grep -q "DUPLICATE-NAME" <<<"$out"; then
++    pass "a non-git common-dir is rejected, so the two repos stay distinct"
++else
++    fail "two distinct repos merged on a bogus common-dir, duplicate silenced (exit $rc): $out"
++fi
++
+ echo
+ echo "==============================================="
+ echo "  Passed: $pass_count"
