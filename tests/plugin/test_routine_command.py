@@ -407,7 +407,6 @@ def test_the_state_branch_is_the_users_choice_exactly():
     assert state_branch.DEFAULT_BRANCH != STATE_BRANCH
 
 
-
 def test_step_2_waits_for_the_sweep_to_exit_before_step_3():
     """A Bash tool timeout or a move to the background is not the sweep
     finishing; running step 3 then would push before the sweep's ledger line
