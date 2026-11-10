@@ -484,7 +484,9 @@ def test_a_ledger_of_another_kind_is_refused_before_it_is_ever_opened(world, mon
     pushed = state_branch.push_ledger(world.repo, BRANCH)
 
     assert pushed.outcome == state_branch.REFUSED, pushed.sentence
-    assert LEDGER_PATH[-1] not in {os.path.basename(name) for name in opened}
+    opened_names = {os.path.basename(name) for name in opened}
+    assert LEDGER_PATH[1] in opened_names  # the spy saw the walk's opens
+    assert LEDGER_PATH[-1] not in opened_names
     assert world.origin_sha(BRANCH) is None
 
 @pytest.mark.parametrize("missing", [".curamoir/state", ".curamoir"])
@@ -663,7 +665,7 @@ def test_a_ledger_that_grows_past_the_bound_after_fstat_stops_being_read(world,
 
     with pytest.raises(state_branch._Refused, match="is larger than"):
         state_branch._work_tree_ledger(str(world.repo))
-    assert sum(taken) <= 16 + 1
+    assert taken and sum(taken) <= 16 + 1  # the spy saw the reads
 
 
 def test_a_ledger_of_exactly_the_bound_is_read(world, monkeypatch):
