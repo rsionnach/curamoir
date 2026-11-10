@@ -22,7 +22,9 @@ is written for the cloud session the Routine starts, not for this session.
 Then tell the developer the one edit it needs before they paste it:
 
 - Replace `REPLACE-WITH-A-CURAMOIR-TAG-OR-COMMIT` (step 1) with a cúramóir
-  tag or full commit SHA. Left as it is, every run stops at step 1. A
+  tag or full commit SHA (for a tag's commit, `git rev-parse <tag>^{commit}`;
+  plain `git rev-parse <tag>` prints an annotated tag's own object, which is
+  not a commit). Left as it is, every run stops at step 1. A
   branch name is accepted but discouraged: it is resolved to a commit once
   per run, so each run may get a different cúramóir.
 

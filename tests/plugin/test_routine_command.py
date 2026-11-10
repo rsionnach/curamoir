@@ -416,9 +416,42 @@ def test_step_2_waits_for_the_sweep_to_exit_before_step_3():
     assert "the Bash tool's longest timeout" in second
     assert "WAIT until the command has exited" in second
     assert "is not the command finishing" in second
-    assert "still running 60 minutes after it started, stop it, record that as a failure" \
+    assert "still running 60 minutes after it started, stop it: send it SIGTERM first" \
         in second
+    assert "SIGKILL. Record that as a failure, and go on to step 3." in second
 
+
+def test_steps_1_and_3_wait_for_their_command_to_exit_too():
+    first, third = flat(step(prompt(), 1)), flat(step(prompt(), 3))
+
+    assert "Wait until it has exited, as step 2 says" in first
+    assert "still running 5 minutes after it started, stop it" in first
+    assert "WAIT until it has exited, as in step 2" in third
+    assert ("still running 45 minutes after it started, stop it the same way and record "
+            "that as a failure") in third
+
+
+def test_the_60_minute_stop_lets_curamoir_write_its_ledger_line():
+    """SIGTERM first (cúramóir's TerminationSignals writes the job line);
+    SIGKILL runs no code, so it is only the fallback."""
+    second = flat(step(prompt(), 2))
+
+    assert ("send it SIGTERM first, which lets cúramóir write the run's ledger line, and "
+            "only if it has not exited a minute later, SIGKILL") in second
+
+
+def test_nothing_to_push_after_a_sweep_that_ran_is_a_warning():
+    """A sweep that ran always writes a job line, so the state push finding
+    nothing new after one means that line was lost (a SIGKILL, say)."""
+    third = flat(step(prompt(), 3))
+
+    assert ("exit 5 after a step 2 that ran at all (whatever its exit code, the 60-minute "
+            "stop included) means the run wrote no ledger line: report it as a warning, "
+            '"no ledger line was kept for this run"') in third
+
+
+def test_the_command_says_how_to_take_a_tags_commit():
+    assert "`git rev-parse <tag>^{commit}`" in flat(command())
 
 def test_a_command_that_cannot_start_is_never_improvised_around():
     text = prompt()
@@ -461,8 +494,8 @@ def test_the_prompt_reads_state_push_exit_codes_as_state_branch_defines_them():
     codes = state_branch.EXIT_CODES
 
     assert (f"Exit {codes[state_branch.PUSHED]} (pushed) and exit "
-            f"{codes[state_branch.NOTHING_TO_PUSH]} (nothing new to push) are both fine."
-            in third)
+            f"{codes[state_branch.NOTHING_TO_PUSH]} (nothing new to push) are both fine, "
+            "except") in third
     assert (f"Exit {codes[state_branch.REFUSED]} (refused) and exit "
             f"{codes[state_branch.FAILED]} (failed), or any other exit code, are failures"
             in third)
@@ -602,8 +635,37 @@ def test_step_1_does_not_resolve_head_or_a_pull_ref(tmp_path):
     not_resolved(resolve(tmp_path, "10521", listing("pip")))
 
 
-def test_step_1_stops_when_the_placeholder_was_left_in(tmp_path):
-    not_resolved(resolve(tmp_path, REF_PLACEHOLDER, listing("curamoir")))
+@pytest.mark.parametrize("git_exit", [0, 128], ids=["listing-works", "listing-fails"])
+def test_step_1_stops_when_the_placeholder_was_left_in(tmp_path, git_exit):
+    """Before any listing, so a listing that fails (a proxy's 403) does not
+    hide the one edit the prompt needed."""
+    result = resolve(tmp_path, REF_PLACEHOLDER, listing("curamoir"), git_exit=git_exit)
+
+    assert result.returncode != 0
+    assert "the prompt's ref was never set; see /curamoir:routine" in result.stdout
+    assert "could not list" not in result.stdout and "SHA:" not in result.stdout
+
+
+def test_step_1_takes_an_upper_case_full_sha_lower_cased(tmp_path):
+    sha = sha_of("curamoir", "refs/heads/feat/e14-platform-first")
+    result = resolve(tmp_path, sha.upper(), listing("curamoir"))
+
+    assert result.returncode == 0 and result.stdout == f"cúramóir SHA: {sha}\n"
+
+
+@pytest.mark.parametrize("listed", ["", "garbage without a tab\n"], ids=["empty", "junk"])
+def test_step_1_stops_on_a_listing_with_no_such_ref(tmp_path, listed):
+    not_resolved(resolve(tmp_path, "20.0", listed))
+
+
+def test_a_ref_that_breaks_the_shell_quoting_never_yields_a_sha(tmp_path):
+    """A `'` in the ref ends step 1 with a shell error, neither of its two
+    sentences; the prompt treats any other output as a stop."""
+    result = resolve(tmp_path, "it's", listing("pip"))
+
+    assert result.returncode != 0 and "SHA:" not in result.stdout
+    assert ("If it printed anything else, or nothing (a shell error, for instance), stop "
+            "here the same way.") in flat(step(prompt(), 1))
 
 
 def test_step_1_stops_on_an_abbreviated_sha_or_an_unknown_ref(tmp_path):

@@ -19,8 +19,12 @@ commit SHA it names, and prints that SHA:
 
 ```bash
 ref='REPLACE-WITH-A-CURAMOIR-TAG-OR-COMMIT'
-if [[ "$ref" =~ ^[0-9a-f]{40}$ ]]; then
-  sha="$ref"
+if [[ "$ref" == REPLACE-WITH-* ]]; then
+  echo "cúramóir ref '${ref}' did not resolve: the prompt's ref was never set; see /curamoir:routine."
+  exit 1
+fi
+if [[ "$ref" =~ ^[0-9a-fA-F]{40}$ ]]; then
+  sha="$(tr 'A-F' 'a-f' <<<"$ref")"
 else
   if ! listed="$(GIT_TERMINAL_PROMPT=0 git ls-remote https://github.com/rsionnach/curamoir)"; then
     echo "cúramóir ref '${ref}' did not resolve: could not list rsionnach/curamoir; see git's error above."
@@ -39,13 +43,19 @@ else
 fi
 ```
 
+Wait until it has exited, as step 2 says; if it is still running 5
+minutes after it started, stop it and stop here the same way as for "did
+not resolve".
+
 If it printed "cúramóir SHA: " and 40 characters, that SHA is the one every
 later command runs: in steps 2 and 3, replace `<SHA>` with it, character for
 character, and resolve nothing again. If it printed "did not resolve"
 instead, stop here: run neither step 2 nor step 3 (there is no cúramóir to
-run them with), and report what it printed. If the command cannot start
-(not found, or not permitted), do not install anything and do not resolve
-the ref any other way: note what was printed and stop here the same way.
+run them with), and report what it printed. If it printed anything else,
+or nothing (a shell error, for instance), stop here the same way. If the
+command cannot start (not found, or not permitted), do not install anything
+and do not resolve the ref any other way: note what was printed and stop
+here the same way.
 
 Step 2. Run the sweep.
 
@@ -57,8 +67,9 @@ Run it with the Bash tool's longest timeout. If the tool returns before
 the command has exited, or moves it to the background, WAIT until the
 command has exited (check its output) before going on: a tool timeout or a
 move to the background is not the command finishing. Only if it is still
-running 60 minutes after it started, stop it, record that as a failure,
-and go on to step 3.
+running 60 minutes after it started, stop it: send it SIGTERM first, which
+lets cúramóir write the run's ledger line, and only if it has not exited a
+minute later, SIGKILL. Record that as a failure, and go on to step 3.
 
 If the command cannot start (not found, or not permitted), do not install
 anything and do not run cúramóir any other way: note what was printed and
@@ -79,9 +90,16 @@ Run this after step 2 every time, whatever step 2 did:
 CURAMOIR_RUNNER=hosted uvx --from "git+https://github.com/rsionnach/curamoir@<SHA>" curamoir state push --branch claude/curamoir-state
 ```
 
+Run it with the Bash tool's longest timeout and WAIT until it has exited,
+as in step 2; if it is still running 45 minutes after it started, stop it
+the same way and record that as a failure.
+
 It prints one sentence. Exit 0 (pushed) and exit 5 (nothing new to push) are
-both fine. Exit 3 (refused) and exit 1 (failed), or any other exit code, are
-failures: the run's ledger lines were not kept. Do not retry it, and do not
+both fine, except that exit 5 after a step 2 that ran at all (whatever its
+exit code, the 60-minute stop included) means the run wrote no ledger line:
+report it as a warning, "no ledger line was kept for this run". Exit 3
+(refused) and exit 1 (failed), or any other exit code, are failures: the
+run's ledger lines were not kept. Do not retry it, and do not
 push the ledger any other way. If the sentence contains "It skipped", report
 it as a warning, whatever the exit code.
 
