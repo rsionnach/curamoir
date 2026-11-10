@@ -322,11 +322,10 @@ CLAUDE_CODE_RETRY_WATCHDOG=1
   30 minutes (the default is 2). A command still running then is moved to
   the background, where it can run up to 30 more minutes before Claude Code
   stops it; only a value above 1800000 lengthens that background limit. So
-  a sweep gets about an hour in all, the prompt's own limit, and a sweep
-  longer than 30 minutes relies on that background time. If your sweeps
-  take longer than an hour, set a larger value here and raise the prompt's
-  60 minutes (its step 2) with it: the two move together, and either alone
-  still stops the sweep at the lower one.
+  a sweep gets about an hour in all, and a sweep longer than 30 minutes
+  relies on that background time. The prompt stops nothing itself: this
+  limit is the only stop, a backstop that records the run as a failure. If
+  your sweeps take longer than an hour, set a larger value here.
 - `CLAUDE_CODE_RETRY_WATCHDOG=1` is Claude Code's setting for unattended
   sessions: it retries `429` and `529` capacity errors indefinitely, backing
   off up to 5 minutes, instead of failing after a few attempts, and retries

@@ -43,9 +43,8 @@ else
 fi
 ```
 
-Wait until it has exited, as step 2 says; if it is still running 5
-minutes after it started, stop it and stop here the same way as for "did
-not resolve".
+Run it with a Bash tool timeout of 300000 ms (5 minutes). If that timeout
+ends it, stop here the same way as for "did not resolve".
 
 If it printed "cúramóir SHA: " and 40 characters, that SHA is the one every
 later command runs: in steps 2 and 3, replace `<SHA>` with it, character for
@@ -66,17 +65,9 @@ CURAMOIR_RUNNER=hosted uvx --from "git+https://github.com/rsionnach/curamoir@<SH
 Run it with the Bash tool's longest timeout. If the tool returns before
 the command has exited, or moves it to the background, WAIT until the
 command has exited (check its output) before going on: a tool timeout or a
-move to the background is not the command finishing. Only if it is still
-running 60 minutes after it started, stop it: send it SIGTERM first, which
-lets cúramóir write the run's ledger line,
-`pkill -TERM -f 'curamoir run swee[p]'`, and only if it has not exited a
-minute later, SIGKILL cúramóir itself, not only uvx (which does not pass
-SIGKILL on): `pkill -KILL -f 'curamoir run swee[p]'`. Run each as its own
-command, exactly as written (the brackets keep the pattern from matching
-the shell that runs it). A helper cúramóir started in
-a session of its own (its fix agent, a test run, a push) can outlive it
-until this cloud session ends; report that the run was killed. Record that
-as a failure, and go on to step 3.
+move to the background is not the command finishing. Do not stop or kill
+it yourself. If Claude Code stops it, record that as a failure, and go on
+to step 3.
 
 If the command cannot start (not found, or not permitted), do not install
 anything and do not run cúramóir any other way: note what was printed and
@@ -87,7 +78,7 @@ code. Exit 0 (success) means the sweep finished, and the sentence says what
 it did. Exit 3 (refused) is an expected outcome, not an error: a guard or
 the sweep declined to run or to open a pull request, and the sentence gives
 the reason. Any other exit code is a failure. Whatever happened, success,
-refusal, failure, the 60 minutes running out, or the command not starting
+refusal, failure, Claude Code stopping it, or the command not starting
 at all, go on to step 3.
 
 Step 3. ALWAYS commit the run's ledger lines to the state branch.
@@ -98,13 +89,12 @@ CURAMOIR_RUNNER=hosted uvx --from "git+https://github.com/rsionnach/curamoir@<SH
 ```
 
 Run it with the Bash tool's longest timeout and WAIT until it has exited,
-as in step 2; if it is still running 45 minutes after it started, stop it
-the same way, with `pkill -TERM -f 'curamoir state pus[h]'` and then
-`pkill -KILL -f 'curamoir state pus[h]'`, and record that as a failure.
+as in step 2. Do not stop or kill it yourself; if Claude Code stops it,
+record that as a failure.
 
 It prints one sentence. Exit 0 (pushed) and exit 5 (nothing new to push) are
 both fine, except that exit 5 after a step 2 that ran at all (whatever its
-exit code, the 60-minute stop included) means the run wrote no ledger line:
+exit code, Claude Code stopping it included) means the run wrote no ledger line:
 report it as a warning, "no ledger line was kept for this run". Exit 3
 (refused) and exit 1 (failed), or any other exit code, are failures: the
 run's ledger lines were not kept. Do not retry it, and do not

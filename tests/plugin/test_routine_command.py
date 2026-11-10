@@ -292,9 +292,9 @@ def test_the_recipe_gives_the_users_variables_exactly():
     assert variables.split() == ["CURAMOIR_RUNNER=hosted", "BASH_DEFAULT_TIMEOUT_MS=1800000",
                                  "CLAUDE_CODE_RETRY_WATCHDOG=1"]
     assert "only a value above 1800000 lengthens that background limit" in flat(text)
-    assert ("If your sweeps take longer than an hour, set a larger value here and raise the "
-            "prompt's 60 minutes (its step 2) with it: the two move together") in flat(text)
-    assert "running 60 minutes after it started" in flat(PROMPT.read_text(encoding="utf-8"))
+    assert ("The prompt stops nothing itself: this limit is the only stop, a backstop that "
+            "records the run as a failure. If your sweeps take longer than an hour, set a "
+            "larger value here.") in flat(text)
     assert "Put no token or key here" in flat(text)
 
 
@@ -432,67 +432,42 @@ def test_step_2_waits_for_the_sweep_to_exit_before_step_3():
     assert "the Bash tool's longest timeout" in second
     assert "WAIT until the command has exited" in second
     assert "is not the command finishing" in second
-    assert "still running 60 minutes after it started, stop it: send it SIGTERM first" \
-        in second
-    assert "Record that as a failure, and go on to step 3." in second
+    assert ("Do not stop or kill it yourself. If Claude Code stops it, record that as a "
+            "failure, and go on to step 3.") in second
 
 
 def test_steps_1_and_3_wait_for_their_command_to_exit_too():
     first, third = flat(step(prompt(), 1)), flat(step(prompt(), 3))
 
-    assert "Wait until it has exited, as step 2 says" in first
-    assert "still running 5 minutes after it started, stop it" in first
+    assert ("Run it with a Bash tool timeout of 300000 ms (5 minutes). If that timeout ends "
+            'it, stop here the same way as for "did not resolve".') in first
     assert "WAIT until it has exited, as in step 2" in third
-    assert "still running 45 minutes after it started, stop it the same way" in third
-    assert "record that as a failure" in third
+    assert ("Do not stop or kill it yourself; if Claude Code stops it, record that as a "
+            "failure.") in third
 
 
-def test_the_60_minute_stop_lets_curamoir_write_its_ledger_line():
-    """SIGTERM first (cúramóir's TerminationSignals writes the job line);
-    SIGKILL runs no code, so it is only the fallback."""
-    second = flat(step(prompt(), 2))
 
-    assert "send it SIGTERM first, which lets cúramóir write the run's ledger line" in second
-    assert ("only if it has not exited a minute later, SIGKILL cúramóir itself, not only "
-            "uvx") in second
+def test_the_session_stops_nothing_itself():
+    """User decision 2026-11-10 (cm-2qp.5's R5 redo): no session-side stop
+    rule. Six review rounds each found a new hole in a pkill pattern (its
+    own shell, the Bash tool's wrapper, helpers in their own sessions), so
+    the pattern was the problem. Claude Code's Bash limit is the backstop;
+    the runner owning its own deadline is a bead of its own."""
+    text = prompt()
 
-
-def test_a_sigkill_reaches_curamoir_itself_not_only_uvx():
-    """uvx passes SIGTERM on to its child but not SIGKILL, which would leave
-    cúramóir running beside step 3 (or still pushing after a reported
-    failure); each fallback names the process by its own command line, with
-    a bracket so the pattern cannot match the shell running it (procps-ng's
-    pkill, unlike the BSD one, does not leave out its own ancestors)."""
-    second, third = flat(step(prompt(), 2)), flat(step(prompt(), 3))
-
-    for signal_name in ("TERM", "KILL"):  # the SIGTERM too: a copy of it unbracketed
-        assert f"`pkill -{signal_name} -f 'curamoir run swee[p]'`" in second
-        assert f"`pkill -{signal_name} -f 'curamoir state pus[h]'`" in third
-    assert "Run each as its own command, exactly as written" in second
-    assert not re.search(r"pkill -\w+ -f 'curamoir (run sweep|state push)'", prompt())
-    for pattern, command in (("curamoir run swee[p]", "curamoir run sweep"),
-                             ("curamoir state pus[h]", "curamoir state push")):
-        assert re.search(pattern, f"uvx --from x {command}")  # matches the process
-        assert not re.search(pattern, f"pkill -KILL -f '{pattern}'")  # not its own shell
-
-
-def test_the_prompt_does_not_claim_the_sigkill_reaches_every_helper():
-    """cúramóir starts its fix agent, test runs, gh and git push in sessions
-    of their own (git_guard.run_in_group), which its pkill pattern does not
-    match; the prompt says so rather than claim a whole tree."""
-    second = flat(step(prompt(), 2))
-
-    assert "whole process tree" not in second
-    assert "can outlive it until this cloud session ends" in second
+    assert not re.search(r"\b(pkill|killall)\b|\bkill -", text)  # no kill command
+    assert "SIGTERM" not in text and "SIGKILL" not in text
+    for number in (2, 3):
+        assert "Do not stop or kill it yourself" in flat(step(text, number)), number
 
 
 def test_nothing_to_push_after_a_sweep_that_ran_is_a_warning():
     """A sweep that ran always writes a job line, so the state push finding
-    nothing new after one means that line was lost (a SIGKILL, say)."""
+    nothing new after one means that line was lost (Claude Code's stop, say)."""
     third = flat(step(prompt(), 3))
 
-    assert ("exit 5 after a step 2 that ran at all (whatever its exit code, the 60-minute "
-            "stop included) means the run wrote no ledger line: report it as a warning, "
+    assert ("exit 5 after a step 2 that ran at all (whatever its exit code, Claude Code "
+            "stopping it included) means the run wrote no ledger line: report it as a warning, "
             '"no ledger line was kept for this run"') in third
 
 
@@ -518,8 +493,8 @@ def test_the_state_push_runs_always():
     text = prompt()
 
     assert "ALWAYS" in step(text, 3)
-    assert ("Whatever happened, success, refusal, failure, the 60 minutes running out, "
-            "or the command not starting at all, go on to step 3.") in flat(step(text, 2))
+    assert ("Whatever happened, success, refusal, failure, Claude Code stopping it, or the "
+            "command not starting at all, go on to step 3.") in flat(step(text, 2))
     assert "Run this after step 2 every time, whatever step 2 did:" in flat(step(text, 3))
 
 
