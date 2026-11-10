@@ -343,11 +343,27 @@ def test_the_loaded_plugin_exposes_the_routine_command():
 def test_the_command_says_why_that_branch_without_claiming_a_confinement():
     body = flat(command())
 
-    assert "the project's chosen name for the Routine's state branch" in body
+    assert ("Then tell them why that branch name: `claude/curamoir-state` is the project's "
+            "chosen name for the Routine's state branch") in body
     assert "`claude/` is only the default prefix" in body
     assert "confined" not in body
     assert "confined" not in Path(state_branch.__file__).read_text(encoding="utf-8")
 
+
+def test_the_command_tells_the_developer_what_the_choices_mean():
+    """The advice the session relays, sentence by sentence: an unedited
+    placeholder stops every run, a branch name moves, one runner per
+    repository, and whose identity and usage the Routine spends."""
+    body = flat(command())
+
+    assert "Left as it is, every run stops at step 1." in body
+    assert ("A branch name is accepted but discouraged: it is resolved to a commit once "
+            "per run, so each run may get a different cúramóir.") in body
+    assert ("The two share no lock and no ledger, so their runs can overlap and their "
+            "spend is split across two ledgers.") in body
+    assert ("The Routine runs as them: its commits, the state branch push and the PR "
+            "carry their GitHub identity, and its runs count against their Claude usage."
+            ) in body
 
 # --- the prompt -------------------------------------------------------------
 
@@ -544,10 +560,15 @@ def test_the_prompt_reads_the_sweep_exit_codes_as_the_runner_defines_them():
 
 
 def test_the_prompt_reports_the_outcome_and_the_pr_link():
-    fourth = step(prompt(), 4)
+    fourth = flat(step(prompt(), 4))
 
-    assert "sentence" in fourth
-    assert "pull request" in fourth
+    assert "- the cúramóir SHA from step 1;" in fourth
+    assert ("- step 2's exit code and its sentence, quoted exactly; if the sentence names a "
+            'pull request it opened (a link after "opened"), give that link on its own line;'
+            in fourth)
+    assert ("- step 3's exit code and its sentence, quoted exactly, saying plainly if it was "
+            "a failure or carried a warning.") in fourth
+    assert "Do nothing else." in fourth
 
 
 def test_the_prompt_never_names_a_credential_variable():
@@ -579,8 +600,11 @@ def resolve(tmp_path, ref, listed="", git_exit=0):
     bin_dir.mkdir(exist_ok=True)
     fake_git = bin_dir / "git"
     (tmp_path / "listing").write_text(listed, encoding="utf-8")
+    # A git that may prompt for credentials would hang an unattended run:
+    # the fake refuses unless step 1 turned prompting off.
     fake_git.write_text(
-        f'#!/bin/sh\n[ "$1" = ls-remote ] || exit 2\ncat "{tmp_path / "listing"}"\nexit {git_exit}\n',
+        '#!/bin/sh\n[ "$GIT_TERMINAL_PROMPT" = 0 ] || { echo "git may prompt" >&2; exit 97; }\n'
+        f'[ "$1" = ls-remote ] || exit 2\ncat "{tmp_path / "listing"}"\nexit {git_exit}\n',
         encoding="utf-8")
     fake_git.chmod(0o755)
     return subprocess.run(["bash", "-c", script], capture_output=True, text=True,
@@ -697,6 +721,25 @@ def test_a_ref_that_breaks_the_shell_quoting_never_yields_a_sha(tmp_path):
     assert ("If it printed anything else, or nothing (a shell error, for instance), stop "
             "here the same way.") in flat(step(prompt(), 1))
 
+
+def test_step_1_never_lets_git_prompt_for_credentials(tmp_path):
+    """The listing runs with GIT_TERMINAL_PROMPT=0: the fake git exits 97
+    without it, so a step 1 that dropped it resolves nothing."""
+    result = resolve(tmp_path, "20.0", listing("pip"))
+
+    assert result.returncode == 0, result.stderr
+    assert "git may prompt" not in result.stderr
+
+
+def test_step_1_stops_on_a_listed_object_that_is_not_a_full_sha(tmp_path):
+    """Constructed (no real listing has one): a ref whose listed object is
+    not 40 hex characters resolves nothing, by the final check."""
+    not_resolved(resolve(tmp_path, "x", "abc\trefs/heads/x\n"))
+
+
+def test_step_1_resolves_once_and_steps_2_and_3_reuse_it():
+    assert ("in steps 2 and 3, replace `<SHA>` with it, character for character, and "
+            "resolve nothing again") in flat(step(prompt(), 1))
 
 def test_step_1_stops_on_an_abbreviated_sha_or_an_unknown_ref(tmp_path):
     abbreviated = sha_of("curamoir", "refs/heads/feat/e14-platform-first")[:7]
