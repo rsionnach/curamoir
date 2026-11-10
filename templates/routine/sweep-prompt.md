@@ -69,9 +69,12 @@ command has exited (check its output) before going on: a tool timeout or a
 move to the background is not the command finishing. Only if it is still
 running 60 minutes after it started, stop it: send it SIGTERM first, which
 lets cúramóir write the run's ledger line, and only if it has not exited a
-minute later, SIGKILL the whole process tree, not only uvx (which does not
-pass SIGKILL on): `pkill -KILL -f 'curamoir run sweep'`. Record that as a
-failure, and go on to step 3.
+minute later, SIGKILL cúramóir itself, not only uvx (which does not pass
+SIGKILL on): `pkill -KILL -f 'curamoir run swee[p]'` (the brackets keep the
+pattern from matching the shell that runs it). A helper cúramóir started in
+a session of its own (its fix agent, a test run, a push) can outlive it
+until this cloud session ends; report that the run was killed. Record that
+as a failure, and go on to step 3.
 
 If the command cannot start (not found, or not permitted), do not install
 anything and do not run cúramóir any other way: note what was printed and
@@ -94,7 +97,7 @@ CURAMOIR_RUNNER=hosted uvx --from "git+https://github.com/rsionnach/curamoir@<SH
 
 Run it with the Bash tool's longest timeout and WAIT until it has exited,
 as in step 2; if it is still running 45 minutes after it started, stop it
-the same way (the SIGKILL as `pkill -KILL -f 'curamoir state push'`) and
+the same way (the SIGKILL as `pkill -KILL -f 'curamoir state pus[h]'`) and
 record that as a failure.
 
 It prints one sentence. Exit 0 (pushed) and exit 5 (nothing new to push) are

@@ -437,18 +437,34 @@ def test_the_60_minute_stop_lets_curamoir_write_its_ledger_line():
     second = flat(step(prompt(), 2))
 
     assert ("send it SIGTERM first, which lets cúramóir write the run's ledger line, and "
-            "only if it has not exited a minute later, SIGKILL the whole process tree, not "
-            "only uvx") in second
+            "only if it has not exited a minute later, SIGKILL cúramóir itself, not only "
+            "uvx") in second
 
 
 def test_a_sigkill_reaches_curamoir_itself_not_only_uvx():
     """uvx passes SIGTERM on to its child but not SIGKILL, which would leave
     cúramóir running beside step 3 (or still pushing after a reported
-    failure); each fallback names the process by its own command line."""
+    failure); each fallback names the process by its own command line, with
+    a bracket so the pattern cannot match the shell running it (procps-ng's
+    pkill, unlike the BSD one, does not leave out its own ancestors)."""
     second, third = flat(step(prompt(), 2)), flat(step(prompt(), 3))
 
-    assert "`pkill -KILL -f 'curamoir run sweep'`" in second
-    assert "`pkill -KILL -f 'curamoir state push'`" in third
+    assert "`pkill -KILL -f 'curamoir run swee[p]'`" in second
+    assert "`pkill -KILL -f 'curamoir state pus[h]'`" in third
+    for pattern, command in (("curamoir run swee[p]", "curamoir run sweep"),
+                             ("curamoir state pus[h]", "curamoir state push")):
+        assert re.search(pattern, f"uvx --from x {command}")  # matches the process
+        assert not re.search(pattern, f"pkill -KILL -f '{pattern}'")  # not its own shell
+
+
+def test_the_prompt_does_not_claim_the_sigkill_reaches_every_helper():
+    """cúramóir starts its fix agent, test runs, gh and git push in sessions
+    of their own (git_guard.run_in_group), which its pkill pattern does not
+    match; the prompt says so rather than claim a whole tree."""
+    second = flat(step(prompt(), 2))
+
+    assert "whole process tree" not in second
+    assert "can outlive it until this cloud session ends" in second
 
 
 def test_nothing_to_push_after_a_sweep_that_ran_is_a_warning():
