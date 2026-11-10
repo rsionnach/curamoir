@@ -33,7 +33,7 @@ commit, and then always commits the run's ledger lines to the
 Routine's VM is discarded after the run. The session does nothing else: the
 sweep opens its own PR, at most one per run.
 
-Why that branch name: `claude/curamoir-state` is the project's chosen name
+Then tell them why that branch name: `claude/curamoir-state` is the project's chosen name
 for the Routine's state branch, kept apart from the GitHub Actions
 workflow's `curamoir/state` so the two runners' ledgers never mix. It is
 not there to fit a restriction: `claude/` is only the default prefix of
@@ -54,10 +54,11 @@ Give these steps, in this order:
 3. Select this repository, and only this one.
 4. Schedule: weekly is enough, at a few minutes past the hour (a run set
    exactly on the hour can start late), for example Mondays at 04:17 UTC
-   (cron `17 4 * * 1`, the GitHub Actions workflow's slot). Routines refuse
-   anything more often than hourly. Match it to `cadence.sweep` in
+   (cron `17 4 * * 1`, the GitHub Actions workflow's slot; a cron
+   expression of five fields is read in UTC). Routines refuse anything more
+   often than hourly. Match it to `cadence.sweep` in
    `.curamoir/curamoir.yaml`, this repository's record of how often the
-   sweep runs. A cron expression of five fields is read in UTC.
+   sweep runs.
 5. Cloud environment: make it first, as section 3 describes (setup script,
    variables, network level), then select it here. Set section 3's branch
    protection on GitHub before step 7's **Run now**.

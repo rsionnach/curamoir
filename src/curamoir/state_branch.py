@@ -9,11 +9,12 @@ ledger is the only memory between runs (docs/direction-platform-first.md
 branch stays untouched and protected (user decision, 2026-10-30), so the
 lines go to a dedicated non-default branch instead: `curamoir/state` by
 default (DEFAULT_BRANCH), `claude/curamoir-state` from a Routine (E14.5's
-prompt, templates/routine/sweep-prompt.md: the project's chosen name for
-the Routine's state branch, kept apart from the workflow's; `claude/` is
-only the default prefix of Claude's own pushes, not a confinement, so a
-ruleset is what limits either branch). The
-workflow template runs it after the sweep with `if: always()`, so a
+prompt, templates/routine/sweep-prompt.md). That is the project's chosen
+name for the Routine's state branch, kept apart from the workflow's.
+`claude/` is only the default prefix of Claude's own pushes, not a
+confinement: the repository's rulesets are what limit pushes to
+`curamoir/state` and to `claude/curamoir-state`. The workflow template
+runs it after the sweep with `if: always()`, so a
 refusal's line and a failure's line are kept too.
 
 **Which lines are the run's.** The ledger is append-only, so the run's
@@ -154,8 +155,7 @@ from curamoir.publish import (
 from curamoir.redaction import redact
 
 #: The state branch when none is named. A Routine passes
-#: `claude/curamoir-state` (E14.5), the project's name for the Routine's
-#: state branch; nothing confines a Routine's pushes to `claude/*`.
+#: `claude/curamoir-state` (E14.5) instead (module docstring).
 DEFAULT_BRANCH = "curamoir/state"
 
 #: How many times the push is built and tried when another run moved the

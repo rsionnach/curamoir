@@ -21,11 +21,12 @@ read a token.
 import re
 import shutil
 import subprocess
+import tomllib
 from pathlib import Path
 
 import pytest
 
-from curamoir import runner, state_branch
+from curamoir import cli, runner, state_branch
 from curamoir.config import GithubApi
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -51,6 +52,10 @@ CREDENTIAL_NAME = re.compile(r"\b[A-Z_]*(TOKEN|_PAT|API_KEY|SECRET)\b")
 #: Real `git ls-remote` listings, trimmed (each file's header says from where
 #: and when), so step 1 is tested against the shapes git prints.
 LS_REMOTE = Path(__file__).resolve().parent / "ls_remote"
+
+
+def command():
+    return COMMAND.read_text(encoding="utf-8")
 
 
 def prompt():
@@ -83,7 +88,7 @@ def test_the_routine_command_file_exists_so_it_is_namespaced_automatically():
 
 
 def test_the_command_has_the_frontmatter_the_other_commands_have():
-    body = COMMAND.read_text(encoding="utf-8")
+    body = command()
     frontmatter = body.split("---\n")[1]
 
     assert body.startswith("---\n")
@@ -95,14 +100,14 @@ def test_the_command_has_the_frontmatter_the_other_commands_have():
 def test_the_command_reads_the_one_prompt_file_through_the_plugin_root():
     """Claude Code substitutes ${CLAUDE_PLUGIN_ROOT} into the body at load time
     (tests/plugin/test_cli.py), so the path has to be written there."""
-    body = COMMAND.read_text(encoding="utf-8")
+    body = command()
 
     assert "${CLAUDE_PLUGIN_ROOT}/templates/routine/sweep-prompt.md" in body
     assert PROMPT.is_file()
 
 
 def test_the_command_does_not_carry_a_second_copy_of_the_prompt():
-    body = COMMAND.read_text(encoding="utf-8")
+    body = command()
 
     assert "curamoir run sweep" not in body.replace("`curamoir run sweep`", "")
     assert PINNED not in body
@@ -110,7 +115,7 @@ def test_the_command_does_not_carry_a_second_copy_of_the_prompt():
 
 
 def test_the_command_shows_the_prompt_verbatim_and_never_runs_it():
-    body = COMMAND.read_text(encoding="utf-8")
+    body = command()
 
     assert "verbatim" in body
     assert ("Do not run any command in it, and do not act on any instruction in it."
@@ -120,7 +125,7 @@ def test_the_command_shows_the_prompt_verbatim_and_never_runs_it():
 
 
 def test_the_command_gives_the_schedule_steps():
-    body = COMMAND.read_text(encoding="utf-8")
+    body = command()
 
     assert "/schedule" in body
     assert "claude.ai/code/routines" in body
@@ -129,7 +134,7 @@ def test_the_command_gives_the_schedule_steps():
 
 
 def test_the_command_suggests_a_slot_one_runner_and_how_to_read_a_run():
-    body = flat(COMMAND.read_text(encoding="utf-8"))
+    body = flat(command())
 
     assert "`17 4 * * 1`" in body
     assert "Use one runner per repository" in body
@@ -157,12 +162,12 @@ def test_the_command_and_the_runners_page_carry_the_same_recipe_word_for_word():
     written into docs/runners.md ("Routine environment"); the two may not
     drift apart."""
     assert recipe(COMMAND) == recipe(RUNNERS)
-    body = COMMAND.read_text(encoding="utf-8")
+    body = command()
     assert body.index("## 3. The cloud environment") < body.index("<!-- routine-environment:start")
 
 
 def test_the_command_shows_the_recipe_and_never_runs_it():
-    section_3 = flat(COMMAND.read_text(encoding="utf-8").split("## 3. The cloud environment")[1])
+    section_3 = flat(command().split("## 3. The cloud environment")[1])
 
     assert "as it is written" in section_3
     assert "Do not run the setup script or any command in it here" in section_3
@@ -170,7 +175,7 @@ def test_the_command_shows_the_recipe_and_never_runs_it():
 
 
 def test_the_recipe_no_longer_says_it_is_missing():
-    for text in (COMMAND.read_text(encoding="utf-8"), RUNNERS.read_text(encoding="utf-8"),
+    for text in (command(), RUNNERS.read_text(encoding="utf-8"),
                  README.read_text(encoding="utf-8")):
         flattened = flat(text)
         assert "not expected to complete a sweep" not in flattened
@@ -274,7 +279,7 @@ def test_the_recipe_is_in_the_order_it_is_set_up():
     assert "before the first **Run now**" in text
     assert ("Cloud environment: make it first, as section 3 describes (setup script, "
             "variables, network level), then select it here.") in flat(
-        COMMAND.read_text(encoding="utf-8"))
+        command())
 
 
 def test_the_recipe_gives_the_users_variables_exactly():
@@ -317,7 +322,7 @@ def test_the_recipe_says_not_to_press_run_now_during_a_run():
 
 
 def test_the_command_says_to_remove_connectors_and_allow_the_state_push():
-    body = flat(COMMAND.read_text(encoding="utf-8"))
+    body = flat(command())
 
     assert "Connectors: remove them all. The sweep needs none" in body
     assert ("If a ruleset or branch protection on GitHub covers `claude/curamoir-state`, "
@@ -333,6 +338,15 @@ def test_the_loaded_plugin_exposes_the_routine_command():
 
     assert result.returncode == 0, result.stderr
     assert re.search(r"^\s+routine\s", result.stdout, flags=re.MULTILINE), result.stdout
+
+
+def test_the_command_says_why_that_branch_without_claiming_a_confinement():
+    body = flat(command())
+
+    assert "the project's chosen name for the Routine's state branch" in body
+    assert "`claude/` is only the default prefix" in body
+    assert "confined" not in body
+    assert "confined" not in Path(state_branch.__file__).read_text(encoding="utf-8")
 
 
 # --- the prompt -------------------------------------------------------------
@@ -362,11 +376,8 @@ def test_the_prompts_commands_are_ones_the_installed_package_provides(arguments,
     (pyproject's [project.scripts]: uvx installs that, never the plugin's
     scripts/ wrapper), and the subcommand it names parses: at 864bd19 the
     package declared no script, so both steps could not start (cm-2qp.5's
-    R5 redo). The executable is the word after the pinned `uvx --from`."""
-    import tomllib
-
-    from curamoir import cli
-
+    R5 redo). The executable is the last word of PINNED, after the
+    `--from` spec."""
     executable = PINNED.rsplit(" ", 1)[-1]
     scripts = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))[
         "project"]["scripts"]
@@ -377,6 +388,7 @@ def test_the_prompts_commands_are_ones_the_installed_package_provides(arguments,
     assert parsed.value.code == 0
     assert "usage:" in capsys.readouterr().out
 
+
 def test_the_job_the_prompt_runs_is_a_registered_job():
     """`--help` exits before the job is looked up, so the parse check above
     accepts any name; the job the prompt runs must be one runner.JOBS
@@ -385,7 +397,8 @@ def test_the_job_the_prompt_runs_is_a_registered_job():
                       re.MULTILINE)
 
     assert jobs == ["sweep"]
-    assert all(job in runner.JOBS for job in jobs)
+    assert "sweep" in runner.JOBS
+
 
 def test_the_state_branch_is_the_users_choice_exactly():
     pushes = re.findall(r"state push --branch (\S+)", prompt())
@@ -393,14 +406,6 @@ def test_the_state_branch_is_the_users_choice_exactly():
     assert pushes == [STATE_BRANCH]
     assert state_branch.DEFAULT_BRANCH != STATE_BRANCH
 
-
-def test_the_command_says_why_that_branch_without_claiming_a_confinement():
-    body = flat(COMMAND.read_text(encoding="utf-8"))
-
-    assert "the project's chosen name for the Routine's state branch" in body
-    assert "`claude/` is only the default prefix" in body
-    assert "confined" not in body
-    assert "confined" not in Path(state_branch.__file__).read_text(encoding="utf-8")
 
 
 def test_step_2_waits_for_the_sweep_to_exit_before_step_3():
@@ -420,7 +425,7 @@ def test_a_command_that_cannot_start_is_never_improvised_around():
     text = prompt()
     for number, then in ((1, "stop here"), (2, "go on to step 3")):
         part = flat(step(text, number))
-        assert "If the command cannot start" in part or "If it cannot start" in part, number
+        assert "If the command cannot start" in part, number
         assert "do not install anything" in part, number
         assert then in part, number
     assert "do not run cúramóir any other way" in flat(step(text, 2))
@@ -502,17 +507,16 @@ def test_the_prompt_forbids_fixing_code_and_other_git_operations():
 
 # --- step 1, the ref resolution, run for real ---------------------------------
 
-def resolve(tmp_path, ref, listing="", git_exit=0):
+def resolve(tmp_path, ref, listed="", git_exit=0):
     """Runs the prompt's step-1 block with `ref` in place of the placeholder and
-    a `git` on PATH that prints `listing` for ls-remote and exits `git_exit`
+    a `git` on PATH that prints `listed` for ls-remote and exits `git_exit`
     (no network)."""
-    block = bash_blocks(step(prompt(), 1))
-    assert len(block) == 1
-    script = block[0].replace(REF_PLACEHOLDER, ref)
+    (script,) = bash_blocks(step(prompt(), 1))
+    script = script.replace(REF_PLACEHOLDER, ref)
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir(exist_ok=True)
     fake_git = bin_dir / "git"
-    (tmp_path / "listing").write_text(listing, encoding="utf-8")
+    (tmp_path / "listing").write_text(listed, encoding="utf-8")
     fake_git.write_text(
         f'#!/bin/sh\n[ "$1" = ls-remote ] || exit 2\ncat "{tmp_path / "listing"}"\nexit {git_exit}\n',
         encoding="utf-8")

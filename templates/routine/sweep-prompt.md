@@ -60,9 +60,9 @@ move to the background is not the command finishing. Only if it is still
 running 60 minutes after it started, stop it, record that as a failure,
 and go on to step 3.
 
-If it cannot start (not found, or not permitted), do not install anything
-and do not run cúramóir any other way: note what was printed and go on to
-step 3.
+If the command cannot start (not found, or not permitted), do not install
+anything and do not run cúramóir any other way: note what was printed and
+go on to step 3.
 
 It prints one sentence saying what happened. Keep the sentence and the exit
 code. Exit 0 (success) means the sweep finished, and the sentence says what
