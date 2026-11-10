@@ -377,6 +377,16 @@ def test_the_prompts_commands_are_ones_the_installed_package_provides(arguments,
     assert parsed.value.code == 0
     assert "usage:" in capsys.readouterr().out
 
+def test_the_job_the_prompt_runs_is_a_registered_job():
+    """`--help` exits before the job is looked up, so the parse check above
+    accepts any name; the job the prompt runs must be one runner.JOBS
+    holds (`curamoir run <job>` refuses any other, exit 2)."""
+    jobs = re.findall(rf"^CURAMOIR_RUNNER=hosted {re.escape(PINNED)} run (\S+)$", prompt(),
+                      re.MULTILINE)
+
+    assert jobs == ["sweep"]
+    assert all(job in runner.JOBS for job in jobs)
+
 def test_the_state_branch_is_the_users_choice_exactly():
     pushes = re.findall(r"state push --branch (\S+)", prompt())
 
