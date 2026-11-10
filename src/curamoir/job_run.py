@@ -75,7 +75,7 @@ class JobRun:
     """
 
     def __init__(self, ledger, job, run_id=None, now=None, runner=None,
-                 runner_fields=None, github_api=None):
+                 runner_fields=None, github_api=GithubApi.CLI):
         self._ledger = ledger
         self._job = job
         self._runner = runner
@@ -112,7 +112,7 @@ class JobRun:
         a Claude Code cloud session, else CLI. GithubApi.CLI when none was
         given, the 3f50a3f behaviour: what a JobRun made outside
         run_guarded sees (a test, an ad hoc caller)."""
-        return GithubApi.CLI if self._github_api is None else self._github_api
+        return self._github_api
 
     @property
     def ledger(self):

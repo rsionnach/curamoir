@@ -298,14 +298,19 @@ def repo_labels(repo, gh_repo=None, *, github_api=GithubApi.CLI):
     path")."""
     if github_api is GithubApi.REST:
         names = _rest_label_names(repo, gh_repo)
-        limit_phrase = f"as many as LABEL_LIMIT ({LABEL_LIMIT})"
     else:
         names = _cli_label_names(repo, gh_repo)
-        limit_phrase = "its --limit"
     if len(names) >= LABEL_LIMIT:
-        raise GhError(f"gh listed {len(names)} labels, {limit_phrase}, so the list may be cut "
-                      "short and the pause label may be the one left off")
+        raise GhError(f"gh listed {len(names)} labels, "
+                      f"{_limit_phrase(github_api, 'LABEL_LIMIT', LABEL_LIMIT)}, so the list may "
+                      "be cut short and the pause label may be the one left off")
     return names
+
+
+def _limit_phrase(github_api, name, limit):
+    """How a refusal at the limit names it: the CLI path's `--limit`, or on
+    the REST path (which passes none) the constant `name` and its value."""
+    return f"as many as {name} ({limit})" if github_api is GithubApi.REST else "its --limit"
 
 
 def _cli_label_names(repo, gh_repo):
@@ -323,7 +328,7 @@ def _rest_label_names(repo, gh_repo):
     """repo_labels on the REST path: every label's `name`, page by page up
     to LABEL_LIMIT (_rest_pages). GhError for a label without a text name:
     a listing that cannot be read is never read as "not paused"."""
-    _, _, labels = _rest_pages(repo, gh_repo, "labels", "", LABEL_LIMIT)
+    labels = _rest_pages(repo, gh_repo, "labels", "", LABEL_LIMIT)
     names = [label.get("name") for label in labels]
     if not all(isinstance(name, str) for name in names):
         raise GhError(f"gh api .../labels listed a label without a name: "
@@ -344,8 +349,9 @@ def open_sweep_prs(repo, gh_repo=None, *, github_api=GithubApi.CLI):
                           "--limit", str(PR_LIMIT), "--json", PR_FIELDS], cwd=repo)
         items = _json_pulls(printed, "gh pr list")
     if len(items) >= PR_LIMIT:
-        raise GhError(f"gh listed {len(items)} open pull requests, its --limit, so the "
-                      "list may be cut short")
+        raise GhError(f"gh listed {len(items)} open pull requests, "
+                      f"{_limit_phrase(github_api, 'PR_LIMIT', PR_LIMIT)}, so the list may be "
+                      "cut short")
     return [sweep_pr_listing(item) for item in items]
 
 
@@ -400,9 +406,17 @@ def rest_target(gh_repo, *, placeholder=False):
       repository), gives no `--hostname` and gh's own
       `repos/{owner}/{repo}`, which gh fills from the remotes (module
       docstring, "How the repository is named").
-    Anything else is a GhError, before gh runs."""
+    Anything else is a GhError, before gh runs (rest_repository)."""
     if gh_repo is None and placeholder:
         return [], _PLACEHOLDER
+    hostname, owner, name = rest_repository(gh_repo)
+    return hostname, f"repos/{owner}/{name}"
+
+
+def rest_repository(gh_repo):
+    """rest_target's first rule, the target parsed: (`--hostname HOST` as
+    arguments, OWNER, REPO) for a `gh_repo` that is `HOST/OWNER/REPO` or
+    `OWNER/REPO`; GhError for anything else, before gh runs."""
     parts = gh_repo.split("/") if isinstance(gh_repo, str) else []
     if len(parts) == 2:
         parts = [None, *parts]
@@ -410,7 +424,7 @@ def rest_target(gh_repo, *, placeholder=False):
         raise GhError(f"{gh_repo!r} names no GitHub repository as HOST/OWNER/REPO, so gh api "
                       "cannot be asked about it")
     host, owner, name = parts
-    return ([] if host is None else ["--hostname", host]), f"repos/{owner}/{name}"
+    return ([] if host is None else ["--hostname", host]), owner, name
 
 
 def rest_pull_fields(item):
@@ -468,9 +482,9 @@ def rest_json(repo, args, command, *, timeout=None, stdin_bytes=None):
 
 
 def _rest_pages(repo, gh_repo, resource, query, limit):
-    """(hostname arguments, `repos/OWNER/REPO`, items) for a REST listing
-    of `resource` (`labels`, `pulls`) with `query` (`state=open&`, or ""):
-    page by page, `per_page=REST_PER_PAGE&page=<n>`, from page 1 always,
+    """The items of a REST listing of `resource` (`labels`, `pulls`) with
+    `query` (`state=open&`, or ""): page by page,
+    `per_page=REST_PER_PAGE&page=<n>`, from page 1 always,
     stopping at a short page or once `limit` or more items are read, so at
     most ceil(limit / REST_PER_PAGE) pages are asked (module docstring,
     "Each query"). WHY "or more" and no page count: a listing that reaches
@@ -491,7 +505,7 @@ def _rest_pages(repo, gh_repo, resource, query, limit):
                           "list of objects")
         items += listed
         if len(listed) < REST_PER_PAGE or len(items) >= limit:
-            return hostname, path, items
+            return items
         page += 1
 
 
@@ -500,7 +514,8 @@ def _rest_open_prs(repo, gh_repo):
     (_rest_pages; open_sweep_prs then raises at the limit, as on the CLI
     path), as rest_pull_fields gives them, with `files` for those whose
     paths a reader uses (module docstring, "Each query")."""
-    hostname, path, pulls = _rest_pages(repo, gh_repo, "pulls", "state=open&", PR_LIMIT)
+    pulls = _rest_pages(repo, gh_repo, "pulls", "state=open&", PR_LIMIT)
+    hostname, path = rest_target(gh_repo, placeholder=True)
     items = []
     for pull in pulls:
         item = rest_pull_fields(pull)
@@ -528,15 +543,14 @@ def _rest_files(repo, hostname, path, number):
 def _rest_recent_prs(repo, gh_repo):
     """pr_states's items on the REST path: the newest PR_LIMIT PRs in any
     state (_rest_pages), as rest_pull_fields gives them."""
-    _, _, pulls = _rest_pages(repo, gh_repo, "pulls", "state=all&", PR_LIMIT)
+    pulls = _rest_pages(repo, gh_repo, "pulls", "state=all&", PR_LIMIT)
     return [rest_pull_fields(pull) for pull in pulls]
 
 
-def rest_head_query(gh_repo, branch):
-    """The `head=OWNER:BRANCH` query value for `gh_repo`'s own branch,
-    percent-encoded as UTF-8 (a branch name may hold `&`, `#`, `+` or any
-    character git allows)."""
-    owner = rest_target(gh_repo)[1].split("/")[1]
+def rest_head_query(owner, branch):
+    """The `head=OWNER:BRANCH` query value for `owner`'s own branch (OWNER
+    as rest_repository parses it), percent-encoded as UTF-8 (a branch name
+    may hold `&`, `#`, `+` or any character git allows)."""
     return quote(f"{owner}:{branch}", safe=":/")
 
 

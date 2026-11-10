@@ -70,8 +70,7 @@ output it is fed and the provenance of each behaviour below):
   `default_branch`. Without the positional the fake refuses: real gh
   would pick the repository from the remotes, which publish never lets it.
 
-- `gh api [--hostname H] [--paginate [--slurp]] [--jq '.[].name']
-  <endpoint>` (cm-2qp.9, the REST path a Claude Code cloud session takes;
+- `gh api [--hostname H] <endpoint>` (cm-2qp.9, the REST path a Claude Code cloud session takes;
   tests/gh_api_payloads.py records GitHub's answers): `repos/O/R` (the
   recorded repository object, its `default_branch` the fed one),
   `repos/O/R/labels` (the fed labels as REST label objects),
@@ -81,9 +80,9 @@ output it is fed and the provenance of each behaviour below):
   verbatim), and `repos/O/R/pulls/N/files` (the PR's `files` as REST file
   objects; or `rest_files`). Pagination is GitHub's (`per_page`, default
   30, at most 100; `page` from 1) and gh's printing of it as observed
-  (gh_api_payloads' docstring): one JSON array per page, every page with
-  `--paginate`, one array of pages with `--slurp`, `--jq '.[].name'` per
-  page. `repos/{owner}/{repo}` stands for `placeholder_repo`, as real gh
+  (gh_api_payloads' docstring): one JSON array per page asked. Any other
+  option (`--paginate`, `--slurp`, `--jq`) is refused as not recorded.
+  `repos/{owner}/{repo}` stands for `placeholder_repo`, as real gh
   fills the placeholders from the remotes. `gh api -X POST repos/O/R/pulls
   --input -` reads the JSON body from stdin (logged as `input_content`),
   creates the PR as `pr create` does (the same `create_*` options) and
@@ -307,7 +306,7 @@ else:
 _API_HANDLER = r"""
 #: gh api's options that take a value, and the base repository's id the
 #: REST items carry (a fork's head repository gets FORK_ID).
-API_VALUED = ("--hostname", "--jq", "-X", "--method", "--input", "-H", "--header")
+API_VALUED = ("--hostname", "-X", "--method", "--input", "-H", "--header")
 BASE_ID, FORK_ID = 1000, 2000
 
 
@@ -341,7 +340,7 @@ def rest_pull(item, owner, name):
 
 def api(args):
     import urllib.parse
-    opts, flags, positional = {}, set(), []
+    opts, positional = {}, []
     index = 1
     while index < len(args):
         arg = args[index]
@@ -349,8 +348,9 @@ def api(args):
             opts[arg] = args[index + 1]
             index += 2
         elif arg.startswith("-"):
-            flags.add(arg)
-            index += 1
+            # --paginate, --slurp, --jq and the rest: the adapter pages by
+            # hand and passes none of them (curamoir.github).
+            refuse("fake gh: api " + arg + " is not recorded")
         else:
             positional.append(arg)
             index += 1
@@ -384,8 +384,7 @@ def api(args):
         sys.stdout.write(json.dumps(repository))
         return
     if rest == ["labels"]:
-        return pages([rest_label(i, label) for i, label in enumerate(state["labels"])],
-                     params, opts, flags)
+        return pages([rest_label(i, label) for i, label in enumerate(state["labels"])], params)
     if rest == ["pulls"]:
         if state["rest_pulls"] is not None:
             items = state["rest_pulls"]
@@ -399,7 +398,7 @@ def api(args):
         if "head" in params:
             branch = params["head"].split(":", 1)[-1]
             items = [item for item in items if (item.get("head") or {}).get("ref") == branch]
-        return pages(items, params, opts, flags)
+        return pages(items, params)
     if len(rest) == 3 and rest[0] == "pulls" and rest[2] == "files":
         if rest[1] in state["rest_files"]:
             files = state["rest_files"][rest[1]]
@@ -413,43 +412,21 @@ def api(args):
                       "additions": entry.get("additions", 0),
                       "deletions": entry.get("deletions", 0), "changes": 0}
                      for entry in found[0].get("files") or []]
-        return pages(files, params, opts, flags)
+        return pages(files, params)
     refuse("fake gh: api " + endpoint + " is not recorded")
 
 
-def pages(items, params, opts, flags):
+def pages(items, params):
     # GitHub's pagination (per_page, default 30, at most 100; page from 1)
-    # and gh's printing of it: one JSON array per page, all pages with
-    # --paginate, wrapped in one array with --slurp, or `--jq .[].name`
-    # applied to each page.
+    # and gh's printing of it: the one page asked, as one JSON array.
     per_page = min(int(params.get("per_page", 30)), 100)
     chunks = [items[at:at + per_page] for at in range(0, len(items), per_page)] or [[]]
-    first = int(params.get("page", 1))
-    if "--paginate" in flags:
-        chosen = chunks[first - 1:]
-    else:
-        chosen = [chunks[first - 1] if first - 1 < len(chunks) else []]
-    if "--slurp" in flags and "--paginate" not in flags:
-        refuse("gh: the `--slurp` option is only supported with `--paginate`")
+    page = int(params.get("page", 1))
     fail_at = state["api_fail_at_page"]
-    jq = opts.get("--jq")
-    if jq not in (None, ".[].name"):
-        refuse("fake gh: unrecorded --jq " + jq)
-    printed = []
-    for number, chunk in enumerate(chosen, start=first):
-        if fail_at is not None and number >= fail_at:
-            if not ("--slurp" in flags):
-                sys.stdout.write("".join(printed))
-            sys.stderr.write("gh: Server Error (HTTP 502)\n")
-            sys.exit(1)
-        if jq is not None:
-            printed.append("".join(item["name"] + "\n" for item in chunk))
-        elif "--slurp" not in flags:
-            printed.append(json.dumps(chunk))
-    if "--slurp" in flags:
-        sys.stdout.write(json.dumps(chosen))
-    else:
-        sys.stdout.write("".join(printed))
+    if fail_at is not None and page >= fail_at:
+        sys.stderr.write("gh: Server Error (HTTP 502)\n")
+        sys.exit(1)
+    sys.stdout.write(json.dumps(chunks[page - 1] if page - 1 < len(chunks) else []))
 
 
 def api_create(host, owner, name, opts):
@@ -551,9 +528,8 @@ class FakeGh:
           api` call (`GET repos/o/r/pulls?head`, `POST repos/o/r/pulls`):
           stderr message}: such a call exits 1 with it, before it does
           anything (a create that fails so opens no PR).
-        - `api_fail_at_page` (None): a listing exits 1 (HTTP 502) on
-          reaching that page, after printing the pages before it (none
-          with `--slurp`), as gh does when a later page fails.
+        - `api_fail_at_page` (None): a listing exits 1 (HTTP 502) when
+          that page or a later one is asked, as gh does when a page fails.
         - `rest_pulls` (None): REST pull objects `gh api .../pulls`
           answers from verbatim, in place of the fed `prs`.
         - `rest_files` ({}): {"<number>": REST file objects} for `gh api

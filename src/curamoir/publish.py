@@ -727,9 +727,9 @@ def create_pr(repo, *, gh_repo, branch, base_branch, title, body, github_api=Git
     GhError if gh fails: GhTimeout when stopped, CreateOutputUnreadable
     when it exits 0 but prints no PR URL on `gh_repo` (both: the outcome
     is unknown). With `github_api` GithubApi.REST, the same through `gh api -X
-    POST` (_create_pr_rest), with the same errors."""
+    POST` (_rest_create_pr), with the same errors."""
     if github_api is GithubApi.REST:
-        return _create_pr_rest(repo, gh_repo, branch, base_branch, title, body)
+        return _rest_create_pr(repo, gh_repo, branch, base_branch, title, body)
     handle, body_file = tempfile.mkstemp(prefix="curamoir-pr-body-", suffix=".md")
     try:
         with os.fdopen(handle, "w", encoding="utf-8", newline="") as written:
@@ -800,15 +800,16 @@ def _rest_branch_prs(repo, gh_repo, branch):
     """find_open_pr's items on the REST path: `gh api
     'repos/OWNER/REPO/pulls?head=OWNER:<branch>&state=open'`, each pull
     mapped by github.rest_pull_fields to the CLI path's fields."""
-    hostname, path = github.rest_target(gh_repo)
+    hostname, owner, name = github.rest_repository(gh_repo)
     printed = github.run_gh(
-        ["api", *hostname, f"{path}/pulls?head={github.rest_head_query(gh_repo, branch)}"
+        ["api", *hostname, f"repos/{owner}/{name}/pulls?head="
+                           f"{github.rest_head_query(owner, branch)}"
                            f"&state=open&per_page={_LOOKUP_LIMIT}"], cwd=repo)
     return [github.rest_pull_fields(item) if isinstance(item, dict) else item
             for item in _listed_items(printed, "gh api .../pulls")]
 
 
-def _create_pr_rest(repo, gh_repo, branch, base_branch, title, body):
+def _rest_create_pr(repo, gh_repo, branch, base_branch, title, body):
     """create_pr on the REST path (module docstring, "The REST path"):
     `gh api [--hostname HOST] -X POST repos/OWNER/REPO/pulls --input -`,
     the JSON body {title, head, base, body} on gh's stdin, never in the

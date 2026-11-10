@@ -17,10 +17,7 @@ authenticated as this repository's owner:
   per_page=100'`, verbatim (LABELS): the repository's ten labels.
 - `curamoir_pulls_state_all.json`: `gh api 'repos/rsionnach/curamoir/
   pulls?state=all&per_page=5'`, verbatim (NO_PULLS): `[]`, since no PR
-  has ever been opened on this repository. `gh api --paginate --slurp
-  'repos/rsionnach/curamoir/pulls?state=open&per_page=100'` printed
-  `[[]]` the same day (NO_OPEN_PULL_PAGES), which is what `--slurp` makes
-  of one empty page.
+  has ever been opened on this repository.
 - `notfound_stdout.json` and `notfound_stderr.txt`: `gh api
   repos/rsionnach/nosuchrepo-xyz`, exit 1: GitHub's error body on stdout
   and `gh: Not Found (HTTP 404)` on stderr (NOT_FOUND_STDOUT,
@@ -31,9 +28,9 @@ authenticated as this repository's owner:
   the ten names one per line across the four pages, byte for byte the
   `gh label list --jq '.[].name'` output tests/gh_label_payloads.py
   records (LABEL_NAMES_JQ); and `--paginate --slurp` printed `[[...3
-  labels...],[...],[...],[...1...]]`, one array per page. tests/fake_gh.py
-  reproduces both, though the adapter uses neither (it pages by hand,
-  `page=<n>`: curamoir.github, "Each query").
+  labels...],[...],[...],[...1...]]`, one array per page. The adapter
+  uses neither (it pages by hand, `page=<n>`: curamoir.github, "Each
+  query"), so tests/fake_gh.py models neither.
 
 **Captured, shape only** (the same day, same gh), because this repository
 has no PRs: `gh api 'repos/cli/cli/pulls?state=all&per_page=30'` and
@@ -94,10 +91,6 @@ LABELS = _load("curamoir_labels.json")
 
 #: `gh api 'repos/rsionnach/curamoir/pulls?state=all&per_page=5'`: `[]`.
 NO_PULLS = _load("curamoir_pulls_state_all.json")
-
-#: `gh api --paginate --slurp '.../pulls?state=open&per_page=100'` on the
-#: same repository: one empty page.
-NO_OPEN_PULL_PAGES = [[]]
 
 #: Four cli/cli pulls, shape only (module docstring).
 PULLS_SHAPE = _load("cli_pulls_shape.json")

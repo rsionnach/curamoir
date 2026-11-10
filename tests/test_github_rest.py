@@ -34,7 +34,7 @@ from tests.gh_api_payloads import (
     DELETED_FORK_CLOSED,
     FORK_CLOSED,
     LABELS,
-    NO_OPEN_PULL_PAGES,
+    NO_PULLS,
     NOT_FOUND_STDERR,
     NOT_FOUND_STDOUT,
     PROXY_GRAPHQL_PREFIX,
@@ -49,9 +49,8 @@ from tests.gh_pr_payloads import OPEN_PRS, SAME_REPOSITORY_PR, as_sweep_pr
 from tests.os_sandbox_stand_in import Absent
 from tests.test_brief import sweep_line, with_ledger
 from tests.test_github import LABEL_ARGV, PR_ARGV, STATE_ARGV, UNPAUSED_LABELS
-from tests.test_publish import GH_REPO, TITLE, World
-from tests.test_publish import creates as cli_creates
-from tests.test_sweep_acceptance import NOW, creates, sample, stand_in
+from tests.test_publish import GH_REPO, TITLE, World, cli_creates
+from tests.test_sweep_acceptance import NOW, any_creates, sample, stand_in
 from tests.test_sweep_job import (  # noqa: F401  (isolated_home is an autouse fixture)
     isolated_home,
     job_lines,
@@ -176,7 +175,7 @@ def test_a_rest_lookup_asks_for_the_branchs_open_prs_by_owner_and_branch(gh, che
     ("curamoir/a b?c=d", "acme:curamoir/a%20b%3Fc%3Dd"),
 ])
 def test_a_rest_lookups_branch_is_percent_encoded_as_utf8(branch, query):
-    assert github.rest_head_query(GH_REPO, branch) == query
+    assert github.rest_head_query("acme", branch) == query
 
 
 @pytest.mark.parametrize("gh_repo, expected", [
@@ -319,8 +318,7 @@ def test_a_sweep_pr_with_the_files_cap_or_more_has_unknown_paths_on_rest(gh, che
 
 
 def test_the_recorded_empty_repository_lists_no_open_prs_on_rest(gh, checkout):
-    gh.feed(rest_pulls=[])
-    assert NO_OPEN_PULL_PAGES == [[]]
+    gh.feed(rest_pulls=NO_PULLS)
 
     assert github.open_sweep_prs(checkout, gh_repo=GH_REPO, github_api=REST) == []
 
@@ -345,6 +343,30 @@ def test_a_rest_listing_that_is_not_pages_of_pulls_is_a_gh_error(gh, checkout, p
 
     with pytest.raises(github.GhError):
         github.open_sweep_prs(checkout, gh_repo=GH_REPO, github_api=REST)
+
+
+@pytest.mark.parametrize("printed", ['[{"name": 7}]', "[{}]"])
+def test_a_rest_label_without_a_text_name_is_the_adapters_own_error(gh, checkout, printed):
+    gh.feed(raw_stdout=printed.encode().hex())
+
+    with pytest.raises(github.GhError, match="without a name"):
+        github.repo_labels(checkout, gh_repo=GH_REPO, github_api=REST)
+
+
+@pytest.mark.parametrize("provenance", [{}, {"isCrossRepository": None}],
+                         ids=["missing", "unknown"])
+def test_a_sweep_pr_of_unknown_provenance_gets_no_files_call(gh, checkout, provenance):
+    """Its paths are never used (unknown provenance), so they are never
+    asked for: no `/files` call, `paths` None."""
+    pr = {key: value for key, value in as_sweep_pr(SAME_REPOSITORY_PR, "curamoir/sweep-x",
+                                                   BASE).items()
+          if key != "isCrossRepository"}
+    gh.feed(prs=[{**pr, **provenance}])
+
+    [record] = github.open_sweep_prs(checkout, gh_repo=GH_REPO, github_api=REST)
+
+    assert record["cross_repository"] is None and record["paths"] is None
+    assert not any("/files" in argv[-1] for argv in gh.calls())
 
 
 # --- LABEL_LIMIT and pagination on REST -----------------------------------------------------
@@ -430,10 +452,13 @@ def test_rest_open_prs_reaching_pr_limit_ask_bounded_pages_and_are_cut_short(gh,
                                                                               count):
     """Page by hand, never `--paginate`: at most PR_LIMIT / 100 pages are
     asked however many PRs are open, and a listing that reaches PR_LIMIT
-    is refused as possibly cut short, as on the CLI path."""
+    is refused as possibly cut short, as on the CLI path. The refusal
+    names PR_LIMIT, not the `--limit` this path never passes."""
     gh.feed(prs=[{**SAME_REPOSITORY_PR, "number": n} for n in range(1, count + 1)])
 
-    with pytest.raises(github.GhError, match="may be cut short"):
+    with pytest.raises(github.GhError, match=rf"open pull requests, as many as PR_LIMIT "
+                                             rf"\({github.PR_LIMIT}\), so the list may be "
+                                             "cut short"):
         github.open_sweep_prs(checkout, gh_repo=GH_REPO, github_api=REST)
     assert gh.calls() == [["api", *HOST, f"{ACME}/pulls?state=open&per_page=100&page={page}"]
                           for page in range(1, github.PR_LIMIT // 100 + 1)]
@@ -445,6 +470,68 @@ def test_an_open_pr_page_that_fails_part_way_is_a_gh_error(gh, checkout):
 
     with pytest.raises(github.GhError, match="HTTP 502"):
         github.open_sweep_prs(checkout, gh_repo=GH_REPO, github_api=REST)
+
+
+def test_a_rest_label_listing_at_a_limit_below_one_page_raises(gh, checkout, monkeypatch):
+    """tests/test_github.py's LABEL_LIMIT=3 case, on REST: a limit below one
+    page still reads a page, and four labels reach it. Never [] unasked."""
+    monkeypatch.setattr(github, "LABEL_LIMIT", 3)
+    gh.feed(labels=[{"name": f"label-{i}"} for i in range(4)])
+
+    with pytest.raises(github.GhError, match="may be cut short"):
+        github.repo_labels(checkout, gh_repo=GH_REPO, github_api=REST)
+    assert gh.calls() == [REST_LABEL_ARGV]
+
+
+def test_a_rest_pr_listing_at_a_limit_below_one_page_raises(gh, checkout, monkeypatch):
+    monkeypatch.setattr(github, "PR_LIMIT", 2)
+    gh.feed(prs=[{**SAME_REPOSITORY_PR, "number": n} for n in (1, 2, 3)])
+
+    with pytest.raises(github.GhError, match="may be cut short"):
+        github.open_sweep_prs(checkout, gh_repo=GH_REPO, github_api=REST)
+    assert gh.calls() == [REST_PR_ARGV]
+
+
+def test_a_limit_that_is_not_a_whole_page_is_still_reached(gh, checkout, monkeypatch):
+    """150 with 160 open: page 2 is read, 160 >= 150, refused."""
+    monkeypatch.setattr(github, "PR_LIMIT", 150)
+    gh.feed(prs=[{**SAME_REPOSITORY_PR, "number": n} for n in range(1, 161)])
+
+    with pytest.raises(github.GhError, match="may be cut short"):
+        github.open_sweep_prs(checkout, gh_repo=GH_REPO, github_api=REST)
+    assert len(gh.calls()) == 2
+
+
+def test_a_listing_under_a_limit_that_is_not_a_whole_page_is_read_whole(gh, checkout,
+                                                                        monkeypatch):
+    monkeypatch.setattr(github, "PR_LIMIT", 150)
+    gh.feed(prs=[{**SAME_REPOSITORY_PR, "number": n} for n in range(1, 121)])
+
+    listed = github.open_sweep_prs(checkout, gh_repo=GH_REPO, github_api=REST)
+
+    assert len(listed) == 120 and len(gh.calls()) == 2
+
+
+def test_a_limit_above_whole_pages_reads_past_them(gh, checkout, monkeypatch):
+    """1050 with 1100 labels: 11 pages, not 10, so the limit is reached."""
+    monkeypatch.setattr(github, "LABEL_LIMIT", 1050)
+    gh.feed(labels=[{"name": f"label-{i:04}"} for i in range(1100)])
+
+    with pytest.raises(github.GhError, match="listed 1100 labels"):
+        github.repo_labels(checkout, gh_repo=GH_REPO, github_api=REST)
+    assert len(gh.calls()) == 11
+
+
+def test_a_limit_just_past_one_page_reads_a_second_page_and_raises(gh, checkout,
+                                                                   monkeypatch):
+    """PR_LIMIT=101 with 150 open: page 1 (100) is short of it, page 2 is
+    read, 150 >= 101, refused."""
+    monkeypatch.setattr(github, "PR_LIMIT", 101)
+    gh.feed(prs=[{**SAME_REPOSITORY_PR, "number": n} for n in range(1, 151)])
+
+    with pytest.raises(github.GhError, match="may be cut short"):
+        github.open_sweep_prs(checkout, gh_repo=GH_REPO, github_api=REST)
+    assert len(gh.calls()) == 2
 
 
 # --- publish on REST -----------------------------------------------------------------------
@@ -661,7 +748,7 @@ def test_a_cloud_sweep_asks_github_only_through_gh_api(tmp_path, no_real_gh, mon
     assert calls and all(argv[0] == "api" for argv in calls), calls
     assert not any(argv[:1] in (["pr"], ["label"], ["issue"]) or argv[:2] == ["repo", "view"]
                    for argv in calls)
-    [create] = creates(no_real_gh)
+    [create] = any_creates(no_real_gh)
     assert create["argv"] == ["api", *HOST, "-X", "POST", f"{ACME}/pulls", "--input", "-"]
     assert PROXY_GRAPHQL_PREFIX not in ran.sentence
     assert job_lines(repo)[-1]["github_api"] == "rest"
@@ -690,13 +777,18 @@ def test_a_local_sweep_asks_github_only_through_the_cli_calls(tmp_path, no_real_
     assert "github_api" not in job_lines(repo)[-1]
 
 
-def brief_repo(harness):
-    """An initialised repository with a GitHub origin and one sweep PR on
-    its ledger, so the brief asks gh what became of it."""
+def github_origin_repo(harness):
+    """harness.repo initialised, with a GitHub origin (acme/widgets)."""
     init_repo(harness.repo)
     subprocess.run(["git", "remote", "add", "origin", "https://github.com/acme/widgets.git"],
                    cwd=harness.repo, check=True, capture_output=True)
-    return with_ledger(harness.repo, sweep_line(12, 3))
+    return harness.repo
+
+
+def brief_repo(harness):
+    """github_origin_repo with one sweep PR on its ledger, so the brief
+    asks gh what became of it."""
+    return with_ledger(github_origin_repo(harness), sweep_line(12, 3))
 
 
 def test_a_cloud_brief_asks_for_pr_states_through_gh_api(no_real_gh, harness, monkeypatch,
@@ -725,9 +817,7 @@ def test_the_run_job_decision_reaches_the_label_check_the_cap_and_the_body(
         no_real_gh, harness, monkeypatch):
     """A body standing in for the sweep reads `run.github_api`: the one
     decision run_job made from `environ`, and the guards' calls used it."""
-    init_repo(harness.repo)
-    subprocess.run(["git", "remote", "add", "origin", "https://github.com/acme/widgets.git"],
-                   cwd=harness.repo, check=True, capture_output=True)
+    github_origin_repo(harness)
     seen = []
     monkeypatch.setitem(runner.JOBS, "sweep", runner.Job(
         body=lambda _root, run: (seen.append(run.github_api), run.succeeded("ok")),
@@ -766,93 +856,3 @@ def test_the_github_api_field_is_reserved():
     assert "github_api" in RESERVED_FIELDS
     assert GithubApi.REST.ledger_fields() == {"github_api": "rest"}
     assert GithubApi.CLI.ledger_fields() == {}
-
-
-# --- a limit is always reached (cm-2qp.9 re-review) ----------------------------------------
-
-def test_a_rest_label_listing_at_a_limit_below_one_page_raises(gh, checkout, monkeypatch):
-    """tests/test_github.py's LABEL_LIMIT=3 case, on REST: a limit below one
-    page still reads a page, and four labels reach it. Never [] unasked."""
-    monkeypatch.setattr(github, "LABEL_LIMIT", 3)
-    gh.feed(labels=[{"name": f"label-{i}"} for i in range(4)])
-
-    with pytest.raises(github.GhError, match="may be cut short"):
-        github.repo_labels(checkout, gh_repo=GH_REPO, github_api=REST)
-    assert gh.calls() == [REST_LABEL_ARGV]
-
-
-def test_a_rest_pr_listing_at_a_limit_below_one_page_raises(gh, checkout, monkeypatch):
-    monkeypatch.setattr(github, "PR_LIMIT", 2)
-    gh.feed(prs=[{**SAME_REPOSITORY_PR, "number": n} for n in (1, 2, 3)])
-
-    with pytest.raises(github.GhError, match="may be cut short"):
-        github.open_sweep_prs(checkout, gh_repo=GH_REPO, github_api=REST)
-    assert gh.calls() == [REST_PR_ARGV]
-
-
-def test_a_limit_that_is_not_a_whole_page_is_still_reached(gh, checkout, monkeypatch):
-    """150 with 160 open: page 2 is read, 160 >= 150, refused."""
-    monkeypatch.setattr(github, "PR_LIMIT", 150)
-    gh.feed(prs=[{**SAME_REPOSITORY_PR, "number": n} for n in range(1, 161)])
-
-    with pytest.raises(github.GhError, match="may be cut short"):
-        github.open_sweep_prs(checkout, gh_repo=GH_REPO, github_api=REST)
-    assert len(gh.calls()) == 2
-
-
-def test_a_listing_under_a_limit_that_is_not_a_whole_page_is_read_whole(gh, checkout,
-                                                                        monkeypatch):
-    monkeypatch.setattr(github, "PR_LIMIT", 150)
-    gh.feed(prs=[{**SAME_REPOSITORY_PR, "number": n} for n in range(1, 121)])
-
-    listed = github.open_sweep_prs(checkout, gh_repo=GH_REPO, github_api=REST)
-
-    assert len(listed) == 120 and len(gh.calls()) == 2
-
-
-def test_a_limit_above_whole_pages_reads_past_them(gh, checkout, monkeypatch):
-    """1050 with 1100 labels: 11 pages, not 10, so the limit is reached."""
-    monkeypatch.setattr(github, "LABEL_LIMIT", 1050)
-    gh.feed(labels=[{"name": f"label-{i:04}"} for i in range(1100)])
-
-    with pytest.raises(github.GhError, match="listed 1100 labels"):
-        github.repo_labels(checkout, gh_repo=GH_REPO, github_api=REST)
-    assert len(gh.calls()) == 11
-
-
-# --- provenance (cm-2qp.9) -------------------------------------------------------------------
-
-def test_a_limit_just_past_one_page_reads_a_second_page_and_raises(gh, checkout,
-                                                                   monkeypatch):
-    """PR_LIMIT=101 with 150 open: page 1 (100) is short of it, page 2 is
-    read, 150 >= 101, refused."""
-    monkeypatch.setattr(github, "PR_LIMIT", 101)
-    gh.feed(prs=[{**SAME_REPOSITORY_PR, "number": n} for n in range(1, 151)])
-
-    with pytest.raises(github.GhError, match="may be cut short"):
-        github.open_sweep_prs(checkout, gh_repo=GH_REPO, github_api=REST)
-    assert len(gh.calls()) == 2
-
-
-@pytest.mark.parametrize("printed", ['[{"name": 7}]', "[{}]"])
-def test_a_rest_label_without_a_text_name_is_the_adapters_own_error(gh, checkout, printed):
-    gh.feed(raw_stdout=printed.encode().hex())
-
-    with pytest.raises(github.GhError, match="without a name"):
-        github.repo_labels(checkout, gh_repo=GH_REPO, github_api=REST)
-
-
-@pytest.mark.parametrize("provenance", [{}, {"isCrossRepository": None}],
-                         ids=["missing", "unknown"])
-def test_a_sweep_pr_of_unknown_provenance_gets_no_files_call(gh, checkout, provenance):
-    """Its paths are never used (unknown provenance), so they are never
-    asked for: no `/files` call, `paths` None."""
-    pr = {key: value for key, value in as_sweep_pr(SAME_REPOSITORY_PR, "curamoir/sweep-x",
-                                                   BASE).items()
-          if key != "isCrossRepository"}
-    gh.feed(prs=[{**pr, **provenance}])
-
-    [record] = github.open_sweep_prs(checkout, gh_repo=GH_REPO, github_api=REST)
-
-    assert record["cross_repository"] is None and record["paths"] is None
-    assert not any("/files" in argv[-1] for argv in gh.calls())

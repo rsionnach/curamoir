@@ -145,19 +145,19 @@ def world(tmp_path):
     return World(tmp_path)
 
 
-def creates(gh):
+def cli_creates(gh):
     return [record for record in gh.call_records() if record["argv"][:2] == ["pr", "create"]]
 
 
 def no_sweep_branch_and_no_pr(world, gh):
     """For tests that add branches of their own to origin."""
     assert f"refs/heads/{world.branch}" not in world.origin_branches()
-    assert creates(gh) == []
+    assert cli_creates(gh) == []
 
 
 def nothing_left_the_machine(world, gh):
     assert world.origin_branches() == ["refs/heads/main"]
-    assert creates(gh) == []
+    assert cli_creates(gh) == []
 
 
 # --- what lands ------------------------------------------------------------------------
@@ -188,7 +188,7 @@ def test_the_pr_is_opened_on_origins_repository_from_the_branch_into_the_default
         world, no_real_gh):
     world.publish()
 
-    [create] = creates(no_real_gh)
+    [create] = cli_creates(no_real_gh)
     argv = create["argv"]
     assert argv[:2] == ["pr", "create"]
     assert dict(zip(argv[2::2], argv[3::2], strict=True)) == {
@@ -204,7 +204,7 @@ def test_the_body_gh_received_carries_the_marker_and_never_rode_in_argv(world,
     gone afterwards, and no argument carried the body's text."""
     world.publish()
 
-    [create] = creates(no_real_gh)
+    [create] = cli_creates(no_real_gh)
     assert create["body_file_content"] == world.body
     assert parse_sweep_marker(create["body_file_content"]) == world.base
     body_file = create["argv"][create["argv"].index("--body-file") + 1]
@@ -303,7 +303,7 @@ def test_a_default_branch_inside_the_prefix_is_still_refused(world, no_real_gh):
     with pytest.raises(publish.PublishRefused, match="default branch 'curamoir/main'"):
         world.publish(branch="curamoir/main")
 
-    assert creates(no_real_gh) == []
+    assert cli_creates(no_real_gh) == []
     assert git(world.origin, "rev-parse", "curamoir/main").strip() == world.base
 
 
@@ -321,7 +321,7 @@ def test_a_branch_already_on_origin_is_refused_and_left_alone(world, no_real_gh)
         world.publish()
 
     assert git(world.origin, "rev-parse", world.branch).strip() == world.base
-    assert creates(no_real_gh) == []
+    assert cli_creates(no_real_gh) == []
 
 
 def test_a_checkout_with_no_identity_is_refused(world, no_real_gh):
@@ -373,7 +373,7 @@ def test_a_push_that_hangs_is_stopped_and_raises(world, no_real_gh, monkeypatch)
 
     assert time.monotonic() - started < 30
     assert failed.value.timed_out is True
-    assert creates(no_real_gh) == []
+    assert cli_creates(no_real_gh) == []
 
 
 # --- the PR ----------------------------------------------------------------------------
@@ -634,7 +634,7 @@ def test_a_branch_that_appears_after_the_check_is_never_moved(world, no_real_gh,
         world.publish()
 
     assert git(world.origin, "rev-parse", world.branch).strip() == world.base
-    assert creates(no_real_gh) == []
+    assert cli_creates(no_real_gh) == []
 
 
 def test_the_new_branch_check_asks_the_push_target_not_the_fetch_url(world, no_real_gh,
@@ -700,7 +700,7 @@ def test_an_error_that_is_not_ghs_after_the_push_deletes_the_branch(world, no_re
 
     assert failed.value.branch_deleted is True
     assert world.origin_branches() == ["refs/heads/main"]
-    assert creates(no_real_gh) == []
+    assert cli_creates(no_real_gh) == []
 
 
 def test_a_branch_name_with_a_nul_is_refused_before_any_push(world, no_real_gh):
@@ -821,7 +821,7 @@ def test_the_base_is_origins_default_as_gh_reports_it_not_a_local_guess(world,
     published = world.publish()
 
     assert published.base_branch == "develop"
-    [create] = creates(no_real_gh)
+    [create] = cli_creates(no_real_gh)
     assert create["argv"][create["argv"].index("--base") + 1] == "develop"
     views = [r["argv"] for r in no_real_gh.call_records() if r["argv"][:2] == ["repo", "view"]]
     assert views == [["repo", "view", GH_REPO, "--json", "defaultBranchRef"]]
@@ -885,7 +885,7 @@ def test_a_slashed_default_branch_is_the_prs_base(world, no_real_gh):
     published = world.publish()
 
     assert published.base_branch == "release/main"
-    [create] = creates(no_real_gh)
+    [create] = cli_creates(no_real_gh)
     assert create["argv"][create["argv"].index("--base") + 1] == "release/main"
 
 
@@ -958,7 +958,7 @@ def test_two_publishes_at_once_give_one_pr(world, no_real_gh, tmp_path):
     assert sorted(result.get("ok") is not None for result in results) == [False, True]
     [lost] = [result for result in results if "error" in result]
     assert lost["error"] == "PushFailed" and "appeared on origin" in lost["message"]
-    assert len(creates(no_real_gh)) == 1
+    assert len(cli_creates(no_real_gh)) == 1
     assert world.origin_branches() == ["refs/heads/main", f"refs/heads/{world.branch}"]
 
 
@@ -1295,5 +1295,5 @@ def test_a_branch_that_appeared_at_the_sweeps_own_commit_is_not_taken(world, no_
         world.publish()
 
     assert failed.value.timed_out is False
-    assert creates(no_real_gh) == []
+    assert cli_creates(no_real_gh) == []
     assert git(world.origin, "rev-parse", world.branch).strip() == landed[0]

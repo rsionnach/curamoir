@@ -856,4 +856,3 @@ def transcript_fields(link, unavailable):
     if unavailable is not None:
         return {"transcript": f"{TRANSCRIPT_UNAVAILABLE} ({unavailable})"}
     return {}
-

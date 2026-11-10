@@ -181,6 +181,7 @@ from curamoir.guards.lock import create_lock, forget_lock, lock_bytes, lock_file
 from curamoir.budget import PriceTable
 from curamoir.config import (
     ConfigError,
+    GithubApi,
     RunnerDeclarationError,
     resolve_runner,
     session_transcript,
@@ -478,7 +479,7 @@ def _resolve_runner(environ):
 
 
 def run_guarded(repo, job, open_pr_listing, body, *, now=None, repo_labels=None,
-                opens_prs=True, environ=None, github_api=None):
+                opens_prs=True, environ=None, github_api=GithubApi.CLI):
     """Run `body(run)` for `job` behind `job_gateway(repo, ...)`, inside one
     `JobRun` writing to the repo's own ledger, and return a GuardedRun.
 
@@ -501,10 +502,9 @@ def run_guarded(repo, job, open_pr_listing, body, *, now=None, repo_labels=None,
     docstring, "The runner kind"): os.environ when None. It is read once,
     before anything runs; the body gets the result as `run.runner`.
     `github_api` is the config.GithubApi the caller decided (runner.run_job,
-    cm-2qp.9), handed to the body as `run.github_api`; None is
-    GithubApi.CLI (JobRun.github_api). It is the caller's, not resolved
-    here, because the caller's label and listing callables, made before
-    this runs, take the same decision.
+    cm-2qp.9), handed to the body as `run.github_api`. It is the caller's,
+    not resolved here, because the caller's label and listing callables,
+    made before this runs, take the same decision.
 
     It sets os.environ['CURAMOIR_JOB'] to `job` for the run and restores
     the value before it on every exit (module docstring, Ordering 5), so it

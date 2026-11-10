@@ -126,18 +126,18 @@ def run_sweep(repo):
     return ran, job_lines(repo)[-1]
 
 
-def creates(gh):
-    """The PR creates gh was asked for: `gh pr create`, or on the REST path
-    of a cloud session (cm-2qp.9) `gh api -X POST .../pulls`, whose record
-    gets the JSON body's `body` as its `body_file_content`, so a test reads
-    the PR's body the same way on either."""
+def any_creates(gh):
+    """The PR creates gh was asked for on either path: `gh pr create`, or
+    on the REST path of a cloud session (cm-2qp.9) `gh api -X POST
+    .../pulls`. Each record gets the PR's body as `pr_body` (the body
+    file's content, or the JSON body's `body`), so a test reads it the
+    same way on either."""
     found = []
     for record in gh.call_records():
         if record["argv"][:2] == ["pr", "create"]:
-            found.append(record)
+            found.append({**record, "pr_body": record["body_file_content"]})
         elif record["argv"][:1] == ["api"] and "POST" in record["argv"]:
-            found.append({**record,
-                          "body_file_content": json.loads(record["input_content"])["body"]})
+            found.append({**record, "pr_body": json.loads(record["input_content"])["body"]})
     return found
 
 
@@ -209,7 +209,7 @@ def test_one_sweep_opens_one_green_pr_fixing_all_five(tmp_path, no_real_gh, monk
     assert log.exists(), "the stand-in made the edits"
     assert line["outcome"] == SUCCESS and line["work"] == WORK, line["message"]
     # Exactly one PR.
-    [create] = creates(no_real_gh)
+    [create] = any_creates(no_real_gh)
     argv = create["argv"]
     branch = f"curamoir/sweep-{DAY}-{base[:8]}"
     assert argv[argv.index("--head") + 1] == branch
@@ -217,7 +217,7 @@ def test_one_sweep_opens_one_green_pr_fixing_all_five(tmp_path, no_real_gh, monk
     assert argv[argv.index("--repo") + 1] == GH_REPO
     assert argv[argv.index("--title") + 1] == f"curamoir sweep {DAY}: 5 fixes of 3 principles"
     # Its body: 5 fixes, with 3 principle ids, nothing left out.
-    body = create["body_file_content"]
+    body = create["pr_body"]
     assert parse_sweep_marker(body) == base
     fixes = fix_lines(body)
     assert len(fixes) == 5
@@ -256,11 +256,11 @@ def test_a_capped_sweep_leaves_the_rest_for_the_run_after_the_merge(tmp_path, no
     ran, line = run_sweep(repo)
 
     assert ran.exit_code == runner.EXIT_SUCCESS, ran.sentence
-    [create] = creates(no_real_gh)
+    [create] = any_creates(no_real_gh)
     first_branch = line["pr"]["branch"]
     assert line["pr"]["paths"] == [BILLING, HANDLERS]
     assert sorted(changed_on_origin(tmp_path, first_branch, first_base)) == [BILLING, HANDLERS]
-    body = create["body_file_content"]
+    body = create["pr_body"]
     fixes = fix_lines(body)
     assert len(fixes) == 4
     assert all(BILLING in fix or HANDLERS in fix for fix in fixes)
@@ -276,7 +276,7 @@ def test_a_capped_sweep_leaves_the_rest_for_the_run_after_the_merge(tmp_path, no
     assert ran.exit_code == runner.EXIT_SUCCESS, ran.sentence
     assert line["outcome"] == SUCCESS and line["work"] == DUPLICATE_OPEN_PR
     assert [pr["number"] for pr in line["open_sweep_prs"]] == [1]
-    assert len(creates(no_real_gh)) == 1
+    assert len(any_creates(no_real_gh)) == 1
 
     # The PR is merged: a new base, and the PR closed.
     second_base = merge_on_origin(tmp_path, repo, no_real_gh, first_branch)
@@ -285,11 +285,11 @@ def test_a_capped_sweep_leaves_the_rest_for_the_run_after_the_merge(tmp_path, no
     ran, line = run_sweep(repo)
 
     assert ran.exit_code == runner.EXIT_SUCCESS, ran.sentence
-    assert len(creates(no_real_gh)) == 2
+    assert len(any_creates(no_real_gh)) == 2
     assert line["work"] == WORK and line["pr"]["base"] == second_base
     assert line["pr"]["paths"] == [VARIANT]
     assert changed_on_origin(tmp_path, line["pr"]["branch"], second_base) == {VARIANT: "D"}
-    body = creates(no_real_gh)[-1]["body_file_content"]
+    body = any_creates(no_real_gh)[-1]["pr_body"]
     assert principle_ids(fix_lines(body)) == {"no-file-variant-proliferation"}
     assert len(fix_lines(body)) == 1
     assert section(body, "### Files left for the next run")[0] == "None."
@@ -300,7 +300,7 @@ def test_a_capped_sweep_leaves_the_rest_for_the_run_after_the_merge(tmp_path, no
 
     assert ran.exit_code == runner.EXIT_SUCCESS, ran.sentence
     assert line["outcome"] == SUCCESS and line["work"] == NO_WORK
-    assert len(creates(no_real_gh)) == 2
+    assert len(any_creates(no_real_gh)) == 2
 
 
 # --- cm-v5p: unrecorded spend through the runner ---------------------------------------
@@ -333,7 +333,7 @@ def test_a_fix_step_that_does_not_finish_is_unrecorded_spend_through_the_runner(
     assert ("timed out" if ends == "timed_out" else "exited 1") in line["message"]
     assert line["input_tokens"] == line["output_tokens"] == UNRECORDED
     assert line["model"] == MODEL and "cost_usd" not in line
-    assert creates(no_real_gh) == []
+    assert any_creates(no_real_gh) == []
     # Counted in the month of the line's own `at` (the wall clock,
     # job_guard.run_guarded), so a run at a month's end cannot miss it.
     spend = month_to_date(repo_ledger(repo), PRICES, parse_ledger_timestamp(line["at"]))
@@ -359,7 +359,7 @@ def test_a_fix_that_breaks_a_test_is_left_out_of_a_reduced_pr(tmp_path, no_real_
     assert line["pr"]["paths"] == [HANDLERS, VARIANT]
     assert BILLING not in changed_on_origin(tmp_path, line["pr"]["branch"], base)
     assert {fix["path"] for fix in line["fixes"]} == {HANDLERS, VARIANT}
-    body = creates(no_real_gh)[0]["body_file_content"]
+    body = any_creates(no_real_gh)[0]["pr_body"]
     assert not any(BILLING in fix for fix in fix_lines(body))
     assert items(body, "### Files left for the next run") == [
         f"- `{BILLING}` (dropped by the test gate)"]
@@ -407,8 +407,8 @@ def test_with_no_runner_variable_the_sweep_is_the_pre_e14_sweep_plus_runner_loca
     assert ran.exit_code == runner.EXIT_SUCCESS, ran.sentence
     assert set(line) == PRE_E14_SWEEP_KEYS | {"runner"}
     assert line["runner"] == "local"
-    [create] = creates(no_real_gh)
-    assert create["body_file_content"].replace(base, "<BASE>") == PRE_E14_SWEEP_BODY
+    [create] = any_creates(no_real_gh)
+    assert create["pr_body"].replace(base, "<BASE>") == PRE_E14_SWEEP_BODY
 
 
 def test_a_session_puts_its_transcript_link_on_the_line_and_in_the_pr_body(
@@ -428,8 +428,8 @@ def test_a_session_puts_its_transcript_link_on_the_line_and_in_the_pr_body(
 
     assert ran.exit_code == runner.EXIT_SUCCESS, ran.sentence
     assert (line["runner"], line["transcript"]) == ("hosted", link)
-    [create] = creates(no_real_gh)
-    body = create["body_file_content"]
+    [create] = any_creates(no_real_gh)
+    body = create["pr_body"]
     assert f"Transcript of the run that opened this PR: {link}" in body.splitlines()
     assert parse_sweep_marker(body) == base
 
@@ -446,7 +446,7 @@ def test_an_invalid_session_id_is_unavailable_on_the_line_and_left_out_of_the_pr
     assert ran.exit_code == runner.EXIT_SUCCESS, ran.sentence
     assert line["transcript"].startswith("unavailable (")
     assert "evil" not in line["transcript"]
-    body = creates(no_real_gh)[0]["body_file_content"]
+    body = any_creates(no_real_gh)[0]["pr_body"]
     assert "Transcript" not in body and "evil" not in body
 
 
@@ -482,7 +482,7 @@ def test_the_gate_is_wrapped_on_the_local_runner_and_bare_on_the_hosted_one(
     assert line["runner"] == ("hosted" if hosted else "local")
     assert line["test_gate"]["strategy"] == GREEN
     assert set(line["test_gate"]) == PRE_E14_TEST_GATE_KEYS
-    assert len(creates(no_real_gh)) == 1
+    assert len(any_creates(no_real_gh)) == 1
     runs = len(line["test_gate"]["runs"])
     if hosted:
         assert stand_in_sandbox.self_tests == [] and stand_in_sandbox.wrapped == []
@@ -517,7 +517,7 @@ def test_the_fix_agent_has_bash_on_the_hosted_runner_and_not_on_the_local_one(
     argv = json.loads(log.read_text(encoding="utf-8"))["argv"]
 
     assert ran.exit_code == runner.EXIT_SUCCESS, ran.sentence
-    assert len(creates(no_real_gh)) == 1
+    assert len(any_creates(no_real_gh)) == 1
     tools = argv[argv.index("--tools") + 1].split(",")
     allowed = argv[argv.index("--allowedTools") + 1].split(",")
     assert "--settings" in argv and "--restricted" in argv
@@ -609,7 +609,7 @@ def test_test_run_debris_in_the_clone_is_dropped_and_the_pr_still_opens(
     line = job_lines(repo)[-1]
 
     assert ran.exit_code == runner.EXIT_SUCCESS, ran.sentence
-    assert len(creates(no_real_gh)) == 1
+    assert len(any_creates(no_real_gh)) == 1
     assert {(d["kind"], d["path"]) for d in line["scope_dropped"]} == {
         ("file_added", path) for path in TEST_RUN_DEBRIS}
     assert "scope_after_drop" not in line
@@ -746,7 +746,7 @@ def test_the_hosted_sweeps_fix_agent_is_given_no_run_token(
     seen = set(json.loads(log.read_text(encoding="utf-8"))["env"])
 
     assert ran.exit_code == runner.EXIT_SUCCESS, ran.sentence
-    assert len(creates(no_real_gh)) == 1
+    assert len(any_creates(no_real_gh)) == 1
     assert "ANTHROPIC_API_KEY" in seen
     assert (not seen & set(RUN_TOKENS)) if hosted else set(RUN_TOKENS) <= seen
 
