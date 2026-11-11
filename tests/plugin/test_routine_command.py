@@ -270,7 +270,7 @@ def test_the_recipe_is_in_the_order_it_is_set_up():
     protection (before the first Run now), then what a run looks like; and
     /schedule's step 5 says to make the environment before selecting it."""
     text = flat(recipe(COMMAND))
-    order = ["**Setup script.**", "**Environment variables.**", "**Network access: Trusted**",
+    order = ["**Setup script.**", "**Environment variables.**", "**Network access: Limited, with Allow package managers checked**",
              "**Also on GitHub: branch protection on the default branch.**",
              "What to expect in a run:", "**GitHub through REST.**", "**One run at a time.**"]
 
@@ -301,7 +301,8 @@ def test_the_recipe_gives_the_users_variables_exactly():
 def test_the_recipe_names_the_network_level_branch_protection_and_the_fetch():
     text = flat(recipe(COMMAND))
 
-    assert "**Network access: Trusted**" in text
+    assert "**Network access: Limited, with Allow package managers checked**" in text
+    assert "step 2's `uvx` build fails" in text and "step 1 or" not in text
     assert "git ls-remote" in text and "uvx --from git+https://github.com/rsionnach/curamoir" in text
     assert "is not enabled for this session" in text
     assert "**Also on GitHub: branch protection on the default branch.**" in text

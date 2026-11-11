@@ -300,7 +300,7 @@ exit 0  # always 0, and the whole script in under five minutes
 ```
 
 ast-grep is pinned to the GitHub Actions workflow's `AST_GREP_VERSION`; raise
-both together. It comes from PyPI, on the Trusted list. bd's npm package
+both together. It comes from PyPI, on that allowlist. bd's npm package
 fetches its binary from bd's GitHub releases, which a cloud session has not
 yet been seen to reach; if it cannot, the log says "setup: bd not
 installed" and the sweep runs without it.
@@ -332,11 +332,13 @@ CLAUDE_CODE_RETRY_WATCHDOG=1
   other transient errors for about three hours. A spend limit or exhausted
   usage credits still fail at once. The sweep's own `claude -p` calls inherit it.
 
-**Network access: Trusted**, the default level. If it is set too narrow,
-the setup log shows "setup: ... not installed" lines and a run's step 1 or
-2 fails to fetch cúramóir. Trusted reaches the package
-registries the setup script installs from; GitHub goes through the session's
-GitHub proxy whatever the level, so nothing wider is needed.
+**Network access: Limited, with Allow package managers checked**, the
+level a new environment starts at (an environment saved as Trusted opens
+as this). If it is set too narrow, the setup log shows "setup: ... not
+installed" lines and step 2's `uvx` build fails: it fetches its build
+backend and PyYAML from PyPI. That allowlist reaches the package
+registries the setup script and `uvx` install from; GitHub goes through
+the session's GitHub proxy whatever the level, so nothing wider is needed.
 
 The prompt fetches cúramóir from GitHub, `git ls-remote` of
 `https://github.com/rsionnach/curamoir` in step 1 and
