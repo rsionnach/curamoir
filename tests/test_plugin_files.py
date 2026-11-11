@@ -44,7 +44,7 @@ def test_from_the_checkout_every_reader_gets_the_path_it_had_before():
         json.loads((REPO_ROOT / "hooks" / "hooks.json").read_text(encoding="utf-8"))["hooks"])
 
 
-def test_from_the_checkout_the_denylist_settings_are_the_wrapper_as_before(tmp_path):
+def test_from_the_checkout_the_denylist_settings_are_the_wrapper_as_before():
     """The local path is pinned: the command is the checkout's launcher
     script, the root shell-quoted in place of `"${CLAUDE_PLUGIN_ROOT}"`, and
     the rest of the entry (matcher, type, timeout) as hooks.json has it."""
@@ -66,7 +66,47 @@ def test_the_package_carries_no_copy_of_the_plugin_files_in_the_checkout():
     assert not (REPO_ROOT / "src" / "curamoir" / "_plugin").exists()
 
 
-# --- the installed layout's hook command -----------------------------------------------
+# --- layout detection: plugin_files.installed() -----------------------------------------
+
+def plugin_layout(base, *parts, checkout_hooks=False):
+    package = base.joinpath(*parts)
+    (package / "_plugin").mkdir(parents=True)
+    if checkout_hooks:
+        (base / "hooks").mkdir()
+        (base / "hooks" / "hooks.json").write_text("{}", encoding="utf-8")
+    return package
+
+
+def test_a_package_with_the_copy_outside_a_checkout_is_installed(tmp_path):
+    package = plugin_layout(tmp_path, "lib", "python3.12", "site-packages", "curamoir")
+
+    assert plugin_files.installed(package)
+
+
+def test_a_stray_copy_in_the_checkouts_src_is_still_the_checkout(tmp_path):
+    """A `src/curamoir/_plugin/` left by hand beside the checkout's own
+    hooks/hooks.json: reading it would be reading a stale second copy."""
+    package = plugin_layout(tmp_path, "src", "curamoir", checkout_hooks=True)
+
+    assert not plugin_files.installed(package)
+
+
+def test_a_copy_in_a_src_directory_with_no_checkout_hooks_beside_it_is_installed(tmp_path):
+    """Being under `src/` alone is not a checkout: the guard needs the
+    checkout's hooks/hooks.json two levels up too."""
+    package = plugin_layout(tmp_path, "src", "curamoir")
+
+    assert plugin_files.installed(package)
+
+
+def test_a_package_without_the_copy_is_never_installed(tmp_path):
+    package = tmp_path / "site-packages" / "curamoir"
+    package.mkdir(parents=True)
+
+    assert not plugin_files.installed(package)
+
+
+# --- the installed layout's hook command ------------------------------------------------
 
 def installed_command(python=sys.executable):
     settings = fix_step.pretooluse_settings(installed=True, python=python)
@@ -171,37 +211,6 @@ def test_installed_an_interpreter_that_cannot_import_the_hook_under_dash_i_is_re
         fix_step.pretooluse_settings(installed=True, python=str(tmp_path / "absent"))
 
 
-def plugin_layout(base, *parts, checkout_hooks=False):
-    package = base.joinpath(*parts)
-    (package / "_plugin").mkdir(parents=True)
-    if checkout_hooks:
-        (base / "hooks").mkdir()
-        (base / "hooks" / "hooks.json").write_text("{}", encoding="utf-8")
-    return package
-
-
-def test_a_package_with_the_copy_outside_a_checkout_is_installed(tmp_path):
-    package = plugin_layout(tmp_path, "lib", "python3.12", "site-packages", "curamoir")
-
-    assert plugin_files.installed(package)
-
-
-def test_a_stray_copy_in_the_checkouts_src_is_still_the_checkout(tmp_path):
-    """A `src/curamoir/_plugin/` left by hand beside the checkout's own
-    hooks/hooks.json: reading it would be reading a stale second copy."""
-    package = plugin_layout(tmp_path, "src", "curamoir", checkout_hooks=True)
-
-    assert not plugin_files.installed(package)
-
-
-def test_a_copy_in_a_src_directory_with_no_checkout_hooks_beside_it_is_installed(tmp_path):
-    """Being under `src/` alone is not a checkout: the guard needs the
-    checkout's hooks/hooks.json two levels up too."""
-    package = plugin_layout(tmp_path, "src", "curamoir")
-
-    assert plugin_files.installed(package)
-
-
 def test_installed_the_import_is_checked_under_dash_i(tmp_path):
     """A stand-in that runs this interpreter except when `-I` is among its
     arguments, where it fails as a cúramóir reachable only through user
@@ -216,12 +225,7 @@ def test_installed_the_import_is_checked_under_dash_i(tmp_path):
         fix_step.pretooluse_settings(installed=True, python=str(python))
 
 
-def test_a_package_without_the_copy_is_never_installed(tmp_path):
-    package = tmp_path / "site-packages" / "curamoir"
-    package.mkdir(parents=True)
-
-    assert not plugin_files.installed(package)
-
+# --- doctor -----------------------------------------------------------------------------
 
 def test_doctor_does_not_probe_hooks_from_an_installed_package(tmp_path, monkeypatch):
     """An installed package is not the Claude Code plugin and carries no

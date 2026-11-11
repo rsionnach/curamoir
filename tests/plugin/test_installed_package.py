@@ -58,7 +58,7 @@ def _clean_environment():
 
 
 @pytest.fixture(scope="module")
-def installed(tmp_path_factory):
+def installed_venv(tmp_path_factory):
     """(bin directory, working directory) of a fresh venv with the wheel
     built from this checkout installed in it."""
     uv = shutil.which("uv")
@@ -89,44 +89,44 @@ def installed(tmp_path_factory):
     return venv / "bin", work
 
 
-def run(installed, *argv, cwd=None, **kwargs):
-    bin_directory, work = installed
+def run(installed_venv, *argv, cwd=None, **kwargs):
+    bin_directory, work = installed_venv
     return subprocess.run([str(bin_directory / argv[0]), *argv[1:]], capture_output=True,
                           text=True, env=_clean_environment(), cwd=cwd or work, timeout=120,
                           **kwargs)
 
 
-def python(installed, code):
+def python(installed_venv, code):
     """Run `code` in the installed interpreter, isolated (-I), from the work
     directory; its stdout parsed as JSON."""
-    ran = run(installed, "python", "-I", "-c", code)
+    ran = run(installed_venv, "python", "-I", "-c", code)
     assert ran.returncode == 0, ran.stderr
     return json.loads(ran.stdout)
 
 
 @pytest.fixture
-def repo(installed, tmp_path):
+def repo(installed_venv, tmp_path):
     """A fresh git repository, initialised by the installed `curamoir init`."""
     path = tmp_path / "repo"
     path.mkdir()
     subprocess.run(["git", "init", "-q", str(path)], check=True)
     (path / "app.py").write_text("x = 1\n", encoding="utf-8")
-    ran = run(installed, "curamoir", "init", "--repo", str(path), "--github-workflow")
+    ran = run(installed_venv, "curamoir", "init", "--repo", str(path), "--github-workflow")
     assert ran.returncode == 0, ran.stdout + ran.stderr
     return path
 
 
-def test_the_console_scripts_run_with_no_source_tree(installed):
+def test_the_console_scripts_run_with_no_source_tree(installed_venv):
     for script in ("curamoir", "curamoir-lint"):
-        ran = run(installed, script, "--help")
+        ran = run(installed_venv, script, "--help")
         assert ran.returncode == 0, ran.stderr
         assert "usage:" in ran.stdout
 
 
-def test_curamoir_is_imported_from_the_venv_and_reads_its_packaged_files(installed):
-    bin_directory, _work = installed
+def test_curamoir_is_imported_from_the_venv_and_reads_its_packaged_files(installed_venv):
+    bin_directory, _work = installed_venv
     venv = bin_directory.parent.resolve()
-    seen = python(installed, (
+    seen = python(installed_venv, (
         "import json, curamoir, curamoir.plugin_files as p, curamoir.sweep as s,"
         " curamoir.fix_step as f;"
         "print(json.dumps({'file': curamoir.__file__, 'installed': p.INSTALLED,"
@@ -152,20 +152,20 @@ def test_init_scaffolds_the_packaged_templates(repo):
             == (ROOT / "templates" / "github" / "curamoir-sweep.yml").read_bytes())
 
 
-def test_run_brief_runs(installed, repo):
-    ran = run(installed, "curamoir", "run", "brief", "--repo", str(repo))
+def test_run_brief_runs(installed_venv, repo):
+    ran = run(installed_venv, "curamoir", "run", "brief", "--repo", str(repo))
 
     assert ran.returncode == 0, ran.stdout + ran.stderr
     assert "ran 'brief': success" in ran.stdout
     assert (repo / ".curamoir" / "briefs" / "latest.md").is_file()
 
 
-def test_doctor_says_the_hooks_belong_to_the_plugin_not_that_they_are_missing(installed,
-                                                                           repo):
-    seen = python(installed, (
+def test_doctor_says_the_hooks_belong_to_the_plugin_not_that_they_are_missing(
+        installed_venv, repo):
+    seen = python(installed_venv, (
         "import json; from curamoir.doctor import _check_hooks;"
         f"print(json.dumps([[f.level, f.detail] for f in _check_hooks({str(repo)!r})]))"))
-    ran = run(installed, "curamoir", "doctor", "--repo", str(repo))
+    ran = run(installed_venv, "curamoir", "doctor", "--repo", str(repo))
 
     assert seen == [["ok", "not probed: this cúramóir is an installed package, and the "
                            "hooks are registered by the Claude Code plugin, not by it"]]
@@ -173,25 +173,25 @@ def test_doctor_says_the_hooks_belong_to_the_plugin_not_that_they_are_missing(in
     assert "the hooks are registered by the Claude Code plugin" in " ".join(ran.stdout.split())
 
 
-def test_the_work_list_runs_the_lint_as_its_own_process(installed, repo):
+def test_the_work_list_runs_the_lint_as_its_own_process(installed_venv, repo):
     """sweep.work_list starts sweep.LINT; installed, that is the
     `curamoir-lint` console script. A report it could not get would be a
     LintUntrusted, exit 2."""
-    ran = run(installed, "curamoir", "sweep-work-list", "--repo", str(repo))
+    ran = run(installed_venv, "curamoir", "sweep-work-list", "--repo", str(repo))
 
     assert ran.returncode == 0, ran.stdout + ran.stderr
     assert json.loads(ran.stdout)["outcome"] == "no_work"
 
 
-def test_the_installed_denylist_settings_deny_rm_rf_inside_a_job(installed, repo):
+def test_the_installed_denylist_settings_deny_rm_rf_inside_a_job(installed_venv, repo):
     """The fix step's --settings from the installed package, each PreToolUse
     command run through /bin/sh with the repository as its working
     directory and CURAMOIR_JOB set, as the fix step's `claude` would: the
     command names the venv's interpreter (it exists, and is not the
     checkout's launcher), and it denies."""
-    bin_directory, _work = installed
-    settings = python(installed, "import json, curamoir.fix_step as f; "
-                                 "print(json.dumps(f.pretooluse_settings()))")
+    bin_directory, _work = installed_venv
+    settings = python(installed_venv, "import json, curamoir.fix_step as f; "
+                                      "print(json.dumps(f.pretooluse_settings()))")
     payload = {"hook_event_name": "PreToolUse", "tool_name": "Bash",
                "tool_input": {"command": "rm -rf build/"}, "cwd": str(repo)}
 

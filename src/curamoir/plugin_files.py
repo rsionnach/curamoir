@@ -47,7 +47,6 @@ PACKAGE = Path(__file__).resolve().parent
 PACKAGED = PACKAGE / "_plugin"
 
 
-
 def installed(package):
     """Whether `package` (a curamoir package directory) is an installed
     wheel rather than the plugin checkout's `src/curamoir/` (module

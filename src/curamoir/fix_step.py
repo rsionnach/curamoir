@@ -146,10 +146,11 @@ the result as if the prompt had said nothing.
   loads "managed settings and `--settings`" (`claude --help`, 2.1.286), so
   the E0-R5 denylist is registered there: hooks/hooks.json's PreToolUse
   entries exactly, with the plugin root written into the command, and no
-  other event (installed from a wheel, with no checkout, the command is
-  the running interpreter with the hook's module instead: cm-2qp.10,
-  pretooluse_settings). WHY not `--plugin-dir`: it loads the whole plugin, Stop
+  other event. WHY not `--plugin-dir`: it loads the whole plugin, Stop
   hook included, which `--restricted` keeps out (fix_scope's Limits).
+  Installed from a wheel, with no checkout, the command is the running
+  interpreter with the hook's module instead (cm-2qp.10,
+  pretooluse_settings).
   On both runner kinds: on the local runner there is no Bash in the
   toolset, so a later change that adds a shell tool gets the denylist
   without having to remember it; on the hosted runner the fix agent has
@@ -416,7 +417,8 @@ UV_ENVIRONMENT_DIR = "uv-project-environment"
 NOT_STARTED = "the fix step could not start: "
 
 #: The plugin's root: the checkout, where hooks/ and scripts/ sit beside
-#: src/, or an installed wheel's copy of hooks/ (curamoir.plugin_files).
+#: src/, or an installed wheel's `curamoir/_plugin/`, which holds hooks/ and
+#: templates/ (curamoir.plugin_files).
 PLUGIN_ROOT = plugin_files.ROOT
 
 #: How hooks/hooks.json names the plugin root in a hook's command.
@@ -428,8 +430,9 @@ _ROOT_IN_COMMAND = '"${CLAUDE_PLUGIN_ROOT}"'
 _HOOK_LAUNCHER = re.compile(r"/scripts/curamoir-hook-([a-z]+)")
 
 #: Seconds the installed interpreter gets to show it can import the hook's
-#: module under `-I` (_installed_hook_command): a few times the hook's
-#: own 5-second budget would be wasted; Python starts in well under one.
+#: module under `-I` (_installed_hook_command): about twice the hook's own
+#: 5-second timeout. Python starts in well under a second, so this only
+#: bounds a hung interpreter.
 _HOOK_IMPORT_TIMEOUT = 10
 
 #: The tools Claude Code checks file permission rules for ("checks file
@@ -837,20 +840,17 @@ def pretooluse_settings(root=PLUGIN_ROOT, *, installed=plugin_files.INSTALLED,
 
     From the plugin checkout each command's `"${CLAUDE_PLUGIN_ROOT}"` is
     replaced by `root`, shell-quoted, so the hook is the checkout's own
-    launcher script, as at 3f50a3f (`root` is unused when installed).
-    `installed` (an installed wheel,
-    plugin_files.INSTALLED: `uvx --from git+...`, cm-2qp.10) has no
-    launcher script and no checkout for one to put on PYTHONPATH, and the
-    `python3` on PATH need not have cúramóir at all; so there each
-    `/scripts/curamoir-hook-<name>` command becomes `python`, the
-    interpreter running this sweep (which has cúramóir importable: it is
-    running it), with `-I -m curamoir.hooks.<name>`, the module the
-    launcher runs. `-I`: the hook runs with the clone as its working
-    directory, and without it `-m` would put the clone first on sys.path,
-    so a `curamoir/` committed there would be imported as the denylist;
-    `-I` also keeps PYTHONPATH from sending the import anywhere else. Any
-    other command form, no interpreter to name, or one that cannot import
-    the module under `-I` is a ValueError, never a guess."""
+    launcher script, as at 3f50a3f.
+
+    `installed` (an installed wheel, plugin_files.INSTALLED: `uvx --from
+    git+...`, cm-2qp.10) has no launcher script and no checkout for one to
+    put on PYTHONPATH, and the `python3` on PATH need not have cúramóir at
+    all; so there `root` is unused, and each `/scripts/curamoir-hook-<name>`
+    command becomes `python`, the interpreter running this sweep (which has
+    cúramóir importable: it is running it), running the launcher's module
+    under `-I` (_installed_hook_command says why). Any other command form,
+    no interpreter to name, or one that cannot import the module under `-I`
+    is a ValueError, never a guess."""
     registered = json.loads(plugin_files.HOOKS_JSON.read_text(encoding="utf-8"))
     entries = registered["hooks"]["PreToolUse"]
     loaded = []
@@ -874,7 +874,13 @@ def pretooluse_settings(root=PLUGIN_ROOT, *, installed=plugin_files.INSTALLED,
 
 def _installed_hook_command(rest, python):
     """The installed wheel's command for a hook whose hooks.json command is
-    `"${CLAUDE_PLUGIN_ROOT}"` followed by `rest` (pretooluse_settings)."""
+    `"${CLAUDE_PLUGIN_ROOT}"` followed by `rest` (pretooluse_settings):
+    `python -I -m curamoir.hooks.<name>`, the module the launcher runs.
+
+    `-I`: the hook runs with the clone as its working directory, and without
+    it `-m` would put the clone first on sys.path, so a `curamoir/`
+    committed there would be imported as the denylist; `-I` also keeps
+    PYTHONPATH from sending the import anywhere else."""
     launcher = _HOOK_LAUNCHER.fullmatch(rest)
     if launcher is None:
         raise ValueError(f"hooks/hooks.json's PreToolUse command ends {rest!r}, which is not "

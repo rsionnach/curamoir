@@ -36,6 +36,8 @@ README = ROOT / "README.md"
 
 #: The placeholder the developer replaces with a cúramóir tag or commit.
 REF_PLACEHOLDER = "REPLACE-WITH-A-CURAMOIR-TAG-OR-COMMIT"
+#: The recipe's network-level heading, as the environment's selector names it.
+NETWORK_LEVEL = "**Network access: Limited, with Allow package managers checked**"
 #: The Routine's state branch: the user's decision (2026-10-30, on the
 #: bead), the project's name for it, kept apart from the workflow's
 #: `curamoir/state`. Not a platform confinement: `claude/` is only the
@@ -210,21 +212,6 @@ def test_the_setup_script_pins_ast_grep_to_the_workflows_version():
                      setup_script())
 
 
-def test_the_setup_script_runs_in_bash(tmp_path):
-    """With every tool already present it installs nothing and exits 0.
-    (What it installs against the real registries is the first Routine
-    run's to show.)"""
-    for tool in ("uv", "ast-grep", "bd"):
-        stand_in = tmp_path / tool
-        stand_in.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
-        stand_in.chmod(0o755)
-    ran = subprocess.run(["bash", "-c", setup_script()], capture_output=True, text=True,
-                         env={"PATH": f"{tmp_path}:/usr/bin:/bin"}, timeout=30)
-
-    assert ran.returncode == 0, ran.stderr
-    assert ran.stdout == ""
-
-
 def stand_ins(directory, **tools):
     """Executables named after `tools`, each exiting with its given code."""
     directory.mkdir(exist_ok=True)
@@ -233,6 +220,18 @@ def stand_ins(directory, **tools):
         path.write_text(f"#!/bin/sh\nexit {code}\n", encoding="utf-8")
         path.chmod(0o755)
     return directory
+
+
+def test_the_setup_script_runs_in_bash(tmp_path):
+    """With every tool already present it installs nothing and exits 0.
+    (What it installs against the real registries is the first Routine
+    run's to show.)"""
+    stand_ins(tmp_path, uv=0, **{"ast-grep": 0}, bd=0)
+    ran = subprocess.run(["bash", "-c", setup_script()], capture_output=True, text=True,
+                         env={"PATH": f"{tmp_path}:/usr/bin:/bin"}, timeout=30)
+
+    assert ran.returncode == 0, ran.stderr
+    assert ran.stdout == ""
 
 
 def test_with_uv_missing_and_pip_failing_the_setup_script_still_exits_0(tmp_path):
@@ -270,7 +269,7 @@ def test_the_recipe_is_in_the_order_it_is_set_up():
     protection (before the first Run now), then what a run looks like; and
     /schedule's step 5 says to make the environment before selecting it."""
     text = flat(recipe(COMMAND))
-    order = ["**Setup script.**", "**Environment variables.**", "**Network access: Limited, with Allow package managers checked**",
+    order = ["**Setup script.**", "**Environment variables.**", NETWORK_LEVEL,
              "**Also on GitHub: branch protection on the default branch.**",
              "What to expect in a run:", "**GitHub through REST.**", "**One run at a time.**"]
 
@@ -301,8 +300,11 @@ def test_the_recipe_gives_the_users_variables_exactly():
 def test_the_recipe_names_the_network_level_branch_protection_and_the_fetch():
     text = flat(recipe(COMMAND))
 
-    assert "**Network access: Limited, with Allow package managers checked**" in text
-    assert "step 2's `uvx` build fails" in text and "step 1 or" not in text
+    assert NETWORK_LEVEL in text
+    assert "step 2's `uvx` build fails" in text
+    # A too-narrow level breaks step 2's build, not step 1: the recipe no
+    # longer says "a run's step 1 or 2 fails to fetch cúramóir".
+    assert "step 1 or 2 fails" not in text
     assert "git ls-remote" in text and "uvx --from git+https://github.com/rsionnach/curamoir" in text
     assert "is not enabled for this session" in text
     assert "**Also on GitHub: branch protection on the default branch.**" in text

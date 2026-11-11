@@ -275,11 +275,11 @@ on GitHub, and two things to expect in a run.
 root before Claude Code starts. It must exit 0, or the session does not
 start, and finish in under five minutes, or the environment is not cached
 and the script runs again before every run. uv and gh come preinstalled in
-a cloud session; it installs only what is missing, including a Python of
-3.12 or later for uvx (so a run does not download one), gives each install
-at most a minute where `timeout` exists, and reports a failed install in the
-session's setup log rather than failing (without ast-grep the sweep
-refuses, saying why; bd is not needed by the sweep).
+a cloud session; the script installs only what is missing, including a
+Python of 3.12 or later for uvx (so a run does not download one), gives each
+install at most a minute where `timeout` exists, and reports a failed
+install in the session's setup log rather than failing (without ast-grep the
+sweep refuses, saying why; bd is not needed by the sweep).
 
 ```bash
 #!/bin/bash
@@ -300,10 +300,11 @@ exit 0  # always 0, and the whole script in under five minutes
 ```
 
 ast-grep is pinned to the GitHub Actions workflow's `AST_GREP_VERSION`; raise
-both together. It comes from PyPI, on that allowlist. bd's npm package
-fetches its binary from bd's GitHub releases, which a cloud session has not
-yet been seen to reach; if it cannot, the log says "setup: bd not
-installed" and the sweep runs without it.
+both together. It comes from PyPI, which the network level below reaches
+(its Allow package managers list). bd's npm package fetches its binary from
+bd's GitHub releases, which a cloud session has not yet been seen to reach;
+if it cannot, the log says "setup: bd not installed" and the sweep runs
+without it.
 
 **Environment variables.** One per line, as the environment's variables
 (`.env` format). Put no token or key here: anyone who uses the environment
