@@ -173,6 +173,9 @@ def test_a_rest_lookup_asks_for_the_branchs_open_prs_by_owner_and_branch(gh, che
     ("curamoir/a&b#c+d", "acme:curamoir/a%26b%23c%2Bd"),
     ("curamoir/sweep-é-ß", "acme:curamoir/sweep-%C3%A9-%C3%9F"),
     ("curamoir/a b?c=d", "acme:curamoir/a%20b%3Fc%3Dd"),
+    # `%` is the escape itself, and `{}` gh's placeholder syntax.
+    ("curamoir/a%26b", "acme:curamoir/a%2526b"),
+    ("curamoir/{branch}", "acme:curamoir/%7Bbranch%7D"),
 ])
 def test_a_rest_lookups_branch_is_percent_encoded_as_utf8(branch, query):
     assert github.rest_head_query("acme", branch) == query
@@ -317,6 +320,18 @@ def test_a_sweep_pr_with_the_files_cap_or_more_has_unknown_paths_on_rest(gh, che
     assert record["base"] == BASE and record["paths"] is None
 
 
+@pytest.mark.parametrize("files", [{"message": "API rate limit exceeded"}, 3],
+                         ids=["error-object", "scalar"])
+def test_a_files_answer_that_is_not_a_list_at_exit_0_is_a_gh_error(gh, checkout, files):
+    """An error object or a scalar where a sweep PR's `/files` page should
+    be is refused, never iterated as its keys or a TypeError."""
+    sweep_pull = {**SAME_REPOSITORY_OPEN, "body": f"Sweep.\n\n{sweep_marker(BASE)}\n"}
+    gh.feed(rest_pulls=[sweep_pull], rest_files={"14846": files})
+
+    with pytest.raises(github.GhError, match="not a list of files"):
+        github.open_sweep_prs(checkout, gh_repo="github.com/cli/cli", github_api=REST)
+
+
 def test_the_recorded_empty_repository_lists_no_open_prs_on_rest(gh, checkout):
     gh.feed(rest_pulls=NO_PULLS)
 
@@ -329,12 +344,16 @@ def test_the_recorded_empty_repository_lists_no_open_prs_on_rest(gh, checkout):
     lambda repo: github.pr_states(repo, gh_repo=GH_REPO, github_api=REST),
 ], ids=["labels", "open-prs", "states"])
 def test_a_rest_error_is_a_gh_error_quoting_githubs_message(gh, checkout, call):
-    """As recorded: `gh api` exits 1 with `gh: Not Found (HTTP 404)`."""
+    """As recorded: `gh api` exits 1 with `gh: Not Found (HTTP 404)` on
+    stderr and GitHub's error body on stdout. The error quotes the stderr;
+    the stdout's JSON is never read as an answer."""
     gh.feed(api_fail_on={ACME: NOT_FOUND_STDERR.strip()})
-    assert NOT_FOUND_STDOUT.startswith('{"message":"Not Found"')
 
-    with pytest.raises(github.GhError, match=r"exited 1: gh: Not Found \(HTTP 404\)"):
+    with pytest.raises(github.GhError, match=r"exited 1: gh: Not Found \(HTTP 404\)") as failed:
         call(checkout)
+    assert "documentation_url" not in str(failed.value)
+    assert subprocess.run([str(gh.path), "api", ACME], capture_output=True,
+                          text=True).stdout == NOT_FOUND_STDOUT
 
 
 @pytest.mark.parametrize("printed", ["not json", "{}", "[{}, 3]", "[[{}], 3]"])
@@ -691,6 +710,15 @@ def test_a_rest_create_whose_input_cannot_be_made_never_runs_gh_and_deletes_the_
     assert rest_creates(no_real_gh) == [] and rest_lookups(no_real_gh) == []
 
 
+def test_a_rest_create_body_that_cannot_be_encoded_raises_before_gh_runs(gh, checkout):
+    """A lone surrogate cannot be UTF-8: ValueError (UnicodeEncodeError),
+    and gh is never asked, as _rest_create_pr's docstring says."""
+    with pytest.raises(ValueError):
+        publish.create_pr(checkout, gh_repo=GH_REPO, branch="curamoir/sweep-x",
+                          base_branch="main", title=TITLE, body="\ud800", github_api=REST)
+    assert gh.calls() == []
+
+
 def test_a_rest_lookup_ignores_a_fork_and_another_commit(world, no_real_gh):
     """The lookup's filter is the CLI path's, on the mapped fields: the
     same branch name from a fork, or at another commit, is not the PR."""
@@ -802,6 +830,20 @@ def test_a_cloud_brief_asks_for_pr_states_through_gh_api(no_real_gh, harness, mo
     assert cli.main(["brief", "--repo", str(repo)]) == 0
 
     assert no_real_gh.calls() == [["api", *HOST, f"{ACME}/pulls?state=all&per_page=100&page=1"]]
+
+
+def test_a_scheduled_cloud_brief_asks_for_pr_states_through_gh_api(no_real_gh, harness):
+    """The brief job through runner.run_job (a Routine's scheduled brief):
+    run.github_api reaches its state query, so behind the proxy it is the
+    REST listing, after the kill switch's label check."""
+    repo = brief_repo(harness)
+    no_real_gh.feed(proxy=True)
+
+    ran = runner.run_job(repo, "brief", environ=CLOUD)
+
+    assert ran.exit_code == runner.EXIT_SUCCESS, ran.sentence
+    assert no_real_gh.calls() == [REST_LABEL_ARGV,
+                                  ["api", *HOST, f"{ACME}/pulls?state=all&per_page=100&page=1"]]
 
 
 def test_a_local_brief_asks_for_pr_states_through_gh_pr_list(no_real_gh, harness, capsys):

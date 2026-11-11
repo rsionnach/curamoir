@@ -113,7 +113,7 @@ import stat
 import sys
 from pathlib import Path
 
-from tests.gh_api_payloads import PROXY_GRAPHQL_REFUSAL, REPO
+from tests.gh_api_payloads import NOT_FOUND_STDOUT, PROXY_GRAPHQL_REFUSAL, REPO
 
 #: gh 2.86.0's `--json` fields, as its "Unknown JSON field" error lists them.
 LABEL_FIELDS = ("color", "createdAt", "description", "id", "isDefault", "name",
@@ -166,6 +166,7 @@ with open(here / "calls.jsonl", "a", encoding="utf-8") as log:
                           "input_content": input_content,
                           **{{name: os.environ.get(name) for name in {logged!r}}}}}) + "\\n")
 state = json.loads((here / "state.json").read_text(encoding="utf-8"))
+NOT_FOUND_STDOUT = {not_found_stdout!r}
 if state["hang"]:
     time.sleep(600)
 if state["fail"] is not None:
@@ -360,6 +361,9 @@ def api(args):
     method = opts.get("-X") or opts.get("--method") or ("POST" if "--input" in opts else "GET")
     for needle, message in state["api_fail_on"].items():
         if needle in method + " " + endpoint:
+            # As gh does: GitHub's error body on stdout, gh's line on stderr.
+            # The 404's is the one body recorded, so every failure prints it.
+            sys.stdout.write(NOT_FOUND_STDOUT)
             sys.stderr.write(message + "\n")
             sys.exit(1)
     path, _, query = endpoint.partition("?")
@@ -402,6 +406,10 @@ def api(args):
     if len(rest) == 3 and rest[0] == "pulls" and rest[2] == "files":
         if rest[1] in state["rest_files"]:
             files = state["rest_files"][rest[1]]
+            if not isinstance(files, list):
+                # Not a page of files (an error object at exit 0): verbatim.
+                sys.stdout.write(json.dumps(files))
+                return
         else:
             found = [item for item in state["prs"] if str(item.get("number")) == rest[1]]
             if not found:
@@ -472,7 +480,8 @@ class FakeGh:
                                             default_limit=GH_DEFAULT_LIMIT,
                                             logged=LOGGED_VARIABLES,
                                             api_handler=_API_HANDLER,
-                                            proxy_refusal=PROXY_GRAPHQL_REFUSAL),
+                                            proxy_refusal=PROXY_GRAPHQL_REFUSAL,
+                                            not_found_stdout=NOT_FOUND_STDOUT),
                              encoding="utf-8")
         self.path.chmod(self.path.stat().st_mode | stat.S_IXUSR)
         self._initial = (list(labels), list(prs))
@@ -527,13 +536,16 @@ class FakeGh:
         - `api_fail_on` ({}): {substring of "<METHOD> <endpoint>" of a `gh
           api` call (`GET repos/o/r/pulls?head`, `POST repos/o/r/pulls`):
           stderr message}: such a call exits 1 with it, before it does
-          anything (a create that fails so opens no PR).
+          anything (a create that fails so opens no PR), printing on
+          stdout the recorded 404's error body (NOT_FOUND_STDOUT), as gh
+          prints GitHub's error body there.
         - `api_fail_at_page` (None): a listing exits 1 (HTTP 502) when
           that page or a later one is asked, as gh does when a page fails.
         - `rest_pulls` (None): REST pull objects `gh api .../pulls`
           answers from verbatim, in place of the fed `prs`.
         - `rest_files` ({}): {"<number>": REST file objects} for `gh api
-          .../pulls/<number>/files`, in place of the PR's `files`.
+          .../pulls/<number>/files`, in place of the PR's `files`; a value
+          that is not a list is printed as it is, exit 0, unpaged.
         - `rest_repo` (the recorded repository): the object `gh api
           repos/O/R` prints, its names and `default_branch` replaced.
         - `placeholder_repo`: what `{owner}/{repo}` stands for.
