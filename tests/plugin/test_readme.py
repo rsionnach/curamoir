@@ -84,3 +84,37 @@ def test_known_limits_no_longer_carries_the_laptop_only_prose():
 
     assert "CURAMOIR_JOB" not in limits
     assert "stale" not in limits
+
+
+def test_a_routines_own_session_is_said_to_load_the_repositorys_configuration():
+    """cm-2qp.7 redo, correctness: restricted mode covers the scan and the
+    fix agent only. A Routine's own session is a Claude Code session in a
+    clone of the repository and loads its configuration and hooks, so the
+    README says so, not that the configuration never loads."""
+    guardrails = " ".join(flat(section("Guardrails")))
+    limits = " ".join(flat(section("Hosted runner limits")))
+
+    assert "never loads" not in guardrails
+    assert "never reaches the scan or the fix agent" in guardrails
+    assert ("loads the default branch's `CLAUDE.md`, settings and hooks, and they run with "
+            "the session's GitHub access and Claude credentials") in limits
+    assert "that is a prompt, not a fence: a hook still runs" in limits
+
+
+def test_the_runner_declaration_is_said_to_check_markers_not_prove_the_runner():
+    """config.resolve_runner accepts `hosted` on the runners' environment
+    markers alone, which a laptop could set."""
+    boundary = " ".join(flat(section("Where the security boundary is")))
+
+    assert "refused anywhere else" not in boundary
+    assert "own environment markers are set, and refused where they are absent" in boundary
+    assert "it does not prove where the run is" in boundary
+
+
+def test_the_local_test_network_row_says_which_platform_gets_loopback():
+    """os_sandbox: bwrap's --unshare-net always gives a private loopback;
+    `sweep.test_loopback` gates loopback on macOS only."""
+    boundary = " ".join(flat(section("Where the security boundary is")))
+
+    assert ("on macOS not even loopback unless `sweep.test_loopback: true`, on Linux a "
+            "private loopback only") in boundary

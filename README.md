@@ -211,10 +211,11 @@ runner weakens one, the bullet and the table below say so:
   `.gitattributes`, in any case, refuses the run. Only the reviewed patch
   of the files in scope leaves the clone; anything else the agent touched is
   put back or refuses the run.
-- **The repository's own Claude Code configuration never loads.** The scan
-  and the fix agent run Claude Code in restricted mode, so the clone's
-  settings, hooks and plugins are not read; the command guard above comes
-  back through cúramóir's own settings.
+- **The repository's own Claude Code configuration never reaches the scan
+  or the fix agent.** Both run Claude Code in restricted mode, so the
+  clone's settings, hooks and plugins are not read; the command guard above
+  comes back through cúramóir's own settings. A Routine is the exception
+  for its own session: see [Hosted runner limits](#hosted-runner-limits).
 - **Redaction** on everything it writes.
 
 ### Where the security boundary is
@@ -222,9 +223,10 @@ runner weakens one, the bullet and the table below say so:
 What contains an agent that has gone wrong, by accident or because something
 it read told it to, is not the command guard but the runner. Which runner a
 run is on is declared, never guessed: `CURAMOIR_RUNNER=hosted`, which the
-workflow and the Routine prompt set, is accepted only on a GitHub-hosted
-Actions runner or in a Claude Code cloud session, and refused anywhere else.
-Unset, the run is local. Each runner, as built:
+workflow and the Routine prompt set, is accepted only where a GitHub-hosted
+Actions runner's or a Claude Code cloud session's own environment markers
+are set, and refused where they are absent. The check catches a mistaken
+declaration; it does not prove where the run is. Unset, the run is local. Each runner, as built:
 
 | | Hosted (GitHub Actions, Claude Code Routine) | Local (your machine) |
 |---|---|---|
@@ -232,7 +234,7 @@ Unset, the run is local. Each runner, as built:
 | Your checkout | Not on the VM | Out of reach: the work happens in a throwaway clone |
 | Credentials at risk | What the run holds: on Actions its `GITHUB_TOKEN`, scoped by the workflow's `permissions:`; on a Routine the session's GitHub access, which acts as you; and its model credentials | Your home directory |
 | Agents' tools | Scan: Read, Grep, Glob. Fix: those, Edit, and Bash for the repository's own test command (no Bash if that command cannot be named safely) and Claude Code's built-in read-only commands; git denied | Scan: Read, Grep, Glob. Fix: those and Edit; no shell |
-| Your tests | Run unsandboxed in the clone, with the VM's network | Run in the OS sandbox, with no network (loopback only as configured) |
+| Your tests | Run unsandboxed in the clone, with the VM's network | Run in the OS sandbox, with no network: on macOS not even loopback unless `sweep.test_loopback: true`, on Linux a private loopback only |
 | One sweep at a time | On Actions, the workflow's concurrency group queues a second run. On a Routine nothing does: each run's lock is on its own VM, so a scheduled run and **Run now** can overlap; don't start a run while one is going | The supervisor lock ([Local adapter](#local-adapter)) |
 | Kill switch | The label, or a committed `.curamoir/PAUSE` | The label, or `.curamoir/PAUSE` in your checkout |
 | Spend | The ledger records tokens; GitHub Actions bills the API key, a Routine your Claude usage. The monthly ceiling does not yet see earlier hosted runs, so it does not stop them | The ledger prices tokens against the monthly ceiling |
@@ -244,6 +246,14 @@ The fix agent's prompt on a hosted runner forbids git, `bd`, `gh`, installs
 and the network, but the prompt is not the fence: a git command that writes
 the clone's `.git` (or moves HEAD) refuses the whole run, and a stray file
 is dropped from the patch.
+
+On a Routine, the session that runs the sweep is itself a Claude Code
+session in a clone of your repository, so it loads the default branch's
+`CLAUDE.md`, settings and hooks, and they run with the session's GitHub
+access and Claude credentials. The prompt tells it to ignore the
+repository's instructions, but that is a prompt, not a fence: a hook still
+runs. Only what is on the default branch loads, so protect it, as the
+Routine recipe says.
 
 Past that, the boundary is the disposable VM and the scope of the run's
 token, nothing finer. Your tests run there unsandboxed, as the runner's
