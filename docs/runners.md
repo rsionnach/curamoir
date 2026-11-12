@@ -40,7 +40,8 @@ It also needs, in the VM:
 - push credentials for origin, and `gh` authenticated (the sweep's branch,
   its PR and the state branch);
 - the clone's full history;
-- uv, the claude CLI and ast-grep, pinned;
+- uv, and the claude CLI and ast-grep pinned to a version (the worked
+  example pins those two; its setup-uv step names no uv version);
 - a Claude credential for `claude -p`;
 - a repository `/curamoir:init` has initialised (otherwise nothing runs,
   exit 4).
@@ -142,12 +143,24 @@ is the VM and the token's scope (the README's
 **The agent's test command.** On hosted the fix agent may run the base's
 test command, through a Claude Code permission rule that names it. A
 command no rule can name exactly gets no shell at all, so the agent cannot
-run tests (the green gate still does). It can be named when each part
-between `&&`s has no `VAR=` prefix, no quotes, pipes or `;`, none of
-`` $ < > ( ) * , # \ ` ``, and does not start with a wrapper Claude Code
-strips (`timeout`, `nice`, `xargs` and the like), a shell or another
-general command runner (`eval`, `source`, `exec`, `env`, `sudo`, `su`,
-`watch`, `setsid` and the like), or git.
+run tests (the green gate still does). `fix_step.offered_test_command`
+decides. It refuses a command:
+
+- with a character that is not printable (a newline, a tab, a no-break
+  space);
+- that redaction would change (a word that looks like a secret, or a
+  `name=value` with a secret-like name);
+- with an empty part between `&&`s (`&&` is the only separator it splits
+  on);
+- with a part that holds any of `` ( ) * , ; & | < > $ ` ' " \ # ``, so a
+  lone `&`, a pipe, a quote or a substitution;
+- with a part whose first word is a `NAME=value` or `NAME+=value`
+  assignment, or, compared by its last path component (so `/usr/bin/git`
+  counts), a wrapper Claude Code strips (`timeout`, `time`, `nice`,
+  `nohup`, `stdbuf`, `command`, `builtin`, `noglob`, `xargs`), an exec
+  wrapper (`watch`, `setsid`, `ionice`, `flock`), a shell or another
+  general command runner (`sh`, `bash` and the other shells, `eval`,
+  `source`, `.`, `exec`, `sudo`, `su`, `doas`, `env`), or git.
 
 The steps, in order:
 
@@ -412,7 +425,7 @@ run_fix_step contract"; in short:
 Besides the four bullets above, `fix_step` enforces more today, and another
 CLI's runner must meet the same requirements by its own means:
 
-- **Only the allowed tools, on both runner kinds (`cm-xq9`).** Today: no
+- **Only the allowed tools, on both runner kinds.** Today: no
   tool outside `SHELL_FREE_TOOLS` (Read, Grep, Glob, Edit), plus
   `HOSTED_SHELL_TOOLS` (Bash) for the fix step on the hosted runner only.
   On local a shell-capable toolset is refused before the process starts. No
@@ -421,10 +434,14 @@ CLI's runner must meet the same requirements by its own means:
   approved for the base's test command and Claude Code's built-in
   read-only commands, with git denied. A CLI that cannot be held to that
   set cannot be a local runner.
-- **The clone's own configuration never loads.** Today: `--restricted`,
-  `--strict-mcp-config` with no `--mcp-config`, and a `mcp__*` deny, on both
-  kinds. The clone's project settings, hooks, plugins and MCP servers are
-  text a hostile commit can write.
+- **The clone's settings, hooks, plugins and MCP servers never load.**
+  Today: `--restricted`, which ignores the settings files (so the clone's
+  settings, hooks and plugins are not read), and `--strict-mcp-config` with
+  no `--mcp-config` and a `mcp__*` deny, on both kinds. They are text a
+  hostile commit can write. The clone's `CLAUDE.md` is still read, as
+  instructions: on a hosted runner the fix agent's prompt says instructions
+  in the repository's `CLAUDE.md` or `AGENTS.md` about committing, pushing,
+  filing issues or syncing do not apply, but that is a prompt, not a fence.
 - **The command denylist runs before any shell command.** Today:
   cúramóir's PreToolUse hook (`hooks/hooks.json`'s entries, the policy in
   `src/curamoir/hooks/`) comes in through `--settings`, so it runs with the
@@ -500,6 +517,8 @@ ledger stays there and no state push is needed. A seam-B runner would wrap
 `codex exec`, Codex's non-interactive mode, behind the `run_fix_step`
 contract: the clone as its working directory, the toolset translated into
 Codex's own settings (read and edit in the clone only, no shell on the
-local runner), the clone's own Codex configuration kept from loading, and
-its output translated into the payload
-[Seam B](#seam-b-the-agent-runner) describes.
+local runner), the clone's own Codex settings kept from loading, and its
+output translated into the payload [Seam B](#seam-b-the-agent-runner)
+describes. The clone's `AGENTS.md` would still reach the agent: Codex reads
+it as instructions, as Claude Code reads the clone's `CLAUDE.md` today, and
+only the prompt answers it, which is not a fence.
