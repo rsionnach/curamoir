@@ -16,10 +16,14 @@ tests/plugin/test_routine_command.py, cm-2qp.10). The user's instruction
 says "No adapter code", so the page carries no Python.
 """
 
+import inspect
 import re
 from pathlib import Path
 
-from curamoir import config, fix_step, runner, state_branch
+import pytest
+
+from curamoir import budget, config, fix_step, lint, runner, state_branch
+from curamoir.guards.reasons import Reason
 
 ROOT = Path(__file__).resolve().parents[2]
 RUNNERS = ROOT / "docs" / "runners.md"
@@ -39,15 +43,30 @@ def flat(text):
 
 
 def section(heading, text=None):
-    """The body of the `## `/`### ` section titled `heading`, up to the next
-    heading of the same or a higher level."""
+    """The body of the `## `/`### ` section titled `heading` in `text` (the
+    page by default), up to the next heading of the same or a higher level.
+    The heading must occur exactly once, at any level, so a repeated heading
+    fails loudly rather than leaving its second copy unchecked; a `#` line
+    inside a fenced code block is not a heading, so a fenced comment cannot
+    cut a section short (and make a `not in` assert vacuous). The approach
+    of tests/plugin/test_readme.py's section(), less its refusal of HTML
+    comments: the Routine environment section is held between two."""
     text = page() if text is None else text
-    match = re.search(rf"^(#+) {re.escape(heading)}\n", text, re.MULTILINE)
-    assert match, f"docs/runners.md has no {heading!r} heading"
-    level = len(match.group(1))
-    rest = text[match.end():]
-    end = re.search(rf"^#{{1,{level}}} ", rest, re.MULTILINE)
-    return rest[:end.start()] if end else rest
+    headings = []  # (level, title, start of the heading line, end of it)
+    fenced = False
+    offset = 0
+    for line in text.splitlines(keepends=True):
+        if re.match(r"\s*(```|~~~)", line):
+            fenced = not fenced
+        elif not fenced and (match := re.match(r"(#+) (.*?)\n?$", line)):
+            headings.append((len(match.group(1)), match.group(2), offset, offset + len(line)))
+        offset += len(line)
+    found = [entry for entry in headings if entry[1] == heading]
+    assert len(found) == 1, f"the text has {len(found)} {heading!r} headings, not one"
+    level, _, _, body_start = found[0]
+    end = next((start for other, _, start, _ in headings
+                if start >= body_start and other <= level), len(text))
+    return text[body_start:end]
 
 
 def fences(text, language):
@@ -103,7 +122,64 @@ def test_seam_a_gives_the_runner_and_state_push_exit_codes():
                              (state_branch.REFUSED, "refused (the default branch"),
                              (state_branch.FAILED, "failed (git or a ruleset")):
         assert f"| `{codes[outcome]}` | {meaning}" in text, outcome
+    assert "| anything else | failure | fail: the lines were not kept |" in text
+    assert set(codes.values()) == {0, 1, 3, 5}, "a new state-push code needs a row"
     assert "It skipped" in text
+
+
+def test_seam_a_says_a_refusal_can_be_a_misconfiguration():
+    """Exit 3 covers a VM that can never sweep: a runner refusal, or the lint
+    refused because ast-grep is missing (lint.py's Skipped reason, quoted in
+    sweep.LintUntrusted's message)."""
+    text = flat(section("Seam A: the scheduler"))
+
+    assert f"reason `{Reason.RUNNER.value}`" in text
+    assert f"reason `{Reason.LINT.value}` with \"ast-grep is not installed\"" in text
+    assert "a misconfiguration" in text
+    assert "ast-grep is not installed" in inspect.getsource(lint)
+
+
+def test_seam_a_says_which_secrets_reach_the_fix_agent():
+    """Only fix_step.HOSTED_RUN_TOKEN_VARIABLES is dropped, so Seam A says so,
+    and a new marker's checklist adds the platform's run tokens there."""
+    text = flat(section("Seam A: the scheduler"))
+
+    assert ("**Any secret in the run's environment reaches the fix agent**, except "
+            "the names in `fix_step.HOSTED_RUN_TOKEN_VARIABLES`") in text
+    assert ("the platform's run-token names in `fix_step.HOSTED_RUN_TOKEN_VARIABLES`"
+            in text)
+    # The constant the page names is the one fix_step drops, and it holds the
+    # GitHub and Actions tokens the page says it does.
+    assert {"GITHUB_TOKEN", "GH_TOKEN", "ACTIONS_RUNTIME_TOKEN"} <= \
+        fix_step.HOSTED_RUN_TOKEN_VARIABLES
+    assert "ANTHROPIC_API_KEY" not in fix_step.HOSTED_RUN_TOKEN_VARIABLES
+
+
+def test_seam_a_says_the_hosted_ceiling_does_not_see_earlier_runs():
+    """budget.Budget reads repo_ledger (the work tree's ledger) and nothing
+    in budget.py reads the state branch."""
+    text = flat(section("Seam A: the scheduler"))
+
+    assert "**On hosted the monthly ceiling does not see earlier runs.**" in text
+    assert "](../README.md#where-the-security-boundary-is)" in text
+    readme = flat(README.read_text(encoding="utf-8"))
+    assert "The monthly ceiling does not yet see earlier hosted runs" in readme
+    assert "### Where the security boundary is" in README.read_text(encoding="utf-8")
+    source = inspect.getsource(budget)
+    assert "repo_ledger(context.repo)" in source
+    assert "state_branch" not in source
+    assert "does not see earlier runs" in flat(section("Seam B: the agent runner"))
+
+
+def test_seam_a_says_how_the_state_branch_starts_and_moves():
+    text = flat(section("Seam A: the scheduler"))
+
+    assert "The first push creates the state branch, as an orphan commit" in text
+    assert "`CURAMOIR_STATE_BRANCH`" in text
+    assert "the old lines stay on the old one" in text
+    assert "CURAMOIR_STATE_BRANCH: ${{ vars.CURAMOIR_STATE_BRANCH" in \
+        TEMPLATE.read_text(encoding="utf-8")
+    assert "first commit is an orphan" in state_branch.__doc__
 
 
 def test_seam_b_names_the_obligations_fix_step_carries_today():
@@ -125,6 +201,15 @@ def test_seam_b_names_the_obligations_fix_step_carries_today():
     assert "`fix_step.NOT_STARTED`" in text and "`--model <model>`" in text
     assert "`test_command`" in text
     assert "`budget.prices`" in text and "NOT enforced" in text
+    # FixStepRun.started is derived, and a not-started call spends nothing.
+    assert ("`started` is derived (`exit_code` set, or `timed_out` true), so "
+            "`exit_code` must be set for any process that started: `None` with "
+            "`timed_out` false means never started, which is recorded as spending "
+            "nothing.") in text
+    assert not fix_step.FixStepRun(argv=(), exit_code=None, stdout="", stderr="",
+                                   timed_out=False).started
+    assert fix_step.FixStepRun(argv=(), exit_code=None, stdout="", stderr="",
+                               timed_out=True).started
     for field in ("`is_error`", "`subtype`", "`result`", "`total_cost_usd`"):
         assert f"| {field} |" in text, field
 
@@ -144,6 +229,8 @@ def test_seam_b_says_the_clones_instructions_still_reach_the_agent(tmp_path):
             "in the repository's `CLAUDE.md` or `AGENTS.md` about committing, pushing, "
             "filing issues or syncing do not apply, but that is a prompt, not a "
             "fence.") in text
+    assert ("A CLI that cannot keep the clone's settings, hooks and MCP servers "
+            "from loading cannot be a runner.") in text
     assert "configuration never loads" not in text
     assert ("Instructions in this repository's CLAUDE.md or AGENTS.md about committing, "
             "pushing, filing issues or syncing do not apply") in fix_step._HOSTED_COMMANDS_SENTENCE
@@ -292,3 +379,29 @@ def test_the_direction_doc_no_longer_says_the_fix_step_returns_a_diff():
 
     assert "return a diff and token counts" not in text
     assert "docs/runners.md" in text
+
+
+def test_section_skips_fenced_headings():
+    text = ("## One\nbefore\n```sh\n# a comment\n## not a heading\n```\nafter\n"
+            "## Two\nlater\n")
+
+    body = section("One", text)
+    assert "after" in body and "later" not in body
+    with pytest.raises(AssertionError):
+        section("not a heading", text)
+
+
+def test_section_ends_at_the_same_or_a_higher_level():
+    text = "## A\n### A1\nin\n## B\nout\n"
+
+    assert "in" in section("A", text) and "out" not in section("A", text)
+    assert section("A1", text) == "in\n"
+
+
+def test_section_refuses_a_repeated_heading():
+    text = "## Codex\nfirst\n## Other\n## Codex\nstale\n"
+
+    with pytest.raises(AssertionError, match="2 'Codex' headings"):
+        section("Codex", text)
+    with pytest.raises(AssertionError, match="0 'Missing' headings"):
+        section("Missing", text)

@@ -54,6 +54,12 @@ It also needs, in the VM:
 | `3` | refused: a guard or the sweep declined, reason in the sentence and the ledger line | show it, not fail (an expected outcome) |
 | anything else | failure | fail |
 
+A refusal still needs an alert when it says the VM cannot run the sweep:
+reason `runner` (the declaration does not hold there), or reason `lint`
+with "ast-grep is not installed" among the rules skipped. Each is a
+misconfiguration, and every later run is refused the same way, so a
+scheduler that only shows exit 3 stays green while nothing is swept.
+
 **The runner kind is declared, never inferred.** `config.resolve_runner` is
 the one reader of the declaration. Its rule is exact and case-sensitive:
 
@@ -88,12 +94,25 @@ timeout of the run.
 | `5` | nothing new to push | pass |
 | `3` | refused (the default branch, a branch that is not a state branch, among others) | fail: the lines were not kept |
 | `1` | failed (git or a ruleset rejected the push, or the branch kept moving) | fail: the lines were not kept |
+| anything else | failure | fail: the lines were not kept |
 
 If its sentence says "It skipped N line(s)", some lines were not ledger
 lines and were not committed: show a warning, whatever the exit. Use one
 state branch per scheduler (`curamoir/state` from Actions,
 `claude/curamoir-state` from a Routine), and one scheduler per repository:
 two share no lock and no ledger.
+
+The first push creates the state branch, as an orphan commit holding only
+the ledger. In the worked example the Actions variable
+`CURAMOIR_STATE_BRANCH` names another branch than `curamoir/state`.
+Renaming it starts a new ledger on the new branch, and the old lines stay
+on the old one.
+
+**On hosted the monthly ceiling does not see earlier runs.** The budget
+guard reads the clone's own `.curamoir/state/ledger.jsonl` as checked out,
+never the state branch, so on a fresh VM it counts none of the earlier
+hosted runs' lines and does not stop them (the README's Spend row in
+[Where the security boundary is](../README.md#where-the-security-boundary-is)).
 
 **A new hosted scheduler must be a disposable VM**: fresh for the run,
 holding no developer's home, discarded afterwards. That is what `hosted`
@@ -102,11 +121,19 @@ scheduler on a machine someone keeps (a laptop, a self-hosted runner) is
 the local adapter: leave `CURAMOIR_RUNNER` unset, and the OS sandbox holds
 the run.
 
+**Any secret in the run's environment reaches the fix agent**, except the
+names in `fix_step.HOSTED_RUN_TOKEN_VARIABLES` (GitHub's and Actions' run
+tokens), which the fix step drops from its process on hosted. That list is
+fixed names, not a pattern: another platform's own run tokens, and any
+secret under another name, reach the agent, so pass the run none it does
+not need.
+
 **Adding a hosted marker is a code change, not a documentation change.** A
 VM that sets neither marker above is refused `hosted` until
 `config.resolve_runner` accepts a variable that only that platform's
 disposable VMs set, matched exactly as the two above are: a constant beside
-`CLAUDE_MARKER` and `GITHUB_MARKER` in `config.py`, cases in
+`CLAUDE_MARKER` and `GITHUB_MARKER` in `config.py`, the platform's
+run-token names in `fix_step.HOSTED_RUN_TOKEN_VARIABLES`, cases in
 `tests/test_runner_kind.py`, and a row in Platform-first runners §3.
 Nothing else reads the markers; every other hosted branch reads the
 resolved `runner.hosted`.
@@ -394,11 +421,14 @@ run_fix_step contract"; in short:
   mid-call never reads as free); kill the whole process group at the
   timeout; leave the edits in the clone's work tree, never committed.
 - **Out.** A `FixStepRun`: `started`, `exit_code` and `timed_out` say whether
-  and how the agent ran; `stderr` starts with `fix_step.NOT_STARTED` when
-  the process could not start; `git_state` is the snapshot, returned for
-  `fix_scope.verify_fix` and the scan to hold the clone to; `argv` carries
-  `--model <model>` (the scan reads the model from there, and fails after
-  spending without it); `stdout` is the payload below.
+  and how the agent ran. `started` is derived (`exit_code` set, or
+  `timed_out` true), so `exit_code` must be set for any process that
+  started: `None` with `timed_out` false means never started, which is
+  recorded as spending nothing. `stderr` starts with `fix_step.NOT_STARTED`
+  when the process could not start; `git_state` is the snapshot, returned
+  for `fix_scope.verify_fix` and the scan to hold the clone to; `argv`
+  carries `--model <model>` (the scan reads the model from there, and fails
+  after spending without it); `stdout` is the payload below.
 - **Not its job.** The scope check (`fix_scope.verify_fix`, which reads the
   diff from the clone against `git_state`), the green gate and publish stay
   the caller's.
@@ -424,6 +454,8 @@ CLI's runner must meet the same requirements by its own means:
   instructions: on a hosted runner the fix agent's prompt says instructions
   in the repository's `CLAUDE.md` or `AGENTS.md` about committing, pushing,
   filing issues or syncing do not apply, but that is a prompt, not a fence.
+  A CLI that cannot keep the clone's settings, hooks and MCP servers from
+  loading cannot be a runner.
 - **The command denylist runs before any shell command.** Today:
   cúramóir's PreToolUse hook (`hooks/hooks.json`'s entries, the policy in
   `src/curamoir/hooks/`) comes in through `--settings`, so it runs with the
@@ -466,7 +498,8 @@ unrecorded, never as zero. The tokens are priced by model from
 `budget.prices` (defaults in `config.py`, overridable in
 `.curamoir/curamoir.yaml`): for a model with no price there, the budget
 guard is degraded and the monthly ceiling is NOT enforced until one is
-added.
+added. On hosted, even a priced model's ceiling does not see earlier runs
+([Seam A](#seam-a-the-scheduler)).
 
 ### The hosted test command
 
