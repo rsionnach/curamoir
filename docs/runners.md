@@ -54,11 +54,14 @@ It also needs, in the VM:
 | `3` | refused: a guard or the sweep declined, reason in the sentence and the ledger line | show it, not fail (an expected outcome) |
 | anything else | failure | fail |
 
-A refusal still needs an alert when it says the VM cannot run the sweep:
-reason `runner` (the declaration does not hold there), or reason `lint`
-with "ast-grep is not installed" among the rules skipped. Each is a
-misconfiguration, and every later run is refused the same way, so a
-scheduler that only shows exit 3 stays green while nothing is swept.
+A refusal still needs an alert when it repeats run after run, because it
+is a misconfiguration and every later run is refused the same way, so a
+scheduler that only shows exit 3 stays green while nothing is swept. Among
+them: reason `runner` (the declaration does not hold there), reason `lint`
+with "ast-grep is not installed" among the rules skipped, `file_cap`
+(`sweep.max_files_per_pr` is 0), `guard_error` (a `curamoir.yaml` that
+cannot be loaded) and `sweep_base` (no usable GitHub origin). Alerting on
+any exit-3 reason that repeats covers them all.
 
 **The runner kind is declared, never inferred.** `config.resolve_runner` is
 the one reader of the declaration. Its rule is exact and case-sensitive:
@@ -126,7 +129,11 @@ names in `fix_step.HOSTED_RUN_TOKEN_VARIABLES` (GitHub's and Actions' run
 tokens), which the fix step drops from its process on hosted. That list is
 fixed names, not a pattern: another platform's own run tokens, and any
 secret under another name, reach the agent, so pass the run none it does
-not need.
+not need. Dropping a name is not a fence either: the agent runs as the
+same user as the sweep and can still read the sweep's own environment,
+the dropped names included. On hosted the boundary is the VM and the scope
+of the run's tokens
+([Hosted runner limits](../README.md#hosted-runner-limits)).
 
 **Adding a hosted marker is a code change, not a documentation change.** A
 VM that sets neither marker above is refused `hosted` until

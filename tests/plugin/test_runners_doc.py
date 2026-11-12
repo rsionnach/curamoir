@@ -136,6 +136,11 @@ def test_seam_a_says_a_refusal_can_be_a_misconfiguration():
     assert f"reason `{Reason.RUNNER.value}`" in text
     assert f"reason `{Reason.LINT.value}` with \"ast-grep is not installed\"" in text
     assert "a misconfiguration" in text
+    # Repository-config refusals repeat every run too, so the list is examples
+    # and the advice covers any repeated reason (cm-2qp.8 edge-cases-2).
+    for reason in (Reason.FILE_CAP, Reason.GUARD_ERROR, Reason.SWEEP_BASE):
+        assert f"`{reason.value}`" in text, reason
+    assert "Alerting on any exit-3 reason that repeats covers them all." in text
     assert "ast-grep is not installed" in inspect.getsource(lint)
 
 
@@ -148,6 +153,14 @@ def test_seam_a_says_which_secrets_reach_the_fix_agent():
             "the names in `fix_step.HOSTED_RUN_TOKEN_VARIABLES`") in text
     assert ("the platform's run-token names in `fix_step.HOSTED_RUN_TOKEN_VARIABLES`"
             in text)
+    # Dropping the names keeps them out of the agent's own environment only:
+    # as the same user it can read the sweep's (fix_step's docstring says so),
+    # so the page must not present the list as the protection.
+    assert ("Dropping a name is not a fence either: the agent runs as the same user as "
+            "the sweep and can still read the sweep's own environment, the dropped names "
+            "included.") in text
+    assert "](../README.md#hosted-runner-limits)" in text
+    assert "can read the parent's" in inspect.getsource(fix_step)
     # The constant the page names is the one fix_step drops, and it holds the
     # GitHub and Actions tokens the page says it does.
     assert {"GITHUB_TOKEN", "GH_TOKEN", "ACTIONS_RUNTIME_TOKEN"} <= \
