@@ -1,0 +1,28 @@
+diff --git a/docs/upgrading-5.0.md b/docs/upgrading-5.0.md
+index b1befa8..2d9f030 100644
+--- a/docs/upgrading-5.0.md
++++ b/docs/upgrading-5.0.md
+@@ -141,14 +141,15 @@ no `method`, `frequency` or `sampling`.
+   and `ResultReason` are exported for typing.
+ - **New in 5.3.0:** `load_manifest` rejects `apiVersion: opensrm/v1` (the
+   published v1 schema) with an error naming `nthlayer-generate
+-  migrate-manifest`, instead of "service.name is required". (Not bare
+-  `nthlayer`: nthlayer-core registers that script too, so it is ambiguous when
+-  both are installed; opensrm-dww5.) `convert_opensrm_v1_to_v2(data, *,
+-  service_type=None) -> MigrationResult(manifest, unmapped)` converts it to v2
+-  following AUTHORING §7. `unmapped` lists every field not carried over
+-  exactly, each with a `kind`: `"dropped"` (no v2 home) or `"assumed"`
+-  (converted with a value v1 does not declare). `MigrationResult.lossy` is True
+-  only when something was dropped; assumed entries are informational. It raises
++  migrate-manifest`, instead of "service.name is required". (From
++  nthlayer-core 4.0.0 the bare `nthlayer` script belongs to nthlayer-generate as
++  well, but `nthlayer-generate` works with every version; opensrm-dww5.)
++  `convert_opensrm_v1_to_v2(data, *, service_type=None) ->
++  MigrationResult(manifest, unmapped)` converts it to v2 following
++  AUTHORING §7. `unmapped` lists every field not carried over exactly,
++  each with a `kind`: `"dropped"` (no v2 home) or `"assumed"` (converted
++  with a value v1 does not declare). `MigrationResult.lossy` is True only
++  when something was dropped; assumed entries are informational. It raises
+   `OpenSRMV1MigrationError`, a `ValueError`, for input it cannot convert. v2
+   `spec.dependencies[].service` now accepts `resource:` refs.
+   `is_manifest_file` now recognises `opensrm/v1` documents by content, so

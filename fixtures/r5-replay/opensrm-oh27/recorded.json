@@ -1,0 +1,33 @@
+{
+ "schema_version": 1,
+ "entry": "opensrm-oh27",
+ "fidelity": "counts_only",
+ "lens_order": [
+  "correctness",
+  "clarity",
+  "edge-cases",
+  "excellence"
+ ],
+ "iterations": {},
+ "rounds": [],
+ "cross_repo_findings": [],
+ "escaped": [
+  {
+   "lens": "provenance",
+   "severity": "CRITICAL",
+   "path": "src/nthlayer_workers/learn/retrospective.py",
+   "start_line": 321,
+   "end_line": 326,
+   "claim": "The predicate tests spec.slos as a list, but v1 writes a mapping and v2 has no such key, so the branch never fires for a real manifest; every fixture uses the same unreal shape.",
+   "evidence": null,
+   "fix": null,
+   "fingerprint": "8bc5b9120271469d",
+   "verification_level": "asserted",
+   "resolves": null,
+   "regression": false,
+   "status": null,
+   "derived_from": "known_escape",
+   "at_commit": "6605897"
+  }
+ ]
+}

@@ -1,0 +1,969 @@
+diff --git a/docs/architecture.md b/docs/architecture.md
+index 98147e7..8ba9f51 100644
+--- a/docs/architecture.md
++++ b/docs/architecture.md
+@@ -114,9 +114,14 @@ SLO assessment, drift, discovery, gate, portfolio, verification.
+     `portfolio_status` (`service="__portfolio__"`,
+     `parent_ids=slo_assessment_ids`).
+   - `ObserveDriftModule.process_cycle()`: iterates
+-    `_drift_targets(manifests)`, `DriftAnalyzer.analyze()` per
+-    `(service, tier, slo_name, window)`, submits `drift_signal`
+-    assessments.
++    `_drift_targets(manifests)`, keeps only the SLOs
++    `DriftAnalyzer.budgeted_slos(service)` finds a budget series for
++    (`group by (slo)` over the error budget, asked once per service; a
++    failed lookup skips the service with one warning), then
++    `DriftAnalyzer.analyze()` per `(service, tier, slo_name, window)` and
++    submits `drift_signal` assessments. Which SLOs have a budget is
++    generate's decision, read back from the series rather than re-derived
++    from the manifest [opensrm-zo0o].
+   - `ObserveTopologyModule`: `DependencyDiscovery` +
+     `PrometheusDepProvider`. `discovery.build_graph(service_names)`
+     once → per-service `calculate_blast_radius` → submits
+@@ -307,20 +312,31 @@ query_kind)`, the single query builder. The kind rides on
+ `SLODefinition.query_kind` (no default — a wrong one is silent) and is
+ what `evaluate_slos` dispatches its breach rule on: `judgment_rate`
+ inverts a 0-1 rate to an SLI, `ratio` scales a good-ratio SLI without
+-inverting, `judgment_duration` and `latency_seconds` compare durations,
+-`error_budget` tests a signed budget against zero. Dispatching on the
+-SLO's name or `slo_type` instead is what broke: the name is author-chosen
+-in v2, and half the judgment taxonomy has no rate builder, so neither
+-answers what units the value is in [opensrm-fxln]. Module-level `_JUDGMENT_SLO_QUERIES` lookup
+-dict of lambdas keyed by **`spec.judgment_type`**, not by SLO name: in
+-v2 `metadata.name` is author-chosen and independent of the type
+-(`reversal_rate` / `high_confidence_failure` / `calibration` /
+-`feedback_latency`). Only 4 of the 8 `JUDGMENT_SLO_TYPES` have a
+-builder; the other 4 fall through to the `slo:{name}:ratio` recording-
+-rule convention. They must NOT yield `""` — Prometheus 400s on an empty
+-query and `query_prometheus` reads that as no-data, silently skipping
+-the SLO (opensrm-fxln; the `_judgment_slo_query` wrapper that returned
+-`""` was deleted there). Hysteresis reads each window's `raw_breach`
++inverting, `error_budget` tests a signed budget against zero, and
++`not_evaluable` is skipped. Dispatching
++on the SLO's name or `slo_type` instead is what broke: the name is
++author-chosen in v2, and most of the judgment taxonomy has no rate
++builder, so neither answers what units the value is in [opensrm-fxln].
++**Every request-ratio classical SLO is `error_budget`** (ruling Z1,
++opensrm-zo0o): availability, latency and error_rate (`BUDGETED_KINDS`) read
++`slo:error_budget_remaining:ratio{service, slo}` from nthlayer-common's
++`ERROR_BUDGET_REMAINING`, which generate writes per SLO. The other classical
++kinds are `not_evaluable` with an empty query (ruling D5, E3's
++`no_data_source`): `evaluate_slos` never queries them and `evaluate-once`
++lists them. `_classical_kind` is a copy of generate's `_slo_kind` so both
++agree on which SLOs have a budget (opensrm-ltlw moves it to common). The
++latency-seconds and classical ratio branches are gone; a budgeted SLO whose
++series is missing (generate's guard skipped it, or pre-4.1.0 rules) is
++logged at info and not evaluated. Module-level `_JUDGMENT_SLO_QUERIES`
++lookup dict of lambdas keyed by **`spec.judgment_type`**, not by SLO
++name: in v2 `metadata.name` is author-chosen and independent of the type.
++Only 2 of the 5 judgment SLO types (`reversal_rate`,
++`high_confidence_failure`) have a builder; the other 3 fall through to
++the `slo:{name}:ratio` recording-rule convention, the only remaining use
++of `ratio`. They must NOT yield `""` — Prometheus 400s on an empty query
++and `query_prometheus` reads that as no-data, silently skipping the SLO
++(opensrm-fxln; the `_judgment_slo_query` wrapper that returned `""` was
++deleted there). Hysteresis reads each window's `raw_breach`
+ back out of the verdict blob built by `evaluation_custom_metadata` —
+ one definition shared by the CLI writer and
+ `count_consecutive_breaches`, which previously re-derived breach as
+@@ -335,13 +351,7 @@ than a full cycle once a run covered 20 SLOs and capped `consecutive` at
+ measure writes the service into `subject.ref` and leaves
+ `subject.service` None, so that filter matches nothing, and populating
+ it now would silently shorten history for every SLO already running.
+-Duration targets convert via `_target_seconds` using the manifest's
+-declared `unit`, which the parser preserves; a missing or unknown unit
+-logs a warning and assumes `ms` rather than dropping the SLO.
+-`calibration` +
+-`feedback_latency` are
+-window-agnostic (gauge metrics) so their lambdas use a `_window`
+-underscore param. The module logs through `logging.getLogger`, NOT
++The module logs through `logging.getLogger`, NOT
+ structlog — %-style args only; kwargs would TypeError (load-bearing
+ fact per opensrm-y7dd R5 Pass 3).
+ 
+diff --git a/docs/upgrading-4.0.md b/docs/upgrading-4.0.md
+index 09d9d13..4a8d6b5 100644
+--- a/docs/upgrading-4.0.md
++++ b/docs/upgrading-4.0.md
+@@ -33,6 +33,46 @@ command flushes its events as it exits, and with the collector unreachable it
+ waits up to `OTEL_EXPORTER_OTLP_TIMEOUT` (10s by default) to do so; set it
+ lower where that matters, e.g. in scripts.
+ 
++## 4.2: every classical SLO is evaluated from its error budget
++
++From 4.2 (opensrm-zo0o, ruling Z1) `nthlayer-measure` evaluates every
++classical SLO from `slo:error_budget_remaining:ratio{service, slo}`, the
++series nthlayer-generate writes, and breaches when it goes negative. Before,
++only availability SLOs read it; a latency SLO named `latency` compared a
++percentile in seconds with its target, and every other classical SLO read
++`slo:<name>:ratio`, which nothing wrote for error_rate, throughput, freshness,
++lag or custom, so they were never evaluated.
++
++**Deploy nthlayer-generate 4.1.0's recording rules first.** Earlier
++generate releases write a budget for availability SLOs only, so with them a
++latency or error_rate SLO now reads no data and is not evaluated, where 4.1
++evaluated a latency SLO from its percentile. Budgets also read low for their
++first window after the rules are deployed, as generate's upgrade note
++explains.
++
++Throughput, freshness, lag and custom SLOs have no budget (D5,
++opensrm-vcxm), so measure no longer queries anything for them: `evaluate-once`
++lists each as `NOT EVALUABLE (no_data_source)`, writes no verdict for it, and
++counts them in its closing summary. A request-ratio SLO whose budget series
++is missing is logged at info (`No error budget series for <service>/<slo>;
++not evaluated`) and skipped. That is expected when generate's guard skipped
++its budget (generate's README lists when); otherwise generate 4.1.0's rules
++are not deployed.
++
++Two other readers of the budget change with it:
++
++- **correlate** reports the service's worst budget with
++  `bottomk(1, ...)` rather than `min(...)`, and its `error_budget_exhausted`
++  event payload gains `slo`, naming the overspent SLO.
++- **drift** (worker mode) analyses only SLOs Prometheus holds a budget series
++  for. Judgment SLOs and budget-less classical SLOs no longer log
++  `drift_analysis_failed` every cycle; if the lookup itself fails, it logs
++  `drift_budget_discovery_failed` once per service and skips that service for
++  the cycle.
++
++The `latency_seconds` query kind, its duration-unit table and
++`SLODefinition.unit` in `measure/adapters/prometheus.py` are removed.
++
+ ## Breaking changes
+ 
+ ### `gen_ai.decision.evaluated` → per-dimension grader events + a summary
+diff --git a/src/nthlayer_workers/correlate/prometheus.py b/src/nthlayer_workers/correlate/prometheus.py
+index 3770884..c351bbe 100644
+--- a/src/nthlayer_workers/correlate/prometheus.py
++++ b/src/nthlayer_workers/correlate/prometheus.py
+@@ -62,11 +62,14 @@ async def fetch_metric_breaches(
+ 
+     for service in services:
+         # Check error budget: the worst across the service's SLOs, since
+-        # generate writes one series per availability SLO (opensrm-h0at).
+-        budget = await _query_instant(
++        # generate writes one series per classical SLO (opensrm-h0at,
++        # opensrm-zo0o). bottomk, not min: min aggregates the labels away,
++        # and the event must say WHICH SLO is overspent.
++        worst = await _query_instant_sample(
+             client, prometheus_url,
+-            f"min({ERROR_BUDGET_REMAINING.selector(service=service)})",
++            f"bottomk(1, {ERROR_BUDGET_REMAINING.selector(service=service)})",
+         )
++        budget, budget_labels = worst if worst is not None else (None, {})
+         if budget is not None and budget < 0.0:
+             events.append(SitRepEvent(
+                 id=f"prom-metric-{uuid.uuid4().hex[:8]}",
+@@ -80,6 +83,7 @@ async def fetch_metric_breaches(
+                     "metric": ERROR_BUDGET_REMAINING.metric,
+                     "value": budget,
+                     "breach": "error_budget_exhausted",
++                    "slo": budget_labels.get("slo"),
+                 },
+             ))
+ 
+@@ -214,6 +218,16 @@ async def _query_instant(
+     query: str,
+ ) -> float | None:
+     """Execute a PromQL instant query and return the scalar value."""
++    sample = await _query_instant_sample(client, prometheus_url, query)
++    return None if sample is None else sample[0]
++
++
++async def _query_instant_sample(
++    client: httpx.AsyncClient,
++    prometheus_url: str,
++    query: str,
++) -> tuple[float, dict[str, str]] | None:
++    """Execute a PromQL instant query; return the first sample's value and labels."""
+     try:
+         resp = await client.get(
+             f"{prometheus_url}/api/v1/query",
+@@ -227,8 +241,8 @@ async def _query_instant(
+         val = float(results[0].get("value", [None, None])[1])
+         if val != val:  # NaN
+             return None
+-        return val
+-    except (httpx.HTTPError, ValueError, KeyError, IndexError, TypeError):
++        return val, dict(results[0].get("metric") or {})
++    except (httpx.HTTPError, ValueError, KeyError, IndexError, TypeError, AttributeError):
+         return None
+ 
+ 
+diff --git a/src/nthlayer_workers/measure/adapters/prometheus.py b/src/nthlayer_workers/measure/adapters/prometheus.py
+index 5dda2b0..9d2e49b 100644
+--- a/src/nthlayer_workers/measure/adapters/prometheus.py
++++ b/src/nthlayer_workers/measure/adapters/prometheus.py
+@@ -45,12 +45,6 @@ class SLODefinition:
+     # answer — the failure shape this whole bead is about.
+     query_kind: str
+     judgment_type: str | None = None
+-    # The manifest's declared unit for a duration target. The parser
+-    # preserves it verbatim, so `latency: {target: 2, unit: s}` and
+-    # `{target: 2000, unit: ms}` both arrive as target=2000.0/2.0 with the
+-    # unit that makes sense of them. Hard-coding milliseconds here compared
+-    # a seconds SLO against a threshold 1000x too small (opensrm-fxln).
+-    unit: str | None = None
+ 
+ 
+ @dataclass
+@@ -135,7 +129,6 @@ def load_specs(specs_dir: Path) -> LoadedSpecs:
+                 window=slo.window or "7d",
+                 query=query,
+                 query_kind=query_kind,
+-                unit=slo.unit,
+             ))
+ 
+     return LoadedSpecs(slos=slos, parse_failures=parse_failures)
+@@ -146,13 +139,19 @@ def _query_for(service: str, slo: ManifestSLO) -> tuple[str, str]:
+ 
+     Returns ``(query, query_kind)``. The kind is not decoration: it is how
+     evaluate_slos knows whether the number coming back is a rate to invert,
+-    a good-ratio SLI, seconds, or a signed error budget. Deriving it later
+-    from the SLO's name or type cannot work — that is precisely what broke.
+-
+-    Judgment SLOs get the interim raw-metric queries below. Availability-typed
+-    classical SLOs read the error budget generate writes; everything else
+-    falls back to the recording-rule convention. Always returns a query: an
+-    SLO reaching evaluation with none would be dropped silently.
++    a good-ratio SLI, or a signed error budget. Deriving it later from the
++    SLO's name or type cannot work — that is precisely what broke.
++
++    Judgment SLOs get the interim raw-metric queries below, or the
++    recording-rule convention when their type has no builder. A classical
++    SLO of a request-ratio kind reads the error budget generate writes for
++    it: by ruling Z1 (opensrm-zo0o) each one is good/total against its
++    objective, so one series and one breach rule cover them all. Every
++    other classical kind is ``not_evaluable`` with an empty query (ruling
++    D5): generate writes no budget for it, so there is nothing to ask
++    Prometheus, and evaluate_slos reports it rather than querying a series
++    nobody writes. Every other kind always gets a query: an SLO reaching
++    evaluation with none would be dropped silently.
+     """
+     name = slo.name
+     if slo.judgment_type:
+@@ -165,29 +164,48 @@ def _query_for(service: str, slo: ManifestSLO) -> tuple[str, str]:
+         if builder is not None:
+             kind = _JUDGMENT_QUERY_KINDS[slo.judgment_type]
+             return builder(service, slo.window or "7d"), kind
+-    if not slo.judgment_type and "availability" in (slo.slo_type or name).lower():
+-        # The right-hand test is generate's, verbatim (manifest_builder.py
+-        # `_build_standard_slo_rules`): keyed by type, falling back to the
+-        # name only when no type is set. Substring and lower() because srm/v1
+-        # and legacy pass an explicit `type:` through unnormalised (opensrm-hiw2). The
+-        # left-hand `not judgment_type` stands in for generate only ever
+-        # passing classical SLOs there; judgment SLOs are availability-shaped
+-        # too, and one with no builder above keeps the fallback below. The
+-        # selector filters to this SLO, as each series carries slo=<name>
+-        # (opensrm-h0at).
++    if not slo.judgment_type:
++        if _classical_kind(slo) not in BUDGETED_KINDS:
++            return "", "not_evaluable"
++        # The selector filters to this SLO, as each series carries
++        # slo=<name> (opensrm-h0at).
+         return (
+             ERROR_BUDGET_REMAINING.selector(service=service, slo=name),
+             "error_budget",
+         )
+-    if name == "latency":
+-        percentile = slo.percentile or "p99"
+-        return (
+-            f'slo:http_request_duration_seconds:{percentile}{{service="{service}"}}',
+-            "latency_seconds",
+-        )
+     return f'slo:{name}:ratio{{service="{service}"}}', "ratio"
+ 
+ 
++# The classical kinds generate writes an error budget for (ruling D5,
++# opensrm-zo0o). Throughput, freshness, lag and custom have none until
++# time-slice budgets exist (opensrm-vcxm).
++BUDGETED_KINDS = frozenset({"availability", "latency", "error_rate"})
++
++
++def _classical_kind(slo: ManifestSLO) -> str | None:
++    """The SLO's kind as generate classifies it, or None for one it writes
++    no rules for (freshness, lag, custom).
++
++    A copy of generate's ``_slo_kind`` (recording_rules/manifest_builder.py),
++    kept identical so measure asks for exactly the budgets generate writes:
++    substring on the lowered type, falling back to the name when no type is
++    set, because srm/v1 and legacy pass an explicit ``type:`` through
++    unnormalised (opensrm-hiw2). TODO(opensrm-ltlw): move it to
++    nthlayer-common so the two cannot drift.
++    """
++    # str(): srm/v1 loads `name: 404` as an int.
++    slo_type = str(slo.slo_type or slo.name).lower()
++    for needle, kind in (
++        ("availability", "availability"),
++        ("latency", "latency"),
++        ("error", "error_rate"),
++        ("throughput", "throughput"),
++    ):
++        if needle in slo_type:
++            return kind
++    return None
++
++
+ # PromQL builders keyed by judgment TYPE (spec.judgment_type), not by the
+ # SLO's name — in v2 the two are independent. Lambdas take (service,
+ # window).
+@@ -234,54 +252,6 @@ def evaluation_custom_metadata(result: EvaluationResult) -> dict:
+     }
+ 
+ 
+-# Seconds per unit of a duration target. Prometheus latency queries return
+-# seconds, so the target is converted TO seconds rather than the reverse.
+-# Keys are matched case-insensitively after stripping; the spelled-out and
+-# abbreviated forms are aliases because manifests are hand-written and
+-# `unit: seconds` reaching the unknown-unit path would assume milliseconds —
+-# a threshold 1000x too small that breaches every window.
+-_DURATION_UNIT_SECONDS = {
+-    "us": 0.000_001, "µs": 0.000_001, "microsecond": 0.000_001,
+-    "microseconds": 0.000_001,
+-    "ms": 0.001, "msec": 0.001, "millisecond": 0.001, "milliseconds": 0.001,
+-    "s": 1.0, "sec": 1.0, "secs": 1.0, "second": 1.0, "seconds": 1.0,
+-    "m": 60.0, "min": 60.0, "minute": 60.0, "minutes": 60.0,
+-}
+-
+-# What a duration target means when the manifest declared no unit. The
+-# schema's own latency example uses `ms`, and so does every manifest in the
+-# ecosystem, so that is the assumption — but it IS an assumption, so it is
+-# logged rather than applied silently. Refusing to evaluate instead would
+-# drop the SLO, which is the failure this bead exists to remove.
+-_DEFAULT_DURATION_UNIT = "ms"
+-
+-
+-def _target_seconds(target: float, unit: str | None) -> float:
+-    """Convert a duration target to seconds using its declared unit."""
+-    if unit is None:
+-        logger.warning(
+-            "Latency target %s has no unit; assuming %s",
+-            target,
+-            _DEFAULT_DURATION_UNIT,
+-        )
+-        unit = _DEFAULT_DURATION_UNIT
+-    # str() before strip(): parser/v1.py passes config.get("unit") through
+-    # unvalidated, so `unit: 100` arrives as an int. Calling .strip() on it
+-    # would raise out of evaluate_slos' loop and abort the cycle with
+-    # verdicts already written for earlier SLOs — a partial cycle rather
+-    # than a clean failure. Coercing routes it to the warning below.
+-    scale = _DURATION_UNIT_SECONDS.get(str(unit).strip().lower())
+-    if scale is None:
+-        logger.warning(
+-            "Unknown duration unit %r for target %s; assuming %s",
+-            unit,
+-            target,
+-            _DEFAULT_DURATION_UNIT,
+-        )
+-        scale = _DURATION_UNIT_SECONDS[_DEFAULT_DURATION_UNIT]
+-    return target * scale
+-
+-
+ async def query_prometheus(
+     client: httpx.AsyncClient,
+     prometheus_url: str,
+@@ -408,9 +378,33 @@ async def evaluate_slos(
+ 
+     async with httpx.AsyncClient() as client:
+         for slo in slos:
++            if slo.query_kind == "not_evaluable":
++                # E3's no_data_source: no series is defined for this kind.
++                # The CLI reports it; there is nothing to query or to count
++                # toward hysteresis.
++                logger.info(
++                    "%s/%s is not evaluable (no_data_source): generate writes "
++                    "no error budget for its kind",
++                    slo.service, slo.slo_name,
++                )
++                continue
+             current_value = await query_prometheus(client, prometheus_url, slo.query)
+             if current_value is None:
+-                logger.debug("No data for %s/%s, skipping", slo.service, slo.slo_name)
++                if slo.query_kind == "error_budget":
++                    # Not debug: for a classical SLO this is usually not a
++                    # scrape gap but a budget generate chose not to write (an
++                    # objective or latency bound it cannot trust), or rules
++                    # older than generate 4.1.0, and the SLO is then never
++                    # evaluated. An operator needs to see that.
++                    logger.info(
++                        "No error budget series for %s/%s; not evaluated "
++                        "(generate skips a budget whose objective or latency "
++                        "bound it cannot trust, and before 4.1.0 wrote only "
++                        "availability budgets)",
++                        slo.service, slo.slo_name,
++                    )
++                else:
++                    logger.debug("No data for %s/%s, skipping", slo.service, slo.slo_name)
+                 continue
+ 
+             # Dispatch on the kind of number the query returns, decided by
+@@ -433,14 +427,11 @@ async def evaluate_slos(
+                 # The error budget is signed — negative is overspent.
+                 # The target is not consulted; it is baked into the rule.
+                 raw_breach = current_value < 0.0
+-            elif slo.query_kind == "latency_seconds":
+-                # Query is seconds; the target is in whatever unit the
+-                # manifest declared.
+-                raw_breach = current_value > _target_seconds(slo.target, slo.unit)
+             else:
+-                # "ratio": a 0-1 good-ratio SLI against a 0-100 target, so it
+-                # scales but does not invert — the same arithmetic as
+-                # worker.py:242. Comparing the two conventions directly, as
++                # "ratio", only for a judgment type with no builder: the
++                # recording-rule convention's 0-1 good-ratio SLI against a
++                # 0-100 target, so it scales but does not invert — the same
++                # arithmetic as worker.py:242. Comparing the two conventions directly, as
+                 # this branch used to, breaches every window.
+                 raw_breach = current_value * 100 < slo.target
+ 
+diff --git a/src/nthlayer_workers/measure/cli.py b/src/nthlayer_workers/measure/cli.py
+index 45235db..c80f32d 100644
+--- a/src/nthlayer_workers/measure/cli.py
++++ b/src/nthlayer_workers/measure/cli.py
+@@ -212,7 +212,16 @@ def cmd_evaluate_once(args: argparse.Namespace) -> None:
+                         v.metadata.custom["slack_thread_ts"] = thread_ts
+                         verdict_store.put(v)
+ 
+-        print(f"\nEvaluated {len(results)} SLOs, {breach_count} in breach.")
++        # Ruling D5 (opensrm-zo0o): kinds with no error budget are reported,
++        # not queried, and get no verdict (E3 no_data_source).
++        not_evaluable = [s for s in slos if s.query_kind == "not_evaluable"]
++        for s in not_evaluable:
++            print(f"  {s.service}/{s.slo_name}: NOT EVALUABLE (no_data_source)")
++
++        print(
++            f"\nEvaluated {len(results)} SLOs, {breach_count} in breach"
++            f", {len(not_evaluable)} not evaluable."
++        )
+         return results
+ 
+     try:
+diff --git a/src/nthlayer_workers/observe/drift/analyzer.py b/src/nthlayer_workers/observe/drift/analyzer.py
+index 041dbb0..5fbb3b6 100644
+--- a/src/nthlayer_workers/observe/drift/analyzer.py
++++ b/src/nthlayer_workers/observe/drift/analyzer.py
+@@ -150,6 +150,37 @@ class DriftAnalyzer:
+             exit_code=exit_code,
+         )
+ 
++    async def budgeted_slos(self, service: str) -> set[str]:
++        """Names of the service's SLOs that have an error budget series.
++
++        Generate decides which SLOs get a budget (opensrm-zo0o: availability,
++        latency and error_rate, minus objectives it cannot trust), so drift
++        asks for the series it wrote rather than re-deriving that rule from
++        the manifest, which in worker mode lacks the fields it needs.
++        Raises DriftAnalysisError when Prometheus cannot answer, so a caller
++        can tell "none" from "unknown".
++        """
++        import httpx
++
++        query = f"group by (slo) ({ERROR_BUDGET_REMAINING.selector(service=service)})"
++        auth = (self.username, self.password) if self.username and self.password else None
++        try:
++            async with httpx.AsyncClient(auth=auth, timeout=30.0) as client:
++                response = await client.get(
++                    f"{self.prometheus_url}/api/v1/query", params={"query": query}
++                )
++                response.raise_for_status()
++                result = response.json()
++        except (httpx.HTTPError, ValueError) as e:
++            raise DriftAnalysisError(f"Failed to query Prometheus: {e}") from e
++        if result.get("status") != "success":
++            raise DriftAnalysisError(f"Prometheus query failed: {result.get('error', 'Unknown')}")
++        return {
++            series["metric"]["slo"]
++            for series in result.get("data", {}).get("result", [])
++            if "slo" in series.get("metric", {})
++        }
++
+     async def _query_budget_history(
+         self,
+         service: str,
+diff --git a/src/nthlayer_workers/observe/worker.py b/src/nthlayer_workers/observe/worker.py
+index 820bfb4..fb71708 100644
+--- a/src/nthlayer_workers/observe/worker.py
++++ b/src/nthlayer_workers/observe/worker.py
+@@ -168,7 +168,20 @@ class ObserveDriftModule:
+ 
+         analyzer = DriftAnalyzer(self.prometheus_url)
+ 
++        # Only SLOs with an error budget series can drift (opensrm-zo0o):
++        # judgment SLOs and the classical kinds generate writes no budget for
++        # would otherwise fail every cycle with a warning each.
++        budgeted: dict[str, set[str] | None] = {}
+         for service, tier, slo_name, window in _drift_targets(manifests):
++            if service not in budgeted:
++                try:
++                    budgeted[service] = await analyzer.budgeted_slos(service)
++                except DriftAnalysisError:
++                    logger.warning("drift_budget_discovery_failed", service=service)
++                    budgeted[service] = None
++            names = budgeted[service]
++            if names is None or str(slo_name) not in names:
++                continue
+             try:
+                 result = await analyzer.analyze(service, tier, slo_name, window)
+             except DriftAnalysisError:
+diff --git a/tests/correlate/test_correlate_command.py b/tests/correlate/test_correlate_command.py
+index dd18f44..a42d696 100644
+--- a/tests/correlate/test_correlate_command.py
++++ b/tests/correlate/test_correlate_command.py
+@@ -472,22 +472,29 @@ def test_trace_baseline_window_passed_through(specs_dir, tmp_path):
+ 
+ 
+ @pytest.mark.asyncio
+-async def test_metric_breaches_read_the_error_budget_series_generate_writes():
++async def test_metric_breaches_name_the_slo_whose_budget_is_overspent():
+     """correlate queried slo:error_budget:ratio, which nothing writes, so it
+-    never saw an exhausted budget. It has no SLO in hand, so it asks for the
+-    service's worst budget across all its SLOs."""
++    never saw an exhausted budget (opensrm-h0at). It has no SLO in hand, so it
++    asks for the service's worst budget across its SLOs, and must say which
++    SLO that is: min() aggregated the slo label away (opensrm-zo0o)."""
+     import httpx
+ 
+     from nthlayer_workers.correlate.prometheus import fetch_metric_breaches
+ 
+-    budget_query = f"min({ERROR_BUDGET_REMAINING.selector(service='checkout')})"
++    budget_query = f"bottomk(1, {ERROR_BUDGET_REMAINING.selector(service='checkout')})"
+     sent: list[str] = []
+ 
+     def handler(request: httpx.Request) -> httpx.Response:
+         query = request.url.params["query"]
+         sent.append(query)
+-        # Prometheus HTTP API instant-query shape; an aggregation drops labels.
+-        result = [{"metric": {}, "value": [1730000000, "-0.05"]}] if query == budget_query else []
++        # Prometheus HTTP API instant-query shape. bottomk returns the input
++        # series itself, so it keeps the labels generate writes on the
++        # budget (nthlayer-common ERROR_BUDGET_REMAINING.labels).
++        series = {
++            "__name__": ERROR_BUDGET_REMAINING.metric,
++            "service": "checkout", "slo": "checkout-latency", "objective": "99.0",
++        }
++        result = [{"metric": series, "value": [1730000000, "-0.05"]}] if query == budget_query else []
+         return httpx.Response(
+             200, json={"status": "success", "data": {"resultType": "vector", "result": result}}
+         )
+@@ -500,3 +507,4 @@ async def test_metric_breaches_read_the_error_budget_series_generate_writes():
+     assert len(budget) == 1
+     assert budget[0].payload["metric"] == ERROR_BUDGET_REMAINING.metric
+     assert budget[0].payload["value"] == -0.05
++    assert budget[0].payload["slo"] == "checkout-latency"
+diff --git a/tests/measure/test_prometheus.py b/tests/measure/test_prometheus.py
+index af5be84..52583c5 100644
+--- a/tests/measure/test_prometheus.py
++++ b/tests/measure/test_prometheus.py
+@@ -2,6 +2,7 @@
+ """Tests for the Prometheus polling adapter with mocked HTTP responses."""
+ from __future__ import annotations
+ 
++import logging
+ from pathlib import Path
+ from unittest.mock import AsyncMock, patch
+ 
+@@ -814,28 +815,6 @@ async def test_recording_rule_fallback_is_not_inverted(verdict_store):
+     )
+ 
+ 
+-@pytest.mark.asyncio
+-async def test_latency_rule_follows_the_query_not_the_slo_name(verdict_store):
+-    """Same name-vs-type gap the judgment branch closed, on the classical side.
+-
+-    The latency comparison keyed on `slo_name == "latency"`. A v2 SLO named
+-    anything else — p99-latency, checkout-latency — fell to the ratio branch
+-    and had its seconds compared against a 0-100 target.
+-    """
+-    slo = SLODefinition(
+-        service="svc", slo_name="p99-latency", slo_type="traditional",
+-        target=100.0, window="30d", query="q", query_kind="latency_seconds",
+-    )
+-
+-    with patch(
+-        "nthlayer_workers.measure.adapters.prometheus.query_prometheus"
+-    ) as mock_query:
+-        mock_query.return_value = 0.05  # 50ms, well inside a 100ms target
+-        results = await evaluate_slos("http://prom", [slo], verdict_store)
+-
+-    assert results[0].raw_breach is False
+-
+-
+ def test_query_for_reports_the_breach_rule_with_the_query():
+     """_query_for's invariant, as a returned value rather than a comment."""
+     # slo_type as the parsers set it: judgment SLOs are "availability"-shaped
+@@ -845,15 +824,22 @@ def test_query_for_reports_the_breach_rule_with_the_query():
+                        window="5m", judgment_type="reversal_rate")
+     unbuilt = ManifestSLO(name="seg", target=98.0, slo_type="availability",
+                           window="5m", judgment_type="segment_disparity")
+-    latency = ManifestSLO(name="latency", target=100.0, slo_type="latency",
+-                          window="30d")
+-    avail = ManifestSLO(name="availability", target=99.9, slo_type="availability",
+-                        window="30d")
+-
+     assert _query_for("s", rate)[1] == "judgment_rate"
+     assert _query_for("s", unbuilt)[1] == "ratio"
+-    assert _query_for("s", latency)[1] == "latency_seconds"
+-    assert _query_for("s", avail)[1] == "error_budget"
++
++
++# slo_type as the parsers write it for each request-ratio kind.
++@pytest.mark.parametrize("kind", ["availability", "latency", "error_rate"])
++def test_every_request_ratio_slo_reads_its_own_error_budget(kind):
++    """Ruling Z1 (opensrm-zo0o): every request-ratio SLO is good/total against
++    its objective, so generate writes one budget series per SLO and measure
++    reads that series, filtered to the SLO by name, whatever its kind."""
++    slo = ManifestSLO(name=f"checkout-{kind}", target=99.0, slo_type=kind, window="30d")
++
++    query, query_kind = _query_for("checkout", slo)
++
++    assert query == ERROR_BUDGET_REMAINING.selector(service="checkout", slo=f"checkout-{kind}")
++    assert query_kind == "error_budget"
+ 
+ 
+ @pytest.mark.asyncio
+@@ -894,13 +880,13 @@ async def test_hysteresis_survives_a_realistic_number_of_slos(verdict_store):
+ 
+ 
+ @pytest.mark.asyncio
+-async def test_latency_target_is_read_in_its_declared_unit(tmp_path, verdict_store):
+-    """load_specs -> evaluate_slos for latency, the round trip nothing covered.
++async def test_a_latency_slo_breaches_on_its_budget(tmp_path, verdict_store):
++    """load_specs -> evaluate_slos for latency, through the budget.
+ 
+-    The branch hard-coded `target / 1000.0`, assuming milliseconds. The
+-    target reaches it from the parser, which preserves whatever `unit` the
+-    manifest declared — so a seconds-denominated SLO was compared against a
+-    threshold a thousand times too small and breached every window.
++    Latency used to read a percentile in seconds and compare it with the
++    target converted by its unit. Under ruling Z1 the bound lives in
++    generate's good query and the objective in the budget, so measure reads
++    the signed budget and breaches below zero, as for availability.
+     """
+     (tmp_path / "svc.yaml").write_text(
+         "apiVersion: srm/v1\nkind: ServiceReliabilityManifest\n"
+@@ -909,17 +895,76 @@ async def test_latency_target_is_read_in_its_declared_unit(tmp_path, verdict_sto
+         "    latency: {target: 2, unit: s, percentile: p99, window: 30d}\n"
+     )
+     slo = next(s for s in load_specs(tmp_path).slos if s.slo_name == "latency")
++    assert slo.query == ERROR_BUDGET_REMAINING.selector(service="svc", slo="latency")
++
++    with patch(
++        "nthlayer_workers.measure.adapters.prometheus.query_prometheus"
++    ) as mock_query:
++        mock_query.return_value = -0.25  # overspent by a quarter
++        overspent = await evaluate_slos("http://prom", [slo], verdict_store)
++        mock_query.return_value = 0.4
++        healthy = await evaluate_slos("http://prom", [slo], verdict_store)
++
++    assert overspent[0].raw_breach is True
++    assert healthy[0].raw_breach is False
++
++
++# The kinds generate writes no budget for (D5): throughput, and the three its
++# classifier maps to no rules at all.
++@pytest.mark.parametrize("kind", ["throughput", "freshness", "lag", "custom"])
++def test_a_kind_with_no_budget_is_not_evaluable(kind):
++    """Ruling D5 (opensrm-zo0o): measure reports these not evaluable (E3's
++    no_data_source) rather than querying a series nobody writes."""
++    slo = ManifestSLO(name=f"orders-{kind}", target=99.0, slo_type=kind, window="30d")
++
++    assert _query_for("orders", slo) == ("", "not_evaluable")
++
++
++@pytest.mark.asyncio
++async def test_a_not_evaluable_slo_is_never_queried(verdict_store):
++    slo = SLODefinition(
++        service="svc", slo_name="freshness", slo_type="traditional",
++        target=99.0, window="30d", query="", query_kind="not_evaluable",
++    )
+ 
+     with patch(
+         "nthlayer_workers.measure.adapters.prometheus.query_prometheus"
+     ) as mock_query:
+-        mock_query.return_value = 1.5  # 1.5s, inside a 2s target
+         results = await evaluate_slos("http://prom", [slo], verdict_store)
+ 
+-    assert results[0].raw_breach is False, (
+-        "a 2s target read as 2ms makes every response a breach"
++    mock_query.assert_not_called()
++    assert results == []
++
++
++@pytest.mark.asyncio
++async def test_a_missing_budget_is_reported_not_hidden(verdict_store, caplog):
++    """Generate skips a budget whose objective or latency bound it cannot
++    trust, and rules older than generate 4.1.0 carry none for latency. Such
++    an SLO is never evaluated, so that is logged where an operator sees it,
++    unlike a judgment query's ordinary no-data, which stays at debug."""
++    classical = SLODefinition(
++        service="svc", slo_name="latency", slo_type="traditional",
++        target=99.0, window="30d", query="q", query_kind="error_budget",
++    )
++    judgment = SLODefinition(
++        service="svc", slo_name="rev", slo_type="judgment", target=98.5,
++        window="7d", query="q", query_kind="judgment_rate",
++        judgment_type="reversal_rate",
+     )
+ 
++    with patch(
++        "nthlayer_workers.measure.adapters.prometheus.query_prometheus"
++    ) as mock_query, caplog.at_level(logging.DEBUG):
++        mock_query.return_value = None
++        results = await evaluate_slos("http://prom", [classical, judgment], verdict_store)
++
++    assert results == []
++    levels = {
++        r.args[1]: r.levelno for r in caplog.records
++        if r.name == "nthlayer_workers.measure.adapters.prometheus" and r.msg.startswith("No ")
++    }
++    assert levels == {"latency": logging.INFO, "rev": logging.DEBUG}
++
+ 
+ # A v2 manifest that still declares calibration under judgment_slo. Error
+ # magnitudes are thresholds now (decision 3c), so this pins a load failure.
+@@ -956,21 +1001,6 @@ def test_a_calibration_judgment_slo_is_a_load_failure(tmp_path):
+     assert loaded.parse_failures == 1
+ 
+ 
+-@pytest.mark.parametrize(
+-    ("unit", "expected_seconds"),
+-    [("s", 2.0), ("S", 2.0), ("sec", 2.0), ("seconds", 2.0), (" ms ", 0.002)],
+-)
+-def test_duration_units_are_matched_leniently(unit, expected_seconds):
+-    """Manifests are hand-written; `unit: seconds` must not mean milliseconds.
+-
+-    An unmatched unit assumes ms, so every one of these spellings falling
+-    through would give a threshold 1000x too small and breach every window.
+-    """
+-    from nthlayer_workers.measure.adapters.prometheus import _target_seconds
+-
+-    assert _target_seconds(2.0, unit) == pytest.approx(expected_seconds)
+-
+-
+ @pytest.mark.parametrize("value", [0, -1])
+ def test_evaluate_once_rejects_a_hysteresis_below_one(tmp_path, value, capsys):
+     """`consecutive >= 0` is true before any window runs.
+@@ -994,18 +1024,6 @@ def test_evaluate_once_rejects_a_hysteresis_below_one(tmp_path, value, capsys):
+     assert exc.value.code == 2
+ 
+ 
+-def test_a_non_string_unit_warns_rather_than_aborting_the_cycle():
+-    """`unit: 100` reaches here as an int; the parser does not validate it.
+-
+-    Raising would propagate out of evaluate_slos' per-SLO loop and end the
+-    run with verdicts already written for earlier SLOs — a partial cycle,
+-    which is worse than a wrong-but-flagged threshold.
+-    """
+-    from nthlayer_workers.measure.adapters.prometheus import _target_seconds
+-
+-    assert _target_seconds(2.0, 100) == pytest.approx(0.002)  # assumes ms
+-
+-
+ # --- opensrm-h0at: measure reads the error-budget series generate writes ---
+ 
+ # The spec's own v2 example, not a fixture written for this test. CI checks
+@@ -1017,27 +1035,24 @@ _API_FULL_V2 = (
+ )
+ 
+ 
+-def test_a_v2_availability_slo_reads_the_series_generate_writes(tmp_path):
+-    """v2 names SLOs freely: this one is `payment-api-availability`.
++def test_v2_classical_slos_read_the_series_generate_writes(tmp_path):
++    """v2 names SLOs freely: `payment-api-availability`, not `availability`.
+ 
+     measure keyed the error-budget branch on the NAME `availability`, so every
+     such SLO fell through to `slo:payment-api-availability:ratio`, a series
+-    nothing writes, and read as no data. generate writes the error budget for
+-    every availability-typed SLO, labelled with the SLO's name.
++    nothing writes, and read as no data. generate labels each budget with the
++    SLO's name, and since opensrm-zo0o writes one for latency and error_rate
++    too, so every classical SLO here reads its own.
+     """
+     (tmp_path / "payment-api.yaml").write_text(_API_FULL_V2.read_text())
+ 
+     by_name = {s.slo_name: s for s in load_specs(tmp_path).slos}
+ 
+-    avail = by_name["payment-api-availability"]
+-    assert avail.query == ERROR_BUDGET_REMAINING.selector(
+-        service="payment-api", slo="payment-api-availability"
+-    )
+-    assert avail.query_kind == "error_budget"
+-    # The same manifest's non-availability SLOs keep their own queries.
+-    for name in ("payment-api-latency", "payment-api-error-rate"):
+-        assert ERROR_BUDGET_REMAINING.metric not in by_name[name].query, name
+-        assert by_name[name].query_kind != "error_budget", name
++    for name in ("payment-api-availability", "payment-api-latency", "payment-api-error-rate"):
++        assert by_name[name].query == ERROR_BUDGET_REMAINING.selector(
++            service="payment-api", slo=name
++        ), name
++        assert by_name[name].query_kind == "error_budget", name
+ 
+ 
+ def test_an_unbuilt_judgment_slo_does_not_read_the_error_budget():
+@@ -1053,13 +1068,12 @@ def test_an_unbuilt_judgment_slo_does_not_read_the_error_budget():
+     assert kind == "ratio"
+ 
+ 
+-def test_an_explicit_type_is_matched_as_generate_matches_it():
+-    """measure must ask for every series generate writes, and generate's test
+-    is case-insensitive (manifest_builder.py `_build_standard_slo_rules`,
+-    `"availability" in slo_type.lower()`). The shape is not spec-valid: the
+-    v1 schema has no SLO `type` field. It is reachable only because
+-    parser/v1.py and parser/loader.py pass an explicit type through
+-    unnormalised (opensrm-hiw2)."""
++def test_an_unnormalised_type_still_reads_the_budget():
++    """parser/v1.py and parser/loader.py pass an explicit `type:` through
++    unnormalised (opensrm-hiw2), so "Availability" can arrive. measure once
++    matched the type to choose the budget, so its spelling mattered; it now
++    sends every classical SLO to its budget, and must keep doing so for this
++    shape. Not spec-valid: the v1 schema has no SLO `type` field."""
+     explicit = ManifestSLO(name="checkout-avail", target=99.9,
+                            slo_type="Availability", window="30d")
+ 
+diff --git a/tests/observe/test_drift.py b/tests/observe/test_drift.py
+index c9c12f6..fe76ae7 100644
+--- a/tests/observe/test_drift.py
++++ b/tests/observe/test_drift.py
+@@ -382,3 +382,69 @@ async def test_budget_history_queries_the_shared_error_budget_series(monkeypatch
+         ERROR_BUDGET_REMAINING.selector(service="checkout", slo="checkout-availability")
+     ]
+     assert [v for _, v in data] == [0.8]
++
++
++# --- opensrm-zo0o: drift targets only SLOs with a budget series ---
++
++
++def _prometheus_returning(monkeypatch, response: dict | Exception, sent: list[str]):
++    import httpx
++
++    def handler(request: httpx.Request) -> httpx.Response:
++        sent.append(request.url.params["query"])
++        if isinstance(response, Exception):
++            raise response
++        return httpx.Response(200, json=response)
++
++    real_client = httpx.AsyncClient
++    monkeypatch.setattr(
++        httpx, "AsyncClient",
++        lambda **kw: real_client(transport=httpx.MockTransport(handler), **kw),
++    )
++
++
++@pytest.mark.asyncio
++async def test_budgeted_slos_are_the_slo_labels_of_the_written_series(monkeypatch):
++    from nthlayer_common.manifest import ERROR_BUDGET_REMAINING
++
++    sent: list[str] = []
++    # Prometheus HTTP API instant-query shape for `group by (slo) (...)`: one
++    # series per distinct slo label, carrying only that label, value 1.
++    _prometheus_returning(monkeypatch, {"status": "success", "data": {
++        "resultType": "vector",
++        "result": [
++            {"metric": {"slo": "checkout-availability"}, "value": [1730000000, "1"]},
++            {"metric": {"slo": "checkout-latency"}, "value": [1730000000, "1"]},
++        ],
++    }}, sent)
++
++    names = await DriftAnalyzer(prometheus_url="http://prom").budgeted_slos("checkout")
++
++    assert sent == [f"group by (slo) ({ERROR_BUDGET_REMAINING.selector(service='checkout')})"]
++    assert names == {"checkout-availability", "checkout-latency"}
++
++
++@pytest.mark.asyncio
++async def test_budgeted_slos_is_empty_when_the_service_has_no_budget(monkeypatch):
++    _prometheus_returning(monkeypatch, {"status": "success", "data": {
++        "resultType": "vector", "result": [],
++    }}, [])
++
++    assert await DriftAnalyzer(prometheus_url="http://prom").budgeted_slos("checkout") == set()
++
++
++@pytest.mark.asyncio
++@pytest.mark.parametrize("failure", ["unreachable", "error_status"])
++async def test_budgeted_slos_raises_when_prometheus_cannot_answer(monkeypatch, failure):
++    """"No budget" and "could not ask" must stay distinguishable: the worker
++    skips the service on either, but warns only on the second."""
++    import httpx
++
++    response = (
++        httpx.ConnectError("refused") if failure == "unreachable"
++        else {"status": "error", "errorType": "bad_data", "error": "parse error"}
++    )
++    _prometheus_returning(monkeypatch, response, [])
++
++    with pytest.raises(DriftAnalysisError):
++        await DriftAnalyzer(prometheus_url="http://prom").budgeted_slos("checkout")
+diff --git a/tests/observe/test_observe_worker.py b/tests/observe/test_observe_worker.py
+index 71db3d4..afb2d80 100644
+--- a/tests/observe/test_observe_worker.py
++++ b/tests/observe/test_observe_worker.py
+@@ -306,6 +306,58 @@ class TestDriftCycle:
+         client.submit_assessment.assert_not_awaited()
+ 
+ 
++class TestDriftTargetsHaveABudget:
++    """Drift reads the error budget, so it analyses only SLOs that have one
++    (opensrm-zo0o). It targeted every manifest SLO, judgment ones included,
++    and each SLO with no budget series failed every cycle with a warning."""
++
++    def _module(self, analyzer_cls, budgeted):
++        from nthlayer_workers.observe.drift import DriftAnalysisError
++
++        analyzer = AsyncMock()
++        # Only the call matters here; the analysis itself is tested elsewhere.
++        analyzer.analyze = AsyncMock(side_effect=DriftAnalysisError("no history"))
++        if isinstance(budgeted, Exception):
++            analyzer.budgeted_slos = AsyncMock(side_effect=budgeted)
++        else:
++            analyzer.budgeted_slos = AsyncMock(return_value=budgeted)
++        analyzer_cls.return_value = analyzer
++        client = AsyncMock()
++        client.get_manifests = AsyncMock(return_value=_manifest_response())
++        return ObserveDriftModule(client=client, prometheus_url="http://prom:9090"), analyzer
++
++    @patch("nthlayer_workers.observe.drift.DriftAnalyzer")
++    async def test_only_slos_with_a_budget_series_are_analysed(self, analyzer_cls):
++        module, analyzer = self._module(analyzer_cls, {"availability"})
++
++        await module.process_cycle()
++
++        analysed = [c.args[2] for c in analyzer.analyze.await_args_list]
++        assert analysed == ["availability"]  # not the judgment SLO reversal_rate
++
++    @patch("nthlayer_workers.observe.drift.DriftAnalyzer")
++    async def test_a_service_with_no_budget_is_not_analysed(self, analyzer_cls):
++        module, analyzer = self._module(analyzer_cls, set())
++
++        await module.process_cycle()
++
++        analyzer.analyze.assert_not_awaited()
++
++    @patch("nthlayer_workers.observe.drift.DriftAnalyzer")
++    async def test_discovery_failure_skips_the_service_with_one_warning(self, analyzer_cls):
++        from nthlayer_workers.observe.drift import DriftAnalysisError
++
++        module, analyzer = self._module(analyzer_cls, DriftAnalysisError("down"))
++
++        with patch("nthlayer_workers.observe.worker.logger") as log:
++            await module.process_cycle()
++
++        analyzer.analyze.assert_not_awaited()
++        # Asked once for the service, not once per SLO.
++        assert analyzer.budgeted_slos.await_count == 1
++        assert [c.args[0] for c in log.warning.call_args_list] == ["drift_budget_discovery_failed"]
++
++
+ # ---------------------------------------------------------------------------
+ # ObserveTopologyModule
+ # ---------------------------------------------------------------------------
+@@ -419,6 +471,9 @@ class TestDriftCycleHappyPath:
+             recommendation="Investigate trend",
+             exit_code=1,
+         ))
++        # Prometheus holds a budget for the classical SLO only; the judgment
++        # SLO beside it in the manifest has none (opensrm-zo0o).
++        mock_analyzer.budgeted_slos = AsyncMock(return_value={"availability"})
+         mock_analyzer_cls.return_value = mock_analyzer
+ 
+         client = AsyncMock()

@@ -1,0 +1,66 @@
+{
+ "schema_version": 1,
+ "entry": "opensrm-xvwt",
+ "bead": "opensrm-xvwt",
+ "record": "xvwt",
+ "archive": "r5-state-xvwt-completed.json",
+ "record_repos": [
+  "nthlayer-common"
+ ],
+ "repo": "nthlayer-common",
+ "part": null,
+ "base": "df818e83096b2bd4c129e022f62c431e11df7eba",
+ "head": "33e6490e2956509851530c3da1576faaa532ebe9",
+ "record_head": null,
+ "synthetic_base": "492daa7468c86b68d65093bd9b719dc0be165637",
+ "synthetic_head": "83e1c1c8db4510a7cc3698c1cc991d2c3af9f25b",
+ "base_tree": "c0e5d3ef315d8908f0ca25a4397a1973ee5aecb0",
+ "tree_sha": "094344955767dbb5defc1b015a1dbb7e7b02b412",
+ "unavailable": null,
+ "bundle": {
+  "repo": "nthlayer-common",
+  "sha256": "f9019061b549dfd646007ebbc850d287eecb97a0c2d390ec673c0624358e10b3"
+ },
+ "sequential_steps": 3,
+ "record_sequential_steps": 3,
+ "bead_sequential_steps": 3,
+ "fidelity": "counts_only",
+ "blocking_findings": 1,
+ "escape": false,
+ "brief_source": "bead",
+ "roster": {
+  "record_version": 2,
+  "passes": [
+   "correctness",
+   "clarity",
+   "edge-cases",
+   "provenance"
+  ]
+ },
+ "lens_order": [
+  "correctness"
+ ],
+ "counts": {
+  "correctness": [
+   {
+    "critical": 0,
+    "important": 1,
+    "minor": 1
+   },
+   {
+    "critical": 0,
+    "important": 0,
+    "minor": 1
+   }
+  ]
+ },
+ "baseline": {
+  "correctness": {
+   "reviews": 2,
+   "fix_rounds": 1,
+   "findings_first_review": 2,
+   "unattributed": 0,
+   "steps": 3
+  }
+ }
+}

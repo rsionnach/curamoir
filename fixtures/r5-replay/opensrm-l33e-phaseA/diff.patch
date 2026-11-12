@@ -1,0 +1,2333 @@
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index f5d5a18..e0cf7ee 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
+ 
+ ## [Unreleased]
+ 
++### Changed — BREAKING (v2-draft)
++- **Judgment error magnitudes are no longer SLOs** (decision 3c, opensrm-l33e).
++  `segments`, `stability` and `calibration` leave `judgment_slo`, and
++  `audit_sampling`'s `audit_backlog_maximum_age` leaves its target. All four
++  move to the new `spec.judgment_threshold` list, which also gains
++  `feedback_latency`. A breach is the measured value exceeding a declared bound;
++  there is no error budget and no complement.
++
++  Before:
++
++  ```yaml
++  judgment_slo:
++    - judgment_type: calibration
++      measurement: { bins: 10, window: 30d, method: brier_score }
++      target: { maximum_brier_score: 0.05 }
++  ```
++
++  After:
++
++  ```yaml
++  judgment_threshold:
++    - type: calibration
++      measurement: { bins: 10, window: 30d }
++      bounds: { maximum_brier_score: 0.05 }
++  ```
++
++  `target` becomes `bounds`, with the same field names, except that the backlog
++  bound is `bounds.maximum_age` under `type: audit_backlog`. `measurement.method`
++  is removed: declare either calibration bound, or both, and each is evaluated.
++  `judgment_threshold` is inline-only and, like `judgment_slo`, only permitted on
++  an `ai-gate` service.
++
+ ### Changed
+ - Standardized `apiVersion` to `opensrm/v1` across spec, schema, and all examples (previously `opensrm.io/v1` in spec and `srm/v1` in schema/examples)
+ - Moved `judgment-slo-spec.md` to `spec/v1/judgment-slos.md` as canonical location
+diff --git a/CLAUDE.md b/CLAUDE.md
+index 72766e5..b5c4179 100644
+--- a/CLAUDE.md
++++ b/CLAUDE.md
+@@ -109,7 +109,7 @@ shift-left contract.
+     2026-08-25). Machine-readable schema + worked examples:
+     `spec/v2/schema.json` (validated by `spec/v2/validate.sh`).
+   - `spec/v2/AUTHORING.md` — how to WRITE a v2 manifest: block-by-block
+-    walkthrough, all eight judgment SLO types worked, conventions, and
++    walkthrough, all five judgment SLO types and five judgment threshold types worked, conventions, and
+     v1→v2 migration. The entry point for manifest authors;
+     `OPENSRM-CORE-v2.md` stays the normative spec and `spec/v2/README.md`
+     covers the validator.
+diff --git a/OPENSRM-CORE-v2.md b/OPENSRM-CORE-v2.md
+index 3c709d9..2004630 100644
+--- a/OPENSRM-CORE-v2.md
++++ b/OPENSRM-CORE-v2.md
+@@ -119,6 +119,9 @@ spec:
+   judgment_slo:
+     - <see §5 for full schema>
+ 
++  judgment_threshold:                           # §5.5 — bounds on error magnitudes (inline only)
++    - <see §5.5 for full schema>
++
+   # Reliability contracts — what this service promises to callers (see §6)
+   contracts:
+     - <see §6>
+@@ -165,7 +168,7 @@ Type-conditional validation, restoring the v1 rule:
+ 
+ `type` is not inheritable. A `ServiceManifestTemplate` MUST NOT declare `spec.service.type`, and an extending manifest MUST declare its own. Were a template permitted one, a template typed `ai-gate` carrying judgment SLOs and a manifest typed `worker` extending it would both validate alone, and the resolved manifest's verdict would depend on whose value an implementation kept — the same two files accepted by one conformant implementation and rejected by another.
+ 
+-Because template resolution happens at load time rather than during schema validation, a template carrying `judgment_slo` could otherwise supply them to a manifest of any type. An implementation MUST therefore revalidate the fully resolved manifest, after template expansion, against the same rules (§9, §13).
++Because template resolution happens at load time rather than during schema validation, a template carrying `judgment_slo` or `judgment_threshold` could otherwise supply them to a manifest of any type. An implementation MUST therefore revalidate the fully resolved manifest, after template expansion, against the same rules (§9, §13).
+ 
+ ## 4. Classical SLOs (via OpenSLO)
+ 
+@@ -260,7 +263,7 @@ Judgment SLO documents can be embedded in a service manifest's `judgment_slo` bl
+ 
+ ### 5.2 Judgment SLO types
+ 
+-Eight types are specified as the core vocabulary. Organisations can define additional types under their own `apiVersion`; conformant implementations MUST support the eight standard types and MAY support additional types.
++Five types are specified as the core vocabulary. Organisations can define additional types under their own `apiVersion`; conformant implementations MUST support the five standard types and MAY support additional types.
+ 
+ #### 5.2.1 Reversal rate
+ 
+@@ -311,10 +314,11 @@ spec:
+       - segment: "low_confidence"
+         rate: 0.25
+   target:
+-    audit_backlog_maximum_age: 24h     # audits completed within 24h
+     audit_completion_rate: 0.95
+ ```
+ 
++The audit backlog bound is a judgment threshold (§5.5, `type: audit_backlog`), not part of this target.
++
+ #### 5.2.4 Outcomes
+ 
+ Tracks whether decisions produced intended outcomes, where outcomes are resolvable via downstream signals.
+@@ -343,58 +347,13 @@ spec:
+     escalation_human_agreement_rate: 0.8  # humans agree with escalation 80% of the time
+ ```
+ 
+-#### 5.2.6 Segments
+-
+-Tracks that SLO performance is consistent across meaningful segments (customer tiers, geographies, request types). A service with 95% accuracy overall but 60% accuracy on a specific segment has a segment problem that overall SLOs hide.
+-
+-```yaml
+-spec:
+-  service: credit-decision-agent
+-  judgment_type: segments
+-  segment_dimension: customer_tier
+-  segment_values: [enterprise, smb, consumer]
+-  target:
+-    maximum_variance_from_overall: 0.05  # no segment more than 5% below overall
+-```
+-
+-#### 5.2.7 Stability
+-
+-Tracks that the service produces consistent decisions for equivalent inputs over time. A service whose decisions drift with model updates, prompt changes, or upstream data changes has a stability problem.
+-
+-```yaml
+-spec:
+-  service: content-classifier
+-  judgment_type: stability
+-  probe:
+-    frozen_input_set: "s3://probes/content-classifier-2026q1.jsonl"
+-    frequency: daily
+-  target:
+-    maximum_drift: 0.02                # decisions on the probe set change at most 2% per measurement
+-```
+-
+-#### 5.2.8 Calibration
+-
+-Tracks that expressed confidence matches actual accuracy. If the service says it's 80% confident, does it get 80% of those decisions right?
+-
+-```yaml
+-spec:
+-  service: investigation-agent
+-  judgment_type: calibration
+-  measurement:
+-    bins: 10                           # 0.0-0.1, 0.1-0.2, ..., 0.9-1.0
+-    window: 30d
+-    method: brier_score                # or expected_calibration_error
+-  target:
+-    maximum_brier_score: 0.05
+-```
+-
+ ### 5.3 Statistical requirements
+ 
+-Judgment-SLO evaluation relies on established statistical methods, not bespoke formulas. A conformant implementation MUST compute:
++Judgment SLO and threshold evaluation relies on established statistical methods, not bespoke formulas. A conformant implementation MUST compute:
+ 
+-- **Calibration metrics** using accepted methods such as Brier score or expected calibration error, binned over the specified measurement window
++- **Calibration metrics** (§5.5.3) using accepted methods such as Brier score or expected calibration error, binned over the specified measurement window
+ - **Confidence intervals** around reversal-rate and outcome-rate estimates, with interval width appropriate to the sample size
+-- **Segment-variance statistics** for judgment SLOs with segment dimensions, using hypothesis tests appropriate to the segment distribution
++- **Segment-variance statistics** (§5.5.1) for `segments` judgment thresholds, using hypothesis tests appropriate to the segment distribution
+ - **Cohort retention analysis** for reversal rate and outcomes, tracking decisions from emission through resolution
+ 
+ The wire format for judgment-SLO outcomes is the OTel `gen_ai.evaluation.result` event (OTel semconv v1.39.0+), extended with the `nthlayer.decision.*` attributes described in §11.3.
+@@ -421,6 +380,76 @@ breach_actions:
+ 
+ How these actions are dispatched — which consumer handles which action type, what the notification mechanism is, how cases are rendered — is a consumer concern, not an OpenSRM concern. The spec describes what the manifest *declares*; consumers decide what to *do* with the declaration.
+ 
++### 5.5 Judgment thresholds
++
++Some measures of decision quality are not SLOs. A segment variance, a drift bound, a calibration error, an audit backlog age and a feedback delay are *error magnitudes*: they have no population of good events, no complement and no error budget. In every standard surveyed they would be monitored metrics with thresholds. OpenSRM declares them under `spec.judgment_threshold`, an inline list on an `ai-gate` ServiceManifest. Each entry names a `type` and a closed `bounds` object; a breach is the measured value exceeding any declared bound. Thresholds do not declare `breach_actions` in this version of the spec. A threshold entry MUST NOT carry `service`, `target` or `judgment_type`: the service is the enclosing manifest's, the value is `bounds`, and the discriminator is `type`. `segment_dimension` and each `segment_values` entry MUST be non-empty. (Decision 3c, opensrm-l33e.)
++
++#### 5.5.1 Segments
++
++Tracks that measured performance does not vary beyond the declared bound across meaningful segments (customer tiers, geographies, request types). A service with 95% accuracy overall but 60% accuracy on a specific segment has a segment problem that overall SLOs hide.
++
++```yaml
++judgment_threshold:
++  - type: segments
++    segment_dimension: customer_tier
++    segment_values: [enterprise, smb, consumer]
++    bounds:
++      maximum_variance_from_overall: 0.05
++```
++
++#### 5.5.2 Stability
++
++Tracks that the service produces consistent decisions for equivalent inputs over time. A service whose decisions drift with model updates, prompt changes, or upstream data changes has a stability problem.
++
++```yaml
++judgment_threshold:
++  - type: stability
++    probe:
++      frozen_input_set: "s3://probes/credit-decision-2026q1.jsonl"
++      frequency: daily
++    bounds:
++      maximum_drift: 0.02
++```
++
++#### 5.5.3 Calibration
++
++Tracks that expressed confidence matches actual accuracy. If the service says it's 80% confident, does it get 80% of those decisions right?
++
++```yaml
++judgment_threshold:
++  - type: calibration
++    measurement:
++      bins: 10
++      window: 30d
++    bounds:
++      maximum_brier_score: 0.05
++```
++
++Declare either bound or both; each declared bound is evaluated.
++
++#### 5.5.4 Audit backlog
++
++The age of the oldest unaudited sample; a stale backlog means the audit sample is no longer representative.
++
++```yaml
++judgment_threshold:
++  - type: audit_backlog
++    bounds:
++      maximum_age: 24h
++```
++
++#### 5.5.5 Feedback latency
++
++How long until ground truth arrives for a decision; it bounds how quickly any judgment SLO can notice a regression.
++
++```yaml
++judgment_threshold:
++  - type: feedback_latency
++    bounds:
++      maximum_p50: 1h
++      maximum_p90: 24h
++```
++
+ ## 6. Reliability Contracts (OpenSRM's original contribution)
+ 
+ A reliability contract is a first-class cross-service promise. A service declares what reliability it offers to its callers; its callers declare what they expect from it (in the `dependencies` block, §7). When these converge, the system is healthy. When they diverge, an OpenSRM consumer can surface the divergence as a correlation signal.
+@@ -698,7 +727,7 @@ An implementation SHOULD:
+ 
+ An implementation MAY:
+ 
+-- Extend judgment SLO types beyond the eight standards under its own `apiVersion`
++- Extend judgment SLO types beyond the five standards under its own `apiVersion`
+ - Add custom annotations under reserved namespaces
+ - Target any observability backend capable of representing the declared SLOs
+ - Adopt the `nthlayer.decision.*` attributes described in §11.3 pending upstream standardisation
+@@ -719,7 +748,7 @@ The submission narrative is "OpenSRM is the missing composition layer between ex
+ 
+ ## 15. Open Questions
+ 
+-- **Judgment SLO type extensibility.** The eight standard types may not cover all real-world needs. Should there be a formal extension mechanism (new types registered with a TC), or should organisations just use custom `apiVersion` values?
++- **Judgment SLO type extensibility.** The five standard types may not cover all real-world needs. Should there be a formal extension mechanism (new types registered with a TC), or should organisations just use custom `apiVersion` values?
+ - **Contract breach credits.** The `sla_credits` block references an external calculation document. Is that enough, or should OpenSRM specify a contract-breach credit semantics?
+ - **Template composition.** One level of template inheritance is simple; some organisations may want more. Is the single-level limit acceptable?
+ - **Multi-cluster manifests.** A service deployed to multiple clusters/regions may have different reliability characteristics per cluster. Does the manifest model need to extend for this, or do we just recommend per-cluster manifests?
+diff --git a/spec/v2/AUTHORING.md b/spec/v2/AUTHORING.md
+index 3b6c751..ab9a87e 100644
+--- a/spec/v2/AUTHORING.md
++++ b/spec/v2/AUTHORING.md
+@@ -2,12 +2,12 @@
+ 
+ A practical guide to writing an OpenSRM v2 `ServiceManifest`: what each
+ block is for, which ones your service actually needs, how to express all
+-eight judgment SLO types, and how to migrate from v1.
++five judgment SLO types, and how to migrate from v1.
+ 
+ > **Status: v2 is a draft.** `spec/v1/` remains canonical. v2 is
+ > specified in [`../../OPENSRM-CORE-v2.md`](../../OPENSRM-CORE-v2.md) and
+ > validated by [`schema.json`](schema.json). Write v2 manifests today if
+-> you want the eight-type judgment SLO framework or the OpenSLO/Backstage
++> you want the five-type judgment SLO framework or the OpenSLO/Backstage
+ > composition; expect the draft to move before it stabilises.
+ 
+ Every YAML block in this guide is an excerpt from a real file, linked
+@@ -25,14 +25,26 @@ the repo root and are, correctly, not valid under the v2 schema.
+ 2. [The envelope](#2-the-envelope)
+ 3. [Choosing a starting point](#3-choosing-a-starting-point)
+ 4. [Block by block](#4-block-by-block)
+-5. [The eight judgment SLO types](#5-the-eight-judgment-slo-types)
++5. [The five judgment SLO types](#5-the-five-judgment-slo-types)
++   - 5.1 [`reversal_rate`](#51-reversal_rate)
++   - 5.2 [`high_confidence_failure`](#52-high_confidence_failure)
++   - 5.3 [`audit_sampling`](#53-audit_sampling)
++   - 5.4 [`outcomes`](#54-outcomes)
++   - 5.5 [`escalation`](#55-escalation)
++   - 5.6 [`breach_actions`](#56-breach_actions--applies-to-all-five)
++   - 5A. [The five judgment threshold types](#5a-the-five-judgment-threshold-types)
++     - 5A.1 [`segments`](#5a1-segments)
++     - 5A.2 [`stability`](#5a2-stability)
++     - 5A.3 [`calibration`](#5a3-calibration)
++     - 5A.4 [`audit_backlog`](#5a4-audit_backlog)
++     - 5A.5 [`feedback_latency`](#5a5-feedback_latency)
+ 6. [Conventions and gotchas](#6-conventions-and-gotchas)
+ 7. [Migrating from v1](#7-migrating-from-v1)
+ 8. [Validating your manifest](#8-validating-your-manifest)
+ 
+ New to OpenSRM? Read in order. Migrating an existing v1 manifest? Start
+ at [§7](#7-migrating-from-v1), which points back into the detail.
+-Writing your first judgment SLO? [§5](#5-the-eight-judgment-slo-types)
++Writing your first judgment SLO? [§5](#5-the-five-judgment-slo-types)
+ stands alone.
+ 
+ ## 1. What a manifest is for
+@@ -72,7 +84,7 @@ There are three document kinds:
+ |---|---|
+ | `ServiceManifest` | One service's reliability declaration. The main event. |
+ | `JudgmentSLO` | A standalone judgment SLO, referenced from a manifest. |
+-| `ServiceManifestTemplate` | Shared defaults a manifest extends ([§4.8](#48-template--shared-defaults)). |
++| `ServiceManifestTemplate` | Shared defaults a manifest extends ([§4.9](#49-template--shared-defaults)). |
+ 
+ The smallest manifest the schema accepts needs only an owner and a
+ service identity — and an identity means both `name` and `type`
+@@ -164,7 +176,7 @@ conditions are about consumption discipline rather than authentication:
+ 
+ **An ai-gate is an api plus judgment SLOs.** Classical SLOs tell you the
+ gate answered quickly and without erroring. They cannot tell you it
+-answered *well*. That gap is what [§5](#5-the-eight-judgment-slo-types)
++answered *well*. That gap is what [§5](#5-the-five-judgment-slo-types)
+ is about.
+ 
+ ### 3.1 The `type` field
+@@ -325,11 +337,47 @@ This block is only permitted on a service whose `spec.service.type` is
+ → [`examples/services/ai-gate.yaml`](examples/services/ai-gate.yaml)
+ 
+ Unlike `slo`, these **are** fully validated: `judgment_type` selects one
+-of eight branches, each requiring its own `measurement`/`sampling`/
++of five branches, each requiring its own `measurement`/`sampling`/
+ `probe`/`target` shape. Get the shape wrong and the fixture suite
+-catches it. [§5](#5-the-eight-judgment-slo-types) covers all eight.
++catches it. [§5](#5-the-five-judgment-slo-types) covers all five.
+ 
+-### 4.5 `contracts` — what you promise callers
++Error magnitudes — segments, stability, calibration, audit backlog, feedback latency — are not judgment SLOs; declare them under `judgment_threshold` (§4.5).
++
++### 4.5 `judgment_threshold` — bounds on error magnitudes
++
++Some measures of decision quality are not SLOs. A segment variance, a drift bound, a calibration error, an audit backlog age and a feedback delay are *error magnitudes*: they have no population of good events, no complement and no error budget. In every standard surveyed they would be monitored metrics with thresholds. OpenSRM declares them under `spec.judgment_threshold`, an inline list on an `ai-gate` ServiceManifest. Each entry names a `type` and a closed `bounds` object; a breach is the measured value exceeding any declared bound. (Decision 3c, opensrm-l33e.)
++
++```yaml
++judgment_threshold:
++  - type: segments
++    segment_dimension: customer_tier
++    segment_values: [enterprise, smb, consumer]
++    bounds:
++      maximum_variance_from_overall: 0.05
++  - type: stability
++    probe:
++      frozen_input_set: "s3://probes/credit-decision-2026q1.jsonl"
++      frequency: daily
++    bounds:
++      maximum_drift: 0.02
++  - type: calibration
++    measurement:
++      bins: 10
++      window: 30d
++    bounds:
++      maximum_brier_score: 0.05
++  - type: audit_backlog
++    bounds:
++      maximum_age: 24h
++  - type: feedback_latency
++    bounds:
++      maximum_p50: 1h
++      maximum_p90: 24h
++```
++
++Each type is described in §5A.
++
++### 4.6 `contracts` — what you promise callers
+ 
+ A contract is a promise to the services that call you. It is the block
+ that makes cross-service reasoning possible, and it is **not** the same
+@@ -368,7 +416,7 @@ down even when they feel obvious: an unstated condition is one you
+ cannot point at when a caller hammers you without a rate limit and then
+ asks why you missed your number.
+ 
+-### 4.6 `dependencies` — what you expect from others
++### 4.7 `dependencies` — what you expect from others
+ 
+ The mirror image of `contracts`. Your dependency's `promise` and your
+ `expected_*` values should agree; where they do not, a consumer can
+@@ -395,7 +443,7 @@ enum; the examples here use `fail_closed`, `graceful_degradation`,
+ `retry_with_backoff` and `fail_open_to_human`. Agree on a vocabulary
+ within your organisation, because nothing in the schema will.
+ 
+-### 4.7 `instrumentation` — what the service must emit
++### 4.8 `instrumentation` — what the service must emit
+ 
+ The declaration that makes everything above computable, and a checklist
+ for the service owner:
+@@ -437,7 +485,7 @@ This block declares what the service **emits**, not what is built on top
+ of it. Dashboards, alert rules and trace sampling rates are not
+ manifest concerns in v2.
+ 
+-### 4.8 `template` — shared defaults
++### 4.9 `template` — shared defaults
+ 
+ For organisations with many similar services, factor the common parts
+ into a `ServiceManifestTemplate`:
+@@ -492,7 +540,7 @@ Two warnings, because both of these fail late rather than at validation:
+   specified, treat `overrides` as the least safe block in the format and
+   check any expansion by hand.
+ 
+-## 5. The eight judgment SLO types
++## 5. The five judgment SLO types
+ 
+ Judgment SLOs are OpenSRM's original contribution — the part no other
+ standard specifies. They measure whether a service's decisions are
+@@ -504,8 +552,8 @@ classifiers, rule engines, and human-in-the-loop approval queues all
+ qualify. If the service's output is a call someone could disagree
+ with, these apply.
+ 
+-Eight types are the standard vocabulary. Implementations MUST support
+-all eight; organisations MAY define more under their own `apiVersion`.
++Five types are the standard vocabulary. Implementations MUST support
++all five; organisations MAY define more under their own `apiVersion`.
+ Each type below gives what it measures, when to reach for it, how to set
+ the target, what a breach means, and the mistake people make.
+ 
+@@ -609,7 +657,6 @@ spec:
+       - segment: low_confidence
+         rate: 0.25
+   target:
+-    audit_backlog_maximum_age: 24h
+     audit_completion_rate: 0.95
+ ```
+ 
+@@ -626,9 +673,9 @@ declares the sampling rate and holds the audit queue accountable.
+ **Setting the target** means stratifying. A flat `overall_rate` spends
+ your reviewers' scarce attention uniformly across decisions that do not
+ deserve it uniformly — sample high-stakes and low-confidence decisions
+-harder, as above. Then set `audit_completion_rate` and
+-`audit_backlog_maximum_age` to what your reviewer capacity can actually
+-sustain.
++harder, as above. Then set `audit_completion_rate` to what your reviewer
++capacity can actually sustain. The backlog age bound is a judgment
++threshold — see §5A.4.
+ 
+ **A breach means** you have stopped auditing at the declared rate, so
+ every other judgment SLO fed by audit data is now running on stale or
+@@ -636,8 +683,7 @@ thin evidence. Treat it as an integrity failure of the whole judgment
+ SLO set, not a minor process miss.
+ 
+ **Common mistake:** declaring a sampling rate the team has no capacity
+-to review, then quietly falling behind. The backlog target exists to
+-make that visible. The opposite error is quieter and worse: an
++to review, then quietly falling behind. Quieter and worse: an
+ `overall_rate` of `0` validates, and starves every judgment SLO that
+ depends on audit-derived ground truth without any of them reporting a
+ breach.
+@@ -714,19 +760,48 @@ number moved tells you which.
+ **Common mistake:** treating a low escalation rate as unambiguously
+ good. It is only good if agreement stays high.
+ 
+-### 5.6 `segments`
++### 5.6 `breach_actions` — applies to all five
++
++Any judgment SLO may declare what happens when it breaks. Four action
++forms are available: `notify`, `create_case` (with a `P0`–`P3`
++priority), `reduce_autonomy`, and `action_request`. Thresholds (§5A)
++cannot declare breach actions.
+ 
+ ```yaml
+-spec:
+-  service: credit-decision-agent
+-  judgment_type: segments
+-  segment_dimension: customer_tier
+-  segment_values: [enterprise, smb, consumer]
+-  target:
+-    maximum_variance_from_overall: 0.05
++      breach_actions:
++        - create_case:
++            priority: P1
++        - reduce_autonomy:
++            agent: refund-approver
++            new_autonomy_level: recommend_only
++```
++
++→ [`examples/services/ai-gate.yaml`](examples/services/ai-gate.yaml)
++
++`reduce_autonomy` is the one worth dwelling on: it lets a service
++declare, in advance and in version control, how much authority it should
++lose when its own quality degrades. Deciding that while things are calm
++is much easier than deciding it mid-incident.
++
++The manifest only *declares* these. Which consumer dispatches them, and
++how, is deliberately out of scope.
++
++## 5A. The five judgment threshold types
++
++Bounds on error magnitudes, declared under `judgment_threshold` (§4.5). A breach is the measured value exceeding any declared bound. Thresholds do not declare `breach_actions` in this version of the spec.
++
++### 5A.1 `segments`
++
++```yaml
++judgment_threshold:
++  - type: segments
++    segment_dimension: customer_tier
++    segment_values: [enterprise, smb, consumer]
++    bounds:
++      maximum_variance_from_overall: 0.05
+ ```
+ 
+-→ [`examples/judgment-slos/06-segments.yaml`](examples/judgment-slos/06-segments.yaml)
++→ [`examples/judgment-thresholds/all-five-types.yaml`](examples/judgment-thresholds/all-five-types.yaml)
+ 
+ **Measures** whether quality holds *evenly*. A service at 95% overall
+ that runs at 60% for one segment has a serious problem that the
+@@ -734,10 +809,10 @@ aggregate hides.
+ 
+ **Reach for it whenever decisions affect identifiable groups** —
+ customer tiers, geographies, languages, request types. On decisions
+-affecting people, this is often the judgment SLO that matters most, and
++affecting people, this is often the judgment threshold that matters most, and
+ aggregate metrics are structurally incapable of surfacing it.
+ 
+-**Setting the target** means choosing `segment_dimension` where you
++**Setting the bound** means choosing `segment_dimension` where you
+ suspect performance actually varies, not where the data is easiest to
+ join. Enumerate `segment_values` explicitly — a segment absent from the
+ list is not monitored.
+@@ -749,27 +824,26 @@ sample all produce this.
+ 
+ **Common mistake:** picking one dimension and calling the question
+ answered. Segment problems hide along the dimension you did not declare;
+-several `segments` SLOs on different dimensions is a reasonable manifest.
++several `segments` thresholds on different dimensions is a reasonable manifest.
+ Watch the degenerate case too: a single entry in `segment_values`
+ validates, and compares that one segment against the overall figure. If
+ it is the dimension's only value, the variance is identically zero and
+-the SLO can never fire; if it is not, everything you left off the list
++the threshold can never fire; if it is not, everything you left off the list
+ goes unmonitored.
+ 
+-### 5.7 `stability`
++### 5A.2 `stability`
+ 
+ ```yaml
+-spec:
+-  service: content-classifier
+-  judgment_type: stability
+-  probe:
+-    frozen_input_set: "s3://probes/content-classifier-2026q1.jsonl"
+-    frequency: daily
+-  target:
+-    maximum_drift: 0.02
++judgment_threshold:
++  - type: stability
++    probe:
++      frozen_input_set: "s3://probes/credit-decision-2026q1.jsonl"
++      frequency: daily
++    bounds:
++      maximum_drift: 0.02
+ ```
+ 
+-→ [`examples/judgment-slos/07-stability.yaml`](examples/judgment-slos/07-stability.yaml)
++→ [`examples/judgment-thresholds/all-five-types.yaml`](examples/judgment-thresholds/all-five-types.yaml)
+ 
+ **Measures** whether the same inputs still get the same decisions. A
+ frozen probe set is replayed on a schedule and the answers compared
+@@ -781,7 +855,7 @@ upstream feature changes. This is the only type that catches silent
+ behavioural change, because it is the only one holding the input
+ constant.
+ 
+-**Setting the target** starts with the probe set, which is the real
++**Setting the bound** starts with the probe set, which is the real
+ work. It must be *frozen* and representative; a probe set of easy cases
+ will report stability you do not have. Version it — the path in the
+ example carries `2026q1` for that reason — and re-cut it deliberately,
+@@ -794,71 +868,96 @@ but it must be attributable to a change someone made.
+ **Common mistake:** refreshing the probe set to make drift go away. That
+ converts your one silent-change detector into a rubber stamp.
+ 
+-### 5.8 `calibration`
++### 5A.3 `calibration`
+ 
+ ```yaml
+-spec:
+-  service: investigation-agent
+-  judgment_type: calibration
+-  measurement:
+-    bins: 10
+-    window: 30d
+-    method: brier_score
+-  target:
+-    maximum_brier_score: 0.05
++judgment_threshold:
++  - type: calibration
++    measurement:
++      bins: 10
++      window: 30d
++    bounds:
++      maximum_brier_score: 0.05
+ ```
+ 
+-→ [`examples/judgment-slos/08-calibration.yaml`](examples/judgment-slos/08-calibration.yaml)
++→ [`examples/judgment-thresholds/all-five-types.yaml`](examples/judgment-thresholds/all-five-types.yaml)
+ 
+ **Measures** whether expressed confidence means anything: of the
+ decisions the service called 80% likely, are about 80% correct?
+ 
+ **Reach for it when** confidence values are consumed by anything —
+ routing, thresholds, autonomy levels. If confidence drives behaviour, it
+-needs its own SLO. Note the relationship to §5.2: `high_confidence_failure`
++needs its own bound. Note the relationship to §5.2: `high_confidence_failure`
+ watches one end of the confidence range, `calibration` assesses the whole
+ curve.
+ 
+-**Setting the target** requires matching `method` to the target key.
+-`brier_score` pairs with `maximum_brier_score`;
+-`expected_calibration_error` pairs with
+-`maximum_expected_calibration_error`. `bins` controls the resolution of
+-the reliability curve — more bins need more data per bin to stay
+-meaningful, and the schema floors it at 2, since one bin is not a curve.
++**Setting the bound** means declaring the bound(s) you want
++evaluated — `maximum_brier_score`, `maximum_expected_calibration_error`,
++or both; each declared bound is evaluated. `bins` controls the
++resolution of the reliability curve — more bins need more data per bin
++to stay meaningful, and the schema floors it at 2, since one bin is not
++a curve.
+ 
+ **A breach means** the confidence signal is not trustworthy, so
+ everything downstream that gates on it is running on a number that does
+ not mean what it says.
+ 
+ **Common mistake:** comparing calibration numbers computed with
+-different `bins` or a different `method` and treating the difference as
++different `bins` or a different metric and treating the difference as
+ a change in quality. Neither metric is comparable across configurations
+ — if you re-tune `bins`, your history restarts.
+ 
+-### 5.9 `breach_actions` — applies to all eight
++### 5A.4 `audit_backlog`
+ 
+-Any judgment SLO may declare what happens when it breaks. Four action
+-forms are available: `notify`, `create_case` (with a `P0`–`P3`
+-priority), `reduce_autonomy`, and `action_request`.
++```yaml
++judgment_threshold:
++  - type: audit_backlog
++    bounds:
++      maximum_age: 24h
++```
++
++→ [`examples/judgment-thresholds/all-five-types.yaml`](examples/judgment-thresholds/all-five-types.yaml)
++
++**Measures** how old the oldest unreviewed audit item is.
++
++**Reach for it when** you declare an `audit_sampling` rate (§5.3). The
++backlog age bound makes falling behind visible.
++
++**Setting the bound** means choosing what your reviewer capacity can
++actually sustain. Declaring a sampling rate the team has no capacity to
++review means quietly falling behind.
++
++**A breach means** audits are queuing faster than they are reviewed, so
++audit-derived ground truth is going stale.
++
++**Common mistake:** sizing the sampling rate first and the bound never,
++so the backlog grows with nothing to report it.
++
++### 5A.5 `feedback_latency`
+ 
+ ```yaml
+-      breach_actions:
+-        - create_case:
+-            priority: P1
+-        - reduce_autonomy:
+-            agent: refund-approver
+-            new_autonomy_level: recommend_only
++judgment_threshold:
++  - type: feedback_latency
++    bounds:
++      maximum_p50: 1h
++      maximum_p90: 24h
+ ```
+ 
+-→ [`examples/services/ai-gate.yaml`](examples/services/ai-gate.yaml)
++→ [`examples/judgment-thresholds/all-five-types.yaml`](examples/judgment-thresholds/all-five-types.yaml)
+ 
+-`reduce_autonomy` is the one worth dwelling on: it lets a service
+-declare, in advance and in version control, how much authority it should
+-lose when its own quality degrades. Deciding that while things are calm
+-is much easier than deciding it mid-incident.
++**Measures** the time from a decision to its ground truth arriving.
+ 
+-The manifest only *declares* these. Which consumer dispatches them, and
+-how, is deliberately out of scope.
++**Reach for it when** judgment SLOs depend on outcomes or audits that
++arrive after the fact.
++
++**Setting the bound** means declaring p50 for the typical case, p90 for
++the tail, or both.
++
++**A breach means** ground truth is arriving too slowly for judgment SLOs
++to notice a regression within their window.
++
++**Common mistake:** setting the bound longer than the judgment SLO
++windows it feeds, which hides regressions.
+ 
+ ## 6. Conventions and gotchas
+ 
+@@ -915,7 +1014,10 @@ should track your promise, not your private target.
+ ### 6.2 Ratios are 0.0–1.0, never percentages
+ 
+ `0.999`, not `99.9`. This is the wire format, enforced by the `Ratio`
+-type (`minimum: 0`, `maximum: 1`).
++type (`minimum: 0`, `maximum: 1`). This includes the Ratio-typed `judgment_threshold` bounds:
++`maximum_variance_from_overall`, `maximum_drift` and
++`maximum_expected_calibration_error` (`maximum_brier_score` has the same
++0–1 range).
+ 
+ The forgiving failure is writing `99.9` where `0.999` was meant: it is
+ rejected, loudly. The dangerous one is writing `0.99` for `99.9%` —
+@@ -967,12 +1069,10 @@ over-read:
+   it. Validation-time green, load-time red.
+ - **Template nesting is not caught.** A `ServiceManifestTemplate` whose
+   own `spec` carries `template.extends` validates, despite one-level
+-  inheritance being the rule ([§4.8](#48-template--shared-defaults)).
++  inheritance being the rule ([§4.9](#49-template--shared-defaults)).
+   So does an `extends` naming a template that does not exist.
+ - **Nothing inside `overrides` is checked** — it is typed as a bare
+   object, so a misspelled merge key validates and silently no-ops.
+-- **`method` and target keys are not bound** for `calibration`
+-  ([§5.8](#58-calibration)).
+ - **Judgment SLOs arriving via a template are not type-checked.** The
+   schema forbids `judgment_slo` on a non-`ai-gate` manifest
+   ([§3.1](#31-the-type-field)), but a `ServiceManifestTemplate` is
+@@ -1215,6 +1315,8 @@ manifest until they have a home:
+   your CD pipeline — which can still read the SLOs above to make the
+   same decisions, but must now be told to.
+ 
++v1 `calibration` and `feedback_latency` now have a home: `judgment_threshold` (§4.5).
++
+ ### 7.7 Suggested order
+ 
+ 1. Rename the envelope and confirm it validates. Everything else fails
+@@ -1230,7 +1332,7 @@ manifest until they have a home:
+    `type` each metric now needs.
+ 7. Park the four homeless blocks somewhere before deleting them.
+ 8. Only now consider adding `judgment_slo`
+-   ([§5](#5-the-eight-judgment-slo-types)) — new capability, not
++   ([§5](#5-the-five-judgment-slo-types)) — new capability, not
+    migration. Do it as its own change, and note that it requires
+    `spec.service.type: ai-gate` ([§3.1](#31-the-type-field)); on any
+    other type the schema rejects the block.
+diff --git a/spec/v2/examples/judgment-slos/03-audit-sampling.yaml b/spec/v2/examples/judgment-slos/03-audit-sampling.yaml
+index 645a0e0..03d29c8 100644
+--- a/spec/v2/examples/judgment-slos/03-audit-sampling.yaml
++++ b/spec/v2/examples/judgment-slos/03-audit-sampling.yaml
+@@ -1,4 +1,6 @@
+-# Judgment SLO: audit_sampling — human audit sampling rates + backlog target.
++# Judgment SLO: audit_sampling — human audit sampling rates + completion target.
++# The backlog bound that used to sit here is a judgment_threshold
++# (type: audit_backlog) since opensrm-l33e; see ../judgment-thresholds/.
+ apiVersion: opensrm.nthlayer.io/v2
+ kind: JudgmentSLO
+ metadata:
+@@ -15,5 +17,4 @@ spec:
+       - segment: low_confidence
+         rate: 0.25
+   target:
+-    audit_backlog_maximum_age: 24h
+     audit_completion_rate: 0.95
+diff --git a/spec/v2/examples/judgment-thresholds/ai-gate-template.yaml b/spec/v2/examples/judgment-thresholds/ai-gate-template.yaml
+new file mode 100644
+index 0000000..4a515a6
+--- /dev/null
++++ b/spec/v2/examples/judgment-thresholds/ai-gate-template.yaml
+@@ -0,0 +1,20 @@
++# OpenSRM v2 ServiceManifestTemplate carrying judgment thresholds.
++#
++# A template MAY carry `judgment_threshold`; its items are the same
++# JudgmentThresholdSpec a ServiceManifest uses (decision 3c,
++# opensrm-l33e). Nothing in the fixture set extends this template: it
++# exists to keep the template side of the rule exercised.
++apiVersion: opensrm.nthlayer.io/v2
++kind: ServiceManifestTemplate
++metadata:
++  name: decision-services-thresholds-base
++  namespace: default
++spec:
++  judgment_threshold:
++    # Stability bound shared by every decision service built on this base.
++    - type: stability
++      probe:
++        frozen_input_set: "s3://probes/credit-decision-2026q1.jsonl"
++        frequency: daily
++      bounds:
++        maximum_drift: 0.02
+diff --git a/spec/v2/examples/judgment-thresholds/all-five-types.yaml b/spec/v2/examples/judgment-thresholds/all-five-types.yaml
+new file mode 100644
+index 0000000..13cf7ce
+--- /dev/null
++++ b/spec/v2/examples/judgment-thresholds/all-five-types.yaml
+@@ -0,0 +1,40 @@
++# Judgment thresholds — one of each of the five types (decision 3c).
++# Bounds on error magnitudes: breach when the measured value EXCEEDS the bound.
++# No error budget and no complement, unlike judgment_slo.
++apiVersion: opensrm.nthlayer.io/v2
++kind: ServiceManifest
++metadata:
++  name: credit-decision-agent
++  labels:
++    tier: critical   # optional in the schema; nthlayer-common still requires it (opensrm-9bil)
++spec:
++  owner:
++    group: group:default/risk
++  service:
++    name: credit-decision-agent
++    type: ai-gate
++  judgment_threshold:
++    - type: segments
++      segment_dimension: customer_tier
++      segment_values: [enterprise, smb, consumer]
++      bounds:
++        maximum_variance_from_overall: 0.05
++    - type: stability
++      probe:
++        frozen_input_set: "s3://probes/credit-decision-2026q1.jsonl"
++        frequency: daily
++      bounds:
++        maximum_drift: 0.02
++    - type: calibration
++      measurement:
++        bins: 10
++        window: 30d
++      bounds:
++        maximum_brier_score: 0.05
++    - type: audit_backlog
++      bounds:
++        maximum_age: 24h
++    - type: feedback_latency
++      bounds:
++        maximum_p50: 1h
++        maximum_p90: 24h
+diff --git a/spec/v2/examples/judgment-thresholds/calibration-both-bounds.yaml b/spec/v2/examples/judgment-thresholds/calibration-both-bounds.yaml
+new file mode 100644
+index 0000000..05da5f5
+--- /dev/null
++++ b/spec/v2/examples/judgment-thresholds/calibration-both-bounds.yaml
+@@ -0,0 +1,22 @@
++# Calibration with BOTH bounds. Each declared bound is evaluated; a breach of
++# either is a breach. (Before opensrm-l33e only the first was ever read.)
++apiVersion: opensrm.nthlayer.io/v2
++kind: ServiceManifest
++metadata:
++  name: investigation-agent
++  labels:
++    tier: critical   # optional in the schema; nthlayer-common still requires it (opensrm-9bil)
++spec:
++  owner:
++    group: group:default/risk
++  service:
++    name: investigation-agent
++    type: ai-gate
++  judgment_threshold:
++    - type: calibration
++      measurement:
++        bins: 10
++        window: 30d
++      bounds:
++        maximum_brier_score: 0.05
++        maximum_expected_calibration_error: 0.03
+diff --git a/spec/v2/examples/judgment-thresholds/feedback-latency-p50-only.yaml b/spec/v2/examples/judgment-thresholds/feedback-latency-p50-only.yaml
+new file mode 100644
+index 0000000..ecc5790
+--- /dev/null
++++ b/spec/v2/examples/judgment-thresholds/feedback-latency-p50-only.yaml
+@@ -0,0 +1,19 @@
++# Judgment thresholds — feedback_latency with maximum_p50 alone (decision 3c).
++# Pins that p50 by itself satisfies the bounds anyOf; single-bounds.yaml
++# pins p90 alone.
++apiVersion: opensrm.nthlayer.io/v2
++kind: ServiceManifest
++metadata:
++  name: intake-agent
++  labels:
++    tier: critical   # optional in the schema; nthlayer-common still requires it (opensrm-9bil)
++spec:
++  owner:
++    group: group:default/risk
++  service:
++    name: intake-agent
++    type: ai-gate
++  judgment_threshold:
++    - type: feedback_latency
++      bounds:
++        maximum_p50: 1h
+diff --git a/spec/v2/examples/judgment-thresholds/single-bounds.yaml b/spec/v2/examples/judgment-thresholds/single-bounds.yaml
+new file mode 100644
+index 0000000..331ff60
+--- /dev/null
++++ b/spec/v2/examples/judgment-thresholds/single-bounds.yaml
+@@ -0,0 +1,25 @@
++# Judgment thresholds — single-bound forms (decision 3c).
++# Pins that either bound alone is enough: feedback_latency with only
++# maximum_p90, and calibration with only maximum_expected_calibration_error.
++apiVersion: opensrm.nthlayer.io/v2
++kind: ServiceManifest
++metadata:
++  name: triage-agent
++  labels:
++    tier: critical   # optional in the schema; nthlayer-common still requires it (opensrm-9bil)
++spec:
++  owner:
++    group: group:default/risk
++  service:
++    name: triage-agent
++    type: ai-gate
++  judgment_threshold:
++    - type: feedback_latency
++      bounds:
++        maximum_p90: 24h
++    - type: calibration
++      measurement:
++        bins: 10
++        window: 30d
++      bounds:
++        maximum_expected_calibration_error: 0.03
+diff --git a/spec/v2/examples/service-manifest-full.yaml b/spec/v2/examples/service-manifest-full.yaml
+index 6e22854..3a2700b 100644
+--- a/spec/v2/examples/service-manifest-full.yaml
++++ b/spec/v2/examples/service-manifest-full.yaml
+@@ -45,7 +45,16 @@ spec:
+         source: lineage
+       target:
+         maximum_reversal_rate: 0.05
+-    - $ref: "./judgment-slos/08-calibration.yaml"
++    - $ref: "./judgment-slos/02-high-confidence-failure.yaml"
++
++  # Error magnitudes are bounds, not SLOs (decision 3c): see judgment_threshold.
++  judgment_threshold:
++    - type: calibration
++      measurement:
++        bins: 10
++        window: 30d
++      bounds:
++        maximum_brier_score: 0.05
+ 
+   contracts:
+     - name: payment-authorisation-api
+diff --git a/spec/v2/examples/services/ai-gate.yaml b/spec/v2/examples/services/ai-gate.yaml
+index 8219b14..7e0ea55 100644
+--- a/spec/v2/examples/services/ai-gate.yaml
++++ b/spec/v2/examples/services/ai-gate.yaml
+@@ -85,17 +85,19 @@ spec:
+             agent: refund-approver
+             new_autonomy_level: recommend_only
+ 
++    # External reference — same effect, kept in its own document.
++    - $ref: "../judgment-slos/03-audit-sampling.yaml"
++
++  # Error magnitudes are bounds, not SLOs (decision 3c): no error budget, no
++  # complement — breach when the measured value exceeds the bound.
++  judgment_threshold:
+     # Quality must not vary by customer segment.
+-    - service: refund-approver
+-      judgment_type: segments
++    - type: segments
+       segment_dimension: customer_tier
+       segment_values: [enterprise, smb, consumer]
+-      target:
++      bounds:
+         maximum_variance_from_overall: 0.05
+ 
+-    # External reference — same effect, kept in its own document.
+-    - $ref: "../judgment-slos/03-audit-sampling.yaml"
+-
+   contracts:
+     - name: refund-decision-api
+       api_ref:
+diff --git a/spec/v2/schema.json b/spec/v2/schema.json
+index b4ea78b..4f8f9c1 100644
+--- a/spec/v2/schema.json
++++ b/spec/v2/schema.json
+@@ -83,7 +83,7 @@
+       "required": ["apiVersion", "kind", "metadata", "spec"],
+       "allOf": [
+         {
+-          "description": "Judgment SLOs measure decision quality and are only meaningful on a decision-making service. Restores v1 §11's type-specific validation MUST, which v1's shipped schema never enforced.",
++          "description": "Judgment SLOs and judgment thresholds measure decision quality and are only meaningful on a decision-making service. Restores v1 §11's type-specific validation MUST, which v1's shipped schema never enforced.",
+           "if": {
+             "properties": {
+               "spec": {
+@@ -100,7 +100,7 @@
+           },
+           "then": {
+             "properties": {
+-              "spec": { "properties": { "judgment_slo": false } }
++              "spec": { "properties": { "judgment_slo": false, "judgment_threshold": false } }
+             }
+           }
+         }
+@@ -125,6 +125,11 @@
+               "description": "Native OpenSRM judgment SLOs (inline JudgmentSLO specs or $ref) — decision-quality targets, distinct from classical `slo`.",
+               "items": { "$ref": "#/definitions/JudgmentSLOItem" }
+             },
++            "judgment_threshold": {
++              "type": "array",
++              "description": "Bounds on judgment error magnitudes (segments, stability, calibration, audit backlog, feedback latency) — distinct from judgment_slo, which holds rate targets with error budgets. Decision 3c, opensrm-l33e.",
++              "items": { "$ref": "#/definitions/JudgmentThresholdSpec" }
++            },
+             "contracts": {
+               "type": "array",
+               "items": { "$ref": "#/definitions/Contract" }
+@@ -181,7 +186,7 @@
+       ]
+     },
+     "JudgmentSLOItem": {
+-      "description": "Either an external $ref or an inline judgment-SLO spec (the discriminated union of the eight standard types).",
++      "description": "Either an external $ref or an inline judgment-SLO spec (the discriminated union of the five standard types).",
+       "oneOf": [
+         { "$ref": "#/definitions/Ref" },
+         { "$ref": "#/definitions/JudgmentSLOSpec" }
+@@ -199,7 +204,7 @@
+     },
+     "JudgmentSLOSpec": {
+       "type": "object",
+-      "description": "A judgment SLO. The `judgment_type` value selects one of the eight standard shapes; the matching branch below adds the measurement/sampling/probe/outcome_signal and target fields that type requires.",
++      "description": "A judgment SLO. The `judgment_type` value selects one of the five standard shapes; the matching branch below adds the measurement/sampling/outcome_signal and target fields that type requires.",
+       "required": ["service", "judgment_type"],
+       "properties": {
+         "service": { "type": "string" },
+@@ -209,10 +214,7 @@
+             "high_confidence_failure",
+             "audit_sampling",
+             "outcomes",
+-            "escalation",
+-            "segments",
+-            "stability",
+-            "calibration"
++            "escalation"
+           ]
+         },
+         "breach_actions": {
+@@ -295,8 +297,9 @@
+               "target": {
+                 "type": "object",
+                 "required": ["audit_completion_rate"],
++                "description": "audit_backlog_maximum_age moved to judgment_threshold (type: audit_backlog) in opensrm-l33e; `false` rejects the old placement instead of silently ignoring it, since this schema does not close objects.",
+                 "properties": {
+-                  "audit_backlog_maximum_age": { "$ref": "#/definitions/Duration" },
++                  "audit_backlog_maximum_age": false,
+                   "audit_completion_rate": { "$ref": "#/definitions/Ratio" }
+                 }
+               }
+@@ -341,32 +344,42 @@
+               }
+             }
+           }
+-        },
++        }
++      ]
++    },
++    "JudgmentThresholdSpec": {
++      "type": "object",
++      "description": "A bound on a judgment ERROR MAGNITUDE (decision 3c, opensrm-l33e). Not an SLO: no error budget and no complement — a breach is the measured value exceeding a bound. Inline only. `bounds` is closed so that a misspelled bound is an error rather than an unenforced limit.",
++      "required": ["type", "bounds"],
++      "properties": {
++        "type": { "enum": ["segments", "stability", "calibration", "audit_backlog", "feedback_latency"] },
++        "bounds": { "type": "object" },
++        "breach_actions": { "not": {}, "description": "Thresholds do not declare breach actions (opensrm-l33e). Rejected so a breach_actions block carried over from judgment_slo fails instead of being silently ignored." },
++        "target": { "not": {}, "description": "Thresholds declare `bounds`, not `target` (opensrm-l33e). Rejected so a stale target from judgment_slo fails instead of being silently ignored." },
++        "judgment_type": { "not": {}, "description": "Thresholds use `type`, not `judgment_type` (opensrm-l33e)." },
++        "service": { "not": {}, "description": "Thresholds are inline; the enclosing manifest's service is implied (opensrm-l33e). Rejected so an entry carried over from judgment_slo, or copied from another manifest, fails instead of silently attaching here." }
++      },
++      "allOf": [
+         {
+-          "if": { "properties": { "judgment_type": { "const": "segments" } }, "required": ["judgment_type"] },
++          "if": { "properties": { "type": { "const": "segments" } }, "required": ["type"] },
+           "then": {
+-            "required": ["segment_dimension", "segment_values", "target"],
++            "required": ["segment_dimension", "segment_values", "bounds"],
+             "properties": {
+-              "segment_dimension": { "type": "string" },
+-              "segment_values": {
+-                "type": "array",
+-                "items": { "type": "string" },
+-                "minItems": 1
+-              },
+-              "target": {
++              "segment_dimension": { "type": "string", "minLength": 1 },
++              "segment_values": { "type": "array", "items": { "type": "string", "minLength": 1 }, "minItems": 1 },
++              "bounds": {
+                 "type": "object",
++                "additionalProperties": false,
+                 "required": ["maximum_variance_from_overall"],
+-                "properties": {
+-                  "maximum_variance_from_overall": { "$ref": "#/definitions/Ratio" }
+-                }
++                "properties": { "maximum_variance_from_overall": { "$ref": "#/definitions/Ratio" } }
+               }
+             }
+           }
+         },
+         {
+-          "if": { "properties": { "judgment_type": { "const": "stability" } }, "required": ["judgment_type"] },
++          "if": { "properties": { "type": { "const": "stability" } }, "required": ["type"] },
+           "then": {
+-            "required": ["probe", "target"],
++            "required": ["probe", "bounds"],
+             "properties": {
+               "probe": {
+                 "type": "object",
+@@ -376,32 +389,32 @@
+                   "frequency": { "enum": ["hourly", "daily", "weekly"] }
+                 }
+               },
+-              "target": {
++              "bounds": {
+                 "type": "object",
++                "additionalProperties": false,
+                 "required": ["maximum_drift"],
+-                "properties": {
+-                  "maximum_drift": { "$ref": "#/definitions/Ratio" }
+-                }
++                "properties": { "maximum_drift": { "$ref": "#/definitions/Ratio" } }
+               }
+             }
+           }
+         },
+         {
+-          "if": { "properties": { "judgment_type": { "const": "calibration" } }, "required": ["judgment_type"] },
++          "if": { "properties": { "type": { "const": "calibration" } }, "required": ["type"] },
+           "then": {
+-            "required": ["measurement", "target"],
++            "required": ["measurement", "bounds"],
+             "properties": {
+               "measurement": {
+                 "type": "object",
+-                "required": ["bins", "window", "method"],
++                "required": ["bins", "window"],
+                 "properties": {
+                   "bins": { "type": "integer", "minimum": 2 },
+                   "window": { "$ref": "#/definitions/Duration" },
+-                  "method": { "enum": ["brier_score", "expected_calibration_error"] }
++                  "method": { "not": {}, "description": "measurement.method was removed in opensrm-l33e: the declared bounds decide what is evaluated. Rejected so stale manifests fail loudly." }
+                 }
+               },
+-              "target": {
++              "bounds": {
+                 "type": "object",
++                "additionalProperties": false,
+                 "anyOf": [
+                   { "required": ["maximum_brier_score"] },
+                   { "required": ["maximum_expected_calibration_error"] }
+@@ -413,6 +426,40 @@
+               }
+             }
+           }
++        },
++        {
++          "if": { "properties": { "type": { "const": "audit_backlog" } }, "required": ["type"] },
++          "then": {
++            "required": ["bounds"],
++            "properties": {
++              "bounds": {
++                "type": "object",
++                "additionalProperties": false,
++                "required": ["maximum_age"],
++                "properties": { "maximum_age": { "$ref": "#/definitions/Duration" } }
++              }
++            }
++          }
++        },
++        {
++          "if": { "properties": { "type": { "const": "feedback_latency" } }, "required": ["type"] },
++          "then": {
++            "required": ["bounds"],
++            "properties": {
++              "bounds": {
++                "type": "object",
++                "additionalProperties": false,
++                "anyOf": [
++                  { "required": ["maximum_p50"] },
++                  { "required": ["maximum_p90"] }
++                ],
++                "properties": {
++                  "maximum_p50": { "$ref": "#/definitions/Duration" },
++                  "maximum_p90": { "$ref": "#/definitions/Duration" }
++                }
++              }
++            }
++          }
+         }
+       ]
+     },
+@@ -598,6 +645,7 @@
+             "service": { "$ref": "#/definitions/TemplateServiceIdentity" },
+             "slo": { "type": "array", "items": { "$ref": "#/definitions/SLOItem" } },
+             "judgment_slo": { "type": "array", "items": { "$ref": "#/definitions/JudgmentSLOItem" } },
++            "judgment_threshold": { "type": "array", "items": { "$ref": "#/definitions/JudgmentThresholdSpec" } },
+             "contracts": { "type": "array", "items": { "$ref": "#/definitions/Contract" } },
+             "dependencies": { "type": "array", "items": { "$ref": "#/definitions/Dependency" } },
+             "instrumentation": { "$ref": "#/definitions/Instrumentation" }
+diff --git a/spec/v2/tests/invalid/n12-calibration-one-bin.yaml b/spec/v2/tests/invalid/n12-calibration-one-bin.yaml
+index 089261b..7fbb41e 100644
+--- a/spec/v2/tests/invalid/n12-calibration-one-bin.yaml
++++ b/spec/v2/tests/invalid/n12-calibration-one-bin.yaml
+@@ -1,15 +1,16 @@
+ # MUST be rejected: calibration bins below the schema floor of 2.
+ # One bin is not a reliability curve (AUTHORING.md §5.8).
+ apiVersion: opensrm.nthlayer.io/v2
+-kind: JudgmentSLO
++kind: ServiceManifest
+ metadata:
+-  name: one-bin-calibration
++  name: refund-approver
+ spec:
+-  service: investigation-agent
+-  judgment_type: calibration
+-  measurement:
+-    bins: 1
+-    window: 30d
+-    method: brier_score
+-  target:
+-    maximum_brier_score: 0.05
++  owner:
++    group: group:default/payments
++  service:
++    name: refund-approver
++    type: ai-gate
++  judgment_threshold:
++    - type: calibration
++      measurement: { bins: 1, window: 30d }
++      bounds: { maximum_brier_score: 0.05 }
+diff --git a/spec/v2/examples/judgment-slos/06-segments.yaml b/spec/v2/tests/invalid/n20-segments-as-judgment-slo.yaml
+similarity index 59%
+rename from spec/v2/examples/judgment-slos/06-segments.yaml
+rename to spec/v2/tests/invalid/n20-segments-as-judgment-slo.yaml
+index a93f921..bda22df 100644
+--- a/spec/v2/examples/judgment-slos/06-segments.yaml
++++ b/spec/v2/tests/invalid/n20-segments-as-judgment-slo.yaml
+@@ -1,4 +1,6 @@
+-# Judgment SLO: segments — consistency of quality across segments.
++# MUST be rejected: segments is not a judgment SLO in v2 (decision 3c). This was
++# examples/judgment-slos/06-segments.yaml until opensrm-l33e; declare it under a
++# ServiceManifest's spec.judgment_threshold instead.
+ apiVersion: opensrm.nthlayer.io/v2
+ kind: JudgmentSLO
+ metadata:
+diff --git a/spec/v2/examples/judgment-slos/07-stability.yaml b/spec/v2/tests/invalid/n21-stability-as-judgment-slo.yaml
+similarity index 59%
+rename from spec/v2/examples/judgment-slos/07-stability.yaml
+rename to spec/v2/tests/invalid/n21-stability-as-judgment-slo.yaml
+index 859a2e4..f73ecc2 100644
+--- a/spec/v2/examples/judgment-slos/07-stability.yaml
++++ b/spec/v2/tests/invalid/n21-stability-as-judgment-slo.yaml
+@@ -1,4 +1,6 @@
+-# Judgment SLO: stability — consistent decisions on a frozen probe set.
++# MUST be rejected: stability is not a judgment SLO in v2 (decision 3c). This was
++# examples/judgment-slos/07-stability.yaml until opensrm-l33e; declare it under a
++# ServiceManifest's spec.judgment_threshold instead.
+ apiVersion: opensrm.nthlayer.io/v2
+ kind: JudgmentSLO
+ metadata:
+diff --git a/spec/v2/examples/judgment-slos/08-calibration.yaml b/spec/v2/tests/invalid/n22-calibration-as-judgment-slo.yaml
+similarity index 57%
+rename from spec/v2/examples/judgment-slos/08-calibration.yaml
+rename to spec/v2/tests/invalid/n22-calibration-as-judgment-slo.yaml
+index dd4fe75..a5a1109 100644
+--- a/spec/v2/examples/judgment-slos/08-calibration.yaml
++++ b/spec/v2/tests/invalid/n22-calibration-as-judgment-slo.yaml
+@@ -1,4 +1,6 @@
+-# Judgment SLO: calibration — expressed confidence matches actual accuracy.
++# MUST be rejected: calibration is not a judgment SLO in v2 (decision 3c). This was
++# examples/judgment-slos/08-calibration.yaml until opensrm-l33e; declare it under a
++# ServiceManifest's spec.judgment_threshold instead.
+ apiVersion: opensrm.nthlayer.io/v2
+ kind: JudgmentSLO
+ metadata:
+diff --git a/spec/v2/tests/invalid/n23-audit-backlog-in-audit-sampling-target.yaml b/spec/v2/tests/invalid/n23-audit-backlog-in-audit-sampling-target.yaml
+new file mode 100644
+index 0000000..f8edfff
+--- /dev/null
++++ b/spec/v2/tests/invalid/n23-audit-backlog-in-audit-sampling-target.yaml
+@@ -0,0 +1,21 @@
++# MUST be rejected: audit_backlog_maximum_age left audit_sampling's target in
++# opensrm-l33e. Declare judgment_threshold: [{type: audit_backlog, bounds:
++# {maximum_age: 24h}}] on the ServiceManifest instead.
++apiVersion: opensrm.nthlayer.io/v2
++kind: JudgmentSLO
++metadata:
++  name: moderation-agent-audit
++  namespace: default
++spec:
++  service: moderation-agent
++  judgment_type: audit_sampling
++  sampling:
++    overall_rate: 0.01
++    stratified:
++      - segment: high_stakes
++        rate: 0.1
++      - segment: low_confidence
++        rate: 0.25
++  target:
++    audit_backlog_maximum_age: 24h
++    audit_completion_rate: 0.95
+diff --git a/spec/v2/tests/invalid/n24-threshold-on-non-ai-gate.yaml b/spec/v2/tests/invalid/n24-threshold-on-non-ai-gate.yaml
+new file mode 100644
+index 0000000..64192a5
+--- /dev/null
++++ b/spec/v2/tests/invalid/n24-threshold-on-non-ai-gate.yaml
+@@ -0,0 +1,16 @@
++# MUST be rejected: judgment_threshold, like judgment_slo, is only meaningful
++# on a decision-making service.
++apiVersion: opensrm.nthlayer.io/v2
++kind: ServiceManifest
++metadata:
++  name: checkout-api
++spec:
++  owner:
++    group: group:default/payments
++  service:
++    name: checkout-api
++    type: api
++  judgment_threshold:
++    - type: stability
++      probe: { frozen_input_set: "s3://probes/x.jsonl", frequency: daily }
++      bounds: { maximum_drift: 0.02 }
+diff --git a/spec/v2/tests/invalid/n25-threshold-unknown-bound.yaml b/spec/v2/tests/invalid/n25-threshold-unknown-bound.yaml
+new file mode 100644
+index 0000000..2b21e33
+--- /dev/null
++++ b/spec/v2/tests/invalid/n25-threshold-unknown-bound.yaml
+@@ -0,0 +1,15 @@
++# MUST be rejected: a bound that does not belong to the type (bounds is closed).
++apiVersion: opensrm.nthlayer.io/v2
++kind: ServiceManifest
++metadata:
++  name: refund-approver
++spec:
++  owner:
++    group: group:default/payments
++  service:
++    name: refund-approver
++    type: ai-gate
++  judgment_threshold:
++    - type: stability
++      probe: { frozen_input_set: "s3://probes/x.jsonl", frequency: daily }
++      bounds: { maximum_drift: 0.02, maximum_variance_from_overall: 0.05 }
+diff --git a/spec/v2/tests/invalid/n26-calibration-threshold-no-bounds.yaml b/spec/v2/tests/invalid/n26-calibration-threshold-no-bounds.yaml
+new file mode 100644
+index 0000000..c380377
+--- /dev/null
++++ b/spec/v2/tests/invalid/n26-calibration-threshold-no-bounds.yaml
+@@ -0,0 +1,15 @@
++# MUST be rejected: calibration needs at least one of its two bounds.
++apiVersion: opensrm.nthlayer.io/v2
++kind: ServiceManifest
++metadata:
++  name: refund-approver
++spec:
++  owner:
++    group: group:default/payments
++  service:
++    name: refund-approver
++    type: ai-gate
++  judgment_threshold:
++    - type: calibration
++      measurement: { bins: 10, window: 30d }
++      bounds: {}
+diff --git a/spec/v2/tests/invalid/n27-feedback-latency-ratio-bound.yaml b/spec/v2/tests/invalid/n27-feedback-latency-ratio-bound.yaml
+new file mode 100644
+index 0000000..af00fbe
+--- /dev/null
++++ b/spec/v2/tests/invalid/n27-feedback-latency-ratio-bound.yaml
+@@ -0,0 +1,14 @@
++# MUST be rejected: feedback_latency bounds are Durations, not Ratios.
++apiVersion: opensrm.nthlayer.io/v2
++kind: ServiceManifest
++metadata:
++  name: refund-approver
++spec:
++  owner:
++    group: group:default/payments
++  service:
++    name: refund-approver
++    type: ai-gate
++  judgment_threshold:
++    - type: feedback_latency
++      bounds: { maximum_p50: 0.5 }
+diff --git a/spec/v2/tests/invalid/n28-calibration-threshold-stale-method.yaml b/spec/v2/tests/invalid/n28-calibration-threshold-stale-method.yaml
+new file mode 100644
+index 0000000..674d847
+--- /dev/null
++++ b/spec/v2/tests/invalid/n28-calibration-threshold-stale-method.yaml
+@@ -0,0 +1,17 @@
++# MUST be rejected: measurement.method was removed in opensrm-l33e —
++# the declared bounds decide what is evaluated, so a stale method key
++# fails loudly.
++apiVersion: opensrm.nthlayer.io/v2
++kind: ServiceManifest
++metadata:
++  name: refund-approver
++spec:
++  owner:
++    group: group:default/payments
++  service:
++    name: refund-approver
++    type: ai-gate
++  judgment_threshold:
++    - type: calibration
++      measurement: { bins: 10, window: 30d, method: brier_score }
++      bounds: { maximum_brier_score: 0.05 }
+diff --git a/spec/v2/tests/invalid/n29-threshold-missing-type.yaml b/spec/v2/tests/invalid/n29-threshold-missing-type.yaml
+new file mode 100644
+index 0000000..52b0398
+--- /dev/null
++++ b/spec/v2/tests/invalid/n29-threshold-missing-type.yaml
+@@ -0,0 +1,13 @@
++# MUST be rejected: every threshold names its type.
++apiVersion: opensrm.nthlayer.io/v2
++kind: ServiceManifest
++metadata:
++  name: refund-approver
++spec:
++  owner:
++    group: group:default/payments
++  service:
++    name: refund-approver
++    type: ai-gate
++  judgment_threshold:
++    - bounds: { maximum_drift: 0.02 }
+diff --git a/spec/v2/tests/invalid/n3-missing-target.yaml b/spec/v2/tests/invalid/n3-missing-target.yaml
+index cfaa405..bb17f0b 100644
+--- a/spec/v2/tests/invalid/n3-missing-target.yaml
++++ b/spec/v2/tests/invalid/n3-missing-target.yaml
+@@ -1,8 +1,8 @@
+-# INVALID: calibration requires spec.target (omitted here)
++# INVALID: reversal_rate requires spec.target (omitted here)
+ apiVersion: opensrm.nthlayer.io/v2
+ kind: JudgmentSLO
+ metadata: { name: x }
+ spec:
+   service: x
+-  judgment_type: calibration
+-  measurement: { bins: 10, window: 30d, method: brier_score }
++  judgment_type: reversal_rate
++  measurement: { window: 30d, source: lineage }
+diff --git a/spec/v2/tests/invalid/n30-segments-threshold-missing-dimension.yaml b/spec/v2/tests/invalid/n30-segments-threshold-missing-dimension.yaml
+new file mode 100644
+index 0000000..2bb82dd
+--- /dev/null
++++ b/spec/v2/tests/invalid/n30-segments-threshold-missing-dimension.yaml
+@@ -0,0 +1,15 @@
++# MUST be rejected: segments needs segment_dimension.
++apiVersion: opensrm.nthlayer.io/v2
++kind: ServiceManifest
++metadata:
++  name: refund-approver
++spec:
++  owner:
++    group: group:default/payments
++  service:
++    name: refund-approver
++    type: ai-gate
++  judgment_threshold:
++    - type: segments
++      segment_values: [enterprise, smb]
++      bounds: { maximum_variance_from_overall: 0.05 }
+diff --git a/spec/v2/tests/invalid/n31-threshold-breach-actions.yaml b/spec/v2/tests/invalid/n31-threshold-breach-actions.yaml
+new file mode 100644
+index 0000000..864166c
+--- /dev/null
++++ b/spec/v2/tests/invalid/n31-threshold-breach-actions.yaml
+@@ -0,0 +1,17 @@
++# MUST be rejected: breach_actions is not a threshold key (opensrm-l33e). A block carried over from judgment_slo must fail rather than be silently ignored.
++apiVersion: opensrm.nthlayer.io/v2
++kind: ServiceManifest
++metadata:
++  name: refund-approver
++spec:
++  owner:
++    group: group:default/payments
++  service:
++    name: refund-approver
++    type: ai-gate
++  judgment_threshold:
++    - type: stability
++      probe: { frozen_input_set: "s3://probes/x.jsonl", frequency: daily }
++      bounds: { maximum_drift: 0.02 }
++      breach_actions:
++        - type: escalate
+diff --git a/spec/v2/tests/invalid/n32-threshold-target.yaml b/spec/v2/tests/invalid/n32-threshold-target.yaml
+new file mode 100644
+index 0000000..6b3b49e
+--- /dev/null
++++ b/spec/v2/tests/invalid/n32-threshold-target.yaml
+@@ -0,0 +1,16 @@
++# MUST be rejected: thresholds declare `bounds`, not `target` (opensrm-l33e). A stale target carried over from judgment_slo must fail rather than be silently ignored.
++apiVersion: opensrm.nthlayer.io/v2
++kind: ServiceManifest
++metadata:
++  name: refund-approver
++spec:
++  owner:
++    group: group:default/payments
++  service:
++    name: refund-approver
++    type: ai-gate
++  judgment_threshold:
++    - type: calibration
++      measurement: { bins: 10, window: 30d }
++      bounds: { maximum_brier_score: 0.05 }
++      target: { maximum_brier_score: 0.05 }
+diff --git a/spec/v2/tests/invalid/n33-threshold-judgment-type.yaml b/spec/v2/tests/invalid/n33-threshold-judgment-type.yaml
+new file mode 100644
+index 0000000..985385e
+--- /dev/null
++++ b/spec/v2/tests/invalid/n33-threshold-judgment-type.yaml
+@@ -0,0 +1,16 @@
++# MUST be rejected: thresholds use `type`, not `judgment_type` (opensrm-l33e). The stale key must fail rather than be silently ignored.
++apiVersion: opensrm.nthlayer.io/v2
++kind: ServiceManifest
++metadata:
++  name: refund-approver
++spec:
++  owner:
++    group: group:default/payments
++  service:
++    name: refund-approver
++    type: ai-gate
++  judgment_threshold:
++    - type: stability
++      judgment_type: stability
++      probe: { frozen_input_set: "s3://probes/x.jsonl", frequency: daily }
++      bounds: { maximum_drift: 0.02 }
+diff --git a/spec/v2/tests/invalid/n34-segments-inline-judgment-slo.yaml b/spec/v2/tests/invalid/n34-segments-inline-judgment-slo.yaml
+new file mode 100644
+index 0000000..3f83a71
+--- /dev/null
++++ b/spec/v2/tests/invalid/n34-segments-inline-judgment-slo.yaml
+@@ -0,0 +1,17 @@
++# MUST be rejected: a segments item is a judgment threshold, not a judgment SLO (opensrm-l33e). Inline in a ServiceManifest, judgment_slo must not accept it.
++apiVersion: opensrm.nthlayer.io/v2
++kind: ServiceManifest
++metadata:
++  name: refund-approver
++spec:
++  owner:
++    group: group:default/payments
++  service:
++    name: refund-approver
++    type: ai-gate
++  judgment_slo:
++    - service: refund-approver
++      judgment_type: segments
++      segment_dimension: customer_tier
++      segment_values: [enterprise, smb]
++      target: { maximum_variance_from_overall: 0.05 }
+diff --git a/spec/v2/tests/invalid/n35-template-calibration-judgment-slo.yaml b/spec/v2/tests/invalid/n35-template-calibration-judgment-slo.yaml
+new file mode 100644
+index 0000000..a3800ca
+--- /dev/null
++++ b/spec/v2/tests/invalid/n35-template-calibration-judgment-slo.yaml
+@@ -0,0 +1,12 @@
++# MUST be rejected: calibration is a judgment threshold, not a judgment SLO (opensrm-l33e). A template's judgment_slo must not accept a calibration item.
++apiVersion: opensrm.nthlayer.io/v2
++kind: ServiceManifestTemplate
++metadata:
++  name: payment-services-base
++  namespace: default
++spec:
++  judgment_slo:
++    - service: refund-approver
++      judgment_type: calibration
++      measurement: { bins: 10, window: 30d }
++      target: { maximum_brier_score: 0.05 }
+diff --git a/spec/v2/tests/invalid/n36-threshold-service.yaml b/spec/v2/tests/invalid/n36-threshold-service.yaml
+new file mode 100644
+index 0000000..1e77f33
+--- /dev/null
++++ b/spec/v2/tests/invalid/n36-threshold-service.yaml
+@@ -0,0 +1,16 @@
++# MUST be rejected: service is not a threshold key (opensrm-l33e). Thresholds are inline and the enclosing manifest's service is implied; an entry carried over from judgment_slo (or copied from another manifest) must fail rather than silently attach here.
++apiVersion: opensrm.nthlayer.io/v2
++kind: ServiceManifest
++metadata:
++  name: refund-approver
++spec:
++  owner:
++    group: group:default/payments
++  service:
++    name: refund-approver
++    type: ai-gate
++  judgment_threshold:
++    - type: stability
++      service: other-svc
++      probe: { frozen_input_set: "s3://probes/x.jsonl", frequency: daily }
++      bounds: { maximum_drift: 0.02 }
+diff --git a/spec/v2/tests/invalid/n37-segments-empty-strings.yaml b/spec/v2/tests/invalid/n37-segments-empty-strings.yaml
+new file mode 100644
+index 0000000..3a24445
+--- /dev/null
++++ b/spec/v2/tests/invalid/n37-segments-empty-strings.yaml
+@@ -0,0 +1,16 @@
++# MUST be rejected: segment_dimension is an empty string (opensrm-l33e). One defect only: segment_values is otherwise valid.
++apiVersion: opensrm.nthlayer.io/v2
++kind: ServiceManifest
++metadata:
++  name: refund-approver
++spec:
++  owner:
++    group: group:default/payments
++  service:
++    name: refund-approver
++    type: ai-gate
++  judgment_threshold:
++    - type: segments
++      segment_dimension: ""
++      segment_values: [enterprise, smb]
++      bounds: { maximum_variance_from_overall: 0.05 }
+diff --git a/spec/v2/tests/invalid/n38-segments-empty-value.yaml b/spec/v2/tests/invalid/n38-segments-empty-value.yaml
+new file mode 100644
+index 0000000..c8285af
+--- /dev/null
++++ b/spec/v2/tests/invalid/n38-segments-empty-value.yaml
+@@ -0,0 +1,17 @@
++# MUST be rejected: a segment_values entry is an empty string (opensrm-l33e).
++# One defect only: segment_dimension is otherwise valid.
++apiVersion: opensrm.nthlayer.io/v2
++kind: ServiceManifest
++metadata:
++  name: refund-approver
++spec:
++  owner:
++    group: group:default/payments
++  service:
++    name: refund-approver
++    type: ai-gate
++  judgment_threshold:
++    - type: segments
++      segment_dimension: customer_tier
++      segment_values: [enterprise, ""]
++      bounds: { maximum_variance_from_overall: 0.05 }
+diff --git a/spec/v2/tests/invalid/n39-segments-threshold-unknown-bound.yaml b/spec/v2/tests/invalid/n39-segments-threshold-unknown-bound.yaml
+new file mode 100644
+index 0000000..6d1d1c6
+--- /dev/null
++++ b/spec/v2/tests/invalid/n39-segments-threshold-unknown-bound.yaml
+@@ -0,0 +1,21 @@
++# MUST be rejected: segments bounds is closed, so a misspelled bound is
++# an error rather than an unenforced limit (opensrm-l33e).
++# One defect only: `maximum_variance` beside the correct
++# `maximum_variance_from_overall`.
++apiVersion: opensrm.nthlayer.io/v2
++kind: ServiceManifest
++metadata:
++  name: refund-approver
++spec:
++  owner:
++    group: group:default/payments
++  service:
++    name: refund-approver
++    type: ai-gate
++  judgment_threshold:
++    - type: segments
++      segment_dimension: customer_tier
++      segment_values: [enterprise, smb, consumer]
++      bounds:
++        maximum_variance_from_overall: 0.05
++        maximum_variance: 0.05
+diff --git a/spec/v2/tests/invalid/n40-calibration-threshold-unknown-bound.yaml b/spec/v2/tests/invalid/n40-calibration-threshold-unknown-bound.yaml
+new file mode 100644
+index 0000000..f452574
+--- /dev/null
++++ b/spec/v2/tests/invalid/n40-calibration-threshold-unknown-bound.yaml
+@@ -0,0 +1,22 @@
++# MUST be rejected: calibration bounds is closed, so a misspelled bound
++# is an error rather than an unenforced limit (opensrm-l33e).
++# One defect only: `maximum_brier` beside the correct
++# `maximum_brier_score`.
++apiVersion: opensrm.nthlayer.io/v2
++kind: ServiceManifest
++metadata:
++  name: refund-approver
++spec:
++  owner:
++    group: group:default/payments
++  service:
++    name: refund-approver
++    type: ai-gate
++  judgment_threshold:
++    - type: calibration
++      measurement:
++        bins: 10
++        window: 30d
++      bounds:
++        maximum_brier_score: 0.05
++        maximum_brier: 0.05
+diff --git a/spec/v2/tests/invalid/n41-audit-backlog-threshold-unknown-bound.yaml b/spec/v2/tests/invalid/n41-audit-backlog-threshold-unknown-bound.yaml
+new file mode 100644
+index 0000000..3f3d57c
+--- /dev/null
++++ b/spec/v2/tests/invalid/n41-audit-backlog-threshold-unknown-bound.yaml
+@@ -0,0 +1,18 @@
++# MUST be rejected: audit_backlog bounds is closed, so a misspelled
++# bound is an error rather than an unenforced limit (opensrm-l33e).
++# One defect only: `max_age` beside the correct `maximum_age`.
++apiVersion: opensrm.nthlayer.io/v2
++kind: ServiceManifest
++metadata:
++  name: refund-approver
++spec:
++  owner:
++    group: group:default/payments
++  service:
++    name: refund-approver
++    type: ai-gate
++  judgment_threshold:
++    - type: audit_backlog
++      bounds:
++        maximum_age: 24h
++        max_age: 24h
+diff --git a/spec/v2/tests/invalid/n42-feedback-latency-threshold-unknown-bound.yaml b/spec/v2/tests/invalid/n42-feedback-latency-threshold-unknown-bound.yaml
+new file mode 100644
+index 0000000..baa7c97
+--- /dev/null
++++ b/spec/v2/tests/invalid/n42-feedback-latency-threshold-unknown-bound.yaml
+@@ -0,0 +1,18 @@
++# MUST be rejected: feedback_latency bounds is closed, so a misspelled
++# bound is an error rather than an unenforced limit (opensrm-l33e).
++# One defect only: `maximum_p99` beside the correct `maximum_p50`.
++apiVersion: opensrm.nthlayer.io/v2
++kind: ServiceManifest
++metadata:
++  name: refund-approver
++spec:
++  owner:
++    group: group:default/payments
++  service:
++    name: refund-approver
++    type: ai-gate
++  judgment_threshold:
++    - type: feedback_latency
++      bounds:
++        maximum_p50: 1h
++        maximum_p99: 48h
+diff --git a/spec/v2/tests/invalid/n43-segments-threshold-empty-bounds.yaml b/spec/v2/tests/invalid/n43-segments-threshold-empty-bounds.yaml
+new file mode 100644
+index 0000000..80a90c4
+--- /dev/null
++++ b/spec/v2/tests/invalid/n43-segments-threshold-empty-bounds.yaml
+@@ -0,0 +1,19 @@
++# MUST be rejected: a segments threshold must declare
++# maximum_variance_from_overall; an empty bounds object bounds nothing
++# (opensrm-l33e).
++# One defect only: `bounds: {}`.
++apiVersion: opensrm.nthlayer.io/v2
++kind: ServiceManifest
++metadata:
++  name: refund-approver
++spec:
++  owner:
++    group: group:default/payments
++  service:
++    name: refund-approver
++    type: ai-gate
++  judgment_threshold:
++    - type: segments
++      segment_dimension: customer_tier
++      segment_values: [enterprise, smb, consumer]
++      bounds: {}
+diff --git a/spec/v2/tests/invalid/n44-stability-threshold-empty-bounds.yaml b/spec/v2/tests/invalid/n44-stability-threshold-empty-bounds.yaml
+new file mode 100644
+index 0000000..5603add
+--- /dev/null
++++ b/spec/v2/tests/invalid/n44-stability-threshold-empty-bounds.yaml
+@@ -0,0 +1,19 @@
++# MUST be rejected: a stability threshold must declare maximum_drift; an
++# empty bounds object bounds nothing (opensrm-l33e).
++# One defect only: `bounds: {}`.
++apiVersion: opensrm.nthlayer.io/v2
++kind: ServiceManifest
++metadata:
++  name: refund-approver
++spec:
++  owner:
++    group: group:default/payments
++  service:
++    name: refund-approver
++    type: ai-gate
++  judgment_threshold:
++    - type: stability
++      probe:
++        frozen_input_set: "s3://probes/credit-decision-2026q1.jsonl"
++        frequency: daily
++      bounds: {}
+diff --git a/spec/v2/tests/invalid/n45-audit-backlog-threshold-empty-bounds.yaml b/spec/v2/tests/invalid/n45-audit-backlog-threshold-empty-bounds.yaml
+new file mode 100644
+index 0000000..1aba7b9
+--- /dev/null
++++ b/spec/v2/tests/invalid/n45-audit-backlog-threshold-empty-bounds.yaml
+@@ -0,0 +1,16 @@
++# MUST be rejected: an audit_backlog threshold must declare maximum_age;
++# an empty bounds object bounds nothing (opensrm-l33e).
++# One defect only: `bounds: {}`.
++apiVersion: opensrm.nthlayer.io/v2
++kind: ServiceManifest
++metadata:
++  name: refund-approver
++spec:
++  owner:
++    group: group:default/payments
++  service:
++    name: refund-approver
++    type: ai-gate
++  judgment_threshold:
++    - type: audit_backlog
++      bounds: {}
+diff --git a/spec/v2/tests/invalid/n46-feedback-latency-threshold-empty-bounds.yaml b/spec/v2/tests/invalid/n46-feedback-latency-threshold-empty-bounds.yaml
+new file mode 100644
+index 0000000..0dda85b
+--- /dev/null
++++ b/spec/v2/tests/invalid/n46-feedback-latency-threshold-empty-bounds.yaml
+@@ -0,0 +1,17 @@
++# MUST be rejected: a feedback_latency threshold must declare
++# maximum_p50 or maximum_p90; an empty bounds object bounds nothing
++# (opensrm-l33e).
++# One defect only: `bounds: {}`.
++apiVersion: opensrm.nthlayer.io/v2
++kind: ServiceManifest
++metadata:
++  name: refund-approver
++spec:
++  owner:
++    group: group:default/payments
++  service:
++    name: refund-approver
++    type: ai-gate
++  judgment_threshold:
++    - type: feedback_latency
++      bounds: {}
+diff --git a/spec/v2/tests/invalid/n47-threshold-missing-bounds.yaml b/spec/v2/tests/invalid/n47-threshold-missing-bounds.yaml
+new file mode 100644
+index 0000000..f93b59b
+--- /dev/null
++++ b/spec/v2/tests/invalid/n47-threshold-missing-bounds.yaml
+@@ -0,0 +1,15 @@
++# MUST be rejected: every threshold entry requires `bounds`
++# (opensrm-l33e).
++# One defect only: the audit_backlog entry has only `type`.
++apiVersion: opensrm.nthlayer.io/v2
++kind: ServiceManifest
++metadata:
++  name: refund-approver
++spec:
++  owner:
++    group: group:default/payments
++  service:
++    name: refund-approver
++    type: ai-gate
++  judgment_threshold:
++    - type: audit_backlog
+diff --git a/spec/v2/tests/invalid/n48-threshold-unknown-type.yaml b/spec/v2/tests/invalid/n48-threshold-unknown-type.yaml
+new file mode 100644
+index 0000000..69d8b0f
+--- /dev/null
++++ b/spec/v2/tests/invalid/n48-threshold-unknown-type.yaml
+@@ -0,0 +1,20 @@
++# MUST be rejected: `type` must be one of the five threshold types;
++# `drift` is not one (opensrm-l33e).
++# One defect only: `type: drift` on an otherwise valid stability entry.
++apiVersion: opensrm.nthlayer.io/v2
++kind: ServiceManifest
++metadata:
++  name: refund-approver
++spec:
++  owner:
++    group: group:default/payments
++  service:
++    name: refund-approver
++    type: ai-gate
++  judgment_threshold:
++    - type: drift
++      probe:
++        frozen_input_set: "s3://probes/credit-decision-2026q1.jsonl"
++        frequency: daily
++      bounds:
++        maximum_drift: 0.02
+diff --git a/spec/v2/tests/invalid/n49-segments-threshold-missing-values.yaml b/spec/v2/tests/invalid/n49-segments-threshold-missing-values.yaml
+new file mode 100644
+index 0000000..2d7290a
+--- /dev/null
++++ b/spec/v2/tests/invalid/n49-segments-threshold-missing-values.yaml
+@@ -0,0 +1,18 @@
++# MUST be rejected: a segments threshold requires `segment_values`
++# (opensrm-l33e).
++# One defect only: `segment_values` omitted.
++apiVersion: opensrm.nthlayer.io/v2
++kind: ServiceManifest
++metadata:
++  name: refund-approver
++spec:
++  owner:
++    group: group:default/payments
++  service:
++    name: refund-approver
++    type: ai-gate
++  judgment_threshold:
++    - type: segments
++      segment_dimension: customer_tier
++      bounds:
++        maximum_variance_from_overall: 0.05
+diff --git a/spec/v2/tests/invalid/n50-segments-threshold-empty-values.yaml b/spec/v2/tests/invalid/n50-segments-threshold-empty-values.yaml
+new file mode 100644
+index 0000000..f57d966
+--- /dev/null
++++ b/spec/v2/tests/invalid/n50-segments-threshold-empty-values.yaml
+@@ -0,0 +1,19 @@
++# MUST be rejected: `segment_values` must name at least one segment
++# (opensrm-l33e).
++# One defect only: `segment_values: []`.
++apiVersion: opensrm.nthlayer.io/v2
++kind: ServiceManifest
++metadata:
++  name: refund-approver
++spec:
++  owner:
++    group: group:default/payments
++  service:
++    name: refund-approver
++    type: ai-gate
++  judgment_threshold:
++    - type: segments
++      segment_dimension: customer_tier
++      segment_values: []
++      bounds:
++        maximum_variance_from_overall: 0.05
+diff --git a/spec/v2/tests/invalid/n51-stability-threshold-missing-probe.yaml b/spec/v2/tests/invalid/n51-stability-threshold-missing-probe.yaml
+new file mode 100644
+index 0000000..07b596d
+--- /dev/null
++++ b/spec/v2/tests/invalid/n51-stability-threshold-missing-probe.yaml
+@@ -0,0 +1,17 @@
++# MUST be rejected: a stability threshold requires `probe`
++# (opensrm-l33e).
++# One defect only: `probe` omitted.
++apiVersion: opensrm.nthlayer.io/v2
++kind: ServiceManifest
++metadata:
++  name: refund-approver
++spec:
++  owner:
++    group: group:default/payments
++  service:
++    name: refund-approver
++    type: ai-gate
++  judgment_threshold:
++    - type: stability
++      bounds:
++        maximum_drift: 0.02
+diff --git a/spec/v2/tests/invalid/n52-stability-threshold-missing-frozen-input-set.yaml b/spec/v2/tests/invalid/n52-stability-threshold-missing-frozen-input-set.yaml
+new file mode 100644
+index 0000000..e983440
+--- /dev/null
++++ b/spec/v2/tests/invalid/n52-stability-threshold-missing-frozen-input-set.yaml
+@@ -0,0 +1,19 @@
++# MUST be rejected: a stability probe requires `frozen_input_set`
++# (opensrm-l33e).
++# One defect only: `probe.frozen_input_set` omitted.
++apiVersion: opensrm.nthlayer.io/v2
++kind: ServiceManifest
++metadata:
++  name: refund-approver
++spec:
++  owner:
++    group: group:default/payments
++  service:
++    name: refund-approver
++    type: ai-gate
++  judgment_threshold:
++    - type: stability
++      probe:
++        frequency: daily
++      bounds:
++        maximum_drift: 0.02
+diff --git a/spec/v2/tests/invalid/n53-stability-threshold-missing-frequency.yaml b/spec/v2/tests/invalid/n53-stability-threshold-missing-frequency.yaml
+new file mode 100644
+index 0000000..924f90f
+--- /dev/null
++++ b/spec/v2/tests/invalid/n53-stability-threshold-missing-frequency.yaml
+@@ -0,0 +1,19 @@
++# MUST be rejected: a stability probe requires `frequency`
++# (opensrm-l33e).
++# One defect only: `probe.frequency` omitted.
++apiVersion: opensrm.nthlayer.io/v2
++kind: ServiceManifest
++metadata:
++  name: refund-approver
++spec:
++  owner:
++    group: group:default/payments
++  service:
++    name: refund-approver
++    type: ai-gate
++  judgment_threshold:
++    - type: stability
++      probe:
++        frozen_input_set: "s3://probes/credit-decision-2026q1.jsonl"
++      bounds:
++        maximum_drift: 0.02
+diff --git a/spec/v2/tests/invalid/n54-stability-threshold-monthly-frequency.yaml b/spec/v2/tests/invalid/n54-stability-threshold-monthly-frequency.yaml
+new file mode 100644
+index 0000000..548f0a4
+--- /dev/null
++++ b/spec/v2/tests/invalid/n54-stability-threshold-monthly-frequency.yaml
+@@ -0,0 +1,20 @@
++# MUST be rejected: probe.frequency is hourly, daily or weekly;
++# `monthly` is not one (opensrm-l33e).
++# One defect only: `probe.frequency: monthly`.
++apiVersion: opensrm.nthlayer.io/v2
++kind: ServiceManifest
++metadata:
++  name: refund-approver
++spec:
++  owner:
++    group: group:default/payments
++  service:
++    name: refund-approver
++    type: ai-gate
++  judgment_threshold:
++    - type: stability
++      probe:
++        frozen_input_set: "s3://probes/credit-decision-2026q1.jsonl"
++        frequency: monthly
++      bounds:
++        maximum_drift: 0.02
+diff --git a/spec/v2/tests/invalid/n55-calibration-threshold-missing-measurement.yaml b/spec/v2/tests/invalid/n55-calibration-threshold-missing-measurement.yaml
+new file mode 100644
+index 0000000..3d9e08d
+--- /dev/null
++++ b/spec/v2/tests/invalid/n55-calibration-threshold-missing-measurement.yaml
+@@ -0,0 +1,17 @@
++# MUST be rejected: a calibration threshold requires `measurement`
++# (opensrm-l33e).
++# One defect only: `measurement` omitted.
++apiVersion: opensrm.nthlayer.io/v2
++kind: ServiceManifest
++metadata:
++  name: refund-approver
++spec:
++  owner:
++    group: group:default/payments
++  service:
++    name: refund-approver
++    type: ai-gate
++  judgment_threshold:
++    - type: calibration
++      bounds:
++        maximum_brier_score: 0.05
+diff --git a/spec/v2/tests/invalid/n56-calibration-threshold-missing-bins.yaml b/spec/v2/tests/invalid/n56-calibration-threshold-missing-bins.yaml
+new file mode 100644
+index 0000000..be9294e
+--- /dev/null
++++ b/spec/v2/tests/invalid/n56-calibration-threshold-missing-bins.yaml
+@@ -0,0 +1,19 @@
++# MUST be rejected: calibration `measurement` requires `bins`
++# (opensrm-l33e).
++# One defect only: `measurement.bins` omitted.
++apiVersion: opensrm.nthlayer.io/v2
++kind: ServiceManifest
++metadata:
++  name: refund-approver
++spec:
++  owner:
++    group: group:default/payments
++  service:
++    name: refund-approver
++    type: ai-gate
++  judgment_threshold:
++    - type: calibration
++      measurement:
++        window: 30d
++      bounds:
++        maximum_brier_score: 0.05
+diff --git a/spec/v2/tests/invalid/n57-calibration-threshold-missing-window.yaml b/spec/v2/tests/invalid/n57-calibration-threshold-missing-window.yaml
+new file mode 100644
+index 0000000..859aaa9
+--- /dev/null
++++ b/spec/v2/tests/invalid/n57-calibration-threshold-missing-window.yaml
+@@ -0,0 +1,19 @@
++# MUST be rejected: calibration `measurement` requires `window`
++# (opensrm-l33e).
++# One defect only: `measurement.window` omitted.
++apiVersion: opensrm.nthlayer.io/v2
++kind: ServiceManifest
++metadata:
++  name: refund-approver
++spec:
++  owner:
++    group: group:default/payments
++  service:
++    name: refund-approver
++    type: ai-gate
++  judgment_threshold:
++    - type: calibration
++      measurement:
++        bins: 10
++      bounds:
++        maximum_brier_score: 0.05
+diff --git a/spec/v2/tests/invalid/n58-segments-threshold-variance-above-one.yaml b/spec/v2/tests/invalid/n58-segments-threshold-variance-above-one.yaml
+new file mode 100644
+index 0000000..f6aa8fd
+--- /dev/null
++++ b/spec/v2/tests/invalid/n58-segments-threshold-variance-above-one.yaml
+@@ -0,0 +1,19 @@
++# MUST be rejected: maximum_variance_from_overall is a Ratio (0-1)
++# (opensrm-l33e).
++# One defect only: `maximum_variance_from_overall: 1.5`.
++apiVersion: opensrm.nthlayer.io/v2
++kind: ServiceManifest
++metadata:
++  name: refund-approver
++spec:
++  owner:
++    group: group:default/payments
++  service:
++    name: refund-approver
++    type: ai-gate
++  judgment_threshold:
++    - type: segments
++      segment_dimension: customer_tier
++      segment_values: [enterprise, smb, consumer]
++      bounds:
++        maximum_variance_from_overall: 1.5
+diff --git a/spec/v2/tests/invalid/n59-stability-threshold-drift-above-one.yaml b/spec/v2/tests/invalid/n59-stability-threshold-drift-above-one.yaml
+new file mode 100644
+index 0000000..df09218
+--- /dev/null
++++ b/spec/v2/tests/invalid/n59-stability-threshold-drift-above-one.yaml
+@@ -0,0 +1,19 @@
++# MUST be rejected: maximum_drift is a Ratio (0-1) (opensrm-l33e).
++# One defect only: `maximum_drift: 1.5`.
++apiVersion: opensrm.nthlayer.io/v2
++kind: ServiceManifest
++metadata:
++  name: refund-approver
++spec:
++  owner:
++    group: group:default/payments
++  service:
++    name: refund-approver
++    type: ai-gate
++  judgment_threshold:
++    - type: stability
++      probe:
++        frozen_input_set: "s3://probes/credit-decision-2026q1.jsonl"
++        frequency: daily
++      bounds:
++        maximum_drift: 1.5
+diff --git a/spec/v2/tests/invalid/n60-calibration-threshold-ece-above-one.yaml b/spec/v2/tests/invalid/n60-calibration-threshold-ece-above-one.yaml
+new file mode 100644
+index 0000000..9c10490
+--- /dev/null
++++ b/spec/v2/tests/invalid/n60-calibration-threshold-ece-above-one.yaml
+@@ -0,0 +1,20 @@
++# MUST be rejected: maximum_expected_calibration_error is a Ratio (0-1)
++# (opensrm-l33e).
++# One defect only: `maximum_expected_calibration_error: 1.5`.
++apiVersion: opensrm.nthlayer.io/v2
++kind: ServiceManifest
++metadata:
++  name: refund-approver
++spec:
++  owner:
++    group: group:default/payments
++  service:
++    name: refund-approver
++    type: ai-gate
++  judgment_threshold:
++    - type: calibration
++      measurement:
++        bins: 10
++        window: 30d
++      bounds:
++        maximum_expected_calibration_error: 1.5
+diff --git a/spec/v2/tests/invalid/n61-calibration-threshold-brier-above-one.yaml b/spec/v2/tests/invalid/n61-calibration-threshold-brier-above-one.yaml
+new file mode 100644
+index 0000000..d63d8ac
+--- /dev/null
++++ b/spec/v2/tests/invalid/n61-calibration-threshold-brier-above-one.yaml
+@@ -0,0 +1,20 @@
++# MUST be rejected: a Brier score lies in 0-1, so maximum_brier_score
++# may not exceed 1 (opensrm-l33e).
++# One defect only: `maximum_brier_score: 1.5`.
++apiVersion: opensrm.nthlayer.io/v2
++kind: ServiceManifest
++metadata:
++  name: refund-approver
++spec:
++  owner:
++    group: group:default/payments
++  service:
++    name: refund-approver
++    type: ai-gate
++  judgment_threshold:
++    - type: calibration
++      measurement:
++        bins: 10
++        window: 30d
++      bounds:
++        maximum_brier_score: 1.5
+diff --git a/spec/v2/tests/invalid/n62-calibration-threshold-brier-negative.yaml b/spec/v2/tests/invalid/n62-calibration-threshold-brier-negative.yaml
+new file mode 100644
+index 0000000..dfb97dd
+--- /dev/null
++++ b/spec/v2/tests/invalid/n62-calibration-threshold-brier-negative.yaml
+@@ -0,0 +1,20 @@
++# MUST be rejected: a Brier score lies in 0-1, so maximum_brier_score
++# may not be negative (opensrm-l33e).
++# One defect only: `maximum_brier_score: -0.1`.
++apiVersion: opensrm.nthlayer.io/v2
++kind: ServiceManifest
++metadata:
++  name: refund-approver
++spec:
++  owner:
++    group: group:default/payments
++  service:
++    name: refund-approver
++    type: ai-gate
++  judgment_threshold:
++    - type: calibration
++      measurement:
++        bins: 10
++        window: 30d
++      bounds:
++        maximum_brier_score: -0.1
+diff --git a/spec/v2/tests/invalid/n63-audit-backlog-threshold-numeric-age.yaml b/spec/v2/tests/invalid/n63-audit-backlog-threshold-numeric-age.yaml
+new file mode 100644
+index 0000000..a92e2f2
+--- /dev/null
++++ b/spec/v2/tests/invalid/n63-audit-backlog-threshold-numeric-age.yaml
+@@ -0,0 +1,17 @@
++# MUST be rejected: maximum_age is a Duration string; a bare number has
++# no unit (opensrm-l33e).
++# One defect only: `maximum_age: 24`.
++apiVersion: opensrm.nthlayer.io/v2
++kind: ServiceManifest
++metadata:
++  name: refund-approver
++spec:
++  owner:
++    group: group:default/payments
++  service:
++    name: refund-approver
++    type: ai-gate
++  judgment_threshold:
++    - type: audit_backlog
++      bounds:
++        maximum_age: 24
+diff --git a/spec/v2/tests/invalid/n64-feedback-latency-threshold-prose-p90.yaml b/spec/v2/tests/invalid/n64-feedback-latency-threshold-prose-p90.yaml
+new file mode 100644
+index 0000000..5e99f7c
+--- /dev/null
++++ b/spec/v2/tests/invalid/n64-feedback-latency-threshold-prose-p90.yaml
+@@ -0,0 +1,18 @@
++# MUST be rejected: maximum_p90 is a Duration (integer plus
++# ms/s/m/h/d/w); `1 day` is prose (opensrm-l33e).
++# One defect only: `maximum_p90: "1 day"`.
++apiVersion: opensrm.nthlayer.io/v2
++kind: ServiceManifest
++metadata:
++  name: refund-approver
++spec:
++  owner:
++    group: group:default/payments
++  service:
++    name: refund-approver
++    type: ai-gate
++  judgment_threshold:
++    - type: feedback_latency
++      bounds:
++        maximum_p50: 1h
++        maximum_p90: "1 day"
+diff --git a/spec/v2/tests/invalid/n65-template-threshold-unknown-bound.yaml b/spec/v2/tests/invalid/n65-template-threshold-unknown-bound.yaml
+new file mode 100644
+index 0000000..8c09369
+--- /dev/null
++++ b/spec/v2/tests/invalid/n65-template-threshold-unknown-bound.yaml
+@@ -0,0 +1,19 @@
++# MUST be rejected: a template's judgment_threshold items are
++# JudgmentThresholdSpec, so a stability entry's closed bounds apply
++# there too (opensrm-l33e).
++# One defect only: `maximum_variance` beside the correct
++# `maximum_drift`.
++apiVersion: opensrm.nthlayer.io/v2
++kind: ServiceManifestTemplate
++metadata:
++  name: decision-services-base
++  namespace: default
++spec:
++  judgment_threshold:
++    - type: stability
++      probe:
++        frozen_input_set: "s3://probes/credit-decision-2026q1.jsonl"
++        frequency: daily
++      bounds:
++        maximum_drift: 0.02
++        maximum_variance: 0.05
+diff --git a/spec/v2/tests/invalid/n66-calibration-threshold-brier-string.yaml b/spec/v2/tests/invalid/n66-calibration-threshold-brier-string.yaml
+new file mode 100644
+index 0000000..f965907
+--- /dev/null
++++ b/spec/v2/tests/invalid/n66-calibration-threshold-brier-string.yaml
+@@ -0,0 +1,21 @@
++# MUST be rejected: maximum_brier_score is a number; a quoted value
++# is a string, which the 0-1 range check alone would not catch
++# (opensrm-l33e; design spec §1.1 types it "number, 0–1").
++# One defect only: `maximum_brier_score: "0.05"`.
++apiVersion: opensrm.nthlayer.io/v2
++kind: ServiceManifest
++metadata:
++  name: refund-approver
++spec:
++  owner:
++    group: group:default/payments
++  service:
++    name: refund-approver
++    type: ai-gate
++  judgment_threshold:
++    - type: calibration
++      measurement:
++        bins: 10
++        window: 30d
++      bounds:
++        maximum_brier_score: "0.05"

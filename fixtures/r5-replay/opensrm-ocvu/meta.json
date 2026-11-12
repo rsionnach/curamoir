@@ -1,0 +1,149 @@
+{
+ "schema_version": 1,
+ "entry": "opensrm-ocvu",
+ "bead": "opensrm-ocvu",
+ "record": "ocvu",
+ "archive": "r5-state-ocvu-completed.json",
+ "record_repos": [
+  "nthlayer-common"
+ ],
+ "repo": "nthlayer-common",
+ "part": null,
+ "base": "385a4ddd653c357b8df8a7ee5c45187f4d9100d2",
+ "head": "b2b2d5a946dd2ef06dcff4a988310ce07644c684",
+ "record_head": null,
+ "synthetic_base": "00f4414399de3e931028eeb5855759781e3a95d6",
+ "synthetic_head": "4b1d2ac52658c12b16494e4aee63b7baa8e8618a",
+ "base_tree": "61276c4dea9c5f65a61e51a2142ea114952ccda6",
+ "tree_sha": "f3529157bff0e42dfcf075f59a6f72fbbdebbc30",
+ "unavailable": null,
+ "bundle": {
+  "repo": "nthlayer-common",
+  "sha256": "f9019061b549dfd646007ebbc850d287eecb97a0c2d390ec673c0624358e10b3"
+ },
+ "sequential_steps": 20,
+ "record_sequential_steps": 20,
+ "bead_sequential_steps": 20,
+ "fidelity": "counts_only",
+ "blocking_findings": null,
+ "escape": false,
+ "brief_source": "bead",
+ "roster": {
+  "record_version": 2,
+  "passes": [
+   "correctness",
+   "clarity",
+   "edge-cases",
+   "provenance"
+  ]
+ },
+ "lens_order": [
+  "correctness",
+  "clarity",
+  "edge-cases",
+  "provenance",
+  "excellence"
+ ],
+ "counts": {
+  "correctness": [
+   {
+    "critical": 2,
+    "important": 0,
+    "minor": 1
+   },
+   {
+    "critical": 1,
+    "important": 1,
+    "minor": 0
+   },
+   {
+    "critical": 0,
+    "important": 0,
+    "minor": 0
+   }
+  ],
+  "clarity": [
+   {
+    "critical": 0,
+    "important": 5,
+    "minor": 3
+   }
+  ],
+  "edge-cases": [
+   {
+    "critical": 2,
+    "important": 2,
+    "minor": 1
+   },
+   {
+    "critical": 1,
+    "important": 1,
+    "minor": 0
+   },
+   {
+    "critical": 0,
+    "important": 1,
+    "minor": 0
+   },
+   {
+    "critical": 0,
+    "important": 1,
+    "minor": 0
+   },
+   {
+    "critical": 0,
+    "important": 0,
+    "minor": 0
+   }
+  ],
+  "provenance": [
+   {
+    "critical": 0,
+    "important": 3,
+    "minor": 2
+   },
+   {
+    "critical": 0,
+    "important": 0,
+    "minor": 0
+   }
+  ]
+ },
+ "baseline": {
+  "correctness": {
+   "reviews": 3,
+   "fix_rounds": 2,
+   "findings_first_review": 5,
+   "unattributed": 2,
+   "steps": 5
+  },
+  "clarity": {
+   "reviews": 1,
+   "fix_rounds": 1,
+   "findings_first_review": 8,
+   "unattributed": 0,
+   "steps": 2
+  },
+  "edge-cases": {
+   "reviews": 5,
+   "fix_rounds": 4,
+   "findings_first_review": 11,
+   "unattributed": 6,
+   "steps": 9
+  },
+  "provenance": {
+   "reviews": 2,
+   "fix_rounds": 1,
+   "findings_first_review": 5,
+   "unattributed": 0,
+   "steps": 3
+  },
+  "excellence": {
+   "reviews": 1,
+   "fix_rounds": 0,
+   "findings_first_review": 7,
+   "unattributed": 0,
+   "steps": 1
+  }
+ }
+}

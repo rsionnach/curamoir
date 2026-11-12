@@ -1,0 +1,1202 @@
+diff --git a/AGENTS.md b/AGENTS.md
+index bc88bd1..9760a30 100644
+--- a/AGENTS.md
++++ b/AGENTS.md
+@@ -403,20 +403,24 @@ When adding a new database/cache template:
+ 
+ ## Git Workflow
+ 
+-1. **Never commit directly to `main`** - All work goes to `develop` first
+-2. Commit to `develop` branch for all changes
+-3. Create PR from `develop` → `main` for review before merging
+-4. Run `make lint && make typecheck && make test` before committing
+-5. Commit messages: `<type>: <description>` (e.g., `fix: Add sum by (le) to histogram queries`)
+-6. Update `.beads/issues.jsonl` when completing tasks
++1. **Never commit directly to `main`** — branch, then PR.
++2. Feature branches are `feat/<slug>` or `fix/<slug>`, branched from `main`.
++3. Create the PR against `main`. There is no `develop` branch — see
++   opensrm-z9sz and hard rule 8 in CLAUDE.md.
++4. Run `make lint && make typecheck && make test` before committing.
++5. Commit messages: `<type>: <description> (<bead-id>)`
++   (e.g., `fix: add sum by (le) to histogram queries (opensrm-1234)`).
++6. Beads live in **`../opensrm`'s Dolt DB**, not in this repo. Run `bd`
++   from there. Do not create a local `.beads/` directory.
+ 
+ ```bash
+ # Correct workflow
+-git checkout develop
++git checkout main && git pull
++git checkout -b feat/my-change
+ # ... make changes ...
+-git add . && git commit -m "feat: Add new feature"
+-git push origin develop
+-gh pr create --base main --head develop --title "feat: Add new feature"
++git add . && git commit -m "feat: add new feature (opensrm-1234)"
++git push -u origin feat/my-change
++gh pr create --base main --title "feat: add new feature (opensrm-1234)"
+ 
+ # WRONG - never do this
+ git checkout main
+@@ -449,23 +453,25 @@ git commit -m "..."  # Do not commit to main directly
+ - X = Feature releases (monthly)
+ - Y = Patches/hotfixes (as needed)
+ 
+-**Release Process (uses Trusted Publishing - no tokens needed):**
++**Release Process — automated by `release-please` (Trusted Publishing, no
++tokens needed):**
+ 
+-**Required before releasing:**
+-1. Update version in `pyproject.toml` (e.g., `"0.1.0a1"` → `"0.1.0a2"`)
+-2. **Update `CHANGELOG.md`** - This is mandatory. Include all features, fixes, and breaking changes since last release.
++There are no manual release steps. Do **not** bump the version in
++`pyproject.toml` and do **not** hand-edit `CHANGELOG.md` — release-please
++generates both, and hand edits are overwritten.
+ 
+-```bash
+-# Commit, tag, and push
+-git add pyproject.toml CHANGELOG.md
+-git commit -m "release: vX.Y.Z"
+-git tag -a vX.Y.Z -m "Release vX.Y.Z - description"
+-git push origin develop
+-git push origin vX.Y.Z
+-
+-# Create GitHub Release (triggers PyPI publish)
+-gh release create vX.Y.Z --title "vX.Y.Z - Title" --notes "Release notes here"
+-```
++1. Merge conventional commits to `main`. `.github/workflows/release-please.yml`
++   opens or updates a standing `chore(main): release X.Y.Z` PR.
++2. Merge that PR when you want to ship. It tags the release and creates the
++   GitHub Release, which triggers `release.yml` → PyPI.
++
++Version bumps follow the commit types: `fix:` → patch, `feat:` → minor,
++`feat!:` or a `BREAKING CHANGE:` footer → major. Because release-please
++reads individual commits, **merge PRs with a merge commit rather than a
++squash** when a `BREAKING CHANGE:` footer must survive — a squash collapses
++it into the PR description where release-please will not see it.
++
++Current version is tracked in `.release-please-manifest.json`.
+ 
+ **What happens automatically:**
+ - `.github/workflows/release.yml` triggers on release publish
+diff --git a/CLAUDE.md b/CLAUDE.md
+index c5b0f01..f93c1ff 100644
+--- a/CLAUDE.md
++++ b/CLAUDE.md
+@@ -102,11 +102,18 @@ See `docs/golden-principles.md` for the full list with rationale.
+    (e.g. Prometheus metric existence verification), it belongs in a
+    verifier subcommand, not the generation path.
+ 
+-8. **Branching: `develop` is integration, `main` is release.** All
+-   work goes to `develop` via feature branches and PRs. `main` is
+-   only updated by merging `develop` at release time. Never commit
+-   directly to `main`. Feature branches: `feat/<slug>`, merged to
+-   `develop` via PR.
++8. **Branching: feature branch → PR → `main`.** Same as every other
++   ecosystem repo. Feature branches are `feat/<slug>` or `fix/<slug>`,
++   branched from `main` and merged back via PR. Never commit directly
++   to `main`.
++
++   This rule previously described a `develop` → `main` flow. There was
++   no `origin/develop`; the only `develop` was a local branch, 46
++   ahead and 32 behind, still carrying the pre-rename
++   `src/nthlayer/` layout, and merging it would have deleted the
++   release-please pipeline and `cli/migrate_manifest.py`. It was
++   archived as tag `archive/develop-2026-08-26` and deleted
++   (opensrm-z9sz). Do not recreate it.
+ 
+ 9. **Commit messages: `<type>: <description> (<bead-id>)`.** Types:
+    `feat`, `fix`, `refactor`, `docs`, `test`, `chore`, `lint`. When
+@@ -141,8 +148,13 @@ Autonomous loop: `.claude/ralph-loop.sh [max-iterations]` runs the
+ Ralph loop; prompt at `.claude/ralph-prompt.md`; signal completion
+ with `RALPH_COMPLETE`.
+ 
+-Release: update `CHANGELOG.md`, merge `develop` → `main`, create
+-GitHub release → auto-publishes to PyPI.
++Release: driven by `release-please` (`.github/workflows/release-please.yml`,
++`release-please-config.json`, `.release-please-manifest.json`), same as the
++other ecosystem repos. Merging a conventional commit to `main` updates the
++standing release PR; merging that PR tags the release and publishes to PyPI
++via `release.yml`. **`CHANGELOG.md` and the version are generated — do not
++hand-edit either.** A `feat!:` or a `BREAKING CHANGE:` footer drives the
++major bump.
+ 
+ ## Where to find detail
+ 
+diff --git a/CONTRIBUTING.md b/CONTRIBUTING.md
+index 22b610d..46659f6 100644
+--- a/CONTRIBUTING.md
++++ b/CONTRIBUTING.md
+@@ -28,7 +28,7 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
+ git clone https://github.com/rsionnach/nthlayer-common.git
+ git clone https://github.com/rsionnach/nthlayer-generate.git
+ cd nthlayer-generate
+-git checkout develop                 # all work targets develop, not main
++git checkout -b feat/your-change     # branch from main; there is no develop
+ uv sync --extra dev                  # installs deps + test/lint/typecheck tools
+ make pre-commit-install              # install git hooks
+ 
+@@ -51,16 +51,20 @@ A clean clone to a green `make test` should take well under five minutes.
+ 
+ ## Pull Request Process
+ 
+-This repo uses a **`develop` → `main`** flow (unlike the other ecosystem
+-repos, which commit to `main` directly):
++This repo uses feature branch → PR → `main`, the same as every other
++ecosystem repo:
+ 
+ 1. Fork the repository.
+-2. Create a feature branch off `develop` (`git checkout -b feat/your-change`).
++2. Create a feature branch off `main` (`git checkout -b feat/your-change`).
+ 3. Make your change with tests.
+ 4. Ensure `make test`, `make lint`, and `make typecheck` pass.
+ 5. Commit using the message format below.
+-6. Open a PR targeting **`develop`**. `main` is only updated by merging
+-   `develop` at release time — never commit directly to `main`.
++6. Open a PR targeting **`main`** — never commit to it directly.
++
++> Earlier versions of this guide described a `develop` → `main` flow and
++> called it out as an exception to the rest of the ecosystem. That was
++> never true on the remote: no `origin/develop` ever existed, and every
++> merge went to `main`. Corrected under opensrm-z9sz.
+ 
+ ## Development Guidelines
+ 
+diff --git a/pyproject.toml b/pyproject.toml
+index 16b9dac..83ba562 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -9,7 +9,14 @@ description = "NthLayer - The Missing Layer of Reliability"
+ readme = "README.md"
+ requires-python = ">=3.11"
+ dependencies = [
+-    "nthlayer-common>=0.1.5",
++    # >=2.0.0: generate imports resolve_service_type /
++    # valid_service_types_phrase / is_valid_service_type from
++    # nthlayer_common.manifest.models, which land in 2.0.0 (opensrm-ih0v).
++    # The old >=0.1.5 floor claimed a compatibility that no longer exists —
++    # CI resolves this from PyPI via `uv sync --no-sources`, so an
++    # unsatisfiable floor fails at resolution with a clear message instead
++    # of at import with a confusing ImportError.
++    "nthlayer-common>=2.0.0",
+     "grafana-foundation-sdk>=0.0.11",
+     "pydantic>=2.7.0,<3.0.0",
+     "pydantic-settings>=2.2.1,<3.0.0",
+diff --git a/src/nthlayer_generate/cli/init.py b/src/nthlayer_generate/cli/init.py
+index 5ffcbea..e31ca89 100644
+--- a/src/nthlayer_generate/cli/init.py
++++ b/src/nthlayer_generate/cli/init.py
+@@ -2,6 +2,8 @@
+ 
+ from pathlib import Path
+ 
++from nthlayer_common.manifest.models import resolve_service_type
++
+ from nthlayer_generate.cli.ux import (
+     console,
+     error,
+@@ -285,13 +287,30 @@ service:
+   name: {service_name}
+   team: {team}
+   tier: {tier}
+-  type: {service_type}
++  type: {_manifest_type(service_type)}
+ {template_line}
+ resources:
+ {resources_yaml}
+ """
+ 
+ 
++def _manifest_type(service_type: str) -> str:
++    """Resolve the CLI's friendly type to the value a manifest may store.
++
++    The menu keeps author-friendly names (`web`, and the aliases a template
++    may supply), but a manifest must carry a value schema.json accepts —
++    `web` is not one, `x-web` is (opensrm-z3ab). Resolving here rather than
++    renaming the menu keeps `nthlayer init --type web` working while making
++    its output valid.
++
++    Falls back to the raw value when it does not resolve, so this does not
++    silently change behaviour for the menu entries that were already invalid
++    (`ml` is the live one) — that is opensrm-8qpd's to fix, and it
++    should keep failing loudly at validation until then.
++    """
++    return resolve_service_type(service_type) or service_type
++
++
+ def _build_resources_yaml(
+     service_name: str,
+     tier: str,
+@@ -336,7 +355,7 @@ def _build_resources_yaml(
+         )
+ 
+     # Add latency SLO for API types
+-    if service_type in ("api", "web"):
++    if service_type in ("api", "x-web"):
+         resources.append(
+             """
+   # Latency SLO - p95
+diff --git a/src/nthlayer_generate/dashboards/templates/__init__.py b/src/nthlayer_generate/dashboards/templates/__init__.py
+index 7b9dcd2..365e712 100644
+--- a/src/nthlayer_generate/dashboards/templates/__init__.py
++++ b/src/nthlayer_generate/dashboards/templates/__init__.py
+@@ -71,7 +71,8 @@ TECHNOLOGY_TEMPLATES: Dict[str, Type[TechnologyTemplate]] = {
+     # Service types (for health panels)
+     "http": HTTPIntentTemplate,
+     "api": HTTPIntentTemplate,
+-    "web": HTTPIntentTemplate,
++    "x-web": HTTPIntentTemplate,
++    "web": HTTPIntentTemplate,  # pre-opensrm-ih0v spelling, still looked up
+     "service": HTTPIntentTemplate,
+     "stream": StreamIntentTemplate,
+     "worker": WorkerIntentTemplate,
+diff --git a/src/nthlayer_generate/dashboards/validator.py b/src/nthlayer_generate/dashboards/validator.py
+index a86542a..9452647 100644
+--- a/src/nthlayer_generate/dashboards/validator.py
++++ b/src/nthlayer_generate/dashboards/validator.py
+@@ -190,7 +190,7 @@ def extract_technologies(context: Any, resources: list[Any]) -> set[str]:
+             technologies.add(cache_type)
+ 
+     # Always include HTTP for API services
+-    if context.type in ("api", "service", "web"):
++    if context.type in ("api", "service", "x-web"):
+         technologies.add("http")
+ 
+     return technologies
+diff --git a/src/nthlayer_generate/generators/docs.py b/src/nthlayer_generate/generators/docs.py
+index e4a884d..6790ea0 100644
+--- a/src/nthlayer_generate/generators/docs.py
++++ b/src/nthlayer_generate/generators/docs.py
+@@ -452,7 +452,7 @@ def _adr_initial_architecture(manifest: ReliabilityManifest) -> str:
+ 
+ def _generate_api_docs(manifest: ReliabilityManifest) -> str:
+     """Generate API documentation stub matched to service type."""
+-    if manifest.type in ("api", "web"):
++    if manifest.type in ("api", "x-web"):
+         return _api_docs_http(manifest)
+     elif manifest.type in ("worker", "batch"):
+         return _api_docs_worker(manifest)
+diff --git a/src/nthlayer_generate/metrics/templates/registry.py b/src/nthlayer_generate/metrics/templates/registry.py
+index 18427db..d50c3f6 100644
+--- a/src/nthlayer_generate/metrics/templates/registry.py
++++ b/src/nthlayer_generate/metrics/templates/registry.py
+@@ -27,6 +27,11 @@ _TEMPLATES: dict[str, ServiceTypeTemplate] = {
+     "gateway": GATEWAY_TEMPLATE,
+     "cache": CACHE_TEMPLATE,
+     # Aliases for common alternative names
++    # Both spellings: `x-web` is what a manifest stores post-opensrm-ih0v,
++    # `web` is what older manifests and hand-typed lookups still say. This
++    # table is a permissive name->template index, not a validation rule —
++    # note `http`, `rest`, `db` below, which are not service types at all.
++    "x-web": API_TEMPLATE,
+     "web": API_TEMPLATE,
+     "http": API_TEMPLATE,
+     "rest": API_TEMPLATE,
+diff --git a/src/nthlayer_generate/schemas/backstage-entity.schema.json b/src/nthlayer_generate/schemas/backstage-entity.schema.json
+index f770282..5c53f13 100644
+--- a/src/nthlayer_generate/schemas/backstage-entity.schema.json
++++ b/src/nthlayer_generate/schemas/backstage-entity.schema.json
+@@ -4,7 +4,11 @@
+   "title": "NthLayer Backstage Entity",
+   "description": "JSON artifact for Backstage integration with NthLayer reliability data",
+   "type": "object",
+-  "required": ["schemaVersion", "generatedAt", "service"],
++  "required": [
++    "schemaVersion",
++    "generatedAt",
++    "service"
++  ],
+   "properties": {
+     "schemaVersion": {
+       "const": "v1",
+@@ -41,7 +45,12 @@
+   "$defs": {
+     "serviceContext": {
+       "type": "object",
+-      "required": ["name", "team", "tier", "type"],
++      "required": [
++        "name",
++        "team",
++        "tier",
++        "type"
++      ],
+       "properties": {
+         "name": {
+           "type": "string",
+@@ -53,21 +62,52 @@
+         },
+         "tier": {
+           "type": "string",
+-          "enum": ["critical", "high", "standard", "low"],
++          "enum": [
++            "critical",
++            "high",
++            "standard",
++            "low"
++          ],
+           "description": "Service tier for SLO thresholds and alerting"
+         },
+         "type": {
+           "type": "string",
+-          "enum": ["api", "worker", "stream", "ai-gate", "batch", "database", "web"],
+-          "description": "Service type"
++          "description": "Service operational pattern. Mirrors OpenSRM v2 schema.json's ServiceType (opensrm-z3ab): the six standard values, or an implementation-specific type under the reserved x- prefix. The not/newline guard is deliberate \u2014 regex engines disagree about whether $ matches before a trailing newline, so without it a block scalar 'x-web\\n' is rejected by ECMA-262 engines and accepted by Python's re.",
++          "oneOf": [
++            {
++              "enum": [
++                "api",
++                "worker",
++                "stream",
++                "ai-gate",
++                "batch",
++                "database"
++              ]
++            },
++            {
++              "type": "string",
++              "pattern": "^x-[a-z][a-z0-9-]*$",
++              "not": {
++                "pattern": "\\n"
++              }
++            }
++          ]
+         },
+         "description": {
+-          "type": ["string", "null"],
++          "type": [
++            "string",
++            "null"
++          ],
+           "description": "Human-readable service description"
+         },
+         "supportModel": {
+           "type": "string",
+-          "enum": ["self", "shared", "sre", "business_hours"],
++          "enum": [
++            "self",
++            "shared",
++            "sre",
++            "business_hours"
++          ],
+           "default": "self",
+           "description": "Support model for on-call routing"
+         }
+@@ -75,7 +115,11 @@
+     },
+     "slo": {
+       "type": "object",
+-      "required": ["name", "target", "window"],
++      "required": [
++        "name",
++        "target",
++        "window"
++      ],
+       "properties": {
+         "name": {
+           "type": "string",
+@@ -92,21 +136,46 @@
+           "description": "Time window (e.g., 30d, 7d)"
+         },
+         "sloType": {
+-          "type": ["string", "null"],
+-          "enum": ["availability", "latency", "error_rate", "throughput", "judgment", null],
++          "type": [
++            "string",
++            "null"
++          ],
++          "enum": [
++            "availability",
++            "latency",
++            "error_rate",
++            "throughput",
++            "judgment",
++            null
++          ],
+           "description": "SLO type classification"
+         },
+         "description": {
+-          "type": ["string", "null"],
++          "type": [
++            "string",
++            "null"
++          ],
+           "description": "Human-readable SLO description"
+         },
+         "currentValue": {
+-          "type": ["number", "null"],
++          "type": [
++            "number",
++            "null"
++          ],
+           "description": "Current measured value (null if live data not available)"
+         },
+         "status": {
+-          "type": ["string", "null"],
+-          "enum": ["healthy", "warning", "critical", "exhausted", null],
++          "type": [
++            "string",
++            "null"
++          ],
++          "enum": [
++            "healthy",
++            "warning",
++            "critical",
++            "exhausted",
++            null
++          ],
+           "description": "Current SLO status based on error budget consumption"
+         }
+       }
+@@ -115,30 +184,54 @@
+       "type": "object",
+       "properties": {
+         "totalMinutes": {
+-          "type": ["number", "null"],
++          "type": [
++            "number",
++            "null"
++          ],
+           "description": "Total error budget in minutes for the window"
+         },
+         "consumedMinutes": {
+-          "type": ["number", "null"],
++          "type": [
++            "number",
++            "null"
++          ],
+           "description": "Error budget consumed in minutes"
+         },
+         "remainingMinutes": {
+-          "type": ["number", "null"],
++          "type": [
++            "number",
++            "null"
++          ],
+           "description": "Error budget remaining in minutes"
+         },
+         "remainingPercent": {
+-          "type": ["number", "null"],
++          "type": [
++            "number",
++            "null"
++          ],
+           "minimum": 0,
+           "maximum": 100,
+           "description": "Percentage of error budget remaining"
+         },
+         "burnRate": {
+-          "type": ["number", "null"],
++          "type": [
++            "number",
++            "null"
++          ],
+           "description": "Current burn rate multiplier (null if live data not available)"
+         },
+         "status": {
+-          "type": ["string", "null"],
+-          "enum": ["healthy", "warning", "critical", "exhausted", null],
++          "type": [
++            "string",
++            "null"
++          ],
++          "enum": [
++            "healthy",
++            "warning",
++            "critical",
++            "exhausted",
++            null
++          ],
+           "description": "Overall error budget status"
+         }
+       }
+@@ -147,24 +240,55 @@
+       "type": "object",
+       "properties": {
+         "score": {
+-          "type": ["number", "null"],
++          "type": [
++            "number",
++            "null"
++          ],
+           "minimum": 0,
+           "maximum": 100,
+           "description": "Weighted reliability score (0-100)"
+         },
+         "grade": {
+-          "type": ["string", "null"],
+-          "enum": ["A", "B", "C", "D", "F", null],
++          "type": [
++            "string",
++            "null"
++          ],
++          "enum": [
++            "A",
++            "B",
++            "C",
++            "D",
++            "F",
++            null
++          ],
+           "description": "Letter grade (A=excellent, B=good, C=fair, D=poor, F=critical)"
+         },
+         "band": {
+-          "type": ["string", "null"],
+-          "enum": ["excellent", "good", "fair", "poor", "critical", null],
++          "type": [
++            "string",
++            "null"
++          ],
++          "enum": [
++            "excellent",
++            "good",
++            "fair",
++            "poor",
++            "critical",
++            null
++          ],
+           "description": "Score band classification"
+         },
+         "trend": {
+-          "type": ["string", "null"],
+-          "enum": ["improving", "stable", "degrading", null],
++          "type": [
++            "string",
++            "null"
++          ],
++          "enum": [
++            "improving",
++            "stable",
++            "degrading",
++            null
++          ],
+           "description": "Score trend direction"
+         },
+         "components": {
+@@ -177,19 +301,31 @@
+       "description": "Breakdown of score components",
+       "properties": {
+         "sloCompliance": {
+-          "type": ["number", "null"],
++          "type": [
++            "number",
++            "null"
++          ],
+           "description": "SLO compliance score (0-100, 40% weight)"
+         },
+         "incidentScore": {
+-          "type": ["number", "null"],
++          "type": [
++            "number",
++            "null"
++          ],
+           "description": "Incident score (0-100, 30% weight)"
+         },
+         "deploySuccessRate": {
+-          "type": ["number", "null"],
++          "type": [
++            "number",
++            "null"
++          ],
+           "description": "Deployment success rate (0-100, 20% weight)"
+         },
+         "errorBudgetRemaining": {
+-          "type": ["number", "null"],
++          "type": [
++            "number",
++            "null"
++          ],
+           "description": "Error budget remaining score (0-100, 10% weight)"
+         }
+       }
+@@ -199,23 +335,39 @@
+       "properties": {
+         "status": {
+           "type": "string",
+-          "enum": ["APPROVED", "WARNING", "BLOCKED"],
++          "enum": [
++            "APPROVED",
++            "WARNING",
++            "BLOCKED"
++          ],
+           "description": "Current deployment gate status"
+         },
+         "message": {
+-          "type": ["string", "null"],
++          "type": [
++            "string",
++            "null"
++          ],
+           "description": "Human-readable status message"
+         },
+         "budgetRemainingPercent": {
+-          "type": ["number", "null"],
++          "type": [
++            "number",
++            "null"
++          ],
+           "description": "Current error budget remaining percentage"
+         },
+         "warningThreshold": {
+-          "type": ["number", "null"],
++          "type": [
++            "number",
++            "null"
++          ],
+           "description": "Warning threshold percentage"
+         },
+         "blockingThreshold": {
+-          "type": ["number", "null"],
++          "type": [
++            "number",
++            "null"
++          ],
+           "description": "Blocking threshold percentage"
+         },
+         "recommendations": {
+@@ -232,25 +384,40 @@
+       "description": "Related links for the service",
+       "properties": {
+         "grafanaDashboard": {
+-          "type": ["string", "null"],
++          "type": [
++            "string",
++            "null"
++          ],
+           "format": "uri",
+           "description": "URL to Grafana dashboard"
+         },
+         "runbook": {
+-          "type": ["string", "null"],
++          "type": [
++            "string",
++            "null"
++          ],
+           "format": "uri",
+           "description": "URL to runbook documentation"
+         },
+         "serviceManifest": {
+-          "type": ["string", "null"],
++          "type": [
++            "string",
++            "null"
++          ],
+           "description": "Path to source NthLayer manifest"
+         },
+         "slothSpec": {
+-          "type": ["string", "null"],
++          "type": [
++            "string",
++            "null"
++          ],
+           "description": "Path to generated Sloth specification"
+         },
+         "alertsYaml": {
+-          "type": ["string", "null"],
++          "type": [
++            "string",
++            "null"
++          ],
+           "description": "Path to generated alerts YAML"
+         }
+       }
+diff --git a/src/nthlayer_generate/specs/manifest.py b/src/nthlayer_generate/specs/manifest.py
+index 940889d..502b2f5 100644
+--- a/src/nthlayer_generate/specs/manifest.py
++++ b/src/nthlayer_generate/specs/manifest.py
+@@ -15,6 +15,18 @@ from dataclasses import dataclass, field
+ from enum import Enum
+ from typing import TYPE_CHECKING, Any
+ 
++from nthlayer_common.manifest.models import (
++    SERVICE_TYPE_ALIASES as _COMMON_SERVICE_TYPE_ALIASES,
++)
++from nthlayer_common.manifest.models import (
++    VALID_SERVICE_TYPES as _COMMON_VALID_SERVICE_TYPES,
++)
++from nthlayer_common.manifest.models import (
++    is_valid_service_type,
++    resolve_service_type,
++    valid_service_types_phrase,
++)
++
+ if TYPE_CHECKING:
+     from nthlayer_generate.specs.alerting import AlertingConfig
+     from nthlayer_generate.specs.models import Resource
+@@ -33,22 +45,20 @@ VALID_TIERS = {
+     "low",
+ }
+ 
+-# Valid service types (OpenSRM defines 6 types)
+-VALID_SERVICE_TYPES = {
+-    "api",  # Request/response services
+-    "worker",  # Background processors (OpenSRM canonical name)
+-    "stream",  # Event processors
+-    "ai-gate",  # AI decision services with judgment SLOs
+-    "batch",  # Scheduled jobs (OpenSRM canonical name)
+-    "database",  # Managed database instances
+-    "web",  # Web frontend (NthLayer extension)
+-}
+-
+-# Type aliases for backward compatibility
+-SERVICE_TYPE_ALIASES = {
+-    "background-job": "worker",  # NthLayer legacy → OpenSRM
+-    "pipeline": "batch",  # NthLayer legacy → OpenSRM
+-}
++# Service types come from nthlayer-common, which is the single source of
++# truth for the rule (opensrm-z3ab). generate kept its own copy until the
++# two silently disagreed: it accepted `web`, which schema.json rejects,
++# and rejected `x-web`, which schema.json accepts and which common
++# produces from a `web` input. Re-exported here so existing importers
++# keep their path.
++VALID_SERVICE_TYPES = _COMMON_VALID_SERVICE_TYPES
++SERVICE_TYPE_ALIASES = _COMMON_SERVICE_TYPE_ALIASES
++
++# Re-exported alongside the constants: the predicate is what actually
++# decides the rule, and a consumer reading only the two sets above would
++# not learn that the x- extension branch exists — which is how this
++# divergence started.
++__all__ = [*globals().get('__all__', []), 'is_valid_service_type']
+ 
+ # Judgment SLO types for ai-gate services
+ JUDGMENT_SLO_TYPES = {
+@@ -492,9 +502,12 @@ class ReliabilityManifest:
+ 
+     def __post_init__(self) -> None:
+         """Validate and normalize the manifest."""
+-        # Normalize service type aliases
+-        if self.type in SERVICE_TYPE_ALIASES:
+-            self.type = SERVICE_TYPE_ALIASES[self.type]
++        # Resolve and validate the service type through nthlayer-common,
++        # which owns the rule (opensrm-z3ab). resolve_service_type applies
++        # aliases first — an alias is deliberately not itself a valid type,
++        # so validating before resolving would reject every one of them.
++        # The check itself lives below, after the required-field guards, so
++        # a missing type still reports "Service type is required".
+ 
+         # Validate required fields
+         if not self.name:
+@@ -512,10 +525,14 @@ class ReliabilityManifest:
+                 f"Invalid tier '{self.tier}'. Must be one of: {', '.join(sorted(VALID_TIERS))}"
+             )
+ 
+-        # Validate type (after alias normalization)
+-        if self.type not in VALID_SERVICE_TYPES:
+-            valid = ", ".join(sorted(VALID_SERVICE_TYPES))
+-            raise ValueError(f"Invalid type '{self.type}'. Must be one of: {valid}")
++        # Validate type (resolving aliases first — see __post_init__ note)
++        resolved_type = resolve_service_type(self.type)
++        if resolved_type is None:
++            raise ValueError(
++                f"Invalid type '{self.type}'. "
++                f"Must be one of: {valid_service_types_phrase()}."
++            )
++        self.type = resolved_type
+ 
+         # Validate ai-gate specific requirements
+         if self.type == "ai-gate":
+diff --git a/src/nthlayer_generate/specs/models.py b/src/nthlayer_generate/specs/models.py
+index 90c9db9..9c196a6 100644
+--- a/src/nthlayer_generate/specs/models.py
++++ b/src/nthlayer_generate/specs/models.py
+@@ -7,6 +7,8 @@ from __future__ import annotations
+ from dataclasses import dataclass, field
+ from typing import Any
+ 
++from nthlayer_common.manifest.models import resolve_service_type
++
+ 
+ @dataclass
+ class PagerDutyConfig:
+@@ -64,6 +66,19 @@ class ServiceContext:
+ 
+     def __post_init__(self) -> None:
+         """Validate required fields."""
++        # Resolve the service type at the boundary, so downstream code sees
++        # one spelling (hard rule 1). specs/parser.py hands the raw YAML
++        # value straight in, so without this a `type: web` file yields a
++        # context holding `web` while every branch tests for `x-web` — web
++        # services would silently lose their HTTP dashboard panels and
++        # latency docs (opensrm-z3ab).
++        #
++        # Resolve-or-keep, never raise: type validity is REPORTED by
++        # specs/validator.py as a collected error, and raising here would
++        # turn that into a crash.
++        if self.type:
++            self.type = resolve_service_type(self.type) or self.type
++
+         if not self.name:
+             raise ValueError("Service name is required")
+         if not self.team:
+@@ -139,26 +154,14 @@ VALID_TIERS = {
+     "low",
+ }
+ 
+-# Valid service types (OpenSRM defines 6 types, NthLayer adds 'web')
+-VALID_SERVICE_TYPES = {
+-    "api",  # Request/response services
+-    "worker",  # Background processors (OpenSRM canonical name)
+-    "stream",  # Event processors
+-    "ai-gate",  # AI decision services with judgment SLOs
+-    "batch",  # Scheduled jobs (OpenSRM canonical name)
+-    "database",  # Managed database instances
+-    "web",  # Web frontend (NthLayer extension)
+-    # Legacy aliases (deprecated, use canonical names)
+-    "background-job",  # → worker
+-    "pipeline",  # → batch
+-}
++# Service types are NOT defined here. nthlayer-common owns the rule; import
++# VALID_SERVICE_TYPES / resolve_service_type from
++# nthlayer_common.manifest.models, or from specs.manifest which re-exports
++# them. The copy that used to live here was unreferenced dead code, and it
++# listed the legacy aliases as VALID types — which schema.json rejects and
++# which would have let generate store an alias (opensrm-z3ab).
+ 
+ # Type aliases for backward compatibility
+-SERVICE_TYPE_ALIASES = {
+-    "background-job": "worker",  # NthLayer legacy → OpenSRM
+-    "pipeline": "batch",  # NthLayer legacy → OpenSRM
+-}
+-
+ # Valid support models
+ VALID_SUPPORT_MODELS = {
+     "self",  # Team handles everything 24/7
+diff --git a/src/nthlayer_generate/specs/templates.py b/src/nthlayer_generate/specs/templates.py
+index 97a9936..a69adfe 100644
+--- a/src/nthlayer_generate/specs/templates.py
++++ b/src/nthlayer_generate/specs/templates.py
+@@ -30,7 +30,7 @@ class ServiceTemplate:
+         if self.tier not in TIER_NAMES:
+             raise ValueError(f"Invalid tier: {self.tier}. Valid: {', '.join(TIER_NAMES)}")
+ 
+-        valid_types = ["api", "background-job", "pipeline", "web", "database"]
++        valid_types = ["api", "background-job", "pipeline", "x-web", "database"]
+         if self.type not in valid_types:
+             raise ValueError(f"Invalid type: {self.type}")
+ 
+diff --git a/src/nthlayer_generate/specs/validator.py b/src/nthlayer_generate/specs/validator.py
+index 01cfd40..c1b796c 100644
+--- a/src/nthlayer_generate/specs/validator.py
++++ b/src/nthlayer_generate/specs/validator.py
+@@ -12,6 +12,11 @@ from dataclasses import dataclass, field
+ from pathlib import Path
+ from typing import Any
+ 
++from nthlayer_common.manifest.models import (
++    resolve_service_type,
++    valid_service_types_phrase,
++)
++
+ from nthlayer_generate.specs.contracts import (
+     ContractRegistry,
+     validate_dependency_expectations,
+@@ -22,7 +27,7 @@ from nthlayer_generate.specs.loader import (
+     ManifestLoadError,
+     load_manifest,
+ )
+-from nthlayer_generate.specs.manifest import SERVICE_TYPE_ALIASES, VALID_SERVICE_TYPES, VALID_TIERS
++from nthlayer_generate.specs.manifest import VALID_TIERS
+ from nthlayer_generate.specs.models import VALID_RESOURCE_KINDS
+ from nthlayer_generate.specs.parser import ServiceParseError, parse_service_file
+ from nthlayer_generate.specs.template import validate_template_variables
+@@ -208,12 +213,14 @@ def validate_service_file(
+             f"Must be one of: {', '.join(sorted(VALID_TIERS))}"
+         )
+ 
+-    # Validate type (accept canonical types and legacy aliases)
+-    all_valid_types = VALID_SERVICE_TYPES | set(SERVICE_TYPE_ALIASES.keys())
+-    if service_context.type not in all_valid_types:
++    # Validate type through nthlayer-common, which owns the rule
++    # (opensrm-z3ab). resolve_service_type accepts canonical types, the
++    # spec's x- extension branch, and legacy aliases — the union this used
++    # to build by hand, plus the extension branch it was missing.
++    if resolve_service_type(service_context.type) is None:
+         errors.append(
+             f"Invalid type: '{service_context.type}'. "
+-            f"Must be one of: {', '.join(sorted(VALID_SERVICE_TYPES))}"
++            f"Must be one of: {valid_service_types_phrase()}."
+         )
+ 
+     # Check for duplicate resource names
+diff --git a/src/nthlayer_generate/validation/conftest.py b/src/nthlayer_generate/validation/conftest.py
+index 122d262..5c64b45 100644
+--- a/src/nthlayer_generate/validation/conftest.py
++++ b/src/nthlayer_generate/validation/conftest.py
+@@ -20,6 +20,7 @@ from pathlib import Path
+ from typing import Any
+ 
+ import yaml
++from nthlayer_common.manifest.models import resolve_service_type
+ 
+ from nthlayer_generate.core.tiers import VALID_TIERS
+ from nthlayer_generate.slos.ceiling import validate_slo_ceiling
+@@ -272,9 +273,11 @@ class ConftestValidator:
+                     )
+                 )
+ 
+-            # Valid type
+-            valid_types = {"api", "worker", "stream", "web", "batch", "ml"}
+-            if service.get("type") and service["type"] not in valid_types:
++            # Valid type — delegated to nthlayer-common, which owns the rule
++            # (opensrm-z3ab). This hand-maintained set had drifted three ways:
++            # it carried `web` and `ml`, which are not service types, and was
++            # missing `ai-gate` and `database`, which are.
++            if service.get("type") and resolve_service_type(service["type"]) is None:
+                 result.issues.append(
+                     ValidationIssue(
+                         severity=Severity.WARNING,
+diff --git a/tests/test_dashboards_validator.py b/tests/test_dashboards_validator.py
+index 7037592..e6e7a3a 100644
+--- a/tests/test_dashboards_validator.py
++++ b/tests/test_dashboards_validator.py
+@@ -371,9 +371,14 @@ class TestExtractTechnologies:
+         assert "http" in result
+ 
+     def test_adds_http_for_web_services(self):
+-        """Test HTTP is added for web services."""
++        """Test HTTP is added for web services.
++
++        `x-web` is what a real ServiceContext holds post-opensrm-z3ab: the
++        dataclass resolves `web` through nthlayer-common's alias map at
++        construction, so no parsed context ever carries the bare spelling.
++        """
+         context = MagicMock()
+-        context.type = "web"
++        context.type = "x-web"
+ 
+         result = extract_technologies(context, [])
+ 
+diff --git a/tests/test_opensrm.py b/tests/test_opensrm.py
+index 75410a4..7945a01 100644
+--- a/tests/test_opensrm.py
++++ b/tests/test_opensrm.py
+@@ -22,6 +22,7 @@ from nthlayer_generate.specs.manifest import (
+     RosterMember,
+     RotationConfig,
+     SourceFormat,
++    is_valid_service_type,
+ )
+ from nthlayer_generate.specs.opensrm_parser import (
+     OpenSRMParseError,
+@@ -447,12 +448,22 @@ class TestServiceTypeConstants:
+         assert "ai-gate" in VALID_SERVICE_TYPES
+         assert "batch" in VALID_SERVICE_TYPES  # OpenSRM canonical name
+         assert "database" in VALID_SERVICE_TYPES
+-        assert "web" in VALID_SERVICE_TYPES  # NthLayer extension
++
++        # `web` is NOT a member post-opensrm-ih0v. It was an NthLayer
++        # extension invented before the spec had a mechanism for one; it now
++        # goes through the spec's `^x-[a-z][a-z0-9-]*$` branch as `x-web`,
++        # which is why membership is the wrong question to ask of it — use
++        # the predicate, which knows about the extension branch.
++        assert "web" not in VALID_SERVICE_TYPES
++        assert is_valid_service_type("x-web")
+ 
+     def test_type_aliases(self):
+         """Test type aliases for backward compatibility."""
+         assert SERVICE_TYPE_ALIASES["background-job"] == "worker"
+         assert SERVICE_TYPE_ALIASES["pipeline"] == "batch"
++        # Added by opensrm-ih0v so manifests already written with `web`
++        # keep parsing after the rename.
++        assert SERVICE_TYPE_ALIASES["web"] == "x-web"
+ 
+ 
+ class TestOpenSRMFileParser:
+diff --git a/tests/test_service_type_agreement.py b/tests/test_service_type_agreement.py
+new file mode 100644
+index 0000000..67a8619
+--- /dev/null
++++ b/tests/test_service_type_agreement.py
+@@ -0,0 +1,164 @@
++"""nthlayer-generate and nthlayer-common must agree on what a service type is.
++
++The divergence this file exists to catch (opensrm-z3ab): generate kept its
++own copy of the service-type rule. After opensrm-ih0v made
++``spec.service.type`` a first-class field with a six-value enum plus an
++``^x-[a-z][a-z0-9-]*$`` extension branch, the two copies disagreed —
++generate accepted ``web`` (which schema.json rejects) and rejected
++``x-web`` (which schema.json accepts, and which is exactly what
++nthlayer-common's alias map now produces from a ``web`` input).
++
++Every suite stayed green throughout, because nothing tested the boundary.
++That is the whole point of this module: it is the only place the two
++packages' verdicts on the same value are compared. A test that exercises
++either side alone cannot see the drift.
++
++Latent at the time of filing — no manifest in the ecosystem declared
++``type: web`` — which is why it was worth closing before it bit someone.
++"""
++from __future__ import annotations
++
++import pytest
++from nthlayer_common.manifest.models import (
++    SERVICE_TYPE_ALIASES,
++    VALID_SERVICE_TYPES,
++    resolve_service_type,
++)
++
++from nthlayer_generate.specs.manifest import ReliabilityManifest
++from nthlayer_generate.specs.validator import validate_service_file
++
++# Values that must behave identically on both sides. Canonical types and
++# extension types are valid; aliases resolve; everything else is rejected.
++_ACCEPTED = sorted(VALID_SERVICE_TYPES) + ["x-web", "x-ml"] + sorted(SERVICE_TYPE_ALIASES)
++# NOT "web": since opensrm-ih0v it is an ALIAS that resolves to x-web, so it
++# appears in _ACCEPTED via SERVICE_TYPE_ALIASES. What must be rejected is
++# generate STORING it — pinned by test_generate_stores_x_web_for_a_web_input.
++_REJECTED = ["ml", "Web", "x-", "x-Web", "nonsense", ""]
++
++
++@pytest.mark.parametrize("service_type", _ACCEPTED)
++def test_generate_accepts_what_common_accepts(service_type: str):
++    """Anything nthlayer-common resolves, generate must accept.
++
++    Includes aliases: generate has always accepted them and must keep
++    doing so, because they resolve before validation on both sides.
++    """
++    assert resolve_service_type(service_type) is not None, (
++        f"test premise broken: nthlayer-common no longer accepts {service_type!r}"
++    )
++
++    manifest = ReliabilityManifest(name="svc", team="t", tier="critical", type=service_type)
++
++    assert manifest.type == resolve_service_type(service_type), (
++        f"generate stored {manifest.type!r} for input {service_type!r}, but "
++        f"nthlayer-common resolves it to {resolve_service_type(service_type)!r}"
++    )
++
++
++@pytest.mark.parametrize("service_type", _REJECTED)
++def test_generate_rejects_what_common_rejects(service_type: str):
++    """And the converse — generate must not be WIDER than common either.
++
++    ``ml`` is the live one: cli/init.py offers it in its type menu, and
++    neither generate's own validator nor nthlayer-common accepts it. That
++    is a separate pre-existing defect (its own bead), but this test pins
++    the boundary so closing it cannot silently widen generate.
++    """
++    assert resolve_service_type(service_type) is None, (
++        f"test premise broken: nthlayer-common now accepts {service_type!r}"
++    )
++
++    with pytest.raises(ValueError):
++        ReliabilityManifest(name="svc", team="t", tier="critical", type=service_type)
++
++
++def test_generate_stores_x_web_for_a_web_input():
++    """The concrete incompatibility, pinned.
++
++    An author writing ``type: web`` gets ``x-web`` from nthlayer-common.
++    Generate previously stored ``web`` and then rejected ``x-web``, so a
++    manifest that round-tripped through common could not be read back.
++    """
++    manifest = ReliabilityManifest(name="svc", team="t", tier="critical", type="web")
++
++    assert manifest.type == "x-web"
++
++
++def test_generate_does_not_store_aliases():
++    """Aliases are input conveniences, never stored values.
++
++    generate's specs/models.py listed ``background-job`` and ``pipeline``
++    as VALID types rather than merely as aliases, so generate would have
++    accepted a manifest that *stored* one — which schema.json rejects and
++    nthlayer-common's design explicitly prevents.
++    """
++    for alias, canonical in SERVICE_TYPE_ALIASES.items():
++        manifest = ReliabilityManifest(name="svc", team="t", tier="critical", type=alias)
++        assert manifest.type == canonical
++        assert manifest.type not in SERVICE_TYPE_ALIASES
++
++
++@pytest.mark.parametrize("service_type", ["x-web", "worker", "background-job"])
++def test_validator_agrees_with_the_manifest_model(tmp_path, service_type: str):
++    """The two live validation sites must not disagree with each other.
++
++    specs/validator.py validated against `VALID_SERVICE_TYPES | aliases`
++    while specs/manifest.py validated against VALID_SERVICE_TYPES alone —
++    two rules in one package, either of which could drift from
++    nthlayer-common independently.
++    """
++    service_file = tmp_path / "svc.yaml"
++    service_file.write_text(
++        f"service:\n"
++        f"  name: svc\n"
++        f"  team: t\n"
++        f"  tier: critical\n"
++        f"  type: {service_type}\n"
++        f"resources: []\n"
++    )
++
++    result = validate_service_file(service_file)
++
++    type_errors = [e for e in result.errors if "type" in str(e).lower()]
++    assert not type_errors, (
++        f"validator rejected {service_type!r}, which the manifest model "
++        f"accepts: {type_errors}"
++    )
++
++
++def test_service_context_normalises_its_type():
++    """ServiceContext must resolve like ReliabilityManifest does.
++
++    specs/parser.py passes the raw YAML value straight in, and
++    ServiceContext did not normalise — so a `type: web` service file
++    produced a context holding `web` while every downstream branch was
++    updated to test for `x-web`. Web services would have silently lost
++    their HTTP dashboard panels (dashboards/validator.py) and their
++    latency docs section (generators/docs.py).
++
++    Normalising here rather than teaching each branch both spellings is
++    the repo's own hard rule 1: validate inputs at the boundary, not
++    inline. Six copies of this rule already exist because the opposite
++    was done.
++    """
++    from nthlayer_generate.specs.models import ServiceContext
++
++    context = ServiceContext(name="svc", team="t", tier="critical", type="web")
++
++    assert context.type == "x-web"
++
++
++def test_service_context_keeps_an_unresolvable_type_for_the_validator():
++    """Resolve-or-keep, never raise.
++
++    Type validity is reported by specs/validator.py as a collected error,
++    not by raising at construction. Raising here would turn a reported
++    problem into a crash — and `ml` is currently offered by the CLI menu
++    (opensrm-8qpd), so this path is live.
++    """
++    from nthlayer_generate.specs.models import ServiceContext
++
++    context = ServiceContext(name="svc", team="t", tier="critical", type="ml")
++
++    assert context.type == "ml"
+diff --git a/uv.lock b/uv.lock
+index 37dc41e..10cb4bd 100644
+--- a/uv.lock
++++ b/uv.lock
+@@ -1374,7 +1374,7 @@ wheels = [
+ 
+ [[package]]
+ name = "nthlayer-common"
+-version = "1.6.0"
++version = "1.7.0"
+ source = { editable = "../nthlayer-common" }
+ dependencies = [
+     { name = "anthropic" },
+@@ -1400,6 +1400,7 @@ requires-dist = [
+     { name = "circuitbreaker", specifier = ">=2.0.0,<3.0.0" },
+     { name = "httpx", specifier = ">=0.27" },
+     { name = "instructor", specifier = ">=1.5" },
++    { name = "jsonschema", marker = "extra == 'dev'", specifier = ">=4.21" },
+     { name = "openai", specifier = ">=1.50" },
+     { name = "opentelemetry-api", specifier = ">=1.28" },
+     { name = "pagerduty", specifier = ">=6.0.0,<7.0.0" },
+@@ -1417,7 +1418,7 @@ provides-extras = ["dev"]
+ 
+ [[package]]
+ name = "nthlayer-generate"
+-version = "1.1.0"
++version = "1.1.1"
+ source = { editable = "." }
+ dependencies = [
+     { name = "cachetools" },

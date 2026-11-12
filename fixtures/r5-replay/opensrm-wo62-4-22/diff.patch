@@ -1,0 +1,2747 @@
+diff --git a/src/nthlayer_generate/dashboards/builder_sdk.py b/src/nthlayer_generate/dashboards/builder_sdk.py
+index a6514e3..e1f7ee7 100644
+--- a/src/nthlayer_generate/dashboards/builder_sdk.py
++++ b/src/nthlayer_generate/dashboards/builder_sdk.py
+@@ -490,6 +490,11 @@ class DashboardBuilderSDK:
+         - Uses legacy templates with hardcoded metrics
+         """
+         panels = []
++        # Technology panels describe the technology, not an instance: a second
++        # postgres dependency would add identical panels (opensrm-wo62.4.22).
++        # Keyed on the resolved template so aliases (postgres/postgresql)
++        # count once; a type with no template keeps its own key, unchanged.
++        seen_technologies: set[str] = set()
+ 
+         for dep_resource in self.dependency_resources:
+             dep_spec = dep_resource.spec
+@@ -525,6 +530,12 @@ class DashboardBuilderSDK:
+ 
+             # Build panels for each dependency
+             for _dep_category, dep_type in all_deps:
++                template = get_template_or_none(dep_type)
++                technology_key = template.name if template is not None else dep_type
++                if technology_key in seen_technologies:
++                    continue
++                seen_technologies.add(technology_key)
++
+                 if self.use_intent_templates:
+                     # Use intent-based templates with resolver
+                     tech_panels = self._build_intent_panels(dep_type)
+diff --git a/tests/golden/data/cli_legacy_env_apply/staged__payment-api__env-dev.json b/tests/golden/data/cli_legacy_env_apply/staged__payment-api__env-dev.json
+index 7bd12e7..03215fd 100644
+--- a/tests/golden/data/cli_legacy_env_apply/staged__payment-api__env-dev.json
++++ b/tests/golden/data/cli_legacy_env_apply/staged__payment-api__env-dev.json
+@@ -1274,276 +1274,6 @@
+             "transparent": false,
+             "type": "gauge"
+           },
+-          {
+-            "description": "Active database connections vs max connections limit",
+-            "fieldConfig": {
+-              "defaults": {},
+-              "overrides": []
+-            },
+-            "gridPos": {
+-              "h": 9,
+-              "w": 12,
+-              "x": 0,
+-              "y": 84
+-            },
+-            "options": null,
+-            "repeatDirection": "h",
+-            "targets": [
+-              {
+-                "expr": "pg_stat_database_numbackends{service=\"postgres\"}",
+-                "legendFormat": "{{datname}} connections",
+-                "refId": "A"
+-              },
+-              {
+-                "expr": "pg_settings_max_connections{service=\"postgres\"}",
+-                "legendFormat": "Max connections",
+-                "refId": "B"
+-              }
+-            ],
+-            "title": "PostgreSQL Connections",
+-            "transformations": [],
+-            "transparent": false,
+-            "type": "timeseries"
+-          },
+-          {
+-            "description": "Number of currently executing queries",
+-            "fieldConfig": {
+-              "defaults": {},
+-              "overrides": []
+-            },
+-            "gridPos": {
+-              "h": 9,
+-              "w": 12,
+-              "x": 12,
+-              "y": 84
+-            },
+-            "options": null,
+-            "repeatDirection": "h",
+-            "targets": [
+-              {
+-                "expr": "pg_stat_activity_count{service=\"postgres\",state=\"active\"}",
+-                "legendFormat": "{{pg}}",
+-                "refId": "A"
+-              }
+-            ],
+-            "title": "Active Queries",
+-            "transformations": [],
+-            "transparent": false,
+-            "type": "timeseries"
+-          },
+-          {
+-            "description": "Buffer cache hit ratio - should be >99% for good performance",
+-            "fieldConfig": {
+-              "defaults": {},
+-              "overrides": []
+-            },
+-            "gridPos": {
+-              "h": 9,
+-              "w": 12,
+-              "x": 0,
+-              "y": 93
+-            },
+-            "options": null,
+-            "repeatDirection": "h",
+-            "targets": [
+-              {
+-                "expr": "sum(pg_stat_database_blks_hit{service=\"postgres\"}) /\n(sum(pg_stat_database_blks_hit{service=\"postgres\"}) + sum(pg_stat_database_blks_read{service=\"postgres\"})) * 100",
+-                "legendFormat": "Cache hit %",
+-                "refId": "A"
+-              }
+-            ],
+-            "title": "Cache Hit Ratio",
+-            "transformations": [],
+-            "transparent": false,
+-            "type": "gauge"
+-          },
+-          {
+-            "description": "Transaction commits and rollbacks per second",
+-            "fieldConfig": {
+-              "defaults": {},
+-              "overrides": []
+-            },
+-            "gridPos": {
+-              "h": 9,
+-              "w": 12,
+-              "x": 12,
+-              "y": 93
+-            },
+-            "options": null,
+-            "repeatDirection": "h",
+-            "targets": [
+-              {
+-                "expr": "rate(pg_stat_database_xact_commit{service=\"postgres\"}[5m])",
+-                "legendFormat": "{{datname}} commits/sec",
+-                "refId": "A"
+-              },
+-              {
+-                "expr": "rate(pg_stat_database_xact_rollback{service=\"postgres\"}[5m])",
+-                "legendFormat": "{{datname}} rollbacks/sec",
+-                "refId": "B"
+-              }
+-            ],
+-            "title": "Transaction Rate",
+-            "transformations": [],
+-            "transparent": false,
+-            "type": "timeseries"
+-          },
+-          {
+-            "description": "Total database size",
+-            "fieldConfig": {
+-              "defaults": {},
+-              "overrides": []
+-            },
+-            "gridPos": {
+-              "h": 9,
+-              "w": 12,
+-              "x": 0,
+-              "y": 102
+-            },
+-            "options": null,
+-            "repeatDirection": "h",
+-            "targets": [
+-              {
+-                "expr": "pg_database_size_bytes{service=\"postgres\"}",
+-                "legendFormat": "{{pg}}",
+-                "refId": "A"
+-              }
+-            ],
+-            "title": "Database Size",
+-            "transformations": [],
+-            "transparent": false,
+-            "type": "stat"
+-          },
+-          {
+-            "description": "Query execution time (95th percentile)",
+-            "fieldConfig": {
+-              "defaults": {},
+-              "overrides": []
+-            },
+-            "gridPos": {
+-              "h": 9,
+-              "w": 12,
+-              "x": 12,
+-              "y": 102
+-            },
+-            "options": null,
+-            "repeatDirection": "h",
+-            "targets": [
+-              {
+-                "expr": "histogram_quantile(0.95, sum by (le) (rate(pg_stat_statements_mean_exec_time_seconds_bucket{service=\"postgres\"}[5m])))",
+-                "legendFormat": "{{pg}}",
+-                "refId": "A"
+-              }
+-            ],
+-            "title": "Query Duration (p95)",
+-            "transformations": [],
+-            "transparent": false,
+-            "type": "timeseries"
+-          },
+-          {
+-            "description": "Deadlocks per second - should be near zero",
+-            "fieldConfig": {
+-              "defaults": {},
+-              "overrides": []
+-            },
+-            "gridPos": {
+-              "h": 9,
+-              "w": 12,
+-              "x": 0,
+-              "y": 111
+-            },
+-            "options": null,
+-            "repeatDirection": "h",
+-            "targets": [
+-              {
+-                "expr": "rate(pg_stat_database_deadlocks{service=\"postgres\"}[5m])",
+-                "legendFormat": "{{pg}}",
+-                "refId": "A"
+-              }
+-            ],
+-            "title": "Deadlocks",
+-            "transformations": [],
+-            "transparent": false,
+-            "type": "timeseries"
+-          },
+-          {
+-            "description": "Replication lag in seconds",
+-            "fieldConfig": {
+-              "defaults": {},
+-              "overrides": []
+-            },
+-            "gridPos": {
+-              "h": 9,
+-              "w": 12,
+-              "x": 12,
+-              "y": 111
+-            },
+-            "options": null,
+-            "repeatDirection": "h",
+-            "targets": [
+-              {
+-                "expr": "pg_replication_lag_seconds{service=\"postgres\"}",
+-                "legendFormat": "{{pg}}",
+-                "refId": "A"
+-              }
+-            ],
+-            "title": "Replication Lag",
+-            "transformations": [],
+-            "transparent": false,
+-            "type": "timeseries"
+-          },
+-          {
+-            "description": "Dead tuples indicating table bloat - vacuum if high",
+-            "fieldConfig": {
+-              "defaults": {},
+-              "overrides": []
+-            },
+-            "gridPos": {
+-              "h": 9,
+-              "w": 12,
+-              "x": 0,
+-              "y": 120
+-            },
+-            "options": null,
+-            "repeatDirection": "h",
+-            "targets": [
+-              {
+-                "expr": "sum(pg_stat_user_tables_n_dead_tup{service=\"postgres\"}) by (relname)",
+-                "legendFormat": "{{pg}}",
+-                "refId": "A"
+-              }
+-            ],
+-            "title": "Table Bloat (Dead Tuples)",
+-            "transformations": [],
+-            "transparent": false,
+-            "type": "timeseries"
+-          },
+-          {
+-            "description": "Connection pool utilization percentage",
+-            "fieldConfig": {
+-              "defaults": {},
+-              "overrides": []
+-            },
+-            "gridPos": {
+-              "h": 9,
+-              "w": 12,
+-              "x": 12,
+-              "y": 120
+-            },
+-            "options": null,
+-            "repeatDirection": "h",
+-            "targets": [
+-              {
+-                "expr": "pg_stat_database_numbackends{service=\"postgres\"} /\non() group_left pg_settings_max_connections{service=\"postgres\"} * 100",
+-                "legendFormat": "Pool usage %",
+-                "refId": "A"
+-              }
+-            ],
+-            "title": "Connection Pool Utilization",
+-            "transformations": [],
+-            "transparent": false,
+-            "type": "gauge"
+-          },
+           {
+             "description": "Redis memory consumption",
+             "fieldConfig": {
+@@ -1554,7 +1284,7 @@
+               "h": 9,
+               "w": 12,
+               "x": 0,
+-              "y": 129
++              "y": 84
+             },
+             "options": null,
+             "repeatDirection": "h",
+@@ -1580,7 +1310,7 @@
+               "h": 9,
+               "w": 12,
+               "x": 12,
+-              "y": 129
++              "y": 84
+             },
+             "options": null,
+             "repeatDirection": "h",
+@@ -1606,7 +1336,7 @@
+               "h": 9,
+               "w": 12,
+               "x": 0,
+-              "y": 138
++              "y": 93
+             },
+             "options": null,
+             "repeatDirection": "h",
+@@ -1632,7 +1362,7 @@
+               "h": 9,
+               "w": 12,
+               "x": 12,
+-              "y": 138
++              "y": 93
+             },
+             "options": null,
+             "repeatDirection": "h",
+@@ -1663,7 +1393,7 @@
+               "h": 9,
+               "w": 12,
+               "x": 0,
+-              "y": 147
++              "y": 102
+             },
+             "options": null,
+             "repeatDirection": "h",
+@@ -1689,7 +1419,7 @@
+               "h": 9,
+               "w": 12,
+               "x": 12,
+-              "y": 147
++              "y": 102
+             },
+             "options": null,
+             "repeatDirection": "h",
+@@ -1715,7 +1445,7 @@
+               "h": 9,
+               "w": 12,
+               "x": 0,
+-              "y": 156
++              "y": 111
+             },
+             "options": null,
+             "repeatDirection": "h",
+@@ -1741,7 +1471,7 @@
+               "h": 9,
+               "w": 12,
+               "x": 12,
+-              "y": 156
++              "y": 111
+             },
+             "options": null,
+             "repeatDirection": "h",
+diff --git a/tests/golden/data/cli_legacy_env_apply/staged__payment-api__env-prod.json b/tests/golden/data/cli_legacy_env_apply/staged__payment-api__env-prod.json
+index 91131fb..04bf621 100644
+--- a/tests/golden/data/cli_legacy_env_apply/staged__payment-api__env-prod.json
++++ b/tests/golden/data/cli_legacy_env_apply/staged__payment-api__env-prod.json
+@@ -1240,276 +1240,6 @@
+             "transparent": false,
+             "type": "gauge"
+           },
+-          {
+-            "description": "Active database connections vs max connections limit",
+-            "fieldConfig": {
+-              "defaults": {},
+-              "overrides": []
+-            },
+-            "gridPos": {
+-              "h": 9,
+-              "w": 12,
+-              "x": 0,
+-              "y": 84
+-            },
+-            "options": null,
+-            "repeatDirection": "h",
+-            "targets": [
+-              {
+-                "expr": "pg_stat_database_numbackends{service=\"postgres\"}",
+-                "legendFormat": "{{datname}} connections",
+-                "refId": "A"
+-              },
+-              {
+-                "expr": "pg_settings_max_connections{service=\"postgres\"}",
+-                "legendFormat": "Max connections",
+-                "refId": "B"
+-              }
+-            ],
+-            "title": "PostgreSQL Connections",
+-            "transformations": [],
+-            "transparent": false,
+-            "type": "timeseries"
+-          },
+-          {
+-            "description": "Number of currently executing queries",
+-            "fieldConfig": {
+-              "defaults": {},
+-              "overrides": []
+-            },
+-            "gridPos": {
+-              "h": 9,
+-              "w": 12,
+-              "x": 12,
+-              "y": 84
+-            },
+-            "options": null,
+-            "repeatDirection": "h",
+-            "targets": [
+-              {
+-                "expr": "pg_stat_activity_count{service=\"postgres\",state=\"active\"}",
+-                "legendFormat": "{{pg}}",
+-                "refId": "A"
+-              }
+-            ],
+-            "title": "Active Queries",
+-            "transformations": [],
+-            "transparent": false,
+-            "type": "timeseries"
+-          },
+-          {
+-            "description": "Buffer cache hit ratio - should be >99% for good performance",
+-            "fieldConfig": {
+-              "defaults": {},
+-              "overrides": []
+-            },
+-            "gridPos": {
+-              "h": 9,
+-              "w": 12,
+-              "x": 0,
+-              "y": 93
+-            },
+-            "options": null,
+-            "repeatDirection": "h",
+-            "targets": [
+-              {
+-                "expr": "sum(pg_stat_database_blks_hit{service=\"postgres\"}) /\n(sum(pg_stat_database_blks_hit{service=\"postgres\"}) + sum(pg_stat_database_blks_read{service=\"postgres\"})) * 100",
+-                "legendFormat": "Cache hit %",
+-                "refId": "A"
+-              }
+-            ],
+-            "title": "Cache Hit Ratio",
+-            "transformations": [],
+-            "transparent": false,
+-            "type": "gauge"
+-          },
+-          {
+-            "description": "Transaction commits and rollbacks per second",
+-            "fieldConfig": {
+-              "defaults": {},
+-              "overrides": []
+-            },
+-            "gridPos": {
+-              "h": 9,
+-              "w": 12,
+-              "x": 12,
+-              "y": 93
+-            },
+-            "options": null,
+-            "repeatDirection": "h",
+-            "targets": [
+-              {
+-                "expr": "rate(pg_stat_database_xact_commit{service=\"postgres\"}[5m])",
+-                "legendFormat": "{{datname}} commits/sec",
+-                "refId": "A"
+-              },
+-              {
+-                "expr": "rate(pg_stat_database_xact_rollback{service=\"postgres\"}[5m])",
+-                "legendFormat": "{{datname}} rollbacks/sec",
+-                "refId": "B"
+-              }
+-            ],
+-            "title": "Transaction Rate",
+-            "transformations": [],
+-            "transparent": false,
+-            "type": "timeseries"
+-          },
+-          {
+-            "description": "Total database size",
+-            "fieldConfig": {
+-              "defaults": {},
+-              "overrides": []
+-            },
+-            "gridPos": {
+-              "h": 9,
+-              "w": 12,
+-              "x": 0,
+-              "y": 102
+-            },
+-            "options": null,
+-            "repeatDirection": "h",
+-            "targets": [
+-              {
+-                "expr": "pg_database_size_bytes{service=\"postgres\"}",
+-                "legendFormat": "{{pg}}",
+-                "refId": "A"
+-              }
+-            ],
+-            "title": "Database Size",
+-            "transformations": [],
+-            "transparent": false,
+-            "type": "stat"
+-          },
+-          {
+-            "description": "Query execution time (95th percentile)",
+-            "fieldConfig": {
+-              "defaults": {},
+-              "overrides": []
+-            },
+-            "gridPos": {
+-              "h": 9,
+-              "w": 12,
+-              "x": 12,
+-              "y": 102
+-            },
+-            "options": null,
+-            "repeatDirection": "h",
+-            "targets": [
+-              {
+-                "expr": "histogram_quantile(0.95, sum by (le) (rate(pg_stat_statements_mean_exec_time_seconds_bucket{service=\"postgres\"}[5m])))",
+-                "legendFormat": "{{pg}}",
+-                "refId": "A"
+-              }
+-            ],
+-            "title": "Query Duration (p95)",
+-            "transformations": [],
+-            "transparent": false,
+-            "type": "timeseries"
+-          },
+-          {
+-            "description": "Deadlocks per second - should be near zero",
+-            "fieldConfig": {
+-              "defaults": {},
+-              "overrides": []
+-            },
+-            "gridPos": {
+-              "h": 9,
+-              "w": 12,
+-              "x": 0,
+-              "y": 111
+-            },
+-            "options": null,
+-            "repeatDirection": "h",
+-            "targets": [
+-              {
+-                "expr": "rate(pg_stat_database_deadlocks{service=\"postgres\"}[5m])",
+-                "legendFormat": "{{pg}}",
+-                "refId": "A"
+-              }
+-            ],
+-            "title": "Deadlocks",
+-            "transformations": [],
+-            "transparent": false,
+-            "type": "timeseries"
+-          },
+-          {
+-            "description": "Replication lag in seconds",
+-            "fieldConfig": {
+-              "defaults": {},
+-              "overrides": []
+-            },
+-            "gridPos": {
+-              "h": 9,
+-              "w": 12,
+-              "x": 12,
+-              "y": 111
+-            },
+-            "options": null,
+-            "repeatDirection": "h",
+-            "targets": [
+-              {
+-                "expr": "pg_replication_lag_seconds{service=\"postgres\"}",
+-                "legendFormat": "{{pg}}",
+-                "refId": "A"
+-              }
+-            ],
+-            "title": "Replication Lag",
+-            "transformations": [],
+-            "transparent": false,
+-            "type": "timeseries"
+-          },
+-          {
+-            "description": "Dead tuples indicating table bloat - vacuum if high",
+-            "fieldConfig": {
+-              "defaults": {},
+-              "overrides": []
+-            },
+-            "gridPos": {
+-              "h": 9,
+-              "w": 12,
+-              "x": 0,
+-              "y": 120
+-            },
+-            "options": null,
+-            "repeatDirection": "h",
+-            "targets": [
+-              {
+-                "expr": "sum(pg_stat_user_tables_n_dead_tup{service=\"postgres\"}) by (relname)",
+-                "legendFormat": "{{pg}}",
+-                "refId": "A"
+-              }
+-            ],
+-            "title": "Table Bloat (Dead Tuples)",
+-            "transformations": [],
+-            "transparent": false,
+-            "type": "timeseries"
+-          },
+-          {
+-            "description": "Connection pool utilization percentage",
+-            "fieldConfig": {
+-              "defaults": {},
+-              "overrides": []
+-            },
+-            "gridPos": {
+-              "h": 9,
+-              "w": 12,
+-              "x": 12,
+-              "y": 120
+-            },
+-            "options": null,
+-            "repeatDirection": "h",
+-            "targets": [
+-              {
+-                "expr": "pg_stat_database_numbackends{service=\"postgres\"} /\non() group_left pg_settings_max_connections{service=\"postgres\"} * 100",
+-                "legendFormat": "Pool usage %",
+-                "refId": "A"
+-              }
+-            ],
+-            "title": "Connection Pool Utilization",
+-            "transformations": [],
+-            "transparent": false,
+-            "type": "gauge"
+-          },
+           {
+             "description": "Redis memory consumption",
+             "fieldConfig": {
+@@ -1520,7 +1250,7 @@
+               "h": 9,
+               "w": 12,
+               "x": 0,
+-              "y": 129
++              "y": 84
+             },
+             "options": null,
+             "repeatDirection": "h",
+@@ -1546,7 +1276,7 @@
+               "h": 9,
+               "w": 12,
+               "x": 12,
+-              "y": 129
++              "y": 84
+             },
+             "options": null,
+             "repeatDirection": "h",
+@@ -1572,7 +1302,7 @@
+               "h": 9,
+               "w": 12,
+               "x": 0,
+-              "y": 138
++              "y": 93
+             },
+             "options": null,
+             "repeatDirection": "h",
+@@ -1598,7 +1328,7 @@
+               "h": 9,
+               "w": 12,
+               "x": 12,
+-              "y": 138
++              "y": 93
+             },
+             "options": null,
+             "repeatDirection": "h",
+@@ -1629,7 +1359,7 @@
+               "h": 9,
+               "w": 12,
+               "x": 0,
+-              "y": 147
++              "y": 102
+             },
+             "options": null,
+             "repeatDirection": "h",
+@@ -1655,7 +1385,7 @@
+               "h": 9,
+               "w": 12,
+               "x": 12,
+-              "y": 147
++              "y": 102
+             },
+             "options": null,
+             "repeatDirection": "h",
+@@ -1681,7 +1411,7 @@
+               "h": 9,
+               "w": 12,
+               "x": 0,
+-              "y": 156
++              "y": 111
+             },
+             "options": null,
+             "repeatDirection": "h",
+@@ -1707,7 +1437,7 @@
+               "h": 9,
+               "w": 12,
+               "x": 12,
+-              "y": 156
++              "y": 111
+             },
+             "options": null,
+             "repeatDirection": "h",
+diff --git a/tests/golden/data/cli_legacy_env_apply/staged__search-api__env-prod.json b/tests/golden/data/cli_legacy_env_apply/staged__search-api__env-prod.json
+index d355302..eb07052 100644
+--- a/tests/golden/data/cli_legacy_env_apply/staged__search-api__env-prod.json
++++ b/tests/golden/data/cli_legacy_env_apply/staged__search-api__env-prod.json
+@@ -1132,7 +1132,7 @@
+             "type": "timeseries"
+           },
+           {
+-            "description": "Elasticsearch cluster health (0=green, 1=yellow, 2=red)",
++            "description": "Redis memory consumption",
+             "fieldConfig": {
+               "defaults": {},
+               "overrides": []
+@@ -1145,245 +1145,6 @@
+             },
+             "options": null,
+             "repeatDirection": "h",
+-            "targets": [
+-              {
+-                "expr": "elasticsearch_cluster_health_status{service=\"elasticsearch\"}",
+-                "legendFormat": "{{elasticsearch}}",
+-                "refId": "A"
+-              }
+-            ],
+-            "title": "Cluster Health Status",
+-            "transformations": [],
+-            "transparent": false,
+-            "type": "stat"
+-          },
+-          {
+-            "description": "Number of active and relocating shards",
+-            "fieldConfig": {
+-              "defaults": {},
+-              "overrides": []
+-            },
+-            "gridPos": {
+-              "h": 9,
+-              "w": 12,
+-              "x": 0,
+-              "y": 93
+-            },
+-            "options": null,
+-            "repeatDirection": "h",
+-            "targets": [
+-              {
+-                "expr": "elasticsearch_cluster_health_active_shards{service=\"elasticsearch\"}",
+-                "legendFormat": "Active",
+-                "refId": "A"
+-              },
+-              {
+-                "expr": "elasticsearch_cluster_health_relocating_shards{service=\"elasticsearch\"}",
+-                "legendFormat": "Relocating",
+-                "refId": "B"
+-              }
+-            ],
+-            "title": "Active Shards",
+-            "transformations": [],
+-            "transparent": false,
+-            "type": "timeseries"
+-          },
+-          {
+-            "description": "Search queries per second",
+-            "fieldConfig": {
+-              "defaults": {},
+-              "overrides": []
+-            },
+-            "gridPos": {
+-              "h": 9,
+-              "w": 12,
+-              "x": 12,
+-              "y": 93
+-            },
+-            "options": null,
+-            "repeatDirection": "h",
+-            "targets": [
+-              {
+-                "expr": "sum(rate(elasticsearch_indices_search_query_total{service=\"elasticsearch\"}[5m]))",
+-                "legendFormat": "{{elasticsearch}}",
+-                "refId": "A"
+-              }
+-            ],
+-            "title": "Search Rate",
+-            "transformations": [],
+-            "transparent": false,
+-            "type": "timeseries"
+-          },
+-          {
+-            "description": "Search query latency (95th percentile)",
+-            "fieldConfig": {
+-              "defaults": {},
+-              "overrides": []
+-            },
+-            "gridPos": {
+-              "h": 9,
+-              "w": 12,
+-              "x": 0,
+-              "y": 102
+-            },
+-            "options": null,
+-            "repeatDirection": "h",
+-            "targets": [
+-              {
+-                "expr": "histogram_quantile(0.95, sum by (le) (rate(elasticsearch_indices_search_query_time_seconds_bucket{service=\"elasticsearch\"}[5m])))",
+-                "legendFormat": "{{elasticsearch}}",
+-                "refId": "A"
+-              }
+-            ],
+-            "title": "Search Latency (p95)",
+-            "transformations": [],
+-            "transparent": false,
+-            "type": "timeseries"
+-          },
+-          {
+-            "description": "Documents indexed per second",
+-            "fieldConfig": {
+-              "defaults": {},
+-              "overrides": []
+-            },
+-            "gridPos": {
+-              "h": 9,
+-              "w": 12,
+-              "x": 12,
+-              "y": 102
+-            },
+-            "options": null,
+-            "repeatDirection": "h",
+-            "targets": [
+-              {
+-                "expr": "sum(rate(elasticsearch_indices_indexing_index_total{service=\"elasticsearch\"}[5m]))",
+-                "legendFormat": "{{elasticsearch}}",
+-                "refId": "A"
+-              }
+-            ],
+-            "title": "Indexing Rate",
+-            "transformations": [],
+-            "transparent": false,
+-            "type": "timeseries"
+-          },
+-          {
+-            "description": "Total size of all indices",
+-            "fieldConfig": {
+-              "defaults": {},
+-              "overrides": []
+-            },
+-            "gridPos": {
+-              "h": 9,
+-              "w": 12,
+-              "x": 0,
+-              "y": 111
+-            },
+-            "options": null,
+-            "repeatDirection": "h",
+-            "targets": [
+-              {
+-                "expr": "sum(elasticsearch_indices_store_size_bytes{service=\"elasticsearch\"})",
+-                "legendFormat": "{{elasticsearch}}",
+-                "refId": "A"
+-              }
+-            ],
+-            "title": "Index Size",
+-            "transformations": [],
+-            "transparent": false,
+-            "type": "timeseries"
+-          },
+-          {
+-            "description": "Total number of documents across all indices",
+-            "fieldConfig": {
+-              "defaults": {},
+-              "overrides": []
+-            },
+-            "gridPos": {
+-              "h": 9,
+-              "w": 12,
+-              "x": 12,
+-              "y": 111
+-            },
+-            "options": null,
+-            "repeatDirection": "h",
+-            "targets": [
+-              {
+-                "expr": "sum(elasticsearch_indices_docs{service=\"elasticsearch\"})",
+-                "legendFormat": "{{elasticsearch}}",
+-                "refId": "A"
+-              }
+-            ],
+-            "title": "Document Count",
+-            "transformations": [],
+-            "transparent": false,
+-            "type": "stat"
+-          },
+-          {
+-            "description": "JVM heap memory utilization percentage",
+-            "fieldConfig": {
+-              "defaults": {},
+-              "overrides": []
+-            },
+-            "gridPos": {
+-              "h": 9,
+-              "w": 12,
+-              "x": 0,
+-              "y": 120
+-            },
+-            "options": null,
+-            "repeatDirection": "h",
+-            "targets": [
+-              {
+-                "expr": "elasticsearch_jvm_memory_used_bytes{service=\"elasticsearch\",area=\"heap\"} / \non() elasticsearch_jvm_memory_max_bytes{service=\"elasticsearch\",area=\"heap\"} * 100",
+-                "legendFormat": "Heap %",
+-                "refId": "A"
+-              }
+-            ],
+-            "title": "JVM Heap Usage",
+-            "transformations": [],
+-            "transparent": false,
+-            "type": "gauge"
+-          },
+-          {
+-            "description": "Garbage collection time per second",
+-            "fieldConfig": {
+-              "defaults": {},
+-              "overrides": []
+-            },
+-            "gridPos": {
+-              "h": 9,
+-              "w": 12,
+-              "x": 12,
+-              "y": 120
+-            },
+-            "options": null,
+-            "repeatDirection": "h",
+-            "targets": [
+-              {
+-                "expr": "rate(elasticsearch_jvm_gc_collection_seconds_sum{service=\"elasticsearch\"}[5m])",
+-                "legendFormat": "{{elasticsearch}}",
+-                "refId": "A"
+-              }
+-            ],
+-            "title": "GC Time",
+-            "transformations": [],
+-            "transparent": false,
+-            "type": "timeseries"
+-          },
+-          {
+-            "description": "Redis memory consumption",
+-            "fieldConfig": {
+-              "defaults": {},
+-              "overrides": []
+-            },
+-            "gridPos": {
+-              "h": 9,
+-              "w": 12,
+-              "x": 0,
+-              "y": 129
+-            },
+-            "options": null,
+-            "repeatDirection": "h",
+             "targets": [
+               {
+                 "expr": "redis_memory_used_bytes{service=\"redis\"}",
+@@ -1402,224 +1163,11 @@
+               "defaults": {},
+               "overrides": []
+             },
+-            "gridPos": {
+-              "h": 9,
+-              "w": 12,
+-              "x": 12,
+-              "y": 129
+-            },
+-            "options": null,
+-            "repeatDirection": "h",
+-            "targets": [
+-              {
+-                "expr": "sum(rate(cache_hits_total{service=\"redis\"}[5m])) /\n(sum(rate(cache_hits_total{service=\"redis\"}[5m])) +\nsum(rate(cache_misses_total{service=\"redis\"}[5m]))) * 100",
+-                "legendFormat": "Hit rate %",
+-                "refId": "A"
+-              }
+-            ],
+-            "title": "Cache Hit Rate",
+-            "transformations": [],
+-            "transparent": false,
+-            "type": "gauge"
+-          },
+-          {
+-            "description": "Number of connected clients",
+-            "fieldConfig": {
+-              "defaults": {},
+-              "overrides": []
+-            },
+-            "gridPos": {
+-              "h": 9,
+-              "w": 12,
+-              "x": 0,
+-              "y": 138
+-            },
+-            "options": null,
+-            "repeatDirection": "h",
+-            "targets": [
+-              {
+-                "expr": "redis_connected_clients{service=\"redis\"}",
+-                "legendFormat": "{{redis}}",
+-                "refId": "A"
+-              }
+-            ],
+-            "title": "Connected Clients",
+-            "transformations": [],
+-            "transparent": false,
+-            "type": "timeseries"
+-          },
+-          {
+-            "description": "Cache hits and misses per second",
+-            "fieldConfig": {
+-              "defaults": {},
+-              "overrides": []
+-            },
+-            "gridPos": {
+-              "h": 9,
+-              "w": 12,
+-              "x": 12,
+-              "y": 138
+-            },
+-            "options": null,
+-            "repeatDirection": "h",
+-            "targets": [
+-              {
+-                "expr": "rate(cache_hits_total{service=\"redis\"}[5m])",
+-                "legendFormat": "Hits/sec",
+-                "refId": "A"
+-              },
+-              {
+-                "expr": "rate(cache_misses_total{service=\"redis\"}[5m])",
+-                "legendFormat": "Misses/sec",
+-                "refId": "B"
+-              }
+-            ],
+-            "title": "Cache Hits vs Misses",
+-            "transformations": [],
+-            "transparent": false,
+-            "type": "timeseries"
+-          },
+-          {
+-            "description": "Keys evicted due to memory pressure - should be zero",
+-            "fieldConfig": {
+-              "defaults": {},
+-              "overrides": []
+-            },
+-            "gridPos": {
+-              "h": 9,
+-              "w": 12,
+-              "x": 0,
+-              "y": 147
+-            },
+-            "options": null,
+-            "repeatDirection": "h",
+-            "targets": [
+-              {
+-                "expr": "rate(redis_evicted_keys_total{service=\"redis\"}[5m])",
+-                "legendFormat": "{{redis}}",
+-                "refId": "A"
+-              }
+-            ],
+-            "title": "Evicted Keys",
+-            "transformations": [],
+-            "transparent": false,
+-            "type": "timeseries"
+-          },
+-          {
+-            "description": "Keys expired per second due to TTL",
+-            "fieldConfig": {
+-              "defaults": {},
+-              "overrides": []
+-            },
+-            "gridPos": {
+-              "h": 9,
+-              "w": 12,
+-              "x": 12,
+-              "y": 147
+-            },
+-            "options": null,
+-            "repeatDirection": "h",
+-            "targets": [
+-              {
+-                "expr": "rate(redis_expired_keys_total{service=\"redis\"}[5m])",
+-                "legendFormat": "{{redis}}",
+-                "refId": "A"
+-              }
+-            ],
+-            "title": "Expired Keys",
+-            "transformations": [],
+-            "transparent": false,
+-            "type": "timeseries"
+-          },
+-          {
+-            "description": "Redis commands processed per second",
+-            "fieldConfig": {
+-              "defaults": {},
+-              "overrides": []
+-            },
+-            "gridPos": {
+-              "h": 9,
+-              "w": 12,
+-              "x": 0,
+-              "y": 156
+-            },
+-            "options": null,
+-            "repeatDirection": "h",
+-            "targets": [
+-              {
+-                "expr": "rate(redis_commands_processed_total{service=\"redis\"}[5m])",
+-                "legendFormat": "{{redis}}",
+-                "refId": "A"
+-              }
+-            ],
+-            "title": "Commands/sec",
+-            "transformations": [],
+-            "transparent": false,
+-            "type": "timeseries"
+-          },
+-          {
+-            "description": "Total number of keys in database",
+-            "fieldConfig": {
+-              "defaults": {},
+-              "overrides": []
+-            },
+-            "gridPos": {
+-              "h": 9,
+-              "w": 12,
+-              "x": 12,
+-              "y": 156
+-            },
+-            "options": null,
+-            "repeatDirection": "h",
+-            "targets": [
+-              {
+-                "expr": "sum(redis_db_keys{service=\"redis\"})",
+-                "legendFormat": "{{redis}}",
+-                "refId": "A"
+-              }
+-            ],
+-            "title": "Total Keys",
+-            "transformations": [],
+-            "transparent": false,
+-            "type": "stat"
+-          },
+-          {
+-            "description": "Redis memory consumption",
+-            "fieldConfig": {
+-              "defaults": {},
+-              "overrides": []
+-            },
+             "gridPos": {
+               "h": 9,
+               "w": 12,
+               "x": 0,
+-              "y": 165
+-            },
+-            "options": null,
+-            "repeatDirection": "h",
+-            "targets": [
+-              {
+-                "expr": "redis_memory_used_bytes{service=\"redis\"}",
+-                "legendFormat": "{{redis}}",
+-                "refId": "A"
+-              }
+-            ],
+-            "title": "Redis Memory Usage",
+-            "transformations": [],
+-            "transparent": false,
+-            "type": "timeseries"
+-          },
+-          {
+-            "description": "Cache hit rate - should be >90% for good performance",
+-            "fieldConfig": {
+-              "defaults": {},
+-              "overrides": []
+-            },
+-            "gridPos": {
+-              "h": 9,
+-              "w": 12,
+-              "x": 12,
+-              "y": 165
++              "y": 93
+             },
+             "options": null,
+             "repeatDirection": "h",
+@@ -1644,8 +1192,8 @@
+             "gridPos": {
+               "h": 9,
+               "w": 12,
+-              "x": 0,
+-              "y": 174
++              "x": 12,
++              "y": 93
+             },
+             "options": null,
+             "repeatDirection": "h",
+@@ -1670,8 +1218,8 @@
+             "gridPos": {
+               "h": 9,
+               "w": 12,
+-              "x": 12,
+-              "y": 174
++              "x": 0,
++              "y": 102
+             },
+             "options": null,
+             "repeatDirection": "h",
+@@ -1701,8 +1249,8 @@
+             "gridPos": {
+               "h": 9,
+               "w": 12,
+-              "x": 0,
+-              "y": 183
++              "x": 12,
++              "y": 102
+             },
+             "options": null,
+             "repeatDirection": "h",
+@@ -1727,8 +1275,8 @@
+             "gridPos": {
+               "h": 9,
+               "w": 12,
+-              "x": 12,
+-              "y": 183
++              "x": 0,
++              "y": 111
+             },
+             "options": null,
+             "repeatDirection": "h",
+@@ -1753,8 +1301,8 @@
+             "gridPos": {
+               "h": 9,
+               "w": 12,
+-              "x": 0,
+-              "y": 192
++              "x": 12,
++              "y": 111
+             },
+             "options": null,
+             "repeatDirection": "h",
+@@ -1779,8 +1327,8 @@
+             "gridPos": {
+               "h": 9,
+               "w": 12,
+-              "x": 12,
+-              "y": 192
++              "x": 0,
++              "y": 120
+             },
+             "options": null,
+             "repeatDirection": "h",
+diff --git a/tests/golden/data/cli_legacy_env_generate_dashboard/staged__payment-api__env-dev.json b/tests/golden/data/cli_legacy_env_generate_dashboard/staged__payment-api__env-dev.json
+index 1476e88..97215a6 100644
+--- a/tests/golden/data/cli_legacy_env_generate_dashboard/staged__payment-api__env-dev.json
++++ b/tests/golden/data/cli_legacy_env_generate_dashboard/staged__payment-api__env-dev.json
+@@ -498,276 +498,6 @@
+             "transparent": false,
+             "type": "gauge"
+           },
+-          {
+-            "description": "Active database connections vs max connections limit",
+-            "fieldConfig": {
+-              "defaults": {},
+-              "overrides": []
+-            },
+-            "gridPos": {
+-              "h": 9,
+-              "w": 12,
+-              "x": 0,
+-              "y": 84
+-            },
+-            "options": null,
+-            "repeatDirection": "h",
+-            "targets": [
+-              {
+-                "expr": "pg_stat_database_numbackends{service=\"postgres\"}",
+-                "legendFormat": "{{datname}} connections",
+-                "refId": "A"
+-              },
+-              {
+-                "expr": "pg_settings_max_connections{service=\"postgres\"}",
+-                "legendFormat": "Max connections",
+-                "refId": "B"
+-              }
+-            ],
+-            "title": "PostgreSQL Connections",
+-            "transformations": [],
+-            "transparent": false,
+-            "type": "timeseries"
+-          },
+-          {
+-            "description": "Number of currently executing queries",
+-            "fieldConfig": {
+-              "defaults": {},
+-              "overrides": []
+-            },
+-            "gridPos": {
+-              "h": 9,
+-              "w": 12,
+-              "x": 12,
+-              "y": 84
+-            },
+-            "options": null,
+-            "repeatDirection": "h",
+-            "targets": [
+-              {
+-                "expr": "pg_stat_activity_count{service=\"postgres\",state=\"active\"}",
+-                "legendFormat": "{{pg}}",
+-                "refId": "A"
+-              }
+-            ],
+-            "title": "Active Queries",
+-            "transformations": [],
+-            "transparent": false,
+-            "type": "timeseries"
+-          },
+-          {
+-            "description": "Buffer cache hit ratio - should be >99% for good performance",
+-            "fieldConfig": {
+-              "defaults": {},
+-              "overrides": []
+-            },
+-            "gridPos": {
+-              "h": 9,
+-              "w": 12,
+-              "x": 0,
+-              "y": 93
+-            },
+-            "options": null,
+-            "repeatDirection": "h",
+-            "targets": [
+-              {
+-                "expr": "sum(pg_stat_database_blks_hit{service=\"postgres\"}) /\n(sum(pg_stat_database_blks_hit{service=\"postgres\"}) + sum(pg_stat_database_blks_read{service=\"postgres\"})) * 100",
+-                "legendFormat": "Cache hit %",
+-                "refId": "A"
+-              }
+-            ],
+-            "title": "Cache Hit Ratio",
+-            "transformations": [],
+-            "transparent": false,
+-            "type": "gauge"
+-          },
+-          {
+-            "description": "Transaction commits and rollbacks per second",
+-            "fieldConfig": {
+-              "defaults": {},
+-              "overrides": []
+-            },
+-            "gridPos": {
+-              "h": 9,
+-              "w": 12,
+-              "x": 12,
+-              "y": 93
+-            },
+-            "options": null,
+-            "repeatDirection": "h",
+-            "targets": [
+-              {
+-                "expr": "rate(pg_stat_database_xact_commit{service=\"postgres\"}[5m])",
+-                "legendFormat": "{{datname}} commits/sec",
+-                "refId": "A"
+-              },
+-              {
+-                "expr": "rate(pg_stat_database_xact_rollback{service=\"postgres\"}[5m])",
+-                "legendFormat": "{{datname}} rollbacks/sec",
+-                "refId": "B"
+-              }
+-            ],
+-            "title": "Transaction Rate",
+-            "transformations": [],
+-            "transparent": false,
+-            "type": "timeseries"
+-          },
+-          {
+-            "description": "Total database size",
+-            "fieldConfig": {
+-              "defaults": {},
+-              "overrides": []
+-            },
+-            "gridPos": {
+-              "h": 9,
+-              "w": 12,
+-              "x": 0,
+-              "y": 102
+-            },
+-            "options": null,
+-            "repeatDirection": "h",
+-            "targets": [
+-              {
+-                "expr": "pg_database_size_bytes{service=\"postgres\"}",
+-                "legendFormat": "{{pg}}",
+-                "refId": "A"
+-              }
+-            ],
+-            "title": "Database Size",
+-            "transformations": [],
+-            "transparent": false,
+-            "type": "stat"
+-          },
+-          {
+-            "description": "Query execution time (95th percentile)",
+-            "fieldConfig": {
+-              "defaults": {},
+-              "overrides": []
+-            },
+-            "gridPos": {
+-              "h": 9,
+-              "w": 12,
+-              "x": 12,
+-              "y": 102
+-            },
+-            "options": null,
+-            "repeatDirection": "h",
+-            "targets": [
+-              {
+-                "expr": "histogram_quantile(0.95, sum by (le) (rate(pg_stat_statements_mean_exec_time_seconds_bucket{service=\"postgres\"}[5m])))",
+-                "legendFormat": "{{pg}}",
+-                "refId": "A"
+-              }
+-            ],
+-            "title": "Query Duration (p95)",
+-            "transformations": [],
+-            "transparent": false,
+-            "type": "timeseries"
+-          },
+-          {
+-            "description": "Deadlocks per second - should be near zero",
+-            "fieldConfig": {
+-              "defaults": {},
+-              "overrides": []
+-            },
+-            "gridPos": {
+-              "h": 9,
+-              "w": 12,
+-              "x": 0,
+-              "y": 111
+-            },
+-            "options": null,
+-            "repeatDirection": "h",
+-            "targets": [
+-              {
+-                "expr": "rate(pg_stat_database_deadlocks{service=\"postgres\"}[5m])",
+-                "legendFormat": "{{pg}}",
+-                "refId": "A"
+-              }
+-            ],
+-            "title": "Deadlocks",
+-            "transformations": [],
+-            "transparent": false,
+-            "type": "timeseries"
+-          },
+-          {
+-            "description": "Replication lag in seconds",
+-            "fieldConfig": {
+-              "defaults": {},
+-              "overrides": []
+-            },
+-            "gridPos": {
+-              "h": 9,
+-              "w": 12,
+-              "x": 12,
+-              "y": 111
+-            },
+-            "options": null,
+-            "repeatDirection": "h",
+-            "targets": [
+-              {
+-                "expr": "pg_replication_lag_seconds{service=\"postgres\"}",
+-                "legendFormat": "{{pg}}",
+-                "refId": "A"
+-              }
+-            ],
+-            "title": "Replication Lag",
+-            "transformations": [],
+-            "transparent": false,
+-            "type": "timeseries"
+-          },
+-          {
+-            "description": "Dead tuples indicating table bloat - vacuum if high",
+-            "fieldConfig": {
+-              "defaults": {},
+-              "overrides": []
+-            },
+-            "gridPos": {
+-              "h": 9,
+-              "w": 12,
+-              "x": 0,
+-              "y": 120
+-            },
+-            "options": null,
+-            "repeatDirection": "h",
+-            "targets": [
+-              {
+-                "expr": "sum(pg_stat_user_tables_n_dead_tup{service=\"postgres\"}) by (relname)",
+-                "legendFormat": "{{pg}}",
+-                "refId": "A"
+-              }
+-            ],
+-            "title": "Table Bloat (Dead Tuples)",
+-            "transformations": [],
+-            "transparent": false,
+-            "type": "timeseries"
+-          },
+-          {
+-            "description": "Connection pool utilization percentage",
+-            "fieldConfig": {
+-              "defaults": {},
+-              "overrides": []
+-            },
+-            "gridPos": {
+-              "h": 9,
+-              "w": 12,
+-              "x": 12,
+-              "y": 120
+-            },
+-            "options": null,
+-            "repeatDirection": "h",
+-            "targets": [
+-              {
+-                "expr": "pg_stat_database_numbackends{service=\"postgres\"} /\non() group_left pg_settings_max_connections{service=\"postgres\"} * 100",
+-                "legendFormat": "Pool usage %",
+-                "refId": "A"
+-              }
+-            ],
+-            "title": "Connection Pool Utilization",
+-            "transformations": [],
+-            "transparent": false,
+-            "type": "gauge"
+-          },
+           {
+             "description": "Redis memory consumption",
+             "fieldConfig": {
+@@ -778,7 +508,7 @@
+               "h": 9,
+               "w": 12,
+               "x": 0,
+-              "y": 129
++              "y": 84
+             },
+             "options": null,
+             "repeatDirection": "h",
+@@ -804,7 +534,7 @@
+               "h": 9,
+               "w": 12,
+               "x": 12,
+-              "y": 129
++              "y": 84
+             },
+             "options": null,
+             "repeatDirection": "h",
+@@ -830,7 +560,7 @@
+               "h": 9,
+               "w": 12,
+               "x": 0,
+-              "y": 138
++              "y": 93
+             },
+             "options": null,
+             "repeatDirection": "h",
+@@ -856,7 +586,7 @@
+               "h": 9,
+               "w": 12,
+               "x": 12,
+-              "y": 138
++              "y": 93
+             },
+             "options": null,
+             "repeatDirection": "h",
+@@ -887,7 +617,7 @@
+               "h": 9,
+               "w": 12,
+               "x": 0,
+-              "y": 147
++              "y": 102
+             },
+             "options": null,
+             "repeatDirection": "h",
+@@ -913,7 +643,7 @@
+               "h": 9,
+               "w": 12,
+               "x": 12,
+-              "y": 147
++              "y": 102
+             },
+             "options": null,
+             "repeatDirection": "h",
+@@ -939,7 +669,7 @@
+               "h": 9,
+               "w": 12,
+               "x": 0,
+-              "y": 156
++              "y": 111
+             },
+             "options": null,
+             "repeatDirection": "h",
+@@ -965,7 +695,7 @@
+               "h": 9,
+               "w": 12,
+               "x": 12,
+-              "y": 156
++              "y": 111
+             },
+             "options": null,
+             "repeatDirection": "h",
+diff --git a/tests/golden/data/cli_legacy_env_generate_dashboard/staged__payment-api__env-prod.json b/tests/golden/data/cli_legacy_env_generate_dashboard/staged__payment-api__env-prod.json
+index 48fc9f3..9826007 100644
+--- a/tests/golden/data/cli_legacy_env_generate_dashboard/staged__payment-api__env-prod.json
++++ b/tests/golden/data/cli_legacy_env_generate_dashboard/staged__payment-api__env-prod.json
+@@ -473,276 +473,6 @@
+             "transparent": false,
+             "type": "gauge"
+           },
+-          {
+-            "description": "Active database connections vs max connections limit",
+-            "fieldConfig": {
+-              "defaults": {},
+-              "overrides": []
+-            },
+-            "gridPos": {
+-              "h": 9,
+-              "w": 12,
+-              "x": 0,
+-              "y": 84
+-            },
+-            "options": null,
+-            "repeatDirection": "h",
+-            "targets": [
+-              {
+-                "expr": "pg_stat_database_numbackends{service=\"postgres\"}",
+-                "legendFormat": "{{datname}} connections",
+-                "refId": "A"
+-              },
+-              {
+-                "expr": "pg_settings_max_connections{service=\"postgres\"}",
+-                "legendFormat": "Max connections",
+-                "refId": "B"
+-              }
+-            ],
+-            "title": "PostgreSQL Connections",
+-            "transformations": [],
+-            "transparent": false,
+-            "type": "timeseries"
+-          },
+-          {
+-            "description": "Number of currently executing queries",
+-            "fieldConfig": {
+-              "defaults": {},
+-              "overrides": []
+-            },
+-            "gridPos": {
+-              "h": 9,
+-              "w": 12,
+-              "x": 12,
+-              "y": 84
+-            },
+-            "options": null,
+-            "repeatDirection": "h",
+-            "targets": [
+-              {
+-                "expr": "pg_stat_activity_count{service=\"postgres\",state=\"active\"}",
+-                "legendFormat": "{{pg}}",
+-                "refId": "A"
+-              }
+-            ],
+-            "title": "Active Queries",
+-            "transformations": [],
+-            "transparent": false,
+-            "type": "timeseries"
+-          },
+-          {
+-            "description": "Buffer cache hit ratio - should be >99% for good performance",
+-            "fieldConfig": {
+-              "defaults": {},
+-              "overrides": []
+-            },
+-            "gridPos": {
+-              "h": 9,
+-              "w": 12,
+-              "x": 0,
+-              "y": 93
+-            },
+-            "options": null,
+-            "repeatDirection": "h",
+-            "targets": [
+-              {
+-                "expr": "sum(pg_stat_database_blks_hit{service=\"postgres\"}) /\n(sum(pg_stat_database_blks_hit{service=\"postgres\"}) + sum(pg_stat_database_blks_read{service=\"postgres\"})) * 100",
+-                "legendFormat": "Cache hit %",
+-                "refId": "A"
+-              }
+-            ],
+-            "title": "Cache Hit Ratio",
+-            "transformations": [],
+-            "transparent": false,
+-            "type": "gauge"
+-          },
+-          {
+-            "description": "Transaction commits and rollbacks per second",
+-            "fieldConfig": {
+-              "defaults": {},
+-              "overrides": []
+-            },
+-            "gridPos": {
+-              "h": 9,
+-              "w": 12,
+-              "x": 12,
+-              "y": 93
+-            },
+-            "options": null,
+-            "repeatDirection": "h",
+-            "targets": [
+-              {
+-                "expr": "rate(pg_stat_database_xact_commit{service=\"postgres\"}[5m])",
+-                "legendFormat": "{{datname}} commits/sec",
+-                "refId": "A"
+-              },
+-              {
+-                "expr": "rate(pg_stat_database_xact_rollback{service=\"postgres\"}[5m])",
+-                "legendFormat": "{{datname}} rollbacks/sec",
+-                "refId": "B"
+-              }
+-            ],
+-            "title": "Transaction Rate",
+-            "transformations": [],
+-            "transparent": false,
+-            "type": "timeseries"
+-          },
+-          {
+-            "description": "Total database size",
+-            "fieldConfig": {
+-              "defaults": {},
+-              "overrides": []
+-            },
+-            "gridPos": {
+-              "h": 9,
+-              "w": 12,
+-              "x": 0,
+-              "y": 102
+-            },
+-            "options": null,
+-            "repeatDirection": "h",
+-            "targets": [
+-              {
+-                "expr": "pg_database_size_bytes{service=\"postgres\"}",
+-                "legendFormat": "{{pg}}",
+-                "refId": "A"
+-              }
+-            ],
+-            "title": "Database Size",
+-            "transformations": [],
+-            "transparent": false,
+-            "type": "stat"
+-          },
+-          {
+-            "description": "Query execution time (95th percentile)",
+-            "fieldConfig": {
+-              "defaults": {},
+-              "overrides": []
+-            },
+-            "gridPos": {
+-              "h": 9,
+-              "w": 12,
+-              "x": 12,
+-              "y": 102
+-            },
+-            "options": null,
+-            "repeatDirection": "h",
+-            "targets": [
+-              {
+-                "expr": "histogram_quantile(0.95, sum by (le) (rate(pg_stat_statements_mean_exec_time_seconds_bucket{service=\"postgres\"}[5m])))",
+-                "legendFormat": "{{pg}}",
+-                "refId": "A"
+-              }
+-            ],
+-            "title": "Query Duration (p95)",
+-            "transformations": [],
+-            "transparent": false,
+-            "type": "timeseries"
+-          },
+-          {
+-            "description": "Deadlocks per second - should be near zero",
+-            "fieldConfig": {
+-              "defaults": {},
+-              "overrides": []
+-            },
+-            "gridPos": {
+-              "h": 9,
+-              "w": 12,
+-              "x": 0,
+-              "y": 111
+-            },
+-            "options": null,
+-            "repeatDirection": "h",
+-            "targets": [
+-              {
+-                "expr": "rate(pg_stat_database_deadlocks{service=\"postgres\"}[5m])",
+-                "legendFormat": "{{pg}}",
+-                "refId": "A"
+-              }
+-            ],
+-            "title": "Deadlocks",
+-            "transformations": [],
+-            "transparent": false,
+-            "type": "timeseries"
+-          },
+-          {
+-            "description": "Replication lag in seconds",
+-            "fieldConfig": {
+-              "defaults": {},
+-              "overrides": []
+-            },
+-            "gridPos": {
+-              "h": 9,
+-              "w": 12,
+-              "x": 12,
+-              "y": 111
+-            },
+-            "options": null,
+-            "repeatDirection": "h",
+-            "targets": [
+-              {
+-                "expr": "pg_replication_lag_seconds{service=\"postgres\"}",
+-                "legendFormat": "{{pg}}",
+-                "refId": "A"
+-              }
+-            ],
+-            "title": "Replication Lag",
+-            "transformations": [],
+-            "transparent": false,
+-            "type": "timeseries"
+-          },
+-          {
+-            "description": "Dead tuples indicating table bloat - vacuum if high",
+-            "fieldConfig": {
+-              "defaults": {},
+-              "overrides": []
+-            },
+-            "gridPos": {
+-              "h": 9,
+-              "w": 12,
+-              "x": 0,
+-              "y": 120
+-            },
+-            "options": null,
+-            "repeatDirection": "h",
+-            "targets": [
+-              {
+-                "expr": "sum(pg_stat_user_tables_n_dead_tup{service=\"postgres\"}) by (relname)",
+-                "legendFormat": "{{pg}}",
+-                "refId": "A"
+-              }
+-            ],
+-            "title": "Table Bloat (Dead Tuples)",
+-            "transformations": [],
+-            "transparent": false,
+-            "type": "timeseries"
+-          },
+-          {
+-            "description": "Connection pool utilization percentage",
+-            "fieldConfig": {
+-              "defaults": {},
+-              "overrides": []
+-            },
+-            "gridPos": {
+-              "h": 9,
+-              "w": 12,
+-              "x": 12,
+-              "y": 120
+-            },
+-            "options": null,
+-            "repeatDirection": "h",
+-            "targets": [
+-              {
+-                "expr": "pg_stat_database_numbackends{service=\"postgres\"} /\non() group_left pg_settings_max_connections{service=\"postgres\"} * 100",
+-                "legendFormat": "Pool usage %",
+-                "refId": "A"
+-              }
+-            ],
+-            "title": "Connection Pool Utilization",
+-            "transformations": [],
+-            "transparent": false,
+-            "type": "gauge"
+-          },
+           {
+             "description": "Redis memory consumption",
+             "fieldConfig": {
+@@ -753,7 +483,7 @@
+               "h": 9,
+               "w": 12,
+               "x": 0,
+-              "y": 129
++              "y": 84
+             },
+             "options": null,
+             "repeatDirection": "h",
+@@ -779,7 +509,7 @@
+               "h": 9,
+               "w": 12,
+               "x": 12,
+-              "y": 129
++              "y": 84
+             },
+             "options": null,
+             "repeatDirection": "h",
+@@ -805,7 +535,7 @@
+               "h": 9,
+               "w": 12,
+               "x": 0,
+-              "y": 138
++              "y": 93
+             },
+             "options": null,
+             "repeatDirection": "h",
+@@ -831,7 +561,7 @@
+               "h": 9,
+               "w": 12,
+               "x": 12,
+-              "y": 138
++              "y": 93
+             },
+             "options": null,
+             "repeatDirection": "h",
+@@ -862,7 +592,7 @@
+               "h": 9,
+               "w": 12,
+               "x": 0,
+-              "y": 147
++              "y": 102
+             },
+             "options": null,
+             "repeatDirection": "h",
+@@ -888,7 +618,7 @@
+               "h": 9,
+               "w": 12,
+               "x": 12,
+-              "y": 147
++              "y": 102
+             },
+             "options": null,
+             "repeatDirection": "h",
+@@ -914,7 +644,7 @@
+               "h": 9,
+               "w": 12,
+               "x": 0,
+-              "y": 156
++              "y": 111
+             },
+             "options": null,
+             "repeatDirection": "h",
+@@ -940,7 +670,7 @@
+               "h": 9,
+               "w": 12,
+               "x": 12,
+-              "y": 156
++              "y": 111
+             },
+             "options": null,
+             "repeatDirection": "h",
+diff --git a/tests/golden/data/cli_legacy_env_generate_dashboard/staged__search-api__env-prod.json b/tests/golden/data/cli_legacy_env_generate_dashboard/staged__search-api__env-prod.json
+index 0e08381..c803335 100644
+--- a/tests/golden/data/cli_legacy_env_generate_dashboard/staged__search-api__env-prod.json
++++ b/tests/golden/data/cli_legacy_env_generate_dashboard/staged__search-api__env-prod.json
+@@ -519,7 +519,7 @@
+             "type": "timeseries"
+           },
+           {
+-            "description": "Elasticsearch cluster health (0=green, 1=yellow, 2=red)",
++            "description": "Redis memory consumption",
+             "fieldConfig": {
+               "defaults": {},
+               "overrides": []
+@@ -532,245 +532,6 @@
+             },
+             "options": null,
+             "repeatDirection": "h",
+-            "targets": [
+-              {
+-                "expr": "elasticsearch_cluster_health_status{service=\"elasticsearch\"}",
+-                "legendFormat": "{{elasticsearch}}",
+-                "refId": "A"
+-              }
+-            ],
+-            "title": "Cluster Health Status",
+-            "transformations": [],
+-            "transparent": false,
+-            "type": "stat"
+-          },
+-          {
+-            "description": "Number of active and relocating shards",
+-            "fieldConfig": {
+-              "defaults": {},
+-              "overrides": []
+-            },
+-            "gridPos": {
+-              "h": 9,
+-              "w": 12,
+-              "x": 0,
+-              "y": 93
+-            },
+-            "options": null,
+-            "repeatDirection": "h",
+-            "targets": [
+-              {
+-                "expr": "elasticsearch_cluster_health_active_shards{service=\"elasticsearch\"}",
+-                "legendFormat": "Active",
+-                "refId": "A"
+-              },
+-              {
+-                "expr": "elasticsearch_cluster_health_relocating_shards{service=\"elasticsearch\"}",
+-                "legendFormat": "Relocating",
+-                "refId": "B"
+-              }
+-            ],
+-            "title": "Active Shards",
+-            "transformations": [],
+-            "transparent": false,
+-            "type": "timeseries"
+-          },
+-          {
+-            "description": "Search queries per second",
+-            "fieldConfig": {
+-              "defaults": {},
+-              "overrides": []
+-            },
+-            "gridPos": {
+-              "h": 9,
+-              "w": 12,
+-              "x": 12,
+-              "y": 93
+-            },
+-            "options": null,
+-            "repeatDirection": "h",
+-            "targets": [
+-              {
+-                "expr": "sum(rate(elasticsearch_indices_search_query_total{service=\"elasticsearch\"}[5m]))",
+-                "legendFormat": "{{elasticsearch}}",
+-                "refId": "A"
+-              }
+-            ],
+-            "title": "Search Rate",
+-            "transformations": [],
+-            "transparent": false,
+-            "type": "timeseries"
+-          },
+-          {
+-            "description": "Search query latency (95th percentile)",
+-            "fieldConfig": {
+-              "defaults": {},
+-              "overrides": []
+-            },
+-            "gridPos": {
+-              "h": 9,
+-              "w": 12,
+-              "x": 0,
+-              "y": 102
+-            },
+-            "options": null,
+-            "repeatDirection": "h",
+-            "targets": [
+-              {
+-                "expr": "histogram_quantile(0.95, sum by (le) (rate(elasticsearch_indices_search_query_time_seconds_bucket{service=\"elasticsearch\"}[5m])))",
+-                "legendFormat": "{{elasticsearch}}",
+-                "refId": "A"
+-              }
+-            ],
+-            "title": "Search Latency (p95)",
+-            "transformations": [],
+-            "transparent": false,
+-            "type": "timeseries"
+-          },
+-          {
+-            "description": "Documents indexed per second",
+-            "fieldConfig": {
+-              "defaults": {},
+-              "overrides": []
+-            },
+-            "gridPos": {
+-              "h": 9,
+-              "w": 12,
+-              "x": 12,
+-              "y": 102
+-            },
+-            "options": null,
+-            "repeatDirection": "h",
+-            "targets": [
+-              {
+-                "expr": "sum(rate(elasticsearch_indices_indexing_index_total{service=\"elasticsearch\"}[5m]))",
+-                "legendFormat": "{{elasticsearch}}",
+-                "refId": "A"
+-              }
+-            ],
+-            "title": "Indexing Rate",
+-            "transformations": [],
+-            "transparent": false,
+-            "type": "timeseries"
+-          },
+-          {
+-            "description": "Total size of all indices",
+-            "fieldConfig": {
+-              "defaults": {},
+-              "overrides": []
+-            },
+-            "gridPos": {
+-              "h": 9,
+-              "w": 12,
+-              "x": 0,
+-              "y": 111
+-            },
+-            "options": null,
+-            "repeatDirection": "h",
+-            "targets": [
+-              {
+-                "expr": "sum(elasticsearch_indices_store_size_bytes{service=\"elasticsearch\"})",
+-                "legendFormat": "{{elasticsearch}}",
+-                "refId": "A"
+-              }
+-            ],
+-            "title": "Index Size",
+-            "transformations": [],
+-            "transparent": false,
+-            "type": "timeseries"
+-          },
+-          {
+-            "description": "Total number of documents across all indices",
+-            "fieldConfig": {
+-              "defaults": {},
+-              "overrides": []
+-            },
+-            "gridPos": {
+-              "h": 9,
+-              "w": 12,
+-              "x": 12,
+-              "y": 111
+-            },
+-            "options": null,
+-            "repeatDirection": "h",
+-            "targets": [
+-              {
+-                "expr": "sum(elasticsearch_indices_docs{service=\"elasticsearch\"})",
+-                "legendFormat": "{{elasticsearch}}",
+-                "refId": "A"
+-              }
+-            ],
+-            "title": "Document Count",
+-            "transformations": [],
+-            "transparent": false,
+-            "type": "stat"
+-          },
+-          {
+-            "description": "JVM heap memory utilization percentage",
+-            "fieldConfig": {
+-              "defaults": {},
+-              "overrides": []
+-            },
+-            "gridPos": {
+-              "h": 9,
+-              "w": 12,
+-              "x": 0,
+-              "y": 120
+-            },
+-            "options": null,
+-            "repeatDirection": "h",
+-            "targets": [
+-              {
+-                "expr": "elasticsearch_jvm_memory_used_bytes{service=\"elasticsearch\",area=\"heap\"} / \non() elasticsearch_jvm_memory_max_bytes{service=\"elasticsearch\",area=\"heap\"} * 100",
+-                "legendFormat": "Heap %",
+-                "refId": "A"
+-              }
+-            ],
+-            "title": "JVM Heap Usage",
+-            "transformations": [],
+-            "transparent": false,
+-            "type": "gauge"
+-          },
+-          {
+-            "description": "Garbage collection time per second",
+-            "fieldConfig": {
+-              "defaults": {},
+-              "overrides": []
+-            },
+-            "gridPos": {
+-              "h": 9,
+-              "w": 12,
+-              "x": 12,
+-              "y": 120
+-            },
+-            "options": null,
+-            "repeatDirection": "h",
+-            "targets": [
+-              {
+-                "expr": "rate(elasticsearch_jvm_gc_collection_seconds_sum{service=\"elasticsearch\"}[5m])",
+-                "legendFormat": "{{elasticsearch}}",
+-                "refId": "A"
+-              }
+-            ],
+-            "title": "GC Time",
+-            "transformations": [],
+-            "transparent": false,
+-            "type": "timeseries"
+-          },
+-          {
+-            "description": "Redis memory consumption",
+-            "fieldConfig": {
+-              "defaults": {},
+-              "overrides": []
+-            },
+-            "gridPos": {
+-              "h": 9,
+-              "w": 12,
+-              "x": 0,
+-              "y": 129
+-            },
+-            "options": null,
+-            "repeatDirection": "h",
+             "targets": [
+               {
+                 "expr": "redis_memory_used_bytes{service=\"redis\"}",
+@@ -789,224 +550,11 @@
+               "defaults": {},
+               "overrides": []
+             },
+-            "gridPos": {
+-              "h": 9,
+-              "w": 12,
+-              "x": 12,
+-              "y": 129
+-            },
+-            "options": null,
+-            "repeatDirection": "h",
+-            "targets": [
+-              {
+-                "expr": "sum(rate(cache_hits_total{service=\"redis\"}[5m])) /\n(sum(rate(cache_hits_total{service=\"redis\"}[5m])) +\nsum(rate(cache_misses_total{service=\"redis\"}[5m]))) * 100",
+-                "legendFormat": "Hit rate %",
+-                "refId": "A"
+-              }
+-            ],
+-            "title": "Cache Hit Rate",
+-            "transformations": [],
+-            "transparent": false,
+-            "type": "gauge"
+-          },
+-          {
+-            "description": "Number of connected clients",
+-            "fieldConfig": {
+-              "defaults": {},
+-              "overrides": []
+-            },
+-            "gridPos": {
+-              "h": 9,
+-              "w": 12,
+-              "x": 0,
+-              "y": 138
+-            },
+-            "options": null,
+-            "repeatDirection": "h",
+-            "targets": [
+-              {
+-                "expr": "redis_connected_clients{service=\"redis\"}",
+-                "legendFormat": "{{redis}}",
+-                "refId": "A"
+-              }
+-            ],
+-            "title": "Connected Clients",
+-            "transformations": [],
+-            "transparent": false,
+-            "type": "timeseries"
+-          },
+-          {
+-            "description": "Cache hits and misses per second",
+-            "fieldConfig": {
+-              "defaults": {},
+-              "overrides": []
+-            },
+-            "gridPos": {
+-              "h": 9,
+-              "w": 12,
+-              "x": 12,
+-              "y": 138
+-            },
+-            "options": null,
+-            "repeatDirection": "h",
+-            "targets": [
+-              {
+-                "expr": "rate(cache_hits_total{service=\"redis\"}[5m])",
+-                "legendFormat": "Hits/sec",
+-                "refId": "A"
+-              },
+-              {
+-                "expr": "rate(cache_misses_total{service=\"redis\"}[5m])",
+-                "legendFormat": "Misses/sec",
+-                "refId": "B"
+-              }
+-            ],
+-            "title": "Cache Hits vs Misses",
+-            "transformations": [],
+-            "transparent": false,
+-            "type": "timeseries"
+-          },
+-          {
+-            "description": "Keys evicted due to memory pressure - should be zero",
+-            "fieldConfig": {
+-              "defaults": {},
+-              "overrides": []
+-            },
+-            "gridPos": {
+-              "h": 9,
+-              "w": 12,
+-              "x": 0,
+-              "y": 147
+-            },
+-            "options": null,
+-            "repeatDirection": "h",
+-            "targets": [
+-              {
+-                "expr": "rate(redis_evicted_keys_total{service=\"redis\"}[5m])",
+-                "legendFormat": "{{redis}}",
+-                "refId": "A"
+-              }
+-            ],
+-            "title": "Evicted Keys",
+-            "transformations": [],
+-            "transparent": false,
+-            "type": "timeseries"
+-          },
+-          {
+-            "description": "Keys expired per second due to TTL",
+-            "fieldConfig": {
+-              "defaults": {},
+-              "overrides": []
+-            },
+-            "gridPos": {
+-              "h": 9,
+-              "w": 12,
+-              "x": 12,
+-              "y": 147
+-            },
+-            "options": null,
+-            "repeatDirection": "h",
+-            "targets": [
+-              {
+-                "expr": "rate(redis_expired_keys_total{service=\"redis\"}[5m])",
+-                "legendFormat": "{{redis}}",
+-                "refId": "A"
+-              }
+-            ],
+-            "title": "Expired Keys",
+-            "transformations": [],
+-            "transparent": false,
+-            "type": "timeseries"
+-          },
+-          {
+-            "description": "Redis commands processed per second",
+-            "fieldConfig": {
+-              "defaults": {},
+-              "overrides": []
+-            },
+-            "gridPos": {
+-              "h": 9,
+-              "w": 12,
+-              "x": 0,
+-              "y": 156
+-            },
+-            "options": null,
+-            "repeatDirection": "h",
+-            "targets": [
+-              {
+-                "expr": "rate(redis_commands_processed_total{service=\"redis\"}[5m])",
+-                "legendFormat": "{{redis}}",
+-                "refId": "A"
+-              }
+-            ],
+-            "title": "Commands/sec",
+-            "transformations": [],
+-            "transparent": false,
+-            "type": "timeseries"
+-          },
+-          {
+-            "description": "Total number of keys in database",
+-            "fieldConfig": {
+-              "defaults": {},
+-              "overrides": []
+-            },
+-            "gridPos": {
+-              "h": 9,
+-              "w": 12,
+-              "x": 12,
+-              "y": 156
+-            },
+-            "options": null,
+-            "repeatDirection": "h",
+-            "targets": [
+-              {
+-                "expr": "sum(redis_db_keys{service=\"redis\"})",
+-                "legendFormat": "{{redis}}",
+-                "refId": "A"
+-              }
+-            ],
+-            "title": "Total Keys",
+-            "transformations": [],
+-            "transparent": false,
+-            "type": "stat"
+-          },
+-          {
+-            "description": "Redis memory consumption",
+-            "fieldConfig": {
+-              "defaults": {},
+-              "overrides": []
+-            },
+             "gridPos": {
+               "h": 9,
+               "w": 12,
+               "x": 0,
+-              "y": 165
+-            },
+-            "options": null,
+-            "repeatDirection": "h",
+-            "targets": [
+-              {
+-                "expr": "redis_memory_used_bytes{service=\"redis\"}",
+-                "legendFormat": "{{redis}}",
+-                "refId": "A"
+-              }
+-            ],
+-            "title": "Redis Memory Usage",
+-            "transformations": [],
+-            "transparent": false,
+-            "type": "timeseries"
+-          },
+-          {
+-            "description": "Cache hit rate - should be >90% for good performance",
+-            "fieldConfig": {
+-              "defaults": {},
+-              "overrides": []
+-            },
+-            "gridPos": {
+-              "h": 9,
+-              "w": 12,
+-              "x": 12,
+-              "y": 165
++              "y": 93
+             },
+             "options": null,
+             "repeatDirection": "h",
+@@ -1031,8 +579,8 @@
+             "gridPos": {
+               "h": 9,
+               "w": 12,
+-              "x": 0,
+-              "y": 174
++              "x": 12,
++              "y": 93
+             },
+             "options": null,
+             "repeatDirection": "h",
+@@ -1057,8 +605,8 @@
+             "gridPos": {
+               "h": 9,
+               "w": 12,
+-              "x": 12,
+-              "y": 174
++              "x": 0,
++              "y": 102
+             },
+             "options": null,
+             "repeatDirection": "h",
+@@ -1088,8 +636,8 @@
+             "gridPos": {
+               "h": 9,
+               "w": 12,
+-              "x": 0,
+-              "y": 183
++              "x": 12,
++              "y": 102
+             },
+             "options": null,
+             "repeatDirection": "h",
+@@ -1114,8 +662,8 @@
+             "gridPos": {
+               "h": 9,
+               "w": 12,
+-              "x": 12,
+-              "y": 183
++              "x": 0,
++              "y": 111
+             },
+             "options": null,
+             "repeatDirection": "h",
+@@ -1140,8 +688,8 @@
+             "gridPos": {
+               "h": 9,
+               "w": 12,
+-              "x": 0,
+-              "y": 192
++              "x": 12,
++              "y": 111
+             },
+             "options": null,
+             "repeatDirection": "h",
+@@ -1166,8 +714,8 @@
+             "gridPos": {
+               "h": 9,
+               "w": 12,
+-              "x": 12,
+-              "y": 192
++              "x": 0,
++              "y": 120
+             },
+             "options": null,
+             "repeatDirection": "h",
+diff --git a/tests/test_alerts.py b/tests/test_alerts.py
+index 53c2faf..19e3041 100644
+--- a/tests/test_alerts.py
++++ b/tests/test_alerts.py
+@@ -2,6 +2,8 @@
+ Tests for alert generation module.
+ """
+ 
++from pathlib import Path
++
+ import pytest
+ 
+ from nthlayer_generate.alerts import AlertRule, AlertTemplateLoader
+@@ -501,3 +503,35 @@ class TestForDurationOverride:
+             for_duration_override=None,
+         )
+         assert customized.duration == "5m"
++
++
++def test_manifest_alerts_go_through_validation():
++    """A template's ``for: 0m`` is raised to 1m on the manifest path.
++
++    Ported from the legacy TestAlertValidationIntegration (opensrm-wo62.4.22).
++    alerts/templates/brokers/rabbitmq.yaml ships two ``for: 0m`` rules, and
++    examples/services/email-worker.yaml depends on rabbitmq, so validation
++    has a real zero to fix.
++    """
++    from nthlayer_common.manifest import load_manifest
++
++    from nthlayer_generate.generators.alerts import generate_alerts_from_manifest
++
++    zero = {"0m", "0s", ""}
++    raw_zero = {
++        rule.name
++        for rule in AlertTemplateLoader().load_technology("rabbitmq")
++        if rule.duration in zero
++    }
++    assert raw_zero, "rabbitmq.yaml no longer ships a for: 0m rule; pick another"
++
++    manifest = load_manifest(
++        Path(__file__).resolve().parents[1] / "examples" / "services" / "email-worker.yaml",
++        suppress_deprecation_warning=True,
++    )
++    durations = {
++        alert.name: alert.duration for alert in generate_alerts_from_manifest(manifest, quiet=True)
++    }
++
++    assert {name: durations.get(name) for name in raw_zero} == dict.fromkeys(raw_zero, "1m")
++    assert not [name for name, duration in durations.items() if duration in zero]
+diff --git a/tests/test_dashboard_technology_dedup.py b/tests/test_dashboard_technology_dedup.py
+new file mode 100644
+index 0000000..f0cf27d
+--- /dev/null
++++ b/tests/test_dashboard_technology_dedup.py
+@@ -0,0 +1,63 @@
++"""One set of technology panels per technology, however many dependencies use it.
++
++Ported from the legacy builder's test_templates_avoid_duplicates
++(opensrm-wo62.4.22, ruling J2). On the manifest path a second postgres
++dependency used to add the ten PostgreSQL panels again, with identical
++queries: the panels describe the technology, not the instance.
++
++The input is examples/services/payment-api-with-deps.yaml with its own
++postgres-main entry copied under a new name, so the dependency shape is the
++shipped one. No shipped manifest repeats a technology on its own, but three
++shipped env overlays do once merged (examples/environments/payment-api-dev,
++payment-api-prod and search-api-prod add a second Dependencies resource), and
++the staged env golden cells pin that case end to end.
++"""
++
++from __future__ import annotations
++
++import copy
++from pathlib import Path
++from typing import Any
++
++import pytest
++import yaml
++from nthlayer_common.manifest import load_manifest
++
++from nthlayer_generate.dashboards.manifest_builder import build_dashboard_from_manifest
++
++SHIPPED = (
++    Path(__file__).resolve().parents[1] / "examples" / "services" / "payment-api-with-deps.yaml"
++)
++
++
++def _panel_titles(manifest_path: Path) -> list[str]:
++    manifest = load_manifest(manifest_path, suppress_deprecation_warning=True)
++    titles = []
++    for panel in build_dashboard_from_manifest(manifest)["dashboard"]["panels"]:
++        titles.append(panel["title"])
++        titles.extend(child["title"] for child in panel.get("panels", []))
++    return titles
++
++
++def _with_postgres_twin(tmp_path: Path, twin_type: str) -> Path:
++    data: dict[str, Any] = yaml.safe_load(SHIPPED.read_text(encoding="utf-8"))
++    (deps,) = [r for r in data["resources"] if r["kind"] == "Dependencies"]
++    databases = deps["spec"]["databases"]
++    (postgres,) = [db for db in databases if db["name"] == "postgres-main"]
++    twin = copy.deepcopy(postgres)
++    twin["name"] = "postgres-replica"
++    twin["type"] = twin_type
++    databases.append(twin)
++    path = tmp_path / SHIPPED.name
++    path.write_text(yaml.safe_dump(data), encoding="utf-8")
++    return path
++
++
++# "postgres" repeats the shipped entry's type; "postgresql" is the alias the
++# other shipped examples use, which resolves to the same dashboard template.
++@pytest.mark.parametrize("twin_type", ["postgres", "postgresql"])
++def test_a_second_dependency_on_a_technology_adds_no_panels(tmp_path: Path, twin_type: str):
++    baseline = _panel_titles(SHIPPED)
++    assert "PostgreSQL Connections" in baseline  # the shipped file has postgres panels
++
++    assert _panel_titles(_with_postgres_twin(tmp_path, twin_type)) == baseline
+diff --git a/tests/test_recording_rules.py b/tests/test_recording_rules.py
+index 7272e2f..ed310c4 100644
+--- a/tests/test_recording_rules.py
++++ b/tests/test_recording_rules.py
+@@ -235,5 +235,81 @@ resources:
+             assert len(rules_data["groups"]) >= 1
+ 
+ 
++# --- manifest path (ported from the legacy builder's tests, opensrm-wo62.4.22) ---
++
++EXAMPLES = Path(__file__).resolve().parents[1] / "examples"
++# Every shipped legacy and srm/v1 manifest. The count is pinned so a moved
++# examples directory fails here instead of leaving the loop empty.
++SHIPPED = sorted((EXAMPLES / "services").glob("*.yaml")) + sorted(
++    (EXAMPLES / "opensrm").glob("*.reliability.yaml")
++)
++
++
++def _load(path: Path):
++    from nthlayer_common.manifest import load_manifest
++
++    return load_manifest(path, suppress_deprecation_warning=True)
++
++
++def _rules(path: Path):
++    from nthlayer_generate.recording_rules import build_recording_rules_from_manifest
++
++    return [r for g in build_recording_rules_from_manifest(_load(path)) for r in g.rules]
++
++
++def test_shipped_corpus_is_present():
++    assert len(SHIPPED) == 23, [p.name for p in SHIPPED]
++
++
++@pytest.mark.parametrize("path", SHIPPED, ids=lambda p: p.name)
++def test_shipped_rules_follow_prometheus_conventions(path: Path):
++    """Every record is level:metric:operation style, no edge underscores."""
++    rules = _rules(path)
++    assert rules, f"{path.name} produced no recording rules"
++    for rule in rules:
++        assert ":" in rule.record, rule.record
++        assert not rule.record.startswith("_"), rule.record
++        assert not rule.record.endswith("_"), rule.record
++
++
++@pytest.mark.parametrize("path", SHIPPED, ids=lambda p: p.name)
++def test_shipped_rules_carry_the_service_label(path: Path):
++    service = _load(path).name
++    rules = _rules(path)
++    assert rules, f"{path.name} produced no recording rules"
++    for rule in rules:
++        assert rule.labels.get("service") == service, (rule.record, rule.labels)
++
++
++PAYMENT_API = EXAMPLES / "services" / "payment-api.yaml"
++
++
++def _records_for_slo(path: Path, slo: str) -> set[str]:
++    return {r.record for r in _rules(path) if r.labels.get("slo") == slo}
++
++
++def test_availability_slo_rules():
++    # payment-api.yaml declares an availability SLO with a 30d window.
++    assert _records_for_slo(PAYMENT_API, "availability") >= {
++        "slo:requests_total:30d",
++        "slo:requests_success:30d",
++        "slo:availability:ratio",
++        "slo:error_budget_remaining:ratio",
++    }
++
++
++def test_latency_slo_rules():
++    # payment-api.yaml declares latency-p95 (a legacy latency SLO with a
++    # threshold, 30d window). Not an srm/v1 example: those write latency as
++    # target: <ms>, which the v1 schema rejects (opensrm-jlbm).
++    assert _records_for_slo(PAYMENT_API, "latency-p95") >= {
++        "slo:latency_requests_total:30d",
++        "slo:latency_requests_fast:30d",
++        "slo:latency:ratio",
++        "slo:http_request_duration_seconds:p95",
++        "slo:http_request_duration_seconds:p99",
++    }
++
++
+ if __name__ == "__main__":
+     pytest.main([__file__, "-v"])

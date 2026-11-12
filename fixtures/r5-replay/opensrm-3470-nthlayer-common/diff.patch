@@ -1,0 +1,548 @@
+diff --git a/.release-please-manifest.json b/.release-please-manifest.json
+index 895bf0e..969d3db 100644
+--- a/.release-please-manifest.json
++++ b/.release-please-manifest.json
+@@ -1,3 +1,3 @@
+ {
+-  ".": "2.0.0"
++  ".": "2.1.0"
+ }
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index 5f93541..e1ea985 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -4,6 +4,14 @@
+ Imported by `nthlayer-core`, `nthlayer-workers`, and `nthlayer-bench`. License:
+ Apache-2.0.
+ 
++## [2.1.0](https://github.com/rsionnach/nthlayer-common/compare/v2.0.0...v2.1.0) (2026-08-28)
++
++
++### Features
++
++* **manifest:** promote the foreign-YAML scan gate into nthlayer-common ([674321e](https://github.com/rsionnach/nthlayer-common/commit/674321e4ac38585d5c9bfbcff7bd8a5ac063f817))
++* **manifest:** promote the foreign-YAML scan gate into nthlayer-common ([49594de](https://github.com/rsionnach/nthlayer-common/commit/49594dea247b9b1ea4e929a1831226677d63acc6))
++
+ ## [2.0.0](https://github.com/rsionnach/nthlayer-common/compare/v1.7.0...v2.0.0) (2026-08-25)
+ 
+ 
+diff --git a/docs/architecture.md b/docs/architecture.md
+index 82d5ec5..7ce4d9a 100644
+--- a/docs/architecture.md
++++ b/docs/architecture.md
+@@ -45,6 +45,8 @@ src/nthlayer_common/
+     overrides/           # Human override ingestion (gen_ai.override, opensrm-jmy.4)
+     governance_bridge/   # External governance webhook protocol (opensrm-jmy.5)
+     manifest/            # Unified OpenSRM manifest parsing (v1, v2, OpenSLO, legacy)
++                         #   + scan.py: walking a directory that holds
++                         #     manifests alongside other YAML
+ ```
+ 
+ ## Subsystem references
+@@ -210,6 +212,28 @@ Unified OpenSRM manifest parsing — v1 (srm/v1), v2
+ (opensrm.nthlayer.io/v2), OpenSLO subpackage, legacy NthLayer formats.
+ Implements C-X.2 (manifest format migration).
+ 
++**Scanning a mixed directory** (`manifest/scan.py`). `load_manifest`
++raises for any YAML it cannot parse as a manifest, including files that
++never claimed to be one. Callers walking a specs directory need to
++separate "a manifest that was aiming to load and failed" from "foreign
++YAML sharing the directory" — count the first, and the operator learns
++their view is partial; count the second, and a coverage caveat fires on
++every mixed-directory run until nobody reads it.
++
++- `iter_manifest_files(dir) -> list[Path]` — every `.yaml`/`.yml` FILE
++  directly under `dir`, sorted. Both suffixes always: `.yml` invisibility
++  is a silent subset reached by file extension.
++- `foreign_yaml_reason(path) -> str | None` — `None` when the file was
++  aiming to be a manifest (so the caller counts it), a short reason when
++  it plainly was not (so the caller can log rather than drop it silently).
++  Recovers intent only while evidence of intent survives; see its
++  docstring for the stated limit.
++- `MANIFEST_SUFFIXES` — the two suffixes, for callers doing their own walk.
++
++Used by `nthlayer_workers` observe and learn. **Look here before writing
++a fourth directory walk** — three existed before this was shared
++(opensrm-oh27, opensrm-3470).
++
+ - `load_manifest(path, environment?, format="auto",
+   suppress_deprecation_warning?) -> ReliabilityManifest` —
+   auto-detects format from `apiVersion`. v1 resolves templates
+diff --git a/pyproject.toml b/pyproject.toml
+index 988f1a8..367079c 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
+ 
+ [project]
+ name = "nthlayer-common"
+-version = "2.0.0"
++version = "2.1.0"
+ description = "Shared utilities for the NthLayer ecosystem"
+ readme = "README.md"
+ requires-python = ">=3.11"
+diff --git a/src/nthlayer_common/manifest/__init__.py b/src/nthlayer_common/manifest/__init__.py
+index 338330e..1ed83e1 100644
+--- a/src/nthlayer_common/manifest/__init__.py
++++ b/src/nthlayer_common/manifest/__init__.py
+@@ -73,6 +73,11 @@ from nthlayer_common.manifest.parser.loader import (
+ )
+ from nthlayer_common.manifest.parser.v1 import OpenSRMParseError
+ from nthlayer_common.manifest.parser.v2 import OpenSRMV2ParseError
++from nthlayer_common.manifest.scan import (
++    MANIFEST_SUFFIXES,
++    foreign_yaml_reason,
++    iter_manifest_files,
++)
+ 
+ __all__ = [
+     # Loader
+@@ -95,6 +100,10 @@ __all__ = [
+     "is_valid_service_type",
+     "resolve_service_type",
+     "valid_service_types_phrase",
++    # Directory scanning
++    "MANIFEST_SUFFIXES",
++    "foreign_yaml_reason",
++    "iter_manifest_files",
+     # Enums
+     "DependencyCriticality",
+     "SourceFormat",
+diff --git a/src/nthlayer_common/manifest/scan.py b/src/nthlayer_common/manifest/scan.py
+new file mode 100644
+index 0000000..f30676f
+--- /dev/null
++++ b/src/nthlayer_common/manifest/scan.py
+@@ -0,0 +1,161 @@
++"""Scanning a directory that holds manifests alongside other YAML.
++
++``load_manifest`` raises ``ManifestLoadError`` for any YAML it cannot parse
++as a manifest, including files that never claimed to be one. A caller
++walking a specs directory therefore has to answer a question the parser
++does not: was this file *aiming* to be a manifest and failing, or is it
++something else sharing the directory?
++
++Both wrong answers are real bugs, and both have happened:
++
++- Treat everything as a broken manifest, and a "computed over a subset"
++  caveat fires on every mixed-directory run. A caveat that always fires
++  stops being read.
++- Treat nothing as one, and a broken manifest drops out of a financial
++  figure or a set of measured SLOs without a word (opensrm-oh27,
++  opensrm-3470).
++
++Promoted here from ``nthlayer_workers.learn.retrospective`` once a third
++consumer appeared, so the call sites stop reaching into one another
++(opensrm-3470).
++"""
++
++from __future__ import annotations
++
++from pathlib import Path
++
++import yaml
++
++from nthlayer_common.manifest.parser.v1 import is_srm_v1_format
++from nthlayer_common.manifest.parser.v2 import is_opensrm_v2_format
++
++# Suffixes a manifest may carry. Both, always: `.yml` invisibility is the
++# same silent-subset failure as an uncounted parse error, reached by file
++# extension instead — the manifest is dropped and nothing says so.
++MANIFEST_SUFFIXES = (".yaml", ".yml")
++
++
++def iter_manifest_files(specs_dir: str | Path) -> list[Path]:
++    """Every ``.yaml``/``.yml`` file directly under ``specs_dir``, sorted.
++
++    Sorted so the order is stable across machines. That matters to any
++    caller that dedupes first-wins — learn/retrospective does; observe's
++    spec_loader does not, and whether it should is opensrm-3470's follow-up
++    rather than a property this function can assume.
++
++    Returns empty for a path that is not a directory rather than raising,
++    so a caller that wants its own error message for that case keeps the
++    decision.
++    """
++    path = Path(specs_dir)
++    if not path.is_dir():
++        return []
++    # `not p.is_dir()` rather than `p.is_file()`: excluding DIRECTORIES was
++    # the point — a directory named `foo.yaml` would be counted as a broken
++    # manifest by every caller. is_file() also excludes a dangling symlink,
++    # which silently drops a stale overlay link that previously reached
++    # load_manifest and was counted.
++    #
++    # Suffix compared case-folded: `.YAML` was excluded outright — never
++    # loaded, never counted, never logged — which is the silent-subset-by-
++    # extension failure MANIFEST_SUFFIXES exists to prevent, one case-fold
++    # away.
++    return sorted(
++        p
++        for p in path.iterdir()
++        if not p.is_dir() and p.suffix.lower() in MANIFEST_SUFFIXES
++    )
++
++
++def foreign_yaml_reason(spec_file: str | Path) -> str | None:
++    """Why a file that failed to load should NOT count as a broken manifest.
++
++    Returns ``None`` when the file was aiming at being a manifest — so the
++    caller counts it — or a short reason when it plainly was not, so the
++    caller can drop it and log the reason rather than dropping it silently.
++
++    Evidence of intent is checked in three widening steps: the canonical
++    v1/v2 format predicates, so this cannot drift from what the parser
++    accepts; then a near miss on those headers, since a typo'd kind or a
++    drifted API group is an ordinary way a real manifest breaks; then the
++    body, since a bad merge or a mis-indent can strip the header while
++    leaving ``spec.service`` (as a *mapping*), ``spec.slos`` or
++    ``spec.outcomes`` intact.
++
++    ``spec.service`` as a mapping is what separates a headerless manifest
++    from a headerless OpenSLO document, which writes the same key as a
++    plain string. Anything unreadable or empty counts too — a syntax error
++    or a truncated write inside a specs directory is a deployment error
++    either way.
++
++    LIMIT, stated rather than deferred: this recovers intent only while
++    evidence of intent survives. A file that has lost both its header and
++    its body is indistinguishable in principle from any other headerless
++    YAML mapping — both are dicts with no apiVersion, no kind, no
++    ``spec.service``. No content heuristic separates those, and adding more
++    markers would not change it. For such a file this returns a reason, so
++    the caller can record it rather than drop it without trace — which is
++    what lets an investigator chasing a number that looks wrong pick the
++    trail back up.
++    """
++    path = Path(spec_file)
++    try:
++        data = yaml.safe_load(path.read_text())
++    except (OSError, ValueError, yaml.YAMLError):
++        # ValueError covers UnicodeDecodeError on non-UTF-8 bytes. Too
++        # malformed to inspect, so it counts. A read failing here where
++        # load_manifest's read succeeded also means the file moved
++        # underneath us, which is not evidence it was foreign.
++        return None
++
++    if not data:
++        # None (zero bytes, whitespace, comments) or an empty container. A
++        # truncated or interrupted write is precisely what the count exists
++        # for.
++        return None
++
++    if not isinstance(data, dict):
++        return f"top-level YAML is {type(data).__name__}, not a mapping"
++
++    # "service" at the top level is the legacy pre-apiVersion shape that
++    # load_manifest still accepts.
++    if is_opensrm_v2_format(data) or is_srm_v1_format(data) or "service" in data:
++        return None
++
++    api_version = data.get("apiVersion")
++    kind = data.get("kind")
++    near_miss = (
++        isinstance(api_version, str)
++        and (api_version.startswith("srm/") or "opensrm" in api_version)
++    ) or (
++        isinstance(kind, str)
++        and kind.startswith(("ServiceManifest", "ServiceReliabilityManifest"))
++    )
++    if near_miss:
++        return None
++
++    # Body recovery: a bad merge or a mis-indent can strip the header while
++    # leaving the body intact, and that is the common corruption.
++    #
++    # The key names differ by format, and getting them wrong makes this whole
++    # branch inert — which it was until opensrm-3470's edge-cases pass:
++    #   v1  spec.slos          a MAPPING of name -> config (parser/v1 does
++    #                          slos_data.items()), not a list
++    #   v2  spec.slo           a list of OpenSLO documents
++    #       spec.judgment_slo  a list
++    #       spec.service       a MAPPING; OpenSLO writes the same key as a
++    #                          plain string, which is what keeps OpenSLO out
++    #       spec.outcomes      a mapping
++    # spec.slos is accepted as either shape: v1 writes a mapping, and a
++    # partially-converted file is exactly the kind of thing that lands here.
++    spec = data.get("spec")
++    if isinstance(spec, dict) and (
++        isinstance(spec.get("service"), dict)
++        or isinstance(spec.get("slos"), (dict, list))
++        or isinstance(spec.get("slo"), list)
++        or isinstance(spec.get("judgment_slo"), list)
++        or isinstance(spec.get("outcomes"), dict)
++    ):
++        return None
++
++    return f"no manifest markers (apiVersion={api_version!r}, kind={kind!r})"
+diff --git a/tests/test_manifest_scan.py b/tests/test_manifest_scan.py
+new file mode 100644
+index 0000000..4f180da
+--- /dev/null
++++ b/tests/test_manifest_scan.py
+@@ -0,0 +1,252 @@
++"""Scanning a directory that holds manifests *and other things*.
++
++``load_manifest`` raises ``ManifestLoadError`` for any YAML it cannot parse
++as a manifest — including files that never claimed to be one. A caller
++walking a specs directory therefore has to answer a question the parser
++does not: **was this file aiming to be a manifest and failing, or is it
++simply something else sharing the directory?**
++
++Getting that wrong in either direction is a real bug, and both directions
++have now happened in nthlayer-workers:
++
++- Count everything, and the "computed over a subset" caveat fires on every
++  mixed-directory run. A caveat that always fires stops being read.
++- Count nothing, and a broken manifest drops out of a financial figure or a
++  set of measured SLOs in silence (opensrm-oh27, opensrm-3470).
++
++``foreign_yaml_reason`` is that question, promoted here from
++``nthlayer_workers.learn.retrospective`` so the three call sites that need
++it stop reaching into each other (opensrm-3470). ``iter_manifest_files`` comes with it — see MANIFEST_SUFFIXES for why both
++suffixes, always.
++
++These tests are ported from the workers suite deliberately: the promotion
++must be behaviour-preserving, and porting the contract is how that is
++demonstrated rather than asserted.
++"""
++from __future__ import annotations
++
++import pytest
++
++from nthlayer_common.manifest import foreign_yaml_reason, iter_manifest_files
++
++
++def _write(tmp_path, name: str, body: str):
++    p = tmp_path / name
++    p.write_text(body)
++    return p
++
++
++# =============================================================================
++# foreign_yaml_reason — "was this aiming to be a manifest?"
++# =============================================================================
++
++_AIMING = {
++    "v2 manifest": (
++        "apiVersion: opensrm.nthlayer.io/v2\nkind: ServiceManifest\n"
++        "metadata: {name: s}\nspec:\n  service: {name: s, type: api}\n"
++    ),
++    "v1 manifest": (
++        "apiVersion: srm/v1\nkind: ServiceReliabilityManifest\n"
++        "metadata: {name: s, team: t, tier: critical}\nspec: {type: api, slos: {}}\n"
++    ),
++    "legacy service shape": "service:\n  name: s\n  team: t\n",
++    # Header stripped by a bad merge or a mis-indent, body intact. This is the
++    # common corruption, and the case the gate's last extension exists for.
++    "headerless, spec.service mapping": "spec:\n  service:\n    name: s\n    type: api\n",
++    "headerless, spec.slos": "spec:\n  slos:\n    - name: availability\n",
++    "headerless, spec.outcomes": "spec:\n  outcomes:\n    decision_value: {}\n",
++    # A typo'd kind or a drifted API group is an ordinary way a real manifest
++    # breaks: aiming at us and missing still counts.
++    "near-miss apiVersion": "apiVersion: opensrm.nthlayer.io/v3\nkind: ServiceManifest\n",
++    "near-miss kind": "apiVersion: srm/v9\nkind: ServiceManifestX\n",
++    # Unreadable or empty: a syntax error or a truncated write inside a specs
++    # directory is a deployment error either way.
++    "yaml syntax error": "a: [1,\n",
++    "zero bytes": "",
++    "comments only": "# nothing here\n",
++}
++
++_FOREIGN = {
++    "kustomization": "apiVersion: kustomize.config.k8s.io/v1beta1\nkind: Kustomization\nresources: []\n",
++    "k8s deployment": "apiVersion: apps/v1\nkind: Deployment\nmetadata: {name: d}\n",
++    "prometheus rules": "groups:\n  - name: g\n    rules: []\n",
++    # OpenSLO writes spec.service as a STRING; a ServiceManifest writes it as a
++    # mapping. That polysemy is the discriminator.
++    "openslo": "apiVersion: openslo/v1\nkind: SLO\nspec:\n  service: my-svc\n  objectives: []\n",
++    "headerless openslo": "spec:\n  service: my-svc\n  objectives: []\n",
++    "top-level list": "- a\n- b\n",
++    "top-level scalar": "just-a-string\n",
++}
++
++
++@pytest.mark.parametrize("label", sorted(_AIMING))
++def test_files_aiming_to_be_manifests_are_not_foreign(tmp_path, label):
++    """Returns None — the caller should COUNT these as broken manifests."""
++    path = _write(tmp_path, "x.yaml", _AIMING[label])
++
++    assert foreign_yaml_reason(path) is None, (
++        f"{label!r} was treated as foreign YAML; it should count as a "
++        f"manifest that failed to load"
++    )
++
++
++@pytest.mark.parametrize("label", sorted(_FOREIGN))
++def test_files_that_are_plainly_something_else_are_foreign(tmp_path, label):
++    """Returns a reason — the caller should DROP these without counting."""
++    path = _write(tmp_path, "x.yaml", _FOREIGN[label])
++
++    reason = foreign_yaml_reason(path)
++
++    assert reason is not None, f"{label!r} should have been recognised as foreign"
++    assert reason.strip(), "the reason must be non-empty — it is what gets logged"
++
++
++def test_a_file_that_vanished_is_not_foreign(tmp_path):
++    """A second read failing where load_manifest's first read succeeded means
++    the file moved underneath us. That is not evidence it was foreign, so it
++    counts."""
++    assert foreign_yaml_reason(tmp_path / "never-existed.yaml") is None
++
++
++def test_non_utf8_bytes_are_not_foreign(tmp_path):
++    """Undecodable bytes are too malformed to inspect. A specs directory
++    holding one is a deployment error either way, so it counts rather than
++    being dismissed."""
++    path = tmp_path / "x.yaml"
++    path.write_bytes(b"\xff\xfe\x00binary\n")
++
++    assert foreign_yaml_reason(path) is None
++
++
++# =============================================================================
++# iter_manifest_files — both suffixes, deterministically
++# =============================================================================
++
++
++def test_iter_manifest_files_sees_both_yaml_and_yml(tmp_path):
++    """``.yml`` invisibility is the same silent-subset failure as an
++    uncounted parse error, reached by file extension: the manifest is
++    dropped and nothing anywhere says so."""
++    for name in ("a.yaml", "b.yml", "c.yaml"):
++        _write(tmp_path, name, "spec: {}\n")
++
++    found = {p.name for p in iter_manifest_files(tmp_path)}
++
++    assert found == {"a.yaml", "b.yml", "c.yaml"}
++
++
++def test_iter_manifest_files_ignores_other_suffixes(tmp_path):
++    for name in ("a.yaml", "notes.md", "script.py", "data.json", "noext"):
++        _write(tmp_path, name, "x\n")
++
++    assert [p.name for p in iter_manifest_files(tmp_path)] == ["a.yaml"]
++
++
++def test_iter_manifest_files_is_sorted(tmp_path):
++    """Callers dedupe on a first-wins basis, so filesystem ordering would
++    make which manifest wins non-deterministic across machines."""
++    for name in ("z.yaml", "a.yml", "m.yaml"):
++        _write(tmp_path, name, "spec: {}\n")
++
++    names = [p.name for p in iter_manifest_files(tmp_path)]
++
++    assert names == sorted(names)
++
++
++def test_iter_manifest_files_on_a_missing_directory_is_empty(tmp_path):
++    """Callers check is_dir() for their own error messages; this returning
++    empty rather than raising keeps that their decision."""
++    assert iter_manifest_files(tmp_path / "nope") == []
++
++
++def test_iter_manifest_files_skips_directories(tmp_path):
++    """A DIRECTORY named ``foo.yaml`` is not a manifest file — every caller
++    would otherwise count it as a manifest that failed to load."""
++    (tmp_path / "subdir.yaml").mkdir()
++    (tmp_path / "real.yaml").write_text("spec: {}\n")
++
++    assert [p.name for p in iter_manifest_files(tmp_path)] == ["real.yaml"]
++
++
++# =============================================================================
++# The body-recovery step must fire for REAL manifest shapes
++# =============================================================================
++#
++# opensrm-oh27's fifth and final gate iteration added body recovery: a bad
++# merge or a mis-indent can strip the header while leaving the body intact,
++# and that is the common corruption. It was landed as "the last extension"
++# on the grounds that the remaining leak was unclosable in principle.
++#
++# It was inert. `spec.slos` was tested with isinstance(..., list), but v1
++# writes it as a MAPPING (parser/v1.py does slos_data.items()), and v2 does
++# not use `spec.slos` at all — its keys are `spec.slo` and
++# `spec.judgment_slo`. So the branch never fired for any real manifest, in
++# either format, and a header-stripped manifest was dropped as foreign with
++# parse_failures == 0: the exact silent subset this bead family exists to
++# remove, inside the guard meant to prevent it.
++#
++# Found by opensrm-3470's edge-cases pass. Not caught earlier because the
++# promotion was verified against the ORIGINAL, which had the same defect —
++# faithful copying proves faithfulness, not correctness.
++
++
++@pytest.mark.parametrize(
++    ("label", "body"),
++    [
++        # v1: spec.slos is a mapping of name -> config
++        ("v1 slos mapping", "spec:\n  type: api\n  slos:\n    availability:\n      target: 99.9\n"),
++        # v2: a list of OpenSLO documents
++        ("v2 slo list", "spec:\n  slo:\n    - apiVersion: openslo/v1\n      kind: SLO\n"),
++        # v2: judgment SLOs
++        ("v2 judgment_slo", "spec:\n  judgment_slo:\n    - metadata: {name: j}\n"),
++        # already covered, kept so a regression in either direction shows here
++        ("v2 service mapping", "spec:\n  service:\n    name: s\n    type: api\n"),
++        ("v2 outcomes", "spec:\n  outcomes:\n    decision_value: {}\n"),
++    ],
++)
++def test_headerless_manifest_bodies_are_recovered(tmp_path, label, body):
++    """A header-stripped manifest must COUNT, not be dropped as foreign."""
++    path = tmp_path / "x.yaml"
++    path.write_text(body)
++
++    assert foreign_yaml_reason(path) is None, (
++        f"{label}: a headerless manifest body was classified as foreign YAML, "
++        f"so it would be dropped with parse_failures == 0"
++    )
++
++
++def test_openslo_still_excluded_after_widening_the_body_check(tmp_path):
++    """Widening body recovery must not start swallowing OpenSLO documents.
++
++    OpenSLO writes spec.service as a STRING and has spec.objectives; it has
++    no spec.slos/slo/judgment_slo. If widening broke this, every OpenSLO file
++    in a specs directory would start counting as a broken manifest.
++    """
++    path = tmp_path / "x.yaml"
++    path.write_text("spec:\n  service: my-svc\n  objectives:\n    - target: 0.99\n")
++
++    assert foreign_yaml_reason(path) is not None
++
++
++@pytest.mark.parametrize("name", ["a.YAML", "b.Yml", "c.YmL"])
++def test_iter_manifest_files_is_case_insensitive_on_suffix(tmp_path, name):
++    """`.YAML` was excluded — never loaded, never counted, never logged.
++
++    The same silent-subset-by-extension failure MANIFEST_SUFFIXES exists to
++    prevent, one case-fold away."""
++    (tmp_path / name).write_text("spec: {}\n")
++
++    assert [p.name for p in iter_manifest_files(tmp_path)] == [name]
++
++
++def test_a_dangling_symlink_is_still_listed(tmp_path):
++    """is_file() follows symlinks, so a broken one vanished from the listing.
++
++    Before the is_file() guard it reached load_manifest and raised, so it was
++    counted. Silently dropping a stale overlay symlink is a regression the
++    guard introduced; excluding directories was the point, not excluding
++    everything that is not a readable file.
++    """
++    (tmp_path / "broken.yaml").symlink_to(tmp_path / "does-not-exist.yaml")
++
++    assert [p.name for p in iter_manifest_files(tmp_path)] == ["broken.yaml"]
+diff --git a/uv.lock b/uv.lock
+index 54b5c48..6d001c6 100644
+--- a/uv.lock
++++ b/uv.lock
+@@ -872,7 +872,7 @@ wheels = [
+ 
+ [[package]]
+ name = "nthlayer-common"
+-version = "1.7.0"
++version = "2.1.0"
+ source = { editable = "." }
+ dependencies = [
+     { name = "anthropic" },

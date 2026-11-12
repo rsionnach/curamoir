@@ -1,0 +1,222 @@
+diff --git a/docs/metrics-contract.md b/docs/metrics-contract.md
+index dc67112..84e3839 100644
+--- a/docs/metrics-contract.md
++++ b/docs/metrics-contract.md
+@@ -18,13 +18,23 @@ These metrics are already OTel-aligned in generate templates.
+ 
+ | Recording Rule | PromQL Expression | Purpose |
+ |---------------|-------------------|---------|
+-| `slo:requests_total:30d` | `sum(increase(http_requests_total{service="X"}[30d]))` | Availability denominator |
+-| `slo:requests_success:30d` | `sum(increase(http_requests_total{service="X",status!~"5.."}[30d]))` | Availability numerator |
+-| `slo:availability:ratio` | success / total | Availability SLO ratio |
+-| `slo:error_budget_remaining:ratio` | `1 - ((1 - availability) / (1 - objective))` | Remaining error budget (signed; see note) |
+-| `slo:latency_requests_total:30d` | `sum(increase(http_request_duration_seconds_count{...}[30d]))` | Latency denominator |
+-| `slo:latency_requests_fast:30d` | `sum(increase(http_request_duration_seconds_bucket{...,le="0.5"}[30d]))` | Latency numerator (requests under threshold) |
+-| `slo:latency:ratio` | fast / total | Latency SLO ratio |
++`{w}` is the SLO's own window (`30d` when it declares none). Every `slo:*`
++rule carries `service` and `slo`; the ratio rules also carry `objective`.
++
++| Recording Rule | PromQL Expression | Purpose |
++|---------------|-------------------|---------|
++| `slo:requests_total:{w}` | `sum(increase(http_requests_total{service="X"}[{w}]))` | Availability denominator |
++| `slo:requests_success:{w}` | `sum(increase(http_requests_total{service="X",status!~"5.."}[{w}]))` | Availability numerator |
++| `slo:availability:ratio` | success / total | Availability SLO ratio (good) |
++| `slo:latency_requests_total:{w}` | `sum(increase(http_request_duration_seconds_count{...}[{w}]))` | Latency denominator |
++| `slo:latency_requests_fast:{w}` | `sum(increase(http_request_duration_seconds_bucket{...,le="<bound>"}[{w}]))` | Latency numerator: requests under the SLO's `threshold_ms` (see the budget note for SLOs that declare none) |
++| `slo:latency:ratio` | fast / total | Latency SLO ratio (good) |
++| `slo:error_requests_total:{w}`, `slo:error_requests_failed:{w}` | `sum(increase(http_requests_total{...}[{w}]))`, the same over `status=~"5.."` | Error-rate denominator and numerator |
++| `slo:error_rate:ratio` | failed / total | Error-rate SLO ratio (**bad**: the budget uses `1 - ratio`) |
++| `slo:sli_good:rate`, `slo:sli_total:rate` | the SLO's own good and total queries, as written | Only for an availability, latency or error_rate SLO that declares them (OpenSLO `ratioMetric`, or a legacy `indicators[]` `success_ratio`; a bad query becomes `total - bad`) |
++| `slo:sli:ratio` | `sum_over_time(good[{w}]) / sum_over_time(total[{w}])` | That SLO's ratio (good); its budget comes from this, not from the canned ratio (ruling Z3) |
++| `slo:error_budget_remaining:ratio` | `1 - ((1 - good_ratio) / (1 - objective/100))` | Remaining error budget, one per availability, latency and error_rate SLO (signed; see note) |
++| `slo:throughput:rate5m`, `slo:throughput:compliance` | request rate; rate against the SLO's minimum | Throughput: written, but no budget (ruling D5) |
+ | `slo:http_request_duration_seconds:p50` | `histogram_quantile(0.5, rate(...[5m]))` | P50 latency |
+ | `slo:http_request_duration_seconds:p95` | `histogram_quantile(0.95, rate(...[5m]))` | P95 latency |
+ | `slo:http_request_duration_seconds:p99` | `histogram_quantile(0.99, rate(...[5m]))` | P99 latency |
+@@ -36,10 +46,40 @@ These metrics are already OTel-aligned in generate templates.
+ **Error budget.** `slo:error_budget_remaining:ratio` is signed: 1.0 is a full
+ budget, 0 spent, negative overspent. Labels: `service`, `slo` (the SLO name),
+ `objective`. Its name and labels are owned by nthlayer-common's
+-`ERROR_BUDGET_REMAINING` (`manifest/slo_series.py`); generate writes it, and
+-workers' measure, correlate and drift read it (opensrm-h0at).
+-`test/test_error_budget_seam.py` checks generate and measure agree (correlate
+-and drift build their selectors from the same constant).
++`ERROR_BUDGET_REMAINING` (`manifest/slo_series.py`; opensrm-h0at).
++
++Since opensrm-zo0o (ruling Z1: every classical SLO is good/total against its
++objective, as OpenSLO defines it), nthlayer-generate 4.1.0 writes one budget
++per **availability, latency and error_rate** SLO, from that SLO's good ratio
++(table above). Throughput, freshness, lag and custom SLOs get none (ruling D5;
++time-slice budgets are opensrm-vcxm).
++
++generate deliberately writes **no** budget when it cannot trust one, because a
++reader treats a missing series as no data and a wrong one as an answer:
++
++- the objective is not a success percentage in `[50, 100)` (srm/v1 keeps a
++  latency bound or an error_rate maximum in `target`, opensrm-t13c);
++- a latency SLO declares no `threshold_ms` and has no queries of its own
++  (v2 reads the bound from the objective, opensrm-8jpp; the legacy
++  `indicators[].threshold_ms` is not read, opensrm-s7b1).
++
++Readers (nthlayer-workers 4.2.0):
++
++- **measure** evaluates every availability, latency and error_rate SLO from
++  its budget, `{service, slo}`, breaching below zero. A missing series is a
++  warning and a `NO DATA` line in `evaluate-once`. Throughput, freshness, lag
++  and custom SLOs are reported `NOT EVALUABLE` (no_data_source) and never
++  queried.
++- **correlate** takes the service's worst budget with `bottomk(1, ...)`, so
++  its `error_budget_exhausted` event names the `slo`.
++- **drift** analyses only SLOs Prometheus holds a budget for, found with
++  `group by (slo)` over the service's budgets.
++
++`test/test_error_budget_seam.py` checks, against the published packages, that
++for every real manifest generate writes exactly the budgets measure reads. It
++pins one witness per kind, and lists each budget measure asks for that
++generate's guard skips, with its bead (correlate and drift build their
++selectors from the same constant).
+ 
+ ### Alert Inputs
+ 
+@@ -51,7 +91,7 @@ and drift build their selectors from the same constant).
+ 
+ ### KNOWN GAP: No recording rules exist in nthlayer-generate for judgment SLOs yet.
+ 
+-The ai-gate spec (`examples/opensrm/ai-gate.reliability.yaml`) declares judgment SLOs (reversal_rate, high_confidence_failure, calibration, feedback_latency) but nthlayer-generate does not yet produce recording rules for them.
++The ai-gate spec (`examples/opensrm/ai-gate.reliability.yaml`) declares judgment SLOs (reversal_rate, high_confidence_failure) but nthlayer-generate does not yet produce recording rules for them. Calibration and feedback latency are judgment thresholds now, not SLOs (see "Judgment threshold metrics").
+ 
+ **Interim path for nthlayer-measure:** Query raw metrics directly until generate templates are extended.
+ 
+@@ -79,7 +119,7 @@ sum(increase(gen_ai_overrides_hcf_total{service="fraud-detect"}[7d]))
+ /
+ sum(increase(gen_ai_decisions_total{service="fraud-detect",confidence_bucket="high"}[7d]))
+ 
+-# Error budget remaining (availability)
++# Error budget remaining (any availability, latency or error_rate SLO)
+ slo:error_budget_remaining:ratio{service="fraud-detect",slo="availability"}
+ ```
+ 
+diff --git a/test/test_error_budget_seam.py b/test/test_error_budget_seam.py
+index 58223f8..db2454c 100644
+--- a/test/test_error_budget_seam.py
++++ b/test/test_error_budget_seam.py
+@@ -6,6 +6,14 @@ checked that the reader asks for what the writer writes. This does: for every
+ real manifest, the error-budget series generate writes and the error-budget
+ queries measure sends must be the same set, in both directions.
+ 
++Since opensrm-zo0o (rulings Z1, D5; generate 4.1.0, workers 4.2.0) both sides
++cover every request-ratio SLO, availability, latency and error_rate, so the
++seam is per SLO of each of those kinds, not availability alone. Each kind is
++pinned by a named witness that must be written and read. Where generate
++deliberately writes no budget that measure still asks for, the SLO is listed in
++EXPECTED_READ_NOT_WRITTEN with the bead whose fix would give it one; a budget
++written but not read is never expected.
++
+ The manifests are the spec's v2 examples and generate's shipped examples, not
+ fixtures written for this test. Nothing drops out unseen: a missing checkout
+ fails rather than skipping (the opensrm-oh27 lesson), every file the loader
+@@ -46,7 +54,43 @@ CORPUS_DIRS = (
+     ROOT / "nthlayer-generate" / "examples" / "opensrm",
+ )
+ # Exact, not a floor: a floor lets manifests leave the seam unseen.
+-EXPECTED_WITH_BUDGET = 24  # 2026-11-02, common 5.10.1 / generate 4.0.10 / workers 4.0.2
++EXPECTED_WITH_BUDGET = 24  # 2026-11-07, common 5.12.0 / generate 4.1.0 / workers 4.2.0
++
++# Budgets measure asks for and generate's guard deliberately does not write
++# (generate recording_rules `_budget_skip_reason`: no budget is better than a
++# wrong one, and measure reports each as NO DATA). Keyed (corpus file, SLO
++# name), valued by the bead whose fix should give it a budget. Exact, as the
++# other pins: fixing a bead turns this red, and the entry goes.
++_T13C = "opensrm-t13c: srm/v1 keeps a latency bound or an error_rate maximum in target"
++_S7B1 = "opensrm-s7b1: legacy indicators[].threshold_ms is not read"
++EXPECTED_READ_NOT_WRITTEN = {
++    ("nthlayer-generate/examples/opensrm/ai-gate.reliability.yaml", "latency"): _T13C,
++    ("nthlayer-generate/examples/opensrm/api-basic.reliability.yaml", "latency"): _T13C,
++    ("nthlayer-generate/examples/opensrm/api-critical.reliability.yaml", "latency"): _T13C,
++    ("nthlayer-generate/examples/opensrm/api-critical.reliability.yaml", "error_rate"): _T13C,
++    ("nthlayer-generate/examples/opensrm/batch.reliability.yaml", "error_rate"): _T13C,
++    ("nthlayer-generate/examples/opensrm/stream.reliability.yaml", "error_rate"): _T13C,
++    ("nthlayer-generate/examples/opensrm/worker.reliability.yaml", "error_rate"): _T13C,
++    ("nthlayer-generate/examples/services/analytics-stream.yaml", "event-latency-p99"): _S7B1,
++    ("nthlayer-generate/examples/services/checkout-service.yaml", "latency-p95"): _S7B1,
++    ("nthlayer-generate/examples/services/checkout-service.yaml", "latency-p99"): _S7B1,
++    ("nthlayer-generate/examples/services/identity-service.yaml", "latency-p95"): _S7B1,
++    ("nthlayer-generate/examples/services/identity-service.yaml", "latency-p99"): _S7B1,
++    ("nthlayer-generate/examples/services/notification-worker.yaml", "processing-latency-p95"): _S7B1,
++    ("opensrm/spec/v2/examples/migration/api-full-v2.yaml", "payment-api-latency"): (
++        "opensrm-8jpp: a v2 latency bound is read from the objective"
++    ),
++}
++
++# One budget per request-ratio kind that both sides must agree on, named so
++# the check needs neither side's kind classifier. If a kind lost every budget
++# (as latency and error_rate had none before zo0o), the set comparison alone
++# would still pass.
++KIND_WITNESSES = {
++    "availability": ("nthlayer-generate/examples/opensrm/ai-gate.reliability.yaml", "availability"),
++    "latency": ("nthlayer-generate/examples/services/admin-dashboard-api.yaml", "latency-p95"),
++    "error_rate": ("opensrm/spec/v2/examples/migration/api-full-v2.yaml", "payment-api-error-rate"),
++}
+ 
+ _TEMPLATE = "template or fragment, not a service manifest"
+ # Every corpus file the loader rejects, with why. Spec examples that should
+@@ -105,6 +149,10 @@ def _written(manifest: ReliabilityManifest) -> set[str]:
+     }
+ 
+ 
++def _selector(manifest: ReliabilityManifest, slo: str) -> str:
++    return ERROR_BUDGET_REMAINING.selector(service=manifest.name, slo=slo)
++
++
+ def _read(path: Path, spec_dir: Path) -> set[str]:
+     """Each error-budget query measure sends for the manifest."""
+     spec_dir.mkdir()
+@@ -121,6 +169,8 @@ def _read(path: Path, spec_dir: Path) -> set[str]:
+ def test_measure_reads_exactly_the_error_budget_generate_writes(tmp_path):
+     with_budget = []
+     rejected = set()
++    read_not_written: set[tuple[str, str]] = set()
++    agreed: set[tuple[str, str]] = set()
+     problems: dict[str, object] = {}
+     for i, path in enumerate(_corpus()):
+         rel = str(path.relative_to(ROOT))
+@@ -134,11 +184,20 @@ def test_measure_reads_exactly_the_error_budget_generate_writes(tmp_path):
+         except Exception as exc:  # name the file; a bare traceback does not
+             problems[rel] = f"raised {exc!r}"
+             continue
+-        if written != read:
+-            problems[rel] = {
+-                "written_not_read": sorted(written - read),
+-                "read_not_written": sorted(read - written),
++        if written - read:
++            problems[rel] = {"written_not_read": sorted(written - read)}
++        expected_missing = {
++            _selector(manifest, slo) for (f, slo) in EXPECTED_READ_NOT_WRITTEN if f == rel
++        }
++        if read - written != expected_missing:
++            problems[f"{rel} read_not_written"] = {
++                "unexpected": sorted(read - written - expected_missing),
++                "now_written_or_not_read": sorted(expected_missing - (read - written)),
+             }
++        read_not_written |= {(rel, slo) for (f, slo) in EXPECTED_READ_NOT_WRITTEN
++                             if f == rel and _selector(manifest, slo) in read - written}
++        agreed |= {(rel, slo) for (f, slo) in KIND_WITNESSES.values()
++                   if f == rel and _selector(manifest, slo) in written & read}
+         if written:
+             with_budget.append(rel)
+ 
+@@ -148,6 +207,14 @@ def test_measure_reads_exactly_the_error_budget_generate_writes(tmp_path):
+             "newly_rejected": sorted(rejected - set(EXPECTED_REJECTED)),
+             "now_loads": sorted(set(EXPECTED_REJECTED) - rejected),
+         }
++    # A pinned file that left the corpus or stopped loading must not pass.
++    if read_not_written != set(EXPECTED_READ_NOT_WRITTEN):
++        problems["EXPECTED_READ_NOT_WRITTEN entries not seen"] = sorted(
++            set(EXPECTED_READ_NOT_WRITTEN) - read_not_written
++        )
++    missing_kinds = sorted(k for k, w in KIND_WITNESSES.items() if w not in agreed)
++    if missing_kinds:
++        problems["request-ratio kinds whose witness budget is not written and read"] = missing_kinds
+     if len(with_budget) != EXPECTED_WITH_BUDGET:
+         problems[f"EXPECTED_WITH_BUDGET is {EXPECTED_WITH_BUDGET}, got {len(with_budget)}"] = (
+             with_budget

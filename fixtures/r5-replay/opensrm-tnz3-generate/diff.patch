@@ -1,0 +1,158 @@
+diff --git a/pyproject.toml b/pyproject.toml
+index c7cc9bb..5c620de 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -9,6 +9,16 @@ description = "NthLayer - The Missing Layer of Reliability"
+ readme = "README.md"
+ requires-python = ">=3.11"
+ dependencies = [
++    # WHY 4.0.0 (opensrm-tnz3, opensrm-l33e): nthlayer-common 4.0.0 moved
++    # judgment error magnitudes out of SLOs into JudgmentThreshold. For
++    # `nthlayer migrate-manifest` (the one place this package calls common's
++    # manifest parsers) the output now carries spec.judgment_threshold for
++    # srm/v1 calibration / feedback_latency, and srm/v1 segments / stability /
++    # audit_backlog are rejected. generate's own parser is deliberately left
++    # alone: see the JUDGMENT_SLO_TYPES comment in
++    # src/nthlayer_generate/specs/manifest.py. See
++    # nthlayer-common/docs/upgrading-4.0.md.
++    #
+     # WHY 3.0.0 (opensrm-ir5m): nthlayer-common 3.0.0 converts SLO targets at
+     # the INBOUND manifest boundary (opensrm-ocvu), and this package owns the
+     # OUTBOUND half — slos/pipeline.py divides SLODefinition.target by 100.0 —
+@@ -32,7 +42,7 @@ dependencies = [
+     # is_valid_service_type from nthlayer_common.manifest.models, which landed
+     # in 2.0.0 (opensrm-ih0v). The >=0.1.5 floor before it claimed a
+     # compatibility that no longer existed.
+-    "nthlayer-common>=3.0.0,<4.0.0",
++    "nthlayer-common>=4.0.0,<5.0.0",
+     "grafana-foundation-sdk>=0.0.11",
+     "pydantic>=2.7.0,<3.0.0",
+     "pydantic-settings>=2.2.1,<3.0.0",
+diff --git a/src/nthlayer_generate/specs/manifest.py b/src/nthlayer_generate/specs/manifest.py
+index a9a336a..9bb4fb2 100644
+--- a/src/nthlayer_generate/specs/manifest.py
++++ b/src/nthlayer_generate/specs/manifest.py
+@@ -114,7 +114,14 @@ SERVICE_TYPE_ALIASES = _COMMON_SERVICE_TYPE_ALIASES
+ # predicate is what decides the rule, and the two sets alone do not reveal
+ # that the x- extension branch exists.
+ 
+-# Judgment SLO types for ai-gate services
++# Judgment SLO types for ai-gate services, in generate's OWN srm/v1 model.
++#
++# This is NOT nthlayer-common's vocabulary. In generate's srm/v1 parse,
++# calibration and feedback_latency are SLOs; in nthlayer-common 4.0 they are
++# JudgmentThresholds (V2_JUDGMENT_THRESHOLD_TYPES); nthlayer_common.manifest's
++# JUDGMENT_SLO_TYPES was removed in 4.0.0 (opensrm-l33e). Left as-is because generate's
++# manifest stack is not migrated to common's yet; consolidating the two
++# vocabularies is opensrm-wo62. Do not "fix" this set to match common here.
+ JUDGMENT_SLO_TYPES = {
+     "reversal_rate",  # Human override tracking
+     "high_confidence_failure",  # High-confidence decision failures
+diff --git a/tests/release-smoke/test_resolved_dependencies.py b/tests/release-smoke/test_resolved_dependencies.py
+index 4ab4361..eb4c2fa 100644
+--- a/tests/release-smoke/test_resolved_dependencies.py
++++ b/tests/release-smoke/test_resolved_dependencies.py
+@@ -55,7 +55,7 @@ FRONT_DOOR = "nthlayer"
+ # fails if a sibling appears in the metadata without an entry here — so adding a
+ # dependency forces someone to state its expected major rather than quietly
+ # leaving it unguarded.
+-EXPECTED_MAJORS = {"nthlayer-common": 3}
++EXPECTED_MAJORS = {"nthlayer-common": 4}
+ 
+ 
+ def _sibling_requirements() -> dict[str, Requirement]:
+diff --git a/tests/test_cli_migrate_manifest.py b/tests/test_cli_migrate_manifest.py
+index f2359c4..d55caca 100644
+--- a/tests/test_cli_migrate_manifest.py
++++ b/tests/test_cli_migrate_manifest.py
+@@ -159,3 +159,68 @@ class TestDemoSpecsViaCLI:
+         v2_data = yaml.safe_load(out.read_text())
+         manifest = parse_opensrm_v2(v2_data)
+         assert manifest.name == src.stem
++
++
++AI_GATE_EXAMPLE = (
++    Path(__file__).resolve().parents[1] / "examples" / "opensrm" / "ai-gate.reliability.yaml"
++)
++
++
++class TestAiGateJudgmentThresholds:
++    """srm/v1 judgment magnitudes migrate to spec.judgment_threshold (opensrm-tnz3).
++
++    Expected values are read from the example file, never hardcoded. The shapes
++    asserted follow nthlayer-common 4.0 (docs/upgrading-4.0.md): calibration's
++    target is `maximum_expected_calibration_error`; feedback_latency's is
++    `maximum_p50` as a "<n>s" Duration string.
++    """
++
++    def test_example_calibration_and_feedback_latency_become_thresholds(self, tmp_path):
++        """Relies on `nthlayer_common.manifest.v1_compat.convert_v1_to_v2`."""
++        from nthlayer_generate.cli.migrate_manifest import migrate_manifest_command
++
++        src = yaml.safe_load(AI_GATE_EXAMPLE.read_text())["spec"]["slos"]
++        cal_target = src["calibration"]["target"]
++        lat_target = src["feedback_latency"]["target"]
++
++        out = tmp_path / "ai-gate.v2.yaml"
++        rc = migrate_manifest_command(str(AI_GATE_EXAMPLE), output_path=str(out))
++        assert rc == 0
++        spec = yaml.safe_load(out.read_text())["spec"]
++
++        thresholds = {t["type"]: t for t in spec["judgment_threshold"]}
++        assert thresholds["calibration"]["bounds"] == {
++            "maximum_expected_calibration_error": cal_target
++        }
++        # srm/v1 had no bins key and defaulted to 10; v2 calibration requires bins.
++        assert thresholds["calibration"]["measurement"] == {
++            "bins": 10,
++            "window": src["calibration"]["window"],
++        }
++        assert thresholds["feedback_latency"]["bounds"] == {
++            "maximum_p50": f"{int(lat_target)}s"
++        }
++        slo_types = {s["spec"]["judgment_type"] for s in spec["judgment_slo"]}
++        # Non-vacuous: the other judgment SLOs are still there.
++        assert {"reversal_rate", "high_confidence_failure"} <= slo_types
++        assert not slo_types & {"calibration", "feedback_latency"}
++
++    @pytest.mark.parametrize("section", ["segments", "stability", "audit_backlog"])
++    def test_removed_srm_v1_threshold_is_rejected_cleanly(self, tmp_path, section):
++        """Cleanly = returns exit code 1 (the command handles the error, so no
++        exception/traceback escapes this direct call) and writes no output file.
++
++        The 0.05 / 30d payload is a placeholder: the section type alone triggers
++        the rejection in nthlayer-common 4.0.0.
++        """
++        from nthlayer_generate.cli.migrate_manifest import migrate_manifest_command
++
++        payload = yaml.safe_load(AI_GATE_EXAMPLE.read_text())
++        payload["spec"]["slos"][section] = {"target": 0.05, "window": "30d"}
++        in_file = tmp_path / "ai-gate.yaml"
++        in_file.write_text(yaml.safe_dump(payload))
++        out = tmp_path / "ai-gate.v2.yaml"
++
++        rc = migrate_manifest_command(str(in_file), output_path=str(out))
++        assert rc == 1
++        assert not out.exists()
+diff --git a/uv.lock b/uv.lock
+index a068d79..d652ec5 100644
+--- a/uv.lock
++++ b/uv.lock
+@@ -1374,7 +1374,7 @@ wheels = [
+ 
+ [[package]]
+ name = "nthlayer-common"
+-version = "3.0.0"
++version = "4.0.0"
+ source = { editable = "../nthlayer-common" }
+ dependencies = [
+     { name = "anthropic" },
+@@ -1418,7 +1418,7 @@ provides-extras = ["dev"]
+ 
+ [[package]]
+ name = "nthlayer-generate"
+-version = "2.0.3"
++version = "2.0.4"
+ source = { editable = "." }
+ dependencies = [
+     { name = "cachetools" },

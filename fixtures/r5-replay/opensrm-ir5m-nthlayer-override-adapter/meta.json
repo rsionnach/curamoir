@@ -1,0 +1,153 @@
+{
+ "schema_version": 1,
+ "entry": "opensrm-ir5m-nthlayer-override-adapter",
+ "bead": "opensrm-ir5m",
+ "record": "ir5m",
+ "archive": "r5-state-ir5m-completed.json",
+ "record_repos": [
+  "nthlayer-generate",
+  "nthlayer-core",
+  "nthlayer-workers",
+  "nthlayer-bench",
+  "nthlayer-override-adapter"
+ ],
+ "repo": "nthlayer-override-adapter",
+ "part": null,
+ "base": "67c9dc6ccf658036ed6c9fb0b243261f1e4bde77",
+ "head": "8f501e4460f70e612d0560749f2c8f5f747c5627",
+ "record_head": null,
+ "synthetic_base": "805c1fbd9ea56e0431a1964becd7813f2ed8dd64",
+ "synthetic_head": "a2333942f8e4127d818573ec9526a263ae0773a9",
+ "base_tree": "a13dc251648f0ed7ed7ffdfe03aee60b8748b02f",
+ "tree_sha": "0f74c17b9dc0a290391cb0cff10f2b160fb7b189",
+ "unavailable": null,
+ "bundle": {
+  "repo": "nthlayer-override-adapter",
+  "sha256": "13722bec1d79862af791c5ba6d7069e95f514bbb7682f6363a532a3a66e5dc0e"
+ },
+ "sequential_steps": null,
+ "record_sequential_steps": 22,
+ "bead_sequential_steps": 22,
+ "fidelity": "counts_only",
+ "blocking_findings": null,
+ "escape": false,
+ "brief_source": "bead",
+ "roster": {
+  "record_version": 2,
+  "passes": [
+   "correctness",
+   "clarity",
+   "edge-cases",
+   "provenance"
+  ]
+ },
+ "lens_order": [
+  "correctness",
+  "clarity",
+  "edge-cases",
+  "provenance",
+  "excellence"
+ ],
+ "counts": {
+  "correctness": [
+   {
+    "critical": 0,
+    "important": 1,
+    "minor": 2
+   },
+   {
+    "critical": 0,
+    "important": 0,
+    "minor": 0
+   }
+  ],
+  "clarity": [
+   {
+    "critical": 0,
+    "important": 2,
+    "minor": 4
+   },
+   {
+    "critical": 0,
+    "important": 1,
+    "minor": 2
+   },
+   {
+    "critical": 0,
+    "important": 0,
+    "minor": 1
+   }
+  ],
+  "edge-cases": [
+   {
+    "critical": 1,
+    "important": 0,
+    "minor": 2
+   },
+   {
+    "critical": 0,
+    "important": 2,
+    "minor": 1
+   },
+   {
+    "critical": 0,
+    "important": 0,
+    "minor": 2
+   }
+  ],
+  "provenance": [
+   {
+    "critical": 0,
+    "important": 1,
+    "minor": 2
+   },
+   {
+    "critical": 0,
+    "important": 2,
+    "minor": 2
+   },
+   {
+    "critical": 0,
+    "important": 2,
+    "minor": 1
+   }
+  ]
+ },
+ "baseline": {
+  "correctness": {
+   "reviews": 2,
+   "fix_rounds": 1,
+   "findings_first_review": 3,
+   "unattributed": 0,
+   "steps": 3
+  },
+  "clarity": {
+   "reviews": 4,
+   "fix_rounds": 2,
+   "findings_first_review": 6,
+   "unattributed": 0,
+   "steps": 6
+  },
+  "edge-cases": {
+   "reviews": 3,
+   "fix_rounds": 3,
+   "findings_first_review": 3,
+   "unattributed": 0,
+   "steps": 6
+  },
+  "provenance": {
+   "reviews": 3,
+   "fix_rounds": 3,
+   "findings_first_review": 5,
+   "unattributed": 2,
+   "steps": 6
+  },
+  "excellence": {
+   "reviews": 1,
+   "fix_rounds": 0,
+   "findings_first_review": 2,
+   "unattributed": 0,
+   "steps": 1
+  }
+ }
+}

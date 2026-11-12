@@ -1,0 +1,186 @@
+{
+ "schema_version": 1,
+ "entry": "opensrm-z1kq",
+ "fidelity": "recorded",
+ "lens_order": [
+  "correctness",
+  "clarity",
+  "edge-cases",
+  "provenance",
+  "excellence"
+ ],
+ "iterations": {
+  "correctness": 1,
+  "clarity": 2,
+  "edge-cases": 2,
+  "provenance": 2
+ },
+ "rounds": [
+  {
+   "lens": "correctness",
+   "iteration": 1,
+   "recorded_iteration": null,
+   "counts": {
+    "critical": 0,
+    "important": 0,
+    "minor": 1
+   },
+   "findings": null
+  },
+  {
+   "lens": "clarity",
+   "iteration": 1,
+   "recorded_iteration": null,
+   "counts": {
+    "critical": 0,
+    "important": 2,
+    "minor": 1
+   },
+   "findings": [
+    {
+     "lens": "clarity",
+     "severity": "IMPORTANT",
+     "path": ".github/dependabot.yml",
+     "start_line": null,
+     "end_line": null,
+     "claim": "In `.github/dependabot.yml` the `nthlayer-ecosystem` group still lists `update-types: patch, minor`. Under `increase-if-necessary` with no lockfile, those updates never produce a PR. Only majors do, and majors fall outside the group, so each arrives as its own PR. A reader will assume the group does work.",
+     "evidence": null,
+     "fix": null,
+     "fingerprint": "eda5f39ed28d1342",
+     "verification_level": "asserted",
+     "resolves": null,
+     "regression": false,
+     "status": null,
+     "derived_from": "reviewer_transcript",
+     "extracted_by": "model",
+     "handback_sha256": "0b6cadc6219260dc26b1cca5d5948d1e14fbae970daf6d7cd278b17c7c9290ad",
+     "fix_commit": "939363f10340d7ce7686e47c07e4c49d28a24a18",
+     "reported_path": ".github/dependabot.yml",
+     "path_in_tree": true
+    },
+    {
+     "lens": "clarity",
+     "severity": "IMPORTANT",
+     "path": "CLAUDE.md",
+     "start_line": 319,
+     "end_line": 322,
+     "claim": "CLAUDE.md's CI/Release section (around lines 319-322) is now inconsistent. It says `uv.lock` lives in `/meta-package`, but no such file exists. It also says sibling packages are \"grouped into a single weekly PR\", which is no longer true.",
+     "evidence": null,
+     "fix": null,
+     "fingerprint": "9f4202518bb35a2e",
+     "verification_level": "asserted",
+     "resolves": null,
+     "regression": false,
+     "status": null,
+     "derived_from": "reviewer_transcript",
+     "extracted_by": "model",
+     "handback_sha256": "0b6cadc6219260dc26b1cca5d5948d1e14fbae970daf6d7cd278b17c7c9290ad",
+     "fix_commit": "939363f10340d7ce7686e47c07e4c49d28a24a18",
+     "reported_path": "CLAUDE.md",
+     "path_in_tree": true
+    }
+   ]
+  },
+  {
+   "lens": "clarity",
+   "iteration": 2,
+   "recorded_iteration": 2,
+   "counts": {
+    "critical": 0,
+    "important": 0,
+    "minor": 2
+   },
+   "findings": null
+  },
+  {
+   "lens": "edge_cases",
+   "iteration": 1,
+   "recorded_iteration": null,
+   "counts": {
+    "critical": 0,
+    "important": 1,
+    "minor": 3
+   },
+   "findings": [
+    {
+     "lens": "edge_cases",
+     "severity": "IMPORTANT",
+     "path": ".github/workflows/ci.yml",
+     "start_line": 68,
+     "end_line": 71,
+     "claim": "The resolve step can't catch the failure it was added for",
+     "evidence": null,
+     "fix": null,
+     "fingerprint": "9a46431badd8505e",
+     "verification_level": "asserted",
+     "resolves": null,
+     "regression": false,
+     "status": null,
+     "derived_from": "reviewer_transcript",
+     "extracted_by": "model",
+     "handback_sha256": "d377963822a15bf4670fc12579dc287ba49bdff3f8ffe0f8ddfc6539e7d02563",
+     "fix_commit": "7af7edfe11bd39d799e3d0842ecde668368a0893",
+     "reported_path": ".github/workflows/ci.yml",
+     "path_in_tree": true
+    }
+   ]
+  },
+  {
+   "lens": "edge_cases",
+   "iteration": 2,
+   "recorded_iteration": 2,
+   "counts": {
+    "critical": 0,
+    "important": 0,
+    "minor": 5
+   },
+   "findings": null
+  },
+  {
+   "lens": "provenance",
+   "iteration": 1,
+   "recorded_iteration": null,
+   "counts": {
+    "critical": 0,
+    "important": 1,
+    "minor": 1
+   },
+   "findings": [
+    {
+     "lens": "provenance",
+     "severity": "IMPORTANT",
+     "path": null,
+     "start_line": null,
+     "end_line": null,
+     "claim": "stale ceilings are not guarded",
+     "evidence": null,
+     "fix": null,
+     "fingerprint": "fd136e751358f8fe",
+     "verification_level": "asserted",
+     "resolves": null,
+     "regression": false,
+     "status": null,
+     "derived_from": "reviewer_transcript",
+     "extracted_by": "model",
+     "handback_sha256": "df670d32d793743701a3fac04f69f61abe7308ad4800c480131c89e9b9a3b9c6",
+     "fix_commit": "1cfb8652663f738c7316c973cdc12937b0f5fad9",
+     "reported_path": null,
+     "path_in_tree": false
+    }
+   ]
+  },
+  {
+   "lens": "provenance",
+   "iteration": 2,
+   "recorded_iteration": 2,
+   "counts": {
+    "critical": 0,
+    "important": 0,
+    "minor": 1
+   },
+   "findings": null
+  }
+ ],
+ "cross_repo_findings": [],
+ "escaped": []
+}

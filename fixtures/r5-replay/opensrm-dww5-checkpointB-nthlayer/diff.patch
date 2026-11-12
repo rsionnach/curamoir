@@ -1,0 +1,399 @@
+diff --git a/CLAUDE.md b/CLAUDE.md
+index b7c70f4..685397f 100644
+--- a/CLAUDE.md
++++ b/CLAUDE.md
+@@ -51,7 +51,7 @@ Each active component has its own `CLAUDE.md`.
+ - `nthlayer-generate/` — pure deterministic compiler: specs →
+   artifacts (Python, stateless, no runtime).
+ - `nthlayer-core/` — Tier 1 reliability-critical HTTP API server:
+-  verdict store, case management. CLI: `nthlayer serve`.
++  verdict store, case management. CLI: `nthlayer-core serve`.
+ - `nthlayer-workers/` — Tier 2 consolidated runtime process (Apache
+   2.0): five internal modules — observe, measure, correlate, respond,
+   learn. Communicates with core via HTTP API only.
+@@ -126,21 +126,32 @@ examples, generator-specific scripts.
+     in the ecosystem, deliberately: a checker that imported the packages
+     it checks would fail exactly when they are broken. The workspace
+     root's `.claude/bin/eco-doctor.sh` is a shim that execs this.
+-    Public surface, all 16 module-level functions:
++    Public surface, all 18 module-level functions:
+     - entry point — `main`
+     - discovery / reporting — `discover_repos`, `check_repo`,
+-      `check_currency`, `duplicate_name_findings`
++      `check_currency`, `duplicate_name_findings`,
++      `duplicate_script_findings`
+     - repository identity — `repo_identity`, `recorded_common_dir`,
+       `unidentified`, `is_main_checkout`
+     - manifest and lock reading — `path_sources`, `locked_versions`,
+-      `version_at`, `canonical`, `git`
++      `version_at`, `working_project`, `canonical`, `git`
+     - range arithmetic — `parse_bounds`, `release_tuple`
+ 
+     The four identity functions arrived with [opensrm-bnal], which made
+     REPOSITORY identity rather than directory identity the key a
+     duplicate-name finding groups by, so a repo and its worktrees
+     collapse to one entry while genuinely distinct repos claiming one
+-    name still report.
++    name still report. `DUPLICATE-SCRIPT` [opensrm-dww5] applies the same
++    identity rule to `[project.scripts]` names: two members declaring one
++    console script means a co-install's binary depends on install order.
++
++    Finding classes (the `/r5-supervise` pre-flight classifies by prefix;
++    the authoritative list is `eco_doctor.py`'s module docstring):
++    - range, aborts a gate — `STALE`, `LOCK<FLOOR`, `SIBLING>CEILING`,
++      `NO-CEILING`, `DUPLICATE-NAME`, `DUPLICATE-SCRIPT`,
++      `SIBLING-MISSING`, `PARSE-ERROR`
++    - currency, logged only (`--fetch`) — `BEHIND`, `FETCH-FAILED`,
++      `NO-UPSTREAM`
+ - `demo/` — runnable cascading-failure scenario, `demo.sh`
+   orchestrator, example OpenSRM specifications.
+ - `.github/workflows/`:
+diff --git a/demo/demo.sh b/demo/demo.sh
+index 13425c1..fe1d3c2 100755
+--- a/demo/demo.sh
++++ b/demo/demo.sh
+@@ -386,7 +386,7 @@ cmd_start() {
+     header "Starting nthlayer-core (HTTP API on $CORE_PORT)"
+     NTHLAYER_STORE_PATH="$STATE_DB" \
+     NTHLAYER_MANIFESTS_DIR="$SPECS_DIR" \
+-    $RUN_CORE nthlayer serve --host 127.0.0.1 --port "$CORE_PORT" \
++    $RUN_CORE nthlayer-core serve --host 127.0.0.1 --port "$CORE_PORT" \
+         >> "$OUTPUT_DIR/core.log" 2>&1 &
+     echo $! > "$CORE_PID_FILE"
+     success "core PID $(cat "$CORE_PID_FILE")"
+diff --git a/docs/integration-testing.md b/docs/integration-testing.md
+index a9e31fb..2eb2da5 100644
+--- a/docs/integration-testing.md
++++ b/docs/integration-testing.md
+@@ -167,7 +167,7 @@ sign-off, commit c1307a4).
+ 2. Poll Prometheus `/-/ready` (60s).
+ 3. Start `fake-service.py --name fraud-detect --type ai-gate` (15s
+    health check).
+-4. Start `nthlayer serve` with `NTHLAYER_STORE_PATH` +
++4. Start `nthlayer-core serve` with `NTHLAYER_STORE_PATH` +
+    `NTHLAYER_MANIFESTS_DIR`; poll `/health` (30s); sanity-check
+    `GET /manifests` returns ≥1 manifest.
+ 5. Start `nthlayer-workers serve` with `NTHLAYER_LLM_STUB=canned`
+diff --git a/meta-package/README.md b/meta-package/README.md
+index f025f64..be48f2d 100644
+--- a/meta-package/README.md
++++ b/meta-package/README.md
+@@ -32,10 +32,12 @@ The meta-package is a friendly entry point for **evaluators, demos, and local de
+ 
+ Sub-packages provide their own console scripts:
+ 
+-- `nthlayer serve` — start the Tier 1 HTTP API server (from `nthlayer-core`)
++- `nthlayer` / `nthlayer-generate` — compile manifests (from `nthlayer-generate`; the two names are aliases)
++- `nthlayer-core serve` — start the Tier 1 HTTP API server (from `nthlayer-core` >= 4.0.0; earlier releases named this script `nthlayer`)
+ - `nthlayer-workers serve` — start the worker runtime (from `nthlayer-workers`)
++- `nthlayer-learn` — verdict-learning CLI (from `nthlayer-workers`)
+ - `nthlayer-bench` — launch the operator TUI (from `nthlayer-bench`)
+-- `nthlayer-generate plan|apply|validate ...` — compile manifests (from `nthlayer-generate`)
++- `nthlayer-override-adapter` — override-event sidecar (from `nthlayer-override-adapter`; not a dependency of this meta-package, install it separately)
+ 
+ The meta-package itself contributes no Python modules and no console scripts.
+ 
+diff --git a/meta-package/pyproject.toml b/meta-package/pyproject.toml
+index 97bcf43..e824f6d 100644
+--- a/meta-package/pyproject.toml
++++ b/meta-package/pyproject.toml
+@@ -45,8 +45,9 @@ Repository = "https://github.com/rsionnach/nthlayer"
+ Changelog = "https://github.com/rsionnach/nthlayer/releases"
+ 
+ # No [project.scripts] — the meta-package is dependency-only.
+-# CLI binaries come from the sub-packages: nthlayer (core), nthlayer-workers,
+-# nthlayer-bench, nthlayer-generate.
++# CLI binaries come from the sub-packages: nthlayer and nthlayer-generate
++# (generate), nthlayer-core (core >= 4.0.0), nthlayer-workers and
++# nthlayer-learn (workers), nthlayer-bench.
+ 
+ [tool.setuptools]
+ # No Python source — meta-package is metadata-only.
+diff --git a/scripts/eco_doctor.py b/scripts/eco_doctor.py
+index 2a9c616..bcdd710 100644
+--- a/scripts/eco_doctor.py
++++ b/scripts/eco_doctor.py
+@@ -21,6 +21,15 @@ workers back to a release whose measure adapter yielded zero SLOs for every v2
+ manifest. Nothing compared the declared range, the committed lock, and the
+ sibling actually on disk.
+ 
++FINDING CLASSES — the /r5-supervise pre-flight classifies output by PREFIX
++
++    range      STALE  LOCK<FLOOR  SIBLING>CEILING  NO-CEILING  DUPLICATE-NAME
++               DUPLICATE-SCRIPT  SIBLING-MISSING  PARSE-ERROR      -> abort
++    currency   BEHIND  FETCH-FAILED  NO-UPSTREAM (--fetch only)    -> log, continue
++
++A new prefix must be added to this list AND to the pre-flight's table in
++``.claude/skills/r5-supervise/SKILL.md``; an unlisted prefix is unclassified.
++
+ WHICH SOURCE EACH FACT COMES FROM, AND WHY IT DIFFERS
+ 
+     sibling version      working tree   what ``uv sync`` would install right now
+@@ -464,6 +473,33 @@ def repo_identity(repo: Path) -> str:
+     return unidentified(repo)
+ 
+ 
++def working_project(repo: Path) -> dict:
++    """``[project]`` table from *repo*'s WORKING TREE pyproject; ``{}`` if unreadable.
++
++    Shared by the two duplicate scans so both survive the same bad inputs.
++    errors="replace" and UnicodeDecodeError both, for the reason git() gives:
++    text=True / read_text() decode as UTF-8, and an undecodable byte raises a
++    ValueError that neither OSError nor TOMLDecodeError catches. Unguarded, one
++    latin-1 byte in one pyproject killed the ENTIRE scan with a traceback — and
++    since the /r5-supervise pre-flight classifies findings by line PREFIX, a
++    traceback emits no prefix at all, so the gate read zero blocking findings
++    and proceeded having scanned nothing. A clean record from a check that
++    never ran is the failure this tool exists to prevent.
++
++    A ``[project]`` that is not a table is treated as absent rather than
++    raising AttributeError, for the same reason.
++    """
++    pj = repo / "pyproject.toml"
++    if not pj.is_file():
++        return {}
++    try:
++        text = pj.read_text(encoding="utf-8", errors="replace")
++        project = tomllib.loads(text).get("project", {})
++    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError):
++        return {}
++    return project if isinstance(project, dict) else {}
++
++
+ def duplicate_name_findings(repos: list[Path]) -> list[str]:
+     """Report DISTINCT repositories that declare the same package name.
+ 
+@@ -497,23 +533,7 @@ def duplicate_name_findings(repos: list[Path]) -> list[str]:
+     # setdefault below was written to fix. Stable sort, so lexicographic order
+     # still holds within each class.
+     for repo in sorted(repos, key=lambda p: not is_main_checkout(p)):
+-        pj = repo / "pyproject.toml"
+-        if not pj.is_file():
+-            continue
+-        try:
+-            # errors="replace" and UnicodeDecodeError both, for the reason
+-            # git() gives: text=True / read_text() decode as UTF-8, and an
+-            # undecodable byte raises a ValueError that neither OSError nor
+-            # TOMLDecodeError catches. Unguarded, one latin-1 byte in one
+-            # pyproject killed the ENTIRE scan with a traceback — and since the
+-            # /r5-supervise pre-flight classifies findings by line PREFIX, a
+-            # traceback emits no prefix at all, so the gate read zero blocking
+-            # findings and proceeded having scanned nothing. A clean record from
+-            # a check that never ran is the failure this tool exists to prevent.
+-            text = pj.read_text(encoding="utf-8", errors="replace")
+-            name = tomllib.loads(text).get("project", {}).get("name")
+-        except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError):
+-            continue
++        name = working_project(repo).get("name")
+         # strip(): a whitespace-only name is not a name. `if not name` admitted
+         # "   ", which then rendered a finding with an empty gap where the
+         # package should be — unreadable, and indistinguishable from a
+@@ -545,6 +565,49 @@ def duplicate_name_findings(repos: list[Path]) -> list[str]:
+     return out
+ 
+ 
++def duplicate_script_findings(repos: list[Path]) -> list[str]:
++    """Report DISTINCT repositories that declare the same console script.
++
++    [opensrm-dww5] nthlayer-core and nthlayer-generate both declared the
++    ``nthlayer`` script. pip and uv write a console script as a file in the
++    environment's ``bin/``, so co-installing the two left whichever package
++    was installed LAST owning ``nthlayer`` — silently, with no resolver error,
++    and differently depending on install order. That is an install-time
++    breakage of the published packages, hence range class, not currency.
++
++    Same structure as duplicate_name_findings(), for the same reasons: read
++    from the working tree, main checkouts first, and keyed by repo_identity()
++    so a repository and its worktrees count as ONE declarer. A worktree always
++    carries its parent's ``[project.scripts]``, and CLAUDE.md mandates sibling
++    worktrees, so without that collapse this would fire on every correct
++    workflow and the pre-flight would refuse every gate.
++
++    Script names are compared after strip() but are NOT canonicalised: unlike
++    distribution names they are file names, and ``nthlayer_core`` and
++    ``nthlayer-core`` are two different files in ``bin/``.
++    """
++    seen: dict[str, dict[str, str]] = {}
++    for repo in sorted(repos, key=lambda p: not is_main_checkout(p)):
++        scripts = working_project(repo).get("scripts")
++        if not isinstance(scripts, dict):
++            continue
++        identity = repo_identity(repo)
++        for script in scripts:
++            script = script.strip()
++            if not script:
++                continue
++            seen.setdefault(script, {}).setdefault(identity, repo.name)
++
++    out = []
++    for script, by_identity in sorted(seen.items()):
++        if len(by_identity) > 1:
++            dirs = ", ".join(sorted(by_identity.values()))
++            out.append(
++                f"DUPLICATE-SCRIPT {'(workspace)':28} {script} declared by {dirs}"
++            )
++    return out
++
++
+ def locked_versions(lock_text: str) -> dict[str, str]:
+     return {
+         canonical(m.group(1)): m.group(2)
+@@ -660,6 +723,7 @@ def main(argv: list[str] | None = None) -> int:
+         return EXIT_ERROR
+ 
+     findings: list[str] = duplicate_name_findings(repos)
++    findings.extend(duplicate_script_findings(repos))
+     for repo in repos:
+         findings.extend(check_repo(repo))
+         if args.fetch:
+diff --git a/test/_three_tier_lib.sh b/test/_three_tier_lib.sh
+index 2290331..7d1c3fd 100644
+--- a/test/_three_tier_lib.sh
++++ b/test/_three_tier_lib.sh
+@@ -106,7 +106,7 @@ preflight_port_conflicts() {
+ # Brings up the full stack:
+ #   1. docker compose up -d prometheus → poll /-/ready (60s deadline).
+ #   2. fake-service.py for fraud-detect → poll /health (15s deadline).
+-#   3. nthlayer serve (core) on CORE_PORT → poll /health (30s deadline)
++#   3. nthlayer-core serve on CORE_PORT → poll /health (30s deadline)
+ #      and sanity-check /manifests returns ≥1.
+ #   4. nthlayer-workers serve with NTHLAYER_LLM_STUB=canned and 5s cycles
+ #      → wait for first heartbeat via three_tier_assertions.py (30s).
+@@ -159,7 +159,7 @@ boot_three_tier_stack() {
+     tt_log "Start nthlayer-core on ${core_port}"
+     NTHLAYER_STORE_PATH="${state_db}" \
+     NTHLAYER_MANIFESTS_DIR="${specs_dir}" \
+-    ${run_core} nthlayer serve --host 127.0.0.1 --port "${core_port}" \
++    ${run_core} nthlayer-core serve --host 127.0.0.1 --port "${core_port}" \
+         >"${work_dir}/core.log" 2>&1 &
+     CORE_PID=$!
+     deadline=$(( $(date +%s) + 30 ))
+diff --git a/test/test_eco_doctor.sh b/test/test_eco_doctor.sh
+index c1105ee..926c547 100755
+--- a/test/test_eco_doctor.sh
++++ b/test/test_eco_doctor.sh
+@@ -69,6 +69,14 @@
+ #   30.    absolute and relative recorded gitdirs (git >= 2.48 writes relative)
+ #          name one parent, so two worktrees of it do not split.
+ #
++# Tests 33-35 are DUPLICATE-SCRIPT [opensrm-dww5] — two members declaring one
++# [project.scripts] name, so which binary a co-install gets depends on install
++# order (nthlayer-core and nthlayer-generate both shipped `nthlayer`):
++#   33.    two distinct members declaring one script are reported, naming both.
++#   34.    distinct script names are not a finding.
++#   35.    a worktree of the declaring repo is not a second declarer — the same
++#          identity collapsing test 17 asserts for DUPLICATE-NAME.
++#
+ # Absence assertions are paired with assert_scanned(), because "no finding was
+ # reported" is vacuous if a fixture bug left a checkout undiscovered.
+ #
+@@ -131,6 +139,27 @@ make_consumer() {
+     git -C "$dir" -c user.email=t@t -c user.name=t commit -qm init
+ }
+ 
++# make_scripted <dir> <name> <script>...
++#
++# A member declaring [project.scripts], one `<script> = "pkg.cli:main"` entry per
++# argument. The shape is the one PEP 621 specifies and every member uses — a
++# table of script name to entry-point string — not one derived from what the
++# detector parses.
++make_scripted() {
++    local dir="$1" name="$2"; shift 2
++    mkdir -p "$dir"
++    {
++        printf '[project]\nname = "%s"\nversion = "1.0.0"\n\n[project.scripts]\n' "$name"
++        local s
++        for s in "$@"; do
++            printf '%s = "%s.cli:main"\n' "$s" "${name//-/_}"
++        done
++    } > "$dir/pyproject.toml"
++    git -C "$dir" init -q
++    git -C "$dir" add -A
++    git -C "$dir" -c user.email=t@t -c user.name=t commit -qm init
++}
++
+ # make_worktree <existing-repo-dir> <new-worktree-dir>
+ #
+ # A REAL `git worktree add`, not a second `git init`. That distinction is the
+@@ -1374,6 +1403,81 @@ else
+     fail "canonicalisation untested, the two spellings did not collide (exit $rc): $out"
+ fi
+ 
++# --- Test 33: two members declaring one console script ----------------------
++
++echo
++echo "=== Test 33: two members declaring one console script are reported ==="
++# opensrm-dww5. nthlayer-core and nthlayer-generate both declared `nthlayer`;
++# pip installs whichever comes last over the other, silently, so a co-install's
++# `nthlayer` depended on install order. Two members carry it here plus a
++# bystander with its own script, so the finding must name exactly the two.
++SCR="$WORK/dup-script"
++mkdir -p "$SCR"
++make_scripted "$SCR/nthlayer-core" nthlayer-core nthlayer
++make_scripted "$SCR/nthlayer-generate" nthlayer-generate nthlayer-generate nthlayer
++make_scripted "$SCR/nthlayer-bench" nthlayer-bench nthlayer-bench
++
++rc=0
++out="$(cd "$SCR" && run_doctor)" || rc=$?
++line="$(grep "^DUPLICATE-SCRIPT" <<<"$out" || true)"
++if [[ "$line" == "DUPLICATE-SCRIPT (workspace)                  nthlayer declared by nthlayer-core, nthlayer-generate" ]]; then
++    pass "duplicate script reported once, naming both declarers"
++else
++    fail "expected one DUPLICATE-SCRIPT line naming core and generate, got: $out"
++fi
++if (( rc == FINDINGS_RC )); then
++    pass "duplicate script exits $FINDINGS_RC"
++else
++    fail "exited $rc, expected $FINDINGS_RC — output: $out"
++fi
++if ! grep -q "DUPLICATE-NAME" <<<"$out"; then
++    pass "distinct package names are not a DUPLICATE-NAME"
++else
++    fail "reported a duplicate name for distinct packages: $out"
++fi
++
++# --- Test 34: distinct console scripts are not a finding --------------------
++
++echo
++echo "=== Test 34: distinct console scripts are not reported ==="
++# The rename dww5 made: core keeps the same table shape under its own name.
++SCRD="$WORK/distinct-script"
++mkdir -p "$SCRD"
++make_scripted "$SCRD/nthlayer-core" nthlayer-core nthlayer-core
++make_scripted "$SCRD/nthlayer-generate" nthlayer-generate nthlayer-generate nthlayer
++
++rc=0
++out="$(cd "$SCRD" && run_doctor)" || rc=$?
++if ! grep -q "DUPLICATE-SCRIPT" <<<"$out" && (( rc == 0 )); then
++    pass "distinct script names are clean (exit 0)"
++else
++    fail "distinct script names reported (exit $rc): $out"
++fi
++assert_scanned "$out" 2 "test 34"
++
++# --- Test 35: a worktree is not a second declarer ---------------------------
++
++echo
++echo "=== Test 35: a worktree of the declaring repo is not a DUPLICATE-SCRIPT ==="
++# A worktree carries its parent's pyproject, scripts included, and CLAUDE.md
++# mandates sibling worktrees — so without the identity collapsing test 17 pins
++# for DUPLICATE-NAME, this would fire on every correct workflow and block every
++# gate, since the pre-flight classifies it as range.
++SCRW="$WORK/worktree-script"
++mkdir -p "$SCRW"
++make_scripted "$SCRW/nthlayer-generate" nthlayer-generate nthlayer-generate nthlayer
++make_scripted "$SCRW/nthlayer-core" nthlayer-core nthlayer-core
++make_worktree "$SCRW/nthlayer-generate" "$SCRW/nthlayer-generate-wip"
++
++rc=0
++out="$(cd "$SCRW" && run_doctor)" || rc=$?
++if ! grep -q "DUPLICATE-SCRIPT" <<<"$out" && (( rc == 0 )); then
++    pass "a worktree of the same repo is not a second declarer (exit 0)"
++else
++    fail "worktree reported as DUPLICATE-SCRIPT (exit $rc): $out"
++fi
++assert_scanned "$out" 3 "test 35"
++
+ echo
+ echo "==============================================="
+ echo "  Passed: $pass_count"

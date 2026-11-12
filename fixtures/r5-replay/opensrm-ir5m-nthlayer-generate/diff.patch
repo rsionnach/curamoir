@@ -1,0 +1,74 @@
+diff --git a/pyproject.toml b/pyproject.toml
+index f0233b2..82c9581 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -9,21 +9,30 @@ description = "NthLayer - The Missing Layer of Reliability"
+ readme = "README.md"
+ requires-python = ">=3.11"
+ dependencies = [
+-    # >=2.0.0: generate imports resolve_service_type /
+-    # valid_service_types_phrase / is_valid_service_type from
+-    # nthlayer_common.manifest.models, which land in 2.0.0 (opensrm-ih0v).
+-    # The old >=0.1.5 floor claimed a compatibility that no longer exists —
+-    # CI resolves this from PyPI via `uv sync --no-sources`, so an
+-    # unsatisfiable floor fails at resolution with a clear message instead
+-    # of at import with a confusing ImportError.
+-    # Floor is the version this repo is built and tested against, NOT the
+-    # oldest one that happens to import, and the ceiling is mandatory — without
+-    # one, every future major is declared compatible untested, and this package
+-    # becomes the resolver's escape hatch for constraints it cannot otherwise
+-    # satisfy. Guarded by tests/test_dependency_declarations.py and
++    # WHY 3.0.0 (opensrm-ir5m): nthlayer-common 3.0.0 converts SLO targets at
++    # the INBOUND manifest boundary (opensrm-ocvu), and this package owns the
++    # OUTBOUND half — slos/pipeline.py divides SLODefinition.target by 100.0 —
++    # so a 2.x resolve would double-convert the v2 path. See
++    # nthlayer-common/docs/upgrading-3.0.md.
++    #
++    # WHY A FLOOR AND CEILING ARE DECLARED AT ALL — standing policy, applies to
++    # whatever the current bound happens to be. CI resolves this from PyPI via
++    # `uv sync --no-sources`, so an unsatisfiable floor fails at resolution with
++    # a clear message instead of at import with a confusing ImportError. The
++    # floor is the version this repo is built and tested against, NOT the oldest
++    # one that happens to import. The ceiling is mandatory — without one, every
++    # future major is declared compatible untested, and this package becomes the
++    # resolver's escape hatch for constraints it cannot otherwise satisfy.
++    # Guarded by tests/test_dependency_declarations.py and
+     # tests/release-smoke/test_resolved_dependencies.py; see CLAUDE.md rule 10
+     # [opensrm-z7gn].
+-    "nthlayer-common>=2.1.2,<3.0.0",
++    #
++    # EARLIER FLOORS, inherited and still satisfied. 2.0.0 was required because
++    # generate imports resolve_service_type / valid_service_types_phrase /
++    # is_valid_service_type from nthlayer_common.manifest.models, which landed
++    # in 2.0.0 (opensrm-ih0v). The >=0.1.5 floor before it claimed a
++    # compatibility that no longer existed.
++    "nthlayer-common>=3.0.0,<4.0.0",
+     "grafana-foundation-sdk>=0.0.11",
+     "pydantic>=2.7.0,<3.0.0",
+     "pydantic-settings>=2.2.1,<3.0.0",
+diff --git a/tests/release-smoke/test_resolved_dependencies.py b/tests/release-smoke/test_resolved_dependencies.py
+index f634e3d..4ab4361 100644
+--- a/tests/release-smoke/test_resolved_dependencies.py
++++ b/tests/release-smoke/test_resolved_dependencies.py
+@@ -55,7 +55,7 @@ FRONT_DOOR = "nthlayer"
+ # fails if a sibling appears in the metadata without an entry here — so adding a
+ # dependency forces someone to state its expected major rather than quietly
+ # leaving it unguarded.
+-EXPECTED_MAJORS = {"nthlayer-common": 2}
++EXPECTED_MAJORS = {"nthlayer-common": 3}
+ 
+ 
+ def _sibling_requirements() -> dict[str, Requirement]:
+diff --git a/uv.lock b/uv.lock
+index 241cf76..45eef1a 100644
+--- a/uv.lock
++++ b/uv.lock
+@@ -1374,7 +1374,7 @@ wheels = [
+ 
+ [[package]]
+ name = "nthlayer-common"
+-version = "2.1.2"
++version = "3.0.0"
+ source = { editable = "../nthlayer-common" }
+ dependencies = [
+     { name = "anthropic" },

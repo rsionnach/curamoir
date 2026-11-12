@@ -1,0 +1,257 @@
+diff --git a/src/nthlayer_workers/learn/_apply.py b/src/nthlayer_workers/learn/_apply.py
+index 0c1681d..0acd9a1 100644
+--- a/src/nthlayer_workers/learn/_apply.py
++++ b/src/nthlayer_workers/learn/_apply.py
+@@ -86,26 +86,44 @@ class ApplyResult:
+ 
+     @property
+     def exit_code(self) -> int:
+-        """Per jmy.6 design § 7 deterministic rule.
++        """Per jmy.6 design § 7 deterministic rule (updated by opensrm-1mja).
+ 
+         Empty plan → 0
+-        All applied and each outcome is APPLY_CLEAN or ALREADY_APPLIED → 0
+-        Any APPLY_CLEAN + any skipped → 1 (partial)
+-        Zero APPLY_CLEAN + any skipped → 2 (complete failure)
++        Every entry in ``applied`` is APPLY_CLEAN AND every entry in
++            ``skipped`` is ALREADY_APPLIED → 0
++        At least one clean op (APPLY_CLEAN applied OR ALREADY_APPLIED
++            skipped) AND at least one non-idempotent skip → 1 (partial)
++        Otherwise (zero clean ops + at least one non-idempotent skip) → 2
++
++        ALREADY_APPLIED is an idempotent no-op (lives in ``self.skipped``
++        after opensrm-1mja). It counts as a "clean op" for the partial-
++        success boundary above — otherwise a re-run with one new drift
++        would regress from exit 1 to exit 2 purely because of the
++        ALREADY_APPLIED routing change.
+         """
+         # Empty plan → 0
+         if not self.applied and not self.skipped:
+             return 0
+-        any_clean = any(
++        non_idempotent_skips = [
++            r for r in self.skipped
++            if r.outcome != OutcomeKind.ALREADY_APPLIED
++        ]
++        # All applied are APPLY_CLEAN AND all skipped are ALREADY_APPLIED → 0
++        all_applied_clean = all(
+             r.outcome == OutcomeKind.APPLY_CLEAN for r in self.applied
+         )
+-        all_clean_or_idempotent = all(
+-            r.outcome in (OutcomeKind.APPLY_CLEAN, OutcomeKind.ALREADY_APPLIED)
+-            for r in self.applied
+-        ) and not self.skipped
+-        if all_clean_or_idempotent:
++        if all_applied_clean and not non_idempotent_skips:
+             return 0
+-        if any_clean and self.skipped:
++        # Partial-success boundary: an ALREADY_APPLIED no-op IS a "clean
++        # operation" for partial-vs-complete-failure purposes. Otherwise
++        # a re-run that succeeded for most recs but hit one new drift
++        # would regress from exit 1 (partial) to exit 2 (complete fail)
++        # purely because of the ALREADY_APPLIED→skipped routing change.
++        any_clean = (
++            any(r.outcome == OutcomeKind.APPLY_CLEAN for r in self.applied)
++            or any(r.outcome == OutcomeKind.ALREADY_APPLIED for r in self.skipped)
++        )
++        if any_clean and non_idempotent_skips:
+             return 1  # partial
+         return 2  # complete failure
+ 
+@@ -173,7 +191,14 @@ def apply_recommendations(
+                 outcome=outcome,
+             ))
+         elif outcome == OutcomeKind.ALREADY_APPLIED:
+-            result.applied.append(RecOutcome(
++            # No-op skip: the manifest already matches the proposed
++            # value (scalar paths) or already contains the proposed
++            # item (list-append paths). Belongs in skipped, not
++            # applied — nothing was written to disk and downstream
++            # operators counting "applied" should not see no-ops.
++            # opensrm-1mja: discovered by the add_dependency integration
++            # test's idempotency check.
++            result.skipped.append(RecOutcome(
+                 id=rec.id,
+                 service=rec.service,
+                 field=rec.field,
+diff --git a/src/nthlayer_workers/learn/cli.py b/src/nthlayer_workers/learn/cli.py
+index 4f4bfa3..0d1ae1c 100644
+--- a/src/nthlayer_workers/learn/cli.py
++++ b/src/nthlayer_workers/learn/cli.py
+@@ -282,7 +282,12 @@ def _cmd_recommendations(args: argparse.Namespace) -> None:
+                 for o in applied
+             ],
+             "skipped": [
+-                {"id": o.id, "service": o.service,
++                # field included so consumers reading "which YAML path
++                # was the skipped rec aimed at" don't lose data when
++                # ALREADY_APPLIED routes here (opensrm-1mja). Pre-1mja
++                # an ALREADY_APPLIED rec lived in applied[] and exposed
++                # field; symmetric serialisation preserves that.
++                {"id": o.id, "service": o.service, "field": o.field,
+                  "outcome": o.outcome.value, "detail": o.detail}
+                 for o in skipped
+             ],
+diff --git a/tests/learn/test_apply.py b/tests/learn/test_apply.py
+index feae20f..6a1bb24 100644
+--- a/tests/learn/test_apply.py
++++ b/tests/learn/test_apply.py
+@@ -333,3 +333,158 @@ class TestSummaryBuilder:
+         summary = format_summary(ApplyResult())
+         assert "Applied: 0" in summary
+         assert "Exit code: 0" in summary
++
++
++class TestApplyIdempotency:
++    """opensrm-1mja: ALREADY_APPLIED outcomes route to skipped (not applied).
++
++    The apply layer must report idempotent re-runs as skips so downstream
++    consumers (CLI summary, --json output, operators reading exit-code
++    semantics) don't double-count no-op recs as applied work.
++    """
++
++    def test_add_dependency_rerun_routes_to_skipped(self, tmp_path):
++        """Apply add_dependency once → applied. Apply same plan again →
++        skipped (outcome=already_applied), manifest unchanged."""
++        from datetime import datetime, timezone
++        from nthlayer_workers.learn._apply import apply_recommendations
++        from nthlayer_workers.learn.recommendations import (
++            OutcomeKind, Recommendation, SpecRecommendation,
++        )
++
++        (tmp_path / "payments-api.yaml").write_text(
++            "metadata:\n  name: payments-api\nspec:\n  slos: {}\n"
++        )
++        plan = SpecRecommendation(
++            incident="inc-idempotency",
++            generated_by="test",
++            generated_at=datetime(2026, 5, 30, tzinfo=timezone.utc),
++            confidence=0.5,
++            recommendations=[
++                Recommendation(
++                    id="rec-idem-1",
++                    service="payments-api",
++                    type="add_dependency",
++                    rationale="test",
++                    field="spec.dependencies[+]",
++                    current_value=None,
++                    proposed_value={"name": "svc-new", "type": "api"},
++                ),
++            ],
++        )
++
++        # First apply: APPLY_CLEAN → applied
++        first = apply_recommendations(plan, tmp_path)
++        assert len(first.applied) == 1
++        assert first.applied[0].outcome == OutcomeKind.APPLY_CLEAN
++        assert len(first.skipped) == 0
++
++        # Second apply: ALREADY_APPLIED → skipped (THE FIX)
++        second = apply_recommendations(plan, tmp_path)
++        assert len(second.applied) == 0, (
++            f"already_applied must route to skipped, not applied: "
++            f"{second.applied}"
++        )
++        assert len(second.skipped) == 1
++        assert second.skipped[0].outcome == OutcomeKind.ALREADY_APPLIED
++        assert second.skipped[0].id == "rec-idem-1"
++        # Idempotent re-run is success: exit_code 0, NOT 2.
++        assert second.exit_code == 0
++
++    def test_exit_code_already_applied_plus_drift_is_partial(self):
++        """Boundary test (R5 correctness): ALREADY_APPLIED + DRIFT_DETECTED
++        in skipped (no APPLY_CLEAN in applied) → exit 1 (partial), not 2.
++
++        The idempotent no-op IS a clean operation for partial-success
++        purposes; mixing it with a real failure should preserve the
++        "partial" semantic operators rely on.
++        """
++        from nthlayer_workers.learn._apply import ApplyResult, RecOutcome
++        from nthlayer_workers.learn.recommendations import OutcomeKind
++
++        result = ApplyResult(
++            applied=[],
++            skipped=[
++                RecOutcome(id="r1", service="s", field="f1",
++                           outcome=OutcomeKind.ALREADY_APPLIED),
++                RecOutcome(id="r2", service="s", field="f2",
++                           outcome=OutcomeKind.DRIFT_DETECTED),
++            ],
++        )
++        assert result.exit_code == 1
++
++    def test_exit_code_only_drift_is_complete_failure(self):
++        """Counter-test: no clean op (neither APPLY_CLEAN nor
++        ALREADY_APPLIED) + drift → exit 2 (complete failure)."""
++        from nthlayer_workers.learn._apply import ApplyResult, RecOutcome
++        from nthlayer_workers.learn.recommendations import OutcomeKind
++
++        result = ApplyResult(
++            applied=[],
++            skipped=[
++                RecOutcome(id="r1", service="s", field="f1",
++                           outcome=OutcomeKind.DRIFT_DETECTED),
++            ],
++        )
++        assert result.exit_code == 2
++
++    def test_exit_code_three_way_mix_is_partial(self):
++        """Three-way mix (R5 edge-cases gap): APPLY_CLEAN in applied
++        + ALREADY_APPLIED in skipped + DRIFT_DETECTED in skipped →
++        exit 1 (partial). The boundary tests above cover the empty-
++        applied cases; this pins the full mixed case the routing
++        change is most likely to encounter in a re-run with new drift."""
++        from nthlayer_workers.learn._apply import ApplyResult, RecOutcome
++        from nthlayer_workers.learn.recommendations import OutcomeKind
++
++        result = ApplyResult(
++            applied=[
++                RecOutcome(id="r1", service="s", field="f1",
++                           outcome=OutcomeKind.APPLY_CLEAN),
++            ],
++            skipped=[
++                RecOutcome(id="r2", service="s", field="f2",
++                           outcome=OutcomeKind.ALREADY_APPLIED),
++                RecOutcome(id="r3", service="s", field="f3",
++                           outcome=OutcomeKind.DRIFT_DETECTED),
++            ],
++        )
++        assert result.exit_code == 1
++
++    def test_tighten_slo_rerun_routes_to_skipped(self, tmp_path):
++        """Same invariant for scalar paths (tighten_slo): re-applying a
++        rec whose proposed_value already matches the manifest is a no-op
++        skip, not a re-application."""
++        from datetime import datetime, timezone
++        from nthlayer_workers.learn._apply import apply_recommendations
++        from nthlayer_workers.learn.recommendations import (
++            OutcomeKind, Recommendation, SpecRecommendation,
++        )
++
++        # Seed manifest where the target ALREADY equals the proposed value.
++        (tmp_path / "fraud-detect.yaml").write_text(
++            "metadata:\n  name: fraud-detect\n"
++            "spec:\n  slos:\n    judgment:\n      target: 98.5\n"
++        )
++        plan = SpecRecommendation(
++            incident="inc-idempotency-scalar",
++            generated_by="test",
++            generated_at=datetime(2026, 5, 30, tzinfo=timezone.utc),
++            confidence=0.7,
++            recommendations=[
++                Recommendation(
++                    id="rec-idem-scalar",
++                    service="fraud-detect",
++                    type="tighten_slo",
++                    rationale="test",
++                    field="spec.slos.judgment.target",
++                    current_value=95.0,
++                    proposed_value=98.5,
++                ),
++            ],
++        )
++
++        result = apply_recommendations(plan, tmp_path)
++        assert len(result.applied) == 0
++        assert len(result.skipped) == 1
++        assert result.skipped[0].outcome == OutcomeKind.ALREADY_APPLIED

@@ -1,0 +1,163 @@
+diff --git a/src/nthlayer_common/manifest/__init__.py b/src/nthlayer_common/manifest/__init__.py
+index 061667b..1b9fd1b 100644
+--- a/src/nthlayer_common/manifest/__init__.py
++++ b/src/nthlayer_common/manifest/__init__.py
+@@ -15,6 +15,7 @@ from nthlayer_common.manifest.parser.loader import (
+ from nthlayer_common.manifest.openslo.parser import OpenSLOParseError
+ from nthlayer_common.manifest.parser.v1 import OpenSRMParseError
+ from nthlayer_common.manifest.parser.v2 import OpenSRMV2ParseError
++from nthlayer_common.manifest.parser._shared import extract_declared_dependencies
+ from nthlayer_common.manifest.models import (
+     JUDGMENT_SLO_TYPES,
+     STANDARD_SLO_TYPES,
+@@ -74,6 +75,7 @@ __all__ = [
+     # Loader
+     "load_manifest",
+     "is_manifest_file",
++    "extract_declared_dependencies",
+     "ManifestLoadError",
+     "LegacyFormatWarning",
+     "OpenSLOParseError",
+diff --git a/src/nthlayer_common/manifest/parser/_shared.py b/src/nthlayer_common/manifest/parser/_shared.py
+index 81adccc..308b75c 100644
+--- a/src/nthlayer_common/manifest/parser/_shared.py
++++ b/src/nthlayer_common/manifest/parser/_shared.py
+@@ -20,3 +20,56 @@ def parse_observability(obs_data: dict[str, Any] | None) -> Observability | None
+         grafana_url=obs_data.get("grafana_url"),
+         labels=obs_data.get("labels", {}),
+     )
++
++
++def extract_declared_dependencies(
++    *,
++    from_manifests: dict[str, Any] | None = None,
++    from_dicts: list[dict[str, Any]] | None = None,
++) -> dict[str, list[str]]:
++    """Build a {service_name: [dep_name, ...]} map from either Manifest
++    dataclass instances (CLI/YAML path) or raw HTTP wire dicts (worker
++    path). Exactly one of ``from_manifests`` / ``from_dicts`` must be
++    supplied.
++
++    Used by ``nthlayer-workers/learn`` retrospective generation
++    (opensrm-jmy.21 / opensrm-dpws) to populate
++    ``declared_dependencies_by_service`` on the retrospective payload.
++    Downstream consumers (``_add_dependency_recommendations``) treat
++    this map as the ground-truth view of operator-declared deps.
++
++    A manifest with ``dependencies = None`` produces an empty list for
++    that service; the absence of declared deps is itself information
++    downstream consumers want to record. Dict entries without a
++    non-empty ``name`` are silently skipped (mirrors the
++    ``_extract_service_slos`` precedent in observe/worker.py).
++
++    Duplicate-name handling is delegated to the caller. In ``from_dicts``
++    mode the dict-comp collapses duplicates last-wins; callers needing
++    deterministic first-wins semantics (e.g. nthlayer-workers learn
++    worker) should pre-filter their input list. The dataclass branch
++    cannot encounter duplicates — ``dict[str, Manifest]`` is keyed by
++    service name at the loader level.
++    """
++    if (from_manifests is None) == (from_dicts is None):
++        raise ValueError(
++            "extract_declared_dependencies: supply exactly one of "
++            "from_manifests= or from_dicts="
++        )
++
++    if from_manifests is not None:
++        return {
++            service_name: [dep.name for dep in (manifest.dependencies or [])]
++            for service_name, manifest in from_manifests.items()
++        }
++
++    # Mirror the dataclass branch's shape: dict-comp keyed by service
++    # name, value = list of dep names. The extra `if d.get("name")`
++    # filter is the only asymmetry — Manifest.Dependency.name is
++    # guaranteed by the dataclass; HTTP wire dicts can omit it.
++    return {
++        m["name"]: [
++            d["name"] for d in (m.get("dependencies") or []) if d.get("name")
++        ]
++        for m in (from_dicts or []) if m.get("name")
++    }
+diff --git a/tests/test_manifest_parser.py b/tests/test_manifest_parser.py
+index 04dc221..86645dd 100644
+--- a/tests/test_manifest_parser.py
++++ b/tests/test_manifest_parser.py
+@@ -7,9 +7,12 @@ import pytest
+ import yaml
+ 
+ from nthlayer_common.manifest import (
++    Dependency,
+     ManifestLoadError,
+     OpenSRMParseError,
+     OpenSRMV2ParseError,
++    ReliabilityManifest,
++    extract_declared_dependencies,
+     load_manifest,
+ )
+ from nthlayer_common.manifest.models import SourceFormat
+@@ -610,3 +613,64 @@ class TestLoader:
+             m = load_manifest(spec_file)
+             assert m.name
+             assert m.source_format == SourceFormat.SRM_V1
++
++
++class TestExtractDeclaredDependencies:
++    """opensrm-dpws: shared declared-dep extraction across CLI (Manifest
++    dataclasses) and worker (raw HTTP dicts) retrospective paths."""
++
++    def test_extract_declared_dependencies_from_manifests(self):
++        """Manifest-dataclass input → {service: [dep_name, ...]}."""
++        m_a = ReliabilityManifest(
++            name="svc-a", team="t", tier="standard", type="api",
++            dependencies=[
++                Dependency(name="svc-b", type="api"),
++                Dependency(name="svc-c", type="api"),
++            ],
++        )
++        m_b = ReliabilityManifest(
++            name="svc-b", team="t", tier="standard", type="api",
++            dependencies=None,
++        )
++
++        result = extract_declared_dependencies(
++            from_manifests={"svc-a": m_a, "svc-b": m_b},
++        )
++        assert result == {"svc-a": ["svc-b", "svc-c"], "svc-b": []}
++
++    def test_extract_declared_dependencies_from_dicts(self):
++        """HTTP dict input (GET /manifests wire shape) → same output shape."""
++        manifest_dicts = [
++            {"name": "svc-a", "dependencies": [
++                {"name": "svc-b", "type": "api"},
++                {"name": "svc-c", "type": "api"},
++            ]},
++            {"name": "svc-b", "dependencies": []},
++            {"name": "svc-c"},  # missing dependencies key entirely
++        ]
++        result = extract_declared_dependencies(from_dicts=manifest_dicts)
++        assert result == {
++            "svc-a": ["svc-b", "svc-c"],
++            "svc-b": [],
++            "svc-c": [],
++        }
++
++    def test_extract_declared_dependencies_requires_exactly_one_input(self):
++        """Neither / both supplied → ValueError."""
++        with pytest.raises(ValueError, match="exactly one"):
++            extract_declared_dependencies()
++        with pytest.raises(ValueError, match="exactly one"):
++            extract_declared_dependencies(
++                from_manifests={}, from_dicts=[],
++            )
++
++    def test_extract_declared_dependencies_skips_dict_with_no_name(self):
++        """Dict entries without a name key are silently skipped (mirrors
++        the _extract_service_slos precedent in observe/worker.py)."""
++        manifest_dicts = [
++            {"name": "svc-a", "dependencies": [{"name": "svc-b"}]},
++            {"dependencies": [{"name": "svc-x"}]},  # no name → skip
++            {"name": "", "dependencies": []},  # empty-string name → skip
++        ]
++        result = extract_declared_dependencies(from_dicts=manifest_dicts)
++        assert result == {"svc-a": ["svc-b"]}

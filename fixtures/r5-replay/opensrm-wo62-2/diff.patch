@@ -1,0 +1,1815 @@
+diff --git a/src/nthlayer_generate/generators/alerts.py b/src/nthlayer_generate/generators/alerts.py
+index 5890b85..6f028e1 100644
+--- a/src/nthlayer_generate/generators/alerts.py
++++ b/src/nthlayer_generate/generators/alerts.py
+@@ -12,6 +12,9 @@ import yaml
+ from nthlayer_common.manifest import ReliabilityManifest
+ 
+ from nthlayer_generate.alerts import AlertRule, AlertTemplateLoader
++from nthlayer_generate.generators.judgment_threshold_alerts import (
++    build_judgment_threshold_alerts,
++)
+ from nthlayer_generate.specs.alerting import manifest_alerting
+ from nthlayer_generate.specs.helpers import (
+     extract_dependency_technologies,
+@@ -115,12 +118,25 @@ def generate_alerts_from_manifest(
+     deps = extract_dependency_technologies(manifest)
+     alert_routing = routing or manifest.support_model
+ 
+-    return _load_and_customize_alerts(
++    threshold_alerts = [
++        alert.customize_for_service(
++            service_name=manifest.name,
++            team=manifest.team,
++            tier=manifest.tier,
++            notification_channel=notification_channel,
++            runbook_url=runbook_url,
++            routing=alert_routing,
++            grafana_url=grafana_url,
++        )
++        for alert in build_judgment_threshold_alerts(manifest)
++    ]
++    dependency_alerts = _load_and_customize_alerts(
+         service_name=manifest.name,
+         team=manifest.team,
+         tier=manifest.tier,
+         dependencies=deps,
+-        output_file=output_file,
++        # Written below, once the threshold alerts are appended.
++        output_file=output_file if not threshold_alerts else None,
+         runbook_url=runbook_url,
+         notification_channel=notification_channel,
+         routing=alert_routing,
+@@ -128,6 +144,20 @@ def generate_alerts_from_manifest(
+         quiet=quiet,
+         alerting_config=manifest_alerting(manifest),
+     )
++    if not threshold_alerts:
++        return dependency_alerts
++
++    # Appended after tier filtering, which only dependency templates pass
++    # through: a declared bound is an explicit request, whatever the tier
++    # (wo62.2 design §3 Q2).
++    all_alerts = dependency_alerts + threshold_alerts
++    if not quiet:
++        print(f"✅ Added {len(threshold_alerts)} judgment-threshold alerts")
++    if output_file:
++        write_prometheus_yaml(all_alerts, output_file, manifest.name)
++        if not quiet:
++            print(f"   Written to: {output_file}")
++    return all_alerts
+ 
+ 
+ def generate_alerts_for_service(
+diff --git a/src/nthlayer_generate/generators/docs.py b/src/nthlayer_generate/generators/docs.py
+index 2e9be1e..f0f05fa 100644
+--- a/src/nthlayer_generate/generators/docs.py
++++ b/src/nthlayer_generate/generators/docs.py
+@@ -9,11 +9,15 @@ Generates Markdown documentation from ReliabilityManifest metadata:
+ 
+ from __future__ import annotations
+ 
++import dataclasses
+ from dataclasses import dataclass, field
+ from pathlib import Path
+ 
+ import structlog
+-from nthlayer_common.manifest import ReliabilityManifest, load_manifest
++from nthlayer_common.manifest import ReliabilityManifest, ThresholdMeasurement, load_manifest
++
++from nthlayer_generate.generators.judgment_threshold_alerts import alert_names
++from nthlayer_generate.recording_rules.manifest_builder import THRESHOLD_BOUND_RECORDS
+ 
+ logger = structlog.get_logger()
+ 
+@@ -607,6 +611,8 @@ def _api_docs_ai_gate(manifest: ReliabilityManifest) -> str:
+     else:
+         lines.append("<!-- TODO: Define judgment SLOs -->")
+ 
++    lines.extend(_judgment_thresholds_section(manifest))
++
+     standard_slos = manifest.get_standard_slos()
+     if standard_slos:
+         lines.extend(["", "## Standard SLOs", ""])
+@@ -615,3 +621,54 @@ def _api_docs_ai_gate(manifest: ReliabilityManifest) -> str:
+ 
+     lines.append("")
+     return "\n".join(lines)
++
++
++def _judgment_thresholds_section(manifest: ReliabilityManifest) -> list[str]:
++    """One table row per declared threshold bound (opensrm-wo62.2, design §6).
++
++    Empty when the manifest declares no thresholds. A bound with a recording
++    rule names the rule and its two alerts; segments, stability and
++    audit_backlog have no data source and are evaluated by nthlayer-workers.
++    """
++    thresholds = manifest.get_judgment_thresholds()
++    if not thresholds:
++        return []
++    lines = [
++        "",
++        "## Judgment thresholds",
++        "",
++        "A breach is a measured value strictly above a declared bound (OPENSRM-CORE-v2 §5.5.6).",
++        "",
++        "| Type | Bound | Value | Evaluated by | Measurement |",
++        "|---|---|---|---|---|",
++    ]
++    for threshold in thresholds:
++        records = THRESHOLD_BOUND_RECORDS.get(threshold.type, {})
++        measurement = _measurement_summary(threshold.measurement)
++        for bound, value in threshold.bounds.items():
++            record = records.get(bound)
++            if record is None:
++                evaluated_by = "nthlayer-workers; no Prometheus rule"
++            else:
++                breach, not_evaluable = alert_names(threshold.type, bound)
++                evaluated_by = f"Prometheus: `{record}`; alerts `{breach}`, `{not_evaluable}`"
++            lines.append(
++                f"| {threshold.type} | {bound} | {value} | {evaluated_by} | {measurement} |"
++            )
++    return lines
++
++
++def _measurement_summary(measurement: ThresholdMeasurement) -> str:
++    """The declared measurement fields as ``name: value``, ``; ``-separated."""
++    parts = []
++    for f in dataclasses.fields(measurement):
++        value = getattr(measurement, f.name)
++        if value is None or value == []:
++            continue
++        if dataclasses.is_dataclass(value):
++            inner = dataclasses.asdict(value)  # type: ignore[arg-type]
++            value = ", ".join(f"{k}={v}" for k, v in inner.items() if v is not None)
++        elif isinstance(value, list):
++            value = ", ".join(str(v) for v in value)
++        parts.append(f"{f.name}: {value}")
++    return "; ".join(parts) or "—"
+diff --git a/src/nthlayer_generate/generators/judgment_threshold_alerts.py b/src/nthlayer_generate/generators/judgment_threshold_alerts.py
+new file mode 100644
+index 0000000..3a6e360
+--- /dev/null
++++ b/src/nthlayer_generate/generators/judgment_threshold_alerts.py
+@@ -0,0 +1,106 @@
++"""Alerts on judgment-threshold bounds (opensrm-wo62.2, OPENSRM-CORE-v2 §5.5.6).
++
++Each declared bound that has a recording rule gets two alerts:
++
++- ``AIGate<Type><Bound>Breach`` fires when the measured value is strictly
++  above the bound (E1). A Duration bound is compared in seconds (E2).
++- ``AIGate<Type><Bound>NotEvaluable`` fires when the measurement is absent
++  or NaN (E3). Without it, a missing series would look like within bounds.
++  ``histogram_quantile`` over a window with no arrivals yields NaN, not an
++  absent series, hence ``R != R``.
++
++Both alerts read only generate's own ``ai_gate:*`` recording rules, never
++raw series (design D1), so renaming a source metric does not touch alerts.
++E4 (combining outcomes) is not encoded: each bound alerts on its own, and
++nthlayer-workers combines them.
++
++segments, stability and audit_backlog have no recording rule and get no
++alerts (design D2).
++"""
++
++from __future__ import annotations
++
++from nthlayer_common.manifest import JudgmentThreshold, ReliabilityManifest
++
++from nthlayer_generate.alerts import AlertRule
++from nthlayer_generate.recording_rules.manifest_builder import (
++    THRESHOLD_BOUND_RECORDS,
++    bound_comparison_value,
++)
++
++# Design D4 (Rob, 2026-10-27): slow signals measured over about 30 days; neither pages.
++# Fixed: the manifest's alerting.for_duration overrides apply to dependency
++# templates only, never to these.
++BREACH_SEVERITY = "warning"
++BREACH_FOR = "15m"
++NOT_EVALUABLE_SEVERITY = "info"
++NOT_EVALUABLE_FOR = "1h"
++
++_TYPE_NAMES = {"calibration": "Calibration", "feedback_latency": "FeedbackLatency"}
++_BOUND_NAMES = {
++    "maximum_expected_calibration_error": "ECE",
++    "maximum_brier_score": "Brier",
++    "maximum_p50": "P50",
++    "maximum_p90": "P90",
++}
++
++
++def build_judgment_threshold_alerts(manifest: ReliabilityManifest) -> list[AlertRule]:
++    """Build the Breach and NotEvaluable alerts for every declared bound, in manifest order."""
++    alerts: list[AlertRule] = []
++    for threshold in manifest.get_judgment_thresholds():
++        records = THRESHOLD_BOUND_RECORDS.get(threshold.type, {})
++        for bound in threshold.bounds:
++            record = records.get(bound)
++            if record is not None:
++                alerts.extend(_bound_alerts(manifest.name, threshold, bound, record))
++    return alerts
++
++
++def alert_names(threshold_type: str, bound: str) -> tuple[str, str]:
++    """The (Breach, NotEvaluable) alert names for one bound that has a recording rule."""
++    name = f"AIGate{_TYPE_NAMES[threshold_type]}{_BOUND_NAMES[bound]}"
++    return f"{name}Breach", f"{name}NotEvaluable"
++
++
++def _bound_alerts(
++    service: str, threshold: JudgmentThreshold, bound: str, record: str
++) -> list[AlertRule]:
++    value = bound_comparison_value(threshold.bounds, bound)
++    series = f'{record}{{service="{service}",target="{value}"}}'
++    breach_name, not_evaluable_name = alert_names(threshold.type, bound)
++    labels = {"threshold_type": threshold.type, "bound": bound}
++    return [
++        AlertRule(
++            name=breach_name,
++            expr=f"{series} > {value}",
++            duration=BREACH_FOR,
++            severity=BREACH_SEVERITY,
++            labels={**labels, "severity": BREACH_SEVERITY},
++            annotations={
++                "summary": f"{service}: {threshold.type} {bound} breached",
++                "description": (
++                    f"{record} is {{{{ $value }}}}, above the declared {bound} of "
++                    f"{value} (OPENSRM-CORE-v2 §5.5.6 E1)."
++                ),
++            },
++            technology="judgment_threshold",
++            category="judgment",
++        ),
++        AlertRule(
++            name=not_evaluable_name,
++            expr=f"absent({series}) or ({series} != {series})",
++            duration=NOT_EVALUABLE_FOR,
++            severity=NOT_EVALUABLE_SEVERITY,
++            labels={**labels, "severity": NOT_EVALUABLE_SEVERITY},
++            annotations={
++                "summary": f"{service}: {threshold.type} {bound} not evaluable",
++                "description": (
++                    f"{record} has no value, so {bound} cannot be evaluated. "
++                    "Not evaluable is not within bounds (OPENSRM-CORE-v2 §5.5.6 E3)."
++                ),
++            },
++            technology="judgment_threshold",
++            category="judgment",
++        ),
++    ]
+diff --git a/src/nthlayer_generate/recording_rules/manifest_builder.py b/src/nthlayer_generate/recording_rules/manifest_builder.py
+index 3f6a744..6e584ff 100644
+--- a/src/nthlayer_generate/recording_rules/manifest_builder.py
++++ b/src/nthlayer_generate/recording_rules/manifest_builder.py
+@@ -14,14 +14,33 @@ The generated metrics are compatible with Backstage plugins:
+ from __future__ import annotations
+ 
+ from nthlayer_common.manifest import (
++    FEEDBACK_LATENCY_WINDOW,
+     JudgmentThreshold,
+     ReliabilityManifest,
+     SLODefinition,
+     duration_seconds,
+ )
++from nthlayer_common.manifest.thresholds import DURATION, THRESHOLD_BOUNDS
+ 
+ from nthlayer_generate.recording_rules.models import RecordingRule, RecordingRuleGroup
+ 
++# The recording rule a threshold bound's alerts compare against, per type and
++# bound (wo62.2). Only types with a data source in common's THRESHOLD_SERIES
++# appear; the alert builder reads the same table, so the two cannot drift.
++THRESHOLD_BOUND_RECORDS: dict[str, dict[str, str]] = {
++    "calibration": {
++        "maximum_expected_calibration_error": "ai_gate:calibration:ece",
++        "maximum_brier_score": "ai_gate:calibration:brier",
++    },
++    "feedback_latency": {
++        "maximum_p50": f"ai_gate:feedback_latency:p50_{FEEDBACK_LATENCY_WINDOW}",
++        "maximum_p90": f"ai_gate:feedback_latency:p90_{FEEDBACK_LATENCY_WINDOW}",
++    },
++}
++
++# OPENSRM-CORE-v2 §5.5.5: the quantile each feedback_latency bound caps.
++FEEDBACK_LATENCY_QUANTILES: dict[str, float] = {"maximum_p50": 0.5, "maximum_p90": 0.9}
++
+ 
+ class ManifestRecordingRuleBuilder:
+     """Builds Prometheus recording rules from ReliabilityManifest.
+@@ -74,6 +93,18 @@ class ManifestRecordingRuleBuilder:
+             if judgment_group.rules:
+                 groups.append(judgment_group)
+ 
++            # Window-correct threshold quantiles: 30-day range queries, so a
++            # slower interval than the 30s judgment group (wo62.2).
++            window_group = RecordingRuleGroup(
++                name=f"{self.manifest.name}_judgment_thresholds_{FEEDBACK_LATENCY_WINDOW}",
++                interval="5m",
++            )
++            for threshold in self.manifest.get_judgment_thresholds():
++                for rule in self._build_judgment_threshold_window_rules(threshold):
++                    window_group.add_rule(rule)
++            if window_group.rules:
++                groups.append(window_group)
++
+         # Service health metrics
+         health_group = self._build_health_rules()
+         if health_group.rules:
+@@ -360,37 +391,57 @@ class ManifestRecordingRuleBuilder:
+         return []
+ 
+     def _build_judgment_threshold_rules(self, threshold: JudgmentThreshold) -> list[RecordingRule]:
+-        """Build recording rules for one judgment threshold (spec §5.3).
++        """Build recording rules for one judgment threshold (spec §5.3, wo62.2 §4).
+ 
+-        - calibration: emitted when ``maximum_expected_calibration_error`` is
+-          declared; ``target`` is ``str(bound)``.
++        - calibration: the ECE rules when ``maximum_expected_calibration_error``
++          is declared, then ``:brier`` when ``maximum_brier_score`` is; each
++          rule's ``target`` is ``str(bound)``.
+         - feedback_latency: ``:p50/:p95/:p99`` always; ``:bucket`` when
+           ``maximum_p50`` is declared, with ``le`` and ``target`` both
+-          ``str(duration_seconds(maximum_p50))``.
++          ``str(duration_seconds(maximum_p50))``. The 30-day quantiles are
++          built separately, by ``_build_judgment_threshold_window_rules``.
+ 
+-        Brier-only calibration, p90-only feedback latency, and the segments,
+-        stability and audit_backlog types emit nothing yet (opensrm-wo62.2).
++        segments, stability and audit_backlog have no data source in
++        common's THRESHOLD_SERIES and emit nothing (wo62.2 ruling D2).
+         """
+         service = self.manifest.name
+         bounds = threshold.bounds
+ 
+         if threshold.type == "calibration":
++            rules: list[RecordingRule] = []
+             ece = bounds.get("maximum_expected_calibration_error")
+-            if ece is None:
+-                return []
+-            return self._build_calibration_rules(service, float(ece))
++            if ece is not None:
++                rules.extend(self._build_calibration_rules(service, float(ece)))
++            brier = bounds.get("maximum_brier_score")
++            if brier is not None:
++                rules.append(self._build_brier_rule(service, float(brier)))
++            return rules
+         if threshold.type == "feedback_latency":
+-            p50 = bounds.get("maximum_p50")
+-            target_seconds = None
+-            if p50 is not None:
+-                # A Duration string such as "1h" (validated by common); a
+-                # float here must fail loudly, not stringify to "3600.0".
+-                if not isinstance(p50, str):
+-                    raise TypeError(f"maximum_p50 is not a Duration: {p50!r}")
+-                target_seconds = duration_seconds(p50)
+-            return self._build_feedback_latency_rules(service, target_seconds)
++            return self._build_feedback_latency_rules(
++                service, _bound_seconds(bounds, "maximum_p50")
++            )
+         return []
+ 
++    def _build_judgment_threshold_window_rules(
++        self, threshold: JudgmentThreshold
++    ) -> list[RecordingRule]:
++        """Build the 30-day ``:p50_30d`` / ``:p90_30d`` rule per declared bound.
++
++        These quantiles use the window §5.5.5 defines, and they are what the
++        threshold alerts compare against. Every other type emits nothing here.
++        """
++        if threshold.type != "feedback_latency":
++            return []
++        service = self.manifest.name
++        rules = []
++        for bound, quantile in FEEDBACK_LATENCY_QUANTILES.items():
++            seconds = _bound_seconds(threshold.bounds, bound)
++            if seconds is not None:
++                rules.append(
++                    self._build_feedback_latency_window_rule(service, bound, quantile, seconds)
++                )
++        return rules
++
+     def _build_reversal_rate_rules(
+         self, service: str, target: float, window: str
+     ) -> list[RecordingRule]:
+@@ -501,7 +552,7 @@ class ManifestRecordingRuleBuilder:
+         # This creates a recording rule that aggregates pre-computed ECE
+         rules.append(
+             RecordingRule(
+-                record="ai_gate:calibration:ece",
++                record=THRESHOLD_BOUND_RECORDS["calibration"]["maximum_expected_calibration_error"],
+                 expr=(f'avg(ai_gate_calibration_error{{service="{service}"}})'),
+                 labels={
+                     "service": service,
+@@ -529,6 +580,18 @@ class ManifestRecordingRuleBuilder:
+ 
+         return rules
+ 
++    def _build_brier_rule(self, service: str, target: float) -> RecordingRule:
++        """Build the Brier score rule; the source gauge is computed externally."""
++        return RecordingRule(
++            record=THRESHOLD_BOUND_RECORDS["calibration"]["maximum_brier_score"],
++            expr=f'avg(ai_gate_calibration_brier{{service="{service}"}})',
++            labels={
++                "service": service,
++                "target": str(target),
++                "slo": "calibration",
++            },
++        )
++
+     def _build_feedback_latency_rules(
+         self, service: str, target_seconds: float | None
+     ) -> list[RecordingRule]:
+@@ -648,6 +711,29 @@ class ManifestRecordingRuleBuilder:
+ 
+         return group
+ 
++    def _build_feedback_latency_window_rule(
++        self, service: str, bound: str, quantile: float, target_seconds: float
++    ) -> RecordingRule:
++        """Build one feedback-latency quantile over the §5.5.5 30-day window.
++
++        ``increase`` over the window, summed by ``le``: the quantile of the
++        decisions whose ground truth arrived in the window. With no arrivals
++        the result is NaN, which the NotEvaluable alert treats as E3.
++        """
++        return RecordingRule(
++            record=THRESHOLD_BOUND_RECORDS["feedback_latency"][bound],
++            expr=(
++                f"histogram_quantile({quantile}, sum by (le) ("
++                f'increase(ai_gate_feedback_latency_seconds_bucket{{service="{service}"}}'
++                f"[{FEEDBACK_LATENCY_WINDOW}])))"
++            ),
++            labels={
++                "service": service,
++                "target": str(target_seconds),
++                "slo": "feedback_latency",
++            },
++        )
++
+ 
+ def build_recording_rules_from_manifest(
+     manifest: ReliabilityManifest,
+@@ -668,3 +754,29 @@ def build_recording_rules_from_manifest(
+     """
+     builder = ManifestRecordingRuleBuilder(manifest)
+     return builder.build()
++
++
++def bound_comparison_value(bounds: dict[str, float | str], name: str) -> float:
++    """A declared bound as the rules compare it: a Ratio as declared, a Duration in seconds (E2).
++
++    Its ``str()`` is the ``target`` label of the bound's recording rule.
++    """
++    (threshold_type,) = [t for t, kinds in THRESHOLD_BOUNDS.items() if name in kinds]
++    if THRESHOLD_BOUNDS[threshold_type][name] == DURATION:
++        seconds = _bound_seconds(bounds, name)
++        if seconds is None:
++            raise KeyError(name)
++        return seconds
++    return float(bounds[name])
++
++
++def _bound_seconds(bounds: dict[str, float | str], name: str) -> float | None:
++    """A declared Duration bound in seconds (E2), or None when undeclared."""
++    value = bounds.get(name)
++    if value is None:
++        return None
++    # A Duration string such as "1h" (validated by common); a float here
++    # must fail loudly, not stringify to "3600.0".
++    if not isinstance(value, str):
++        raise TypeError(f"{name} is not a Duration: {value!r}")
++    return duration_seconds(value)
+diff --git a/tests/golden/data/alerts/opensrm__ai-gate.reliability.json b/tests/golden/data/alerts/opensrm__ai-gate.reliability.json
+index 19765bd..777091c 100644
+--- a/tests/golden/data/alerts/opensrm__ai-gate.reliability.json
++++ b/tests/golden/data/alerts/opensrm__ai-gate.reliability.json
+@@ -1 +1,81 @@
+-null
++{
++  "groups": [
++    {
++      "name": "fraud-detector-judgment_threshold",
++      "rules": [
++        {
++          "alert": "AIGateCalibrationECEBreach",
++          "annotations": {
++            "description": "ai_gate:calibration:ece is {{ $value }}, above the declared maximum_expected_calibration_error of 0.05 (OPENSRM-CORE-v2 §5.5.6 E1).",
++            "summary": "fraud-detector: calibration maximum_expected_calibration_error breached"
++          },
++          "expr": "ai_gate:calibration:ece{service=\"fraud-detector\",target=\"0.05\"} > 0.05",
++          "for": "15m",
++          "labels": {
++            "bound": "maximum_expected_calibration_error",
++            "routing": "self",
++            "service": "fraud-detector",
++            "severity": "warning",
++            "team": "risk",
++            "threshold_type": "calibration",
++            "tier": "critical"
++          }
++        },
++        {
++          "alert": "AIGateCalibrationECENotEvaluable",
++          "annotations": {
++            "description": "ai_gate:calibration:ece has no value, so maximum_expected_calibration_error cannot be evaluated. Not evaluable is not within bounds (OPENSRM-CORE-v2 §5.5.6 E3).",
++            "summary": "fraud-detector: calibration maximum_expected_calibration_error not evaluable"
++          },
++          "expr": "absent(ai_gate:calibration:ece{service=\"fraud-detector\",target=\"0.05\"}) or (ai_gate:calibration:ece{service=\"fraud-detector\",target=\"0.05\"} != ai_gate:calibration:ece{service=\"fraud-detector\",target=\"0.05\"})",
++          "for": "1h",
++          "labels": {
++            "bound": "maximum_expected_calibration_error",
++            "routing": "self",
++            "service": "fraud-detector",
++            "severity": "info",
++            "team": "risk",
++            "threshold_type": "calibration",
++            "tier": "critical"
++          }
++        },
++        {
++          "alert": "AIGateFeedbackLatencyP50Breach",
++          "annotations": {
++            "description": "ai_gate:feedback_latency:p50_30d is {{ $value }}, above the declared maximum_p50 of 3600.0 (OPENSRM-CORE-v2 §5.5.6 E1).",
++            "summary": "fraud-detector: feedback_latency maximum_p50 breached"
++          },
++          "expr": "ai_gate:feedback_latency:p50_30d{service=\"fraud-detector\",target=\"3600.0\"} > 3600.0",
++          "for": "15m",
++          "labels": {
++            "bound": "maximum_p50",
++            "routing": "self",
++            "service": "fraud-detector",
++            "severity": "warning",
++            "team": "risk",
++            "threshold_type": "feedback_latency",
++            "tier": "critical"
++          }
++        },
++        {
++          "alert": "AIGateFeedbackLatencyP50NotEvaluable",
++          "annotations": {
++            "description": "ai_gate:feedback_latency:p50_30d has no value, so maximum_p50 cannot be evaluated. Not evaluable is not within bounds (OPENSRM-CORE-v2 §5.5.6 E3).",
++            "summary": "fraud-detector: feedback_latency maximum_p50 not evaluable"
++          },
++          "expr": "absent(ai_gate:feedback_latency:p50_30d{service=\"fraud-detector\",target=\"3600.0\"}) or (ai_gate:feedback_latency:p50_30d{service=\"fraud-detector\",target=\"3600.0\"} != ai_gate:feedback_latency:p50_30d{service=\"fraud-detector\",target=\"3600.0\"})",
++          "for": "1h",
++          "labels": {
++            "bound": "maximum_p50",
++            "routing": "self",
++            "service": "fraud-detector",
++            "severity": "info",
++            "team": "risk",
++            "threshold_type": "feedback_latency",
++            "tier": "critical"
++          }
++        }
++      ]
++    }
++  ]
++}
+diff --git a/tests/golden/data/alerts/v2__judgment-thresholds__all-five-types.json b/tests/golden/data/alerts/v2__judgment-thresholds__all-five-types.json
+index 19765bd..13f102c 100644
+--- a/tests/golden/data/alerts/v2__judgment-thresholds__all-five-types.json
++++ b/tests/golden/data/alerts/v2__judgment-thresholds__all-five-types.json
+@@ -1 +1,117 @@
+-null
++{
++  "groups": [
++    {
++      "name": "credit-decision-agent-judgment_threshold",
++      "rules": [
++        {
++          "alert": "AIGateCalibrationBrierBreach",
++          "annotations": {
++            "description": "ai_gate:calibration:brier is {{ $value }}, above the declared maximum_brier_score of 0.05 (OPENSRM-CORE-v2 §5.5.6 E1).",
++            "summary": "credit-decision-agent: calibration maximum_brier_score breached"
++          },
++          "expr": "ai_gate:calibration:brier{service=\"credit-decision-agent\",target=\"0.05\"} > 0.05",
++          "for": "15m",
++          "labels": {
++            "bound": "maximum_brier_score",
++            "routing": "self",
++            "service": "credit-decision-agent",
++            "severity": "warning",
++            "team": "risk",
++            "threshold_type": "calibration",
++            "tier": "critical"
++          }
++        },
++        {
++          "alert": "AIGateCalibrationBrierNotEvaluable",
++          "annotations": {
++            "description": "ai_gate:calibration:brier has no value, so maximum_brier_score cannot be evaluated. Not evaluable is not within bounds (OPENSRM-CORE-v2 §5.5.6 E3).",
++            "summary": "credit-decision-agent: calibration maximum_brier_score not evaluable"
++          },
++          "expr": "absent(ai_gate:calibration:brier{service=\"credit-decision-agent\",target=\"0.05\"}) or (ai_gate:calibration:brier{service=\"credit-decision-agent\",target=\"0.05\"} != ai_gate:calibration:brier{service=\"credit-decision-agent\",target=\"0.05\"})",
++          "for": "1h",
++          "labels": {
++            "bound": "maximum_brier_score",
++            "routing": "self",
++            "service": "credit-decision-agent",
++            "severity": "info",
++            "team": "risk",
++            "threshold_type": "calibration",
++            "tier": "critical"
++          }
++        },
++        {
++          "alert": "AIGateFeedbackLatencyP50Breach",
++          "annotations": {
++            "description": "ai_gate:feedback_latency:p50_30d is {{ $value }}, above the declared maximum_p50 of 3600.0 (OPENSRM-CORE-v2 §5.5.6 E1).",
++            "summary": "credit-decision-agent: feedback_latency maximum_p50 breached"
++          },
++          "expr": "ai_gate:feedback_latency:p50_30d{service=\"credit-decision-agent\",target=\"3600.0\"} > 3600.0",
++          "for": "15m",
++          "labels": {
++            "bound": "maximum_p50",
++            "routing": "self",
++            "service": "credit-decision-agent",
++            "severity": "warning",
++            "team": "risk",
++            "threshold_type": "feedback_latency",
++            "tier": "critical"
++          }
++        },
++        {
++          "alert": "AIGateFeedbackLatencyP50NotEvaluable",
++          "annotations": {
++            "description": "ai_gate:feedback_latency:p50_30d has no value, so maximum_p50 cannot be evaluated. Not evaluable is not within bounds (OPENSRM-CORE-v2 §5.5.6 E3).",
++            "summary": "credit-decision-agent: feedback_latency maximum_p50 not evaluable"
++          },
++          "expr": "absent(ai_gate:feedback_latency:p50_30d{service=\"credit-decision-agent\",target=\"3600.0\"}) or (ai_gate:feedback_latency:p50_30d{service=\"credit-decision-agent\",target=\"3600.0\"} != ai_gate:feedback_latency:p50_30d{service=\"credit-decision-agent\",target=\"3600.0\"})",
++          "for": "1h",
++          "labels": {
++            "bound": "maximum_p50",
++            "routing": "self",
++            "service": "credit-decision-agent",
++            "severity": "info",
++            "team": "risk",
++            "threshold_type": "feedback_latency",
++            "tier": "critical"
++          }
++        },
++        {
++          "alert": "AIGateFeedbackLatencyP90Breach",
++          "annotations": {
++            "description": "ai_gate:feedback_latency:p90_30d is {{ $value }}, above the declared maximum_p90 of 86400.0 (OPENSRM-CORE-v2 §5.5.6 E1).",
++            "summary": "credit-decision-agent: feedback_latency maximum_p90 breached"
++          },
++          "expr": "ai_gate:feedback_latency:p90_30d{service=\"credit-decision-agent\",target=\"86400.0\"} > 86400.0",
++          "for": "15m",
++          "labels": {
++            "bound": "maximum_p90",
++            "routing": "self",
++            "service": "credit-decision-agent",
++            "severity": "warning",
++            "team": "risk",
++            "threshold_type": "feedback_latency",
++            "tier": "critical"
++          }
++        },
++        {
++          "alert": "AIGateFeedbackLatencyP90NotEvaluable",
++          "annotations": {
++            "description": "ai_gate:feedback_latency:p90_30d has no value, so maximum_p90 cannot be evaluated. Not evaluable is not within bounds (OPENSRM-CORE-v2 §5.5.6 E3).",
++            "summary": "credit-decision-agent: feedback_latency maximum_p90 not evaluable"
++          },
++          "expr": "absent(ai_gate:feedback_latency:p90_30d{service=\"credit-decision-agent\",target=\"86400.0\"}) or (ai_gate:feedback_latency:p90_30d{service=\"credit-decision-agent\",target=\"86400.0\"} != ai_gate:feedback_latency:p90_30d{service=\"credit-decision-agent\",target=\"86400.0\"})",
++          "for": "1h",
++          "labels": {
++            "bound": "maximum_p90",
++            "routing": "self",
++            "service": "credit-decision-agent",
++            "severity": "info",
++            "team": "risk",
++            "threshold_type": "feedback_latency",
++            "tier": "critical"
++          }
++        }
++      ]
++    }
++  ]
++}
+diff --git a/tests/golden/data/alerts/v2__judgment-thresholds__calibration-both-bounds.json b/tests/golden/data/alerts/v2__judgment-thresholds__calibration-both-bounds.json
+index 19765bd..6083ac8 100644
+--- a/tests/golden/data/alerts/v2__judgment-thresholds__calibration-both-bounds.json
++++ b/tests/golden/data/alerts/v2__judgment-thresholds__calibration-both-bounds.json
+@@ -1 +1,81 @@
+-null
++{
++  "groups": [
++    {
++      "name": "investigation-agent-judgment_threshold",
++      "rules": [
++        {
++          "alert": "AIGateCalibrationBrierBreach",
++          "annotations": {
++            "description": "ai_gate:calibration:brier is {{ $value }}, above the declared maximum_brier_score of 0.05 (OPENSRM-CORE-v2 §5.5.6 E1).",
++            "summary": "investigation-agent: calibration maximum_brier_score breached"
++          },
++          "expr": "ai_gate:calibration:brier{service=\"investigation-agent\",target=\"0.05\"} > 0.05",
++          "for": "15m",
++          "labels": {
++            "bound": "maximum_brier_score",
++            "routing": "self",
++            "service": "investigation-agent",
++            "severity": "warning",
++            "team": "risk",
++            "threshold_type": "calibration",
++            "tier": "critical"
++          }
++        },
++        {
++          "alert": "AIGateCalibrationBrierNotEvaluable",
++          "annotations": {
++            "description": "ai_gate:calibration:brier has no value, so maximum_brier_score cannot be evaluated. Not evaluable is not within bounds (OPENSRM-CORE-v2 §5.5.6 E3).",
++            "summary": "investigation-agent: calibration maximum_brier_score not evaluable"
++          },
++          "expr": "absent(ai_gate:calibration:brier{service=\"investigation-agent\",target=\"0.05\"}) or (ai_gate:calibration:brier{service=\"investigation-agent\",target=\"0.05\"} != ai_gate:calibration:brier{service=\"investigation-agent\",target=\"0.05\"})",
++          "for": "1h",
++          "labels": {
++            "bound": "maximum_brier_score",
++            "routing": "self",
++            "service": "investigation-agent",
++            "severity": "info",
++            "team": "risk",
++            "threshold_type": "calibration",
++            "tier": "critical"
++          }
++        },
++        {
++          "alert": "AIGateCalibrationECEBreach",
++          "annotations": {
++            "description": "ai_gate:calibration:ece is {{ $value }}, above the declared maximum_expected_calibration_error of 0.03 (OPENSRM-CORE-v2 §5.5.6 E1).",
++            "summary": "investigation-agent: calibration maximum_expected_calibration_error breached"
++          },
++          "expr": "ai_gate:calibration:ece{service=\"investigation-agent\",target=\"0.03\"} > 0.03",
++          "for": "15m",
++          "labels": {
++            "bound": "maximum_expected_calibration_error",
++            "routing": "self",
++            "service": "investigation-agent",
++            "severity": "warning",
++            "team": "risk",
++            "threshold_type": "calibration",
++            "tier": "critical"
++          }
++        },
++        {
++          "alert": "AIGateCalibrationECENotEvaluable",
++          "annotations": {
++            "description": "ai_gate:calibration:ece has no value, so maximum_expected_calibration_error cannot be evaluated. Not evaluable is not within bounds (OPENSRM-CORE-v2 §5.5.6 E3).",
++            "summary": "investigation-agent: calibration maximum_expected_calibration_error not evaluable"
++          },
++          "expr": "absent(ai_gate:calibration:ece{service=\"investigation-agent\",target=\"0.03\"}) or (ai_gate:calibration:ece{service=\"investigation-agent\",target=\"0.03\"} != ai_gate:calibration:ece{service=\"investigation-agent\",target=\"0.03\"})",
++          "for": "1h",
++          "labels": {
++            "bound": "maximum_expected_calibration_error",
++            "routing": "self",
++            "service": "investigation-agent",
++            "severity": "info",
++            "team": "risk",
++            "threshold_type": "calibration",
++            "tier": "critical"
++          }
++        }
++      ]
++    }
++  ]
++}
+diff --git a/tests/golden/data/alerts/v2__judgment-thresholds__feedback-latency-p50-only.json b/tests/golden/data/alerts/v2__judgment-thresholds__feedback-latency-p50-only.json
+index 19765bd..07f286f 100644
+--- a/tests/golden/data/alerts/v2__judgment-thresholds__feedback-latency-p50-only.json
++++ b/tests/golden/data/alerts/v2__judgment-thresholds__feedback-latency-p50-only.json
+@@ -1 +1,45 @@
+-null
++{
++  "groups": [
++    {
++      "name": "intake-agent-judgment_threshold",
++      "rules": [
++        {
++          "alert": "AIGateFeedbackLatencyP50Breach",
++          "annotations": {
++            "description": "ai_gate:feedback_latency:p50_30d is {{ $value }}, above the declared maximum_p50 of 3600.0 (OPENSRM-CORE-v2 §5.5.6 E1).",
++            "summary": "intake-agent: feedback_latency maximum_p50 breached"
++          },
++          "expr": "ai_gate:feedback_latency:p50_30d{service=\"intake-agent\",target=\"3600.0\"} > 3600.0",
++          "for": "15m",
++          "labels": {
++            "bound": "maximum_p50",
++            "routing": "self",
++            "service": "intake-agent",
++            "severity": "warning",
++            "team": "risk",
++            "threshold_type": "feedback_latency",
++            "tier": "critical"
++          }
++        },
++        {
++          "alert": "AIGateFeedbackLatencyP50NotEvaluable",
++          "annotations": {
++            "description": "ai_gate:feedback_latency:p50_30d has no value, so maximum_p50 cannot be evaluated. Not evaluable is not within bounds (OPENSRM-CORE-v2 §5.5.6 E3).",
++            "summary": "intake-agent: feedback_latency maximum_p50 not evaluable"
++          },
++          "expr": "absent(ai_gate:feedback_latency:p50_30d{service=\"intake-agent\",target=\"3600.0\"}) or (ai_gate:feedback_latency:p50_30d{service=\"intake-agent\",target=\"3600.0\"} != ai_gate:feedback_latency:p50_30d{service=\"intake-agent\",target=\"3600.0\"})",
++          "for": "1h",
++          "labels": {
++            "bound": "maximum_p50",
++            "routing": "self",
++            "service": "intake-agent",
++            "severity": "info",
++            "team": "risk",
++            "threshold_type": "feedback_latency",
++            "tier": "critical"
++          }
++        }
++      ]
++    }
++  ]
++}
+diff --git a/tests/golden/data/alerts/v2__judgment-thresholds__single-bounds.json b/tests/golden/data/alerts/v2__judgment-thresholds__single-bounds.json
+index 19765bd..5cf7bf9 100644
+--- a/tests/golden/data/alerts/v2__judgment-thresholds__single-bounds.json
++++ b/tests/golden/data/alerts/v2__judgment-thresholds__single-bounds.json
+@@ -1 +1,81 @@
+-null
++{
++  "groups": [
++    {
++      "name": "triage-agent-judgment_threshold",
++      "rules": [
++        {
++          "alert": "AIGateFeedbackLatencyP90Breach",
++          "annotations": {
++            "description": "ai_gate:feedback_latency:p90_30d is {{ $value }}, above the declared maximum_p90 of 86400.0 (OPENSRM-CORE-v2 §5.5.6 E1).",
++            "summary": "triage-agent: feedback_latency maximum_p90 breached"
++          },
++          "expr": "ai_gate:feedback_latency:p90_30d{service=\"triage-agent\",target=\"86400.0\"} > 86400.0",
++          "for": "15m",
++          "labels": {
++            "bound": "maximum_p90",
++            "routing": "self",
++            "service": "triage-agent",
++            "severity": "warning",
++            "team": "risk",
++            "threshold_type": "feedback_latency",
++            "tier": "critical"
++          }
++        },
++        {
++          "alert": "AIGateFeedbackLatencyP90NotEvaluable",
++          "annotations": {
++            "description": "ai_gate:feedback_latency:p90_30d has no value, so maximum_p90 cannot be evaluated. Not evaluable is not within bounds (OPENSRM-CORE-v2 §5.5.6 E3).",
++            "summary": "triage-agent: feedback_latency maximum_p90 not evaluable"
++          },
++          "expr": "absent(ai_gate:feedback_latency:p90_30d{service=\"triage-agent\",target=\"86400.0\"}) or (ai_gate:feedback_latency:p90_30d{service=\"triage-agent\",target=\"86400.0\"} != ai_gate:feedback_latency:p90_30d{service=\"triage-agent\",target=\"86400.0\"})",
++          "for": "1h",
++          "labels": {
++            "bound": "maximum_p90",
++            "routing": "self",
++            "service": "triage-agent",
++            "severity": "info",
++            "team": "risk",
++            "threshold_type": "feedback_latency",
++            "tier": "critical"
++          }
++        },
++        {
++          "alert": "AIGateCalibrationECEBreach",
++          "annotations": {
++            "description": "ai_gate:calibration:ece is {{ $value }}, above the declared maximum_expected_calibration_error of 0.03 (OPENSRM-CORE-v2 §5.5.6 E1).",
++            "summary": "triage-agent: calibration maximum_expected_calibration_error breached"
++          },
++          "expr": "ai_gate:calibration:ece{service=\"triage-agent\",target=\"0.03\"} > 0.03",
++          "for": "15m",
++          "labels": {
++            "bound": "maximum_expected_calibration_error",
++            "routing": "self",
++            "service": "triage-agent",
++            "severity": "warning",
++            "team": "risk",
++            "threshold_type": "calibration",
++            "tier": "critical"
++          }
++        },
++        {
++          "alert": "AIGateCalibrationECENotEvaluable",
++          "annotations": {
++            "description": "ai_gate:calibration:ece has no value, so maximum_expected_calibration_error cannot be evaluated. Not evaluable is not within bounds (OPENSRM-CORE-v2 §5.5.6 E3).",
++            "summary": "triage-agent: calibration maximum_expected_calibration_error not evaluable"
++          },
++          "expr": "absent(ai_gate:calibration:ece{service=\"triage-agent\",target=\"0.03\"}) or (ai_gate:calibration:ece{service=\"triage-agent\",target=\"0.03\"} != ai_gate:calibration:ece{service=\"triage-agent\",target=\"0.03\"})",
++          "for": "1h",
++          "labels": {
++            "bound": "maximum_expected_calibration_error",
++            "routing": "self",
++            "service": "triage-agent",
++            "severity": "info",
++            "team": "risk",
++            "threshold_type": "calibration",
++            "tier": "critical"
++          }
++        }
++      ]
++    }
++  ]
++}
+diff --git a/tests/golden/data/cli_docs/opensrm__ai-gate.reliability.json b/tests/golden/data/cli_docs/opensrm__ai-gate.reliability.json
+index 4c11886..a04a60d 100644
+--- a/tests/golden/data/cli_docs/opensrm__ai-gate.reliability.json
++++ b/tests/golden/data/cli_docs/opensrm__ai-gate.reliability.json
+@@ -5,6 +5,6 @@
+     "adr/001-initial-architecture.md": "# ADR-001: Initial Architecture for fraud-detector\n\n## Status\n\nAccepted\n\n## Context\n\nfraud-detector is a **critical**-tier **ai-gate** service owned by the **risk** team.\nIt depends on: feature-store, model-registry.\n\n## Decision\n\n- **Tier:** critical — requires highest reliability guarantees\n- **SLO targets:**\n  - availability: 99.9 (30d window)\n  - latency: 100.0 (30d window)\n  - reversal_rate: 0.05 (7d window)\n  - high_confidence_failure: 0.01 (7d window)\n- **Critical dependencies:** feature-store\n\n## Consequences\n\n- Service must maintain SLO targets as defined above\n- Deployment gates enforce error budget thresholds before release\n- On-call rotation required for this tier level\n",
+     "adr/README.md": "# Architecture Decision Records — fraud-detector\n\nThis directory contains architecture decision records (ADRs) for the fraud-detector service.\n\n## Index\n\n| ID | Title | Status |\n| -- | ----- | ------ |\n| 001 | [Initial Architecture](001-initial-architecture.md) | Accepted |\n\n## Creating a New ADR\n\nCopy `template.md` and increment the ID number.\n",
+     "adr/template.md": "# ADR-NNN: Title\n\n## Status\n\nProposed\n\n## Context\n\nWhat is the issue that we're seeing that is motivating this decision or change?\n\n## Decision\n\nWhat is the change that we're proposing and/or doing?\n\n## Consequences\n\nWhat becomes easier or more difficult to do because of this change?\n",
+-    "api.md": "# AI Gate Documentation — fraud-detector\n\n## Decision Endpoints\n\n<!-- TODO: Document decision API endpoints -->\n\n### Example Decision Request\n\n```json\n{\n  \"input\": {},\n  \"context\": {}\n}\n```\n\n## Judgment SLOs\n\n- **reversal_rate:** 0.05 (7d window)\n- **high_confidence_failure:** 0.01 (7d window)\n\n## Standard SLOs\n\n- **availability:** 99.9 (30d window)\n- **latency:** 100.0 (30d window)\n"
++    "api.md": "# AI Gate Documentation — fraud-detector\n\n## Decision Endpoints\n\n<!-- TODO: Document decision API endpoints -->\n\n### Example Decision Request\n\n```json\n{\n  \"input\": {},\n  \"context\": {}\n}\n```\n\n## Judgment SLOs\n\n- **reversal_rate:** 0.05 (7d window)\n- **high_confidence_failure:** 0.01 (7d window)\n\n## Judgment thresholds\n\nA breach is a measured value strictly above a declared bound (OPENSRM-CORE-v2 §5.5.6).\n\n| Type | Bound | Value | Evaluated by | Measurement |\n|---|---|---|---|---|\n| calibration | maximum_expected_calibration_error | 0.05 | Prometheus: `ai_gate:calibration:ece`; alerts `AIGateCalibrationECEBreach`, `AIGateCalibrationECENotEvaluable` | bins: 10; window: 30d |\n| feedback_latency | maximum_p50 | 3600s | Prometheus: `ai_gate:feedback_latency:p50_30d`; alerts `AIGateFeedbackLatencyP50Breach`, `AIGateFeedbackLatencyP50NotEvaluable` | — |\n\n## Standard SLOs\n\n- **availability:** 99.9 (30d window)\n- **latency:** 100.0 (30d window)\n"
+   }
+ }
+diff --git a/tests/golden/data/cli_docs/v2__judgment-thresholds__all-five-types.json b/tests/golden/data/cli_docs/v2__judgment-thresholds__all-five-types.json
+index c4781e3..fb8620d 100644
+--- a/tests/golden/data/cli_docs/v2__judgment-thresholds__all-five-types.json
++++ b/tests/golden/data/cli_docs/v2__judgment-thresholds__all-five-types.json
+@@ -5,6 +5,6 @@
+     "adr/001-initial-architecture.md": "# ADR-001: Initial Architecture for credit-decision-agent\n\n## Status\n\nAccepted\n\n## Context\n\ncredit-decision-agent is a **critical**-tier **ai-gate** service owned by the **risk** team.\n\n## Decision\n\n- **Tier:** critical — requires highest reliability guarantees\n\n## Consequences\n\n- Service must maintain SLO targets as defined above\n- Deployment gates enforce error budget thresholds before release\n- On-call rotation required for this tier level\n",
+     "adr/README.md": "# Architecture Decision Records — credit-decision-agent\n\nThis directory contains architecture decision records (ADRs) for the credit-decision-agent service.\n\n## Index\n\n| ID | Title | Status |\n| -- | ----- | ------ |\n| 001 | [Initial Architecture](001-initial-architecture.md) | Accepted |\n\n## Creating a New ADR\n\nCopy `template.md` and increment the ID number.\n",
+     "adr/template.md": "# ADR-NNN: Title\n\n## Status\n\nProposed\n\n## Context\n\nWhat is the issue that we're seeing that is motivating this decision or change?\n\n## Decision\n\nWhat is the change that we're proposing and/or doing?\n\n## Consequences\n\nWhat becomes easier or more difficult to do because of this change?\n",
+-    "api.md": "# AI Gate Documentation — credit-decision-agent\n\n## Decision Endpoints\n\n<!-- TODO: Document decision API endpoints -->\n\n### Example Decision Request\n\n```json\n{\n  \"input\": {},\n  \"context\": {}\n}\n```\n\n## Judgment SLOs\n\n<!-- TODO: Define judgment SLOs -->\n"
++    "api.md": "# AI Gate Documentation — credit-decision-agent\n\n## Decision Endpoints\n\n<!-- TODO: Document decision API endpoints -->\n\n### Example Decision Request\n\n```json\n{\n  \"input\": {},\n  \"context\": {}\n}\n```\n\n## Judgment SLOs\n\n<!-- TODO: Define judgment SLOs -->\n\n## Judgment thresholds\n\nA breach is a measured value strictly above a declared bound (OPENSRM-CORE-v2 §5.5.6).\n\n| Type | Bound | Value | Evaluated by | Measurement |\n|---|---|---|---|---|\n| segments | maximum_variance_from_overall | 0.05 | nthlayer-workers; no Prometheus rule | window: 30d; segment_dimension: customer_tier; segment_values: enterprise, smb, consumer; metric: high_confidence_failure; confidence_threshold: 0.9 |\n| stability | maximum_drift | 0.02 | nthlayer-workers; no Prometheus rule | probe: frozen_input_set=s3://probes/credit-decision-2026q1.jsonl, frequency=daily |\n| calibration | maximum_brier_score | 0.05 | Prometheus: `ai_gate:calibration:brier`; alerts `AIGateCalibrationBrierBreach`, `AIGateCalibrationBrierNotEvaluable` | bins: 10; window: 30d |\n| audit_backlog | maximum_age | 24h | nthlayer-workers; no Prometheus rule | — |\n| feedback_latency | maximum_p50 | 1h | Prometheus: `ai_gate:feedback_latency:p50_30d`; alerts `AIGateFeedbackLatencyP50Breach`, `AIGateFeedbackLatencyP50NotEvaluable` | — |\n| feedback_latency | maximum_p90 | 24h | Prometheus: `ai_gate:feedback_latency:p90_30d`; alerts `AIGateFeedbackLatencyP90Breach`, `AIGateFeedbackLatencyP90NotEvaluable` | — |\n"
+   }
+ }
+diff --git a/tests/golden/data/cli_docs/v2__judgment-thresholds__calibration-both-bounds.json b/tests/golden/data/cli_docs/v2__judgment-thresholds__calibration-both-bounds.json
+index a6c2548..069ab93 100644
+--- a/tests/golden/data/cli_docs/v2__judgment-thresholds__calibration-both-bounds.json
++++ b/tests/golden/data/cli_docs/v2__judgment-thresholds__calibration-both-bounds.json
+@@ -5,6 +5,6 @@
+     "adr/001-initial-architecture.md": "# ADR-001: Initial Architecture for investigation-agent\n\n## Status\n\nAccepted\n\n## Context\n\ninvestigation-agent is a **critical**-tier **ai-gate** service owned by the **risk** team.\n\n## Decision\n\n- **Tier:** critical — requires highest reliability guarantees\n\n## Consequences\n\n- Service must maintain SLO targets as defined above\n- Deployment gates enforce error budget thresholds before release\n- On-call rotation required for this tier level\n",
+     "adr/README.md": "# Architecture Decision Records — investigation-agent\n\nThis directory contains architecture decision records (ADRs) for the investigation-agent service.\n\n## Index\n\n| ID | Title | Status |\n| -- | ----- | ------ |\n| 001 | [Initial Architecture](001-initial-architecture.md) | Accepted |\n\n## Creating a New ADR\n\nCopy `template.md` and increment the ID number.\n",
+     "adr/template.md": "# ADR-NNN: Title\n\n## Status\n\nProposed\n\n## Context\n\nWhat is the issue that we're seeing that is motivating this decision or change?\n\n## Decision\n\nWhat is the change that we're proposing and/or doing?\n\n## Consequences\n\nWhat becomes easier or more difficult to do because of this change?\n",
+-    "api.md": "# AI Gate Documentation — investigation-agent\n\n## Decision Endpoints\n\n<!-- TODO: Document decision API endpoints -->\n\n### Example Decision Request\n\n```json\n{\n  \"input\": {},\n  \"context\": {}\n}\n```\n\n## Judgment SLOs\n\n<!-- TODO: Define judgment SLOs -->\n"
++    "api.md": "# AI Gate Documentation — investigation-agent\n\n## Decision Endpoints\n\n<!-- TODO: Document decision API endpoints -->\n\n### Example Decision Request\n\n```json\n{\n  \"input\": {},\n  \"context\": {}\n}\n```\n\n## Judgment SLOs\n\n<!-- TODO: Define judgment SLOs -->\n\n## Judgment thresholds\n\nA breach is a measured value strictly above a declared bound (OPENSRM-CORE-v2 §5.5.6).\n\n| Type | Bound | Value | Evaluated by | Measurement |\n|---|---|---|---|---|\n| calibration | maximum_brier_score | 0.05 | Prometheus: `ai_gate:calibration:brier`; alerts `AIGateCalibrationBrierBreach`, `AIGateCalibrationBrierNotEvaluable` | bins: 10; window: 30d |\n| calibration | maximum_expected_calibration_error | 0.03 | Prometheus: `ai_gate:calibration:ece`; alerts `AIGateCalibrationECEBreach`, `AIGateCalibrationECENotEvaluable` | bins: 10; window: 30d |\n"
+   }
+ }
+diff --git a/tests/golden/data/cli_docs/v2__judgment-thresholds__feedback-latency-p50-only.json b/tests/golden/data/cli_docs/v2__judgment-thresholds__feedback-latency-p50-only.json
+index 2be6963..1cdb93f 100644
+--- a/tests/golden/data/cli_docs/v2__judgment-thresholds__feedback-latency-p50-only.json
++++ b/tests/golden/data/cli_docs/v2__judgment-thresholds__feedback-latency-p50-only.json
+@@ -5,6 +5,6 @@
+     "adr/001-initial-architecture.md": "# ADR-001: Initial Architecture for intake-agent\n\n## Status\n\nAccepted\n\n## Context\n\nintake-agent is a **critical**-tier **ai-gate** service owned by the **risk** team.\n\n## Decision\n\n- **Tier:** critical — requires highest reliability guarantees\n\n## Consequences\n\n- Service must maintain SLO targets as defined above\n- Deployment gates enforce error budget thresholds before release\n- On-call rotation required for this tier level\n",
+     "adr/README.md": "# Architecture Decision Records — intake-agent\n\nThis directory contains architecture decision records (ADRs) for the intake-agent service.\n\n## Index\n\n| ID | Title | Status |\n| -- | ----- | ------ |\n| 001 | [Initial Architecture](001-initial-architecture.md) | Accepted |\n\n## Creating a New ADR\n\nCopy `template.md` and increment the ID number.\n",
+     "adr/template.md": "# ADR-NNN: Title\n\n## Status\n\nProposed\n\n## Context\n\nWhat is the issue that we're seeing that is motivating this decision or change?\n\n## Decision\n\nWhat is the change that we're proposing and/or doing?\n\n## Consequences\n\nWhat becomes easier or more difficult to do because of this change?\n",
+-    "api.md": "# AI Gate Documentation — intake-agent\n\n## Decision Endpoints\n\n<!-- TODO: Document decision API endpoints -->\n\n### Example Decision Request\n\n```json\n{\n  \"input\": {},\n  \"context\": {}\n}\n```\n\n## Judgment SLOs\n\n<!-- TODO: Define judgment SLOs -->\n"
++    "api.md": "# AI Gate Documentation — intake-agent\n\n## Decision Endpoints\n\n<!-- TODO: Document decision API endpoints -->\n\n### Example Decision Request\n\n```json\n{\n  \"input\": {},\n  \"context\": {}\n}\n```\n\n## Judgment SLOs\n\n<!-- TODO: Define judgment SLOs -->\n\n## Judgment thresholds\n\nA breach is a measured value strictly above a declared bound (OPENSRM-CORE-v2 §5.5.6).\n\n| Type | Bound | Value | Evaluated by | Measurement |\n|---|---|---|---|---|\n| feedback_latency | maximum_p50 | 1h | Prometheus: `ai_gate:feedback_latency:p50_30d`; alerts `AIGateFeedbackLatencyP50Breach`, `AIGateFeedbackLatencyP50NotEvaluable` | — |\n"
+   }
+ }
+diff --git a/tests/golden/data/cli_docs/v2__judgment-thresholds__segments-two-dimensions.json b/tests/golden/data/cli_docs/v2__judgment-thresholds__segments-two-dimensions.json
+index 893f8ed..edf9662 100644
+--- a/tests/golden/data/cli_docs/v2__judgment-thresholds__segments-two-dimensions.json
++++ b/tests/golden/data/cli_docs/v2__judgment-thresholds__segments-two-dimensions.json
+@@ -5,6 +5,6 @@
+     "adr/001-initial-architecture.md": "# ADR-001: Initial Architecture for pricing-agent\n\n## Status\n\nAccepted\n\n## Context\n\npricing-agent is a **critical**-tier **ai-gate** service owned by the **risk** team.\n\n## Decision\n\n- **Tier:** critical — requires highest reliability guarantees\n\n## Consequences\n\n- Service must maintain SLO targets as defined above\n- Deployment gates enforce error budget thresholds before release\n- On-call rotation required for this tier level\n",
+     "adr/README.md": "# Architecture Decision Records — pricing-agent\n\nThis directory contains architecture decision records (ADRs) for the pricing-agent service.\n\n## Index\n\n| ID | Title | Status |\n| -- | ----- | ------ |\n| 001 | [Initial Architecture](001-initial-architecture.md) | Accepted |\n\n## Creating a New ADR\n\nCopy `template.md` and increment the ID number.\n",
+     "adr/template.md": "# ADR-NNN: Title\n\n## Status\n\nProposed\n\n## Context\n\nWhat is the issue that we're seeing that is motivating this decision or change?\n\n## Decision\n\nWhat is the change that we're proposing and/or doing?\n\n## Consequences\n\nWhat becomes easier or more difficult to do because of this change?\n",
+-    "api.md": "# AI Gate Documentation — pricing-agent\n\n## Decision Endpoints\n\n<!-- TODO: Document decision API endpoints -->\n\n### Example Decision Request\n\n```json\n{\n  \"input\": {},\n  \"context\": {}\n}\n```\n\n## Judgment SLOs\n\n<!-- TODO: Define judgment SLOs -->\n"
++    "api.md": "# AI Gate Documentation — pricing-agent\n\n## Decision Endpoints\n\n<!-- TODO: Document decision API endpoints -->\n\n### Example Decision Request\n\n```json\n{\n  \"input\": {},\n  \"context\": {}\n}\n```\n\n## Judgment SLOs\n\n<!-- TODO: Define judgment SLOs -->\n\n## Judgment thresholds\n\nA breach is a measured value strictly above a declared bound (OPENSRM-CORE-v2 §5.5.6).\n\n| Type | Bound | Value | Evaluated by | Measurement |\n|---|---|---|---|---|\n| segments | maximum_variance_from_overall | 0.05 | nthlayer-workers; no Prometheus rule | window: 30d; segment_dimension: customer_tier; segment_values: enterprise, smb, consumer; metric: reversal_rate; source: lineage |\n| segments | maximum_variance_from_overall | 0.08 | nthlayer-workers; no Prometheus rule | window: 7d; segment_dimension: region; segment_values: eu, us, apac; metric: outcomes; outcome_signal: source=retro-consumer, window=1h |\n"
+   }
+ }
+diff --git a/tests/golden/data/cli_docs/v2__judgment-thresholds__single-bounds.json b/tests/golden/data/cli_docs/v2__judgment-thresholds__single-bounds.json
+index dd3612f..c9dc9e4 100644
+--- a/tests/golden/data/cli_docs/v2__judgment-thresholds__single-bounds.json
++++ b/tests/golden/data/cli_docs/v2__judgment-thresholds__single-bounds.json
+@@ -5,6 +5,6 @@
+     "adr/001-initial-architecture.md": "# ADR-001: Initial Architecture for triage-agent\n\n## Status\n\nAccepted\n\n## Context\n\ntriage-agent is a **critical**-tier **ai-gate** service owned by the **risk** team.\n\n## Decision\n\n- **Tier:** critical — requires highest reliability guarantees\n\n## Consequences\n\n- Service must maintain SLO targets as defined above\n- Deployment gates enforce error budget thresholds before release\n- On-call rotation required for this tier level\n",
+     "adr/README.md": "# Architecture Decision Records — triage-agent\n\nThis directory contains architecture decision records (ADRs) for the triage-agent service.\n\n## Index\n\n| ID | Title | Status |\n| -- | ----- | ------ |\n| 001 | [Initial Architecture](001-initial-architecture.md) | Accepted |\n\n## Creating a New ADR\n\nCopy `template.md` and increment the ID number.\n",
+     "adr/template.md": "# ADR-NNN: Title\n\n## Status\n\nProposed\n\n## Context\n\nWhat is the issue that we're seeing that is motivating this decision or change?\n\n## Decision\n\nWhat is the change that we're proposing and/or doing?\n\n## Consequences\n\nWhat becomes easier or more difficult to do because of this change?\n",
+-    "api.md": "# AI Gate Documentation — triage-agent\n\n## Decision Endpoints\n\n<!-- TODO: Document decision API endpoints -->\n\n### Example Decision Request\n\n```json\n{\n  \"input\": {},\n  \"context\": {}\n}\n```\n\n## Judgment SLOs\n\n<!-- TODO: Define judgment SLOs -->\n"
++    "api.md": "# AI Gate Documentation — triage-agent\n\n## Decision Endpoints\n\n<!-- TODO: Document decision API endpoints -->\n\n### Example Decision Request\n\n```json\n{\n  \"input\": {},\n  \"context\": {}\n}\n```\n\n## Judgment SLOs\n\n<!-- TODO: Define judgment SLOs -->\n\n## Judgment thresholds\n\nA breach is a measured value strictly above a declared bound (OPENSRM-CORE-v2 §5.5.6).\n\n| Type | Bound | Value | Evaluated by | Measurement |\n|---|---|---|---|---|\n| feedback_latency | maximum_p90 | 24h | Prometheus: `ai_gate:feedback_latency:p90_30d`; alerts `AIGateFeedbackLatencyP90Breach`, `AIGateFeedbackLatencyP90NotEvaluable` | — |\n| calibration | maximum_expected_calibration_error | 0.03 | Prometheus: `ai_gate:calibration:ece`; alerts `AIGateCalibrationECEBreach`, `AIGateCalibrationECENotEvaluable` | bins: 10; window: 30d |\n"
+   }
+ }
+diff --git a/tests/golden/data/docs/opensrm__ai-gate.reliability.json b/tests/golden/data/docs/opensrm__ai-gate.reliability.json
+index 49f2f2b..1bdd64e 100644
+--- a/tests/golden/data/docs/opensrm__ai-gate.reliability.json
++++ b/tests/golden/data/docs/opensrm__ai-gate.reliability.json
+@@ -3,5 +3,5 @@
+   "adr/001-initial-architecture.md": "# ADR-001: Initial Architecture for fraud-detector\n\n## Status\n\nAccepted\n\n## Context\n\nfraud-detector is a **critical**-tier **ai-gate** service owned by the **risk** team.\nIt depends on: feature-store, model-registry.\n\n## Decision\n\n- **Tier:** critical — requires highest reliability guarantees\n- **SLO targets:**\n  - availability: 99.9 (30d window)\n  - latency: 100.0 (30d window)\n  - reversal_rate: 0.05 (7d window)\n  - high_confidence_failure: 0.01 (7d window)\n- **Critical dependencies:** feature-store\n\n## Consequences\n\n- Service must maintain SLO targets as defined above\n- Deployment gates enforce error budget thresholds before release\n- On-call rotation required for this tier level\n",
+   "adr/README.md": "# Architecture Decision Records — fraud-detector\n\nThis directory contains architecture decision records (ADRs) for the fraud-detector service.\n\n## Index\n\n| ID | Title | Status |\n| -- | ----- | ------ |\n| 001 | [Initial Architecture](001-initial-architecture.md) | Accepted |\n\n## Creating a New ADR\n\nCopy `template.md` and increment the ID number.\n",
+   "adr/template.md": "# ADR-NNN: Title\n\n## Status\n\nProposed\n\n## Context\n\nWhat is the issue that we're seeing that is motivating this decision or change?\n\n## Decision\n\nWhat is the change that we're proposing and/or doing?\n\n## Consequences\n\nWhat becomes easier or more difficult to do because of this change?\n",
+-  "api.md": "# AI Gate Documentation — fraud-detector\n\n## Decision Endpoints\n\n<!-- TODO: Document decision API endpoints -->\n\n### Example Decision Request\n\n```json\n{\n  \"input\": {},\n  \"context\": {}\n}\n```\n\n## Judgment SLOs\n\n- **reversal_rate:** 0.05 (7d window)\n- **high_confidence_failure:** 0.01 (7d window)\n\n## Standard SLOs\n\n- **availability:** 99.9 (30d window)\n- **latency:** 100.0 (30d window)\n"
++  "api.md": "# AI Gate Documentation — fraud-detector\n\n## Decision Endpoints\n\n<!-- TODO: Document decision API endpoints -->\n\n### Example Decision Request\n\n```json\n{\n  \"input\": {},\n  \"context\": {}\n}\n```\n\n## Judgment SLOs\n\n- **reversal_rate:** 0.05 (7d window)\n- **high_confidence_failure:** 0.01 (7d window)\n\n## Judgment thresholds\n\nA breach is a measured value strictly above a declared bound (OPENSRM-CORE-v2 §5.5.6).\n\n| Type | Bound | Value | Evaluated by | Measurement |\n|---|---|---|---|---|\n| calibration | maximum_expected_calibration_error | 0.05 | Prometheus: `ai_gate:calibration:ece`; alerts `AIGateCalibrationECEBreach`, `AIGateCalibrationECENotEvaluable` | bins: 10; window: 30d |\n| feedback_latency | maximum_p50 | 3600s | Prometheus: `ai_gate:feedback_latency:p50_30d`; alerts `AIGateFeedbackLatencyP50Breach`, `AIGateFeedbackLatencyP50NotEvaluable` | — |\n\n## Standard SLOs\n\n- **availability:** 99.9 (30d window)\n- **latency:** 100.0 (30d window)\n"
+ }
+diff --git a/tests/golden/data/docs/v2__judgment-thresholds__all-five-types.json b/tests/golden/data/docs/v2__judgment-thresholds__all-five-types.json
+index a73b089..0c4c445 100644
+--- a/tests/golden/data/docs/v2__judgment-thresholds__all-five-types.json
++++ b/tests/golden/data/docs/v2__judgment-thresholds__all-five-types.json
+@@ -3,5 +3,5 @@
+   "adr/001-initial-architecture.md": "# ADR-001: Initial Architecture for credit-decision-agent\n\n## Status\n\nAccepted\n\n## Context\n\ncredit-decision-agent is a **critical**-tier **ai-gate** service owned by the **risk** team.\n\n## Decision\n\n- **Tier:** critical — requires highest reliability guarantees\n\n## Consequences\n\n- Service must maintain SLO targets as defined above\n- Deployment gates enforce error budget thresholds before release\n- On-call rotation required for this tier level\n",
+   "adr/README.md": "# Architecture Decision Records — credit-decision-agent\n\nThis directory contains architecture decision records (ADRs) for the credit-decision-agent service.\n\n## Index\n\n| ID | Title | Status |\n| -- | ----- | ------ |\n| 001 | [Initial Architecture](001-initial-architecture.md) | Accepted |\n\n## Creating a New ADR\n\nCopy `template.md` and increment the ID number.\n",
+   "adr/template.md": "# ADR-NNN: Title\n\n## Status\n\nProposed\n\n## Context\n\nWhat is the issue that we're seeing that is motivating this decision or change?\n\n## Decision\n\nWhat is the change that we're proposing and/or doing?\n\n## Consequences\n\nWhat becomes easier or more difficult to do because of this change?\n",
+-  "api.md": "# AI Gate Documentation — credit-decision-agent\n\n## Decision Endpoints\n\n<!-- TODO: Document decision API endpoints -->\n\n### Example Decision Request\n\n```json\n{\n  \"input\": {},\n  \"context\": {}\n}\n```\n\n## Judgment SLOs\n\n<!-- TODO: Define judgment SLOs -->\n"
++  "api.md": "# AI Gate Documentation — credit-decision-agent\n\n## Decision Endpoints\n\n<!-- TODO: Document decision API endpoints -->\n\n### Example Decision Request\n\n```json\n{\n  \"input\": {},\n  \"context\": {}\n}\n```\n\n## Judgment SLOs\n\n<!-- TODO: Define judgment SLOs -->\n\n## Judgment thresholds\n\nA breach is a measured value strictly above a declared bound (OPENSRM-CORE-v2 §5.5.6).\n\n| Type | Bound | Value | Evaluated by | Measurement |\n|---|---|---|---|---|\n| segments | maximum_variance_from_overall | 0.05 | nthlayer-workers; no Prometheus rule | window: 30d; segment_dimension: customer_tier; segment_values: enterprise, smb, consumer; metric: high_confidence_failure; confidence_threshold: 0.9 |\n| stability | maximum_drift | 0.02 | nthlayer-workers; no Prometheus rule | probe: frozen_input_set=s3://probes/credit-decision-2026q1.jsonl, frequency=daily |\n| calibration | maximum_brier_score | 0.05 | Prometheus: `ai_gate:calibration:brier`; alerts `AIGateCalibrationBrierBreach`, `AIGateCalibrationBrierNotEvaluable` | bins: 10; window: 30d |\n| audit_backlog | maximum_age | 24h | nthlayer-workers; no Prometheus rule | — |\n| feedback_latency | maximum_p50 | 1h | Prometheus: `ai_gate:feedback_latency:p50_30d`; alerts `AIGateFeedbackLatencyP50Breach`, `AIGateFeedbackLatencyP50NotEvaluable` | — |\n| feedback_latency | maximum_p90 | 24h | Prometheus: `ai_gate:feedback_latency:p90_30d`; alerts `AIGateFeedbackLatencyP90Breach`, `AIGateFeedbackLatencyP90NotEvaluable` | — |\n"
+ }
+diff --git a/tests/golden/data/docs/v2__judgment-thresholds__calibration-both-bounds.json b/tests/golden/data/docs/v2__judgment-thresholds__calibration-both-bounds.json
+index b38e1ec..17544c9 100644
+--- a/tests/golden/data/docs/v2__judgment-thresholds__calibration-both-bounds.json
++++ b/tests/golden/data/docs/v2__judgment-thresholds__calibration-both-bounds.json
+@@ -3,5 +3,5 @@
+   "adr/001-initial-architecture.md": "# ADR-001: Initial Architecture for investigation-agent\n\n## Status\n\nAccepted\n\n## Context\n\ninvestigation-agent is a **critical**-tier **ai-gate** service owned by the **risk** team.\n\n## Decision\n\n- **Tier:** critical — requires highest reliability guarantees\n\n## Consequences\n\n- Service must maintain SLO targets as defined above\n- Deployment gates enforce error budget thresholds before release\n- On-call rotation required for this tier level\n",
+   "adr/README.md": "# Architecture Decision Records — investigation-agent\n\nThis directory contains architecture decision records (ADRs) for the investigation-agent service.\n\n## Index\n\n| ID | Title | Status |\n| -- | ----- | ------ |\n| 001 | [Initial Architecture](001-initial-architecture.md) | Accepted |\n\n## Creating a New ADR\n\nCopy `template.md` and increment the ID number.\n",
+   "adr/template.md": "# ADR-NNN: Title\n\n## Status\n\nProposed\n\n## Context\n\nWhat is the issue that we're seeing that is motivating this decision or change?\n\n## Decision\n\nWhat is the change that we're proposing and/or doing?\n\n## Consequences\n\nWhat becomes easier or more difficult to do because of this change?\n",
+-  "api.md": "# AI Gate Documentation — investigation-agent\n\n## Decision Endpoints\n\n<!-- TODO: Document decision API endpoints -->\n\n### Example Decision Request\n\n```json\n{\n  \"input\": {},\n  \"context\": {}\n}\n```\n\n## Judgment SLOs\n\n<!-- TODO: Define judgment SLOs -->\n"
++  "api.md": "# AI Gate Documentation — investigation-agent\n\n## Decision Endpoints\n\n<!-- TODO: Document decision API endpoints -->\n\n### Example Decision Request\n\n```json\n{\n  \"input\": {},\n  \"context\": {}\n}\n```\n\n## Judgment SLOs\n\n<!-- TODO: Define judgment SLOs -->\n\n## Judgment thresholds\n\nA breach is a measured value strictly above a declared bound (OPENSRM-CORE-v2 §5.5.6).\n\n| Type | Bound | Value | Evaluated by | Measurement |\n|---|---|---|---|---|\n| calibration | maximum_brier_score | 0.05 | Prometheus: `ai_gate:calibration:brier`; alerts `AIGateCalibrationBrierBreach`, `AIGateCalibrationBrierNotEvaluable` | bins: 10; window: 30d |\n| calibration | maximum_expected_calibration_error | 0.03 | Prometheus: `ai_gate:calibration:ece`; alerts `AIGateCalibrationECEBreach`, `AIGateCalibrationECENotEvaluable` | bins: 10; window: 30d |\n"
+ }
+diff --git a/tests/golden/data/docs/v2__judgment-thresholds__feedback-latency-p50-only.json b/tests/golden/data/docs/v2__judgment-thresholds__feedback-latency-p50-only.json
+index 93dcd15..3a23e95 100644
+--- a/tests/golden/data/docs/v2__judgment-thresholds__feedback-latency-p50-only.json
++++ b/tests/golden/data/docs/v2__judgment-thresholds__feedback-latency-p50-only.json
+@@ -3,5 +3,5 @@
+   "adr/001-initial-architecture.md": "# ADR-001: Initial Architecture for intake-agent\n\n## Status\n\nAccepted\n\n## Context\n\nintake-agent is a **critical**-tier **ai-gate** service owned by the **risk** team.\n\n## Decision\n\n- **Tier:** critical — requires highest reliability guarantees\n\n## Consequences\n\n- Service must maintain SLO targets as defined above\n- Deployment gates enforce error budget thresholds before release\n- On-call rotation required for this tier level\n",
+   "adr/README.md": "# Architecture Decision Records — intake-agent\n\nThis directory contains architecture decision records (ADRs) for the intake-agent service.\n\n## Index\n\n| ID | Title | Status |\n| -- | ----- | ------ |\n| 001 | [Initial Architecture](001-initial-architecture.md) | Accepted |\n\n## Creating a New ADR\n\nCopy `template.md` and increment the ID number.\n",
+   "adr/template.md": "# ADR-NNN: Title\n\n## Status\n\nProposed\n\n## Context\n\nWhat is the issue that we're seeing that is motivating this decision or change?\n\n## Decision\n\nWhat is the change that we're proposing and/or doing?\n\n## Consequences\n\nWhat becomes easier or more difficult to do because of this change?\n",
+-  "api.md": "# AI Gate Documentation — intake-agent\n\n## Decision Endpoints\n\n<!-- TODO: Document decision API endpoints -->\n\n### Example Decision Request\n\n```json\n{\n  \"input\": {},\n  \"context\": {}\n}\n```\n\n## Judgment SLOs\n\n<!-- TODO: Define judgment SLOs -->\n"
++  "api.md": "# AI Gate Documentation — intake-agent\n\n## Decision Endpoints\n\n<!-- TODO: Document decision API endpoints -->\n\n### Example Decision Request\n\n```json\n{\n  \"input\": {},\n  \"context\": {}\n}\n```\n\n## Judgment SLOs\n\n<!-- TODO: Define judgment SLOs -->\n\n## Judgment thresholds\n\nA breach is a measured value strictly above a declared bound (OPENSRM-CORE-v2 §5.5.6).\n\n| Type | Bound | Value | Evaluated by | Measurement |\n|---|---|---|---|---|\n| feedback_latency | maximum_p50 | 1h | Prometheus: `ai_gate:feedback_latency:p50_30d`; alerts `AIGateFeedbackLatencyP50Breach`, `AIGateFeedbackLatencyP50NotEvaluable` | — |\n"
+ }
+diff --git a/tests/golden/data/docs/v2__judgment-thresholds__segments-two-dimensions.json b/tests/golden/data/docs/v2__judgment-thresholds__segments-two-dimensions.json
+index 714c9af..fa63167 100644
+--- a/tests/golden/data/docs/v2__judgment-thresholds__segments-two-dimensions.json
++++ b/tests/golden/data/docs/v2__judgment-thresholds__segments-two-dimensions.json
+@@ -3,5 +3,5 @@
+   "adr/001-initial-architecture.md": "# ADR-001: Initial Architecture for pricing-agent\n\n## Status\n\nAccepted\n\n## Context\n\npricing-agent is a **critical**-tier **ai-gate** service owned by the **risk** team.\n\n## Decision\n\n- **Tier:** critical — requires highest reliability guarantees\n\n## Consequences\n\n- Service must maintain SLO targets as defined above\n- Deployment gates enforce error budget thresholds before release\n- On-call rotation required for this tier level\n",
+   "adr/README.md": "# Architecture Decision Records — pricing-agent\n\nThis directory contains architecture decision records (ADRs) for the pricing-agent service.\n\n## Index\n\n| ID | Title | Status |\n| -- | ----- | ------ |\n| 001 | [Initial Architecture](001-initial-architecture.md) | Accepted |\n\n## Creating a New ADR\n\nCopy `template.md` and increment the ID number.\n",
+   "adr/template.md": "# ADR-NNN: Title\n\n## Status\n\nProposed\n\n## Context\n\nWhat is the issue that we're seeing that is motivating this decision or change?\n\n## Decision\n\nWhat is the change that we're proposing and/or doing?\n\n## Consequences\n\nWhat becomes easier or more difficult to do because of this change?\n",
+-  "api.md": "# AI Gate Documentation — pricing-agent\n\n## Decision Endpoints\n\n<!-- TODO: Document decision API endpoints -->\n\n### Example Decision Request\n\n```json\n{\n  \"input\": {},\n  \"context\": {}\n}\n```\n\n## Judgment SLOs\n\n<!-- TODO: Define judgment SLOs -->\n"
++  "api.md": "# AI Gate Documentation — pricing-agent\n\n## Decision Endpoints\n\n<!-- TODO: Document decision API endpoints -->\n\n### Example Decision Request\n\n```json\n{\n  \"input\": {},\n  \"context\": {}\n}\n```\n\n## Judgment SLOs\n\n<!-- TODO: Define judgment SLOs -->\n\n## Judgment thresholds\n\nA breach is a measured value strictly above a declared bound (OPENSRM-CORE-v2 §5.5.6).\n\n| Type | Bound | Value | Evaluated by | Measurement |\n|---|---|---|---|---|\n| segments | maximum_variance_from_overall | 0.05 | nthlayer-workers; no Prometheus rule | window: 30d; segment_dimension: customer_tier; segment_values: enterprise, smb, consumer; metric: reversal_rate; source: lineage |\n| segments | maximum_variance_from_overall | 0.08 | nthlayer-workers; no Prometheus rule | window: 7d; segment_dimension: region; segment_values: eu, us, apac; metric: outcomes; outcome_signal: source=retro-consumer, window=1h |\n"
+ }
+diff --git a/tests/golden/data/docs/v2__judgment-thresholds__single-bounds.json b/tests/golden/data/docs/v2__judgment-thresholds__single-bounds.json
+index 4fc304f..83f7b49 100644
+--- a/tests/golden/data/docs/v2__judgment-thresholds__single-bounds.json
++++ b/tests/golden/data/docs/v2__judgment-thresholds__single-bounds.json
+@@ -3,5 +3,5 @@
+   "adr/001-initial-architecture.md": "# ADR-001: Initial Architecture for triage-agent\n\n## Status\n\nAccepted\n\n## Context\n\ntriage-agent is a **critical**-tier **ai-gate** service owned by the **risk** team.\n\n## Decision\n\n- **Tier:** critical — requires highest reliability guarantees\n\n## Consequences\n\n- Service must maintain SLO targets as defined above\n- Deployment gates enforce error budget thresholds before release\n- On-call rotation required for this tier level\n",
+   "adr/README.md": "# Architecture Decision Records — triage-agent\n\nThis directory contains architecture decision records (ADRs) for the triage-agent service.\n\n## Index\n\n| ID | Title | Status |\n| -- | ----- | ------ |\n| 001 | [Initial Architecture](001-initial-architecture.md) | Accepted |\n\n## Creating a New ADR\n\nCopy `template.md` and increment the ID number.\n",
+   "adr/template.md": "# ADR-NNN: Title\n\n## Status\n\nProposed\n\n## Context\n\nWhat is the issue that we're seeing that is motivating this decision or change?\n\n## Decision\n\nWhat is the change that we're proposing and/or doing?\n\n## Consequences\n\nWhat becomes easier or more difficult to do because of this change?\n",
+-  "api.md": "# AI Gate Documentation — triage-agent\n\n## Decision Endpoints\n\n<!-- TODO: Document decision API endpoints -->\n\n### Example Decision Request\n\n```json\n{\n  \"input\": {},\n  \"context\": {}\n}\n```\n\n## Judgment SLOs\n\n<!-- TODO: Define judgment SLOs -->\n"
++  "api.md": "# AI Gate Documentation — triage-agent\n\n## Decision Endpoints\n\n<!-- TODO: Document decision API endpoints -->\n\n### Example Decision Request\n\n```json\n{\n  \"input\": {},\n  \"context\": {}\n}\n```\n\n## Judgment SLOs\n\n<!-- TODO: Define judgment SLOs -->\n\n## Judgment thresholds\n\nA breach is a measured value strictly above a declared bound (OPENSRM-CORE-v2 §5.5.6).\n\n| Type | Bound | Value | Evaluated by | Measurement |\n|---|---|---|---|---|\n| feedback_latency | maximum_p90 | 24h | Prometheus: `ai_gate:feedback_latency:p90_30d`; alerts `AIGateFeedbackLatencyP90Breach`, `AIGateFeedbackLatencyP90NotEvaluable` | — |\n| calibration | maximum_expected_calibration_error | 0.03 | Prometheus: `ai_gate:calibration:ece`; alerts `AIGateCalibrationECEBreach`, `AIGateCalibrationECENotEvaluable` | bins: 10; window: 30d |\n"
+ }
+diff --git a/tests/golden/data/recording_rules/opensrm__ai-gate.reliability.json b/tests/golden/data/recording_rules/opensrm__ai-gate.reliability.json
+index a25182c..a2c468d 100644
+--- a/tests/golden/data/recording_rules/opensrm__ai-gate.reliability.json
++++ b/tests/golden/data/recording_rules/opensrm__ai-gate.reliability.json
+@@ -208,6 +208,21 @@
+         }
+       ]
+     },
++    {
++      "interval": "5m",
++      "name": "fraud-detector_judgment_thresholds_30d",
++      "rules": [
++        {
++          "expr": "histogram_quantile(0.5, sum by (le) (increase(ai_gate_feedback_latency_seconds_bucket{service=\"fraud-detector\"}[30d])))",
++          "labels": {
++            "service": "fraud-detector",
++            "slo": "feedback_latency",
++            "target": "3600.0"
++          },
++          "record": "ai_gate:feedback_latency:p50_30d"
++        }
++      ]
++    },
+     {
+       "interval": "30s",
+       "name": "fraud-detector_health_metrics",
+diff --git a/tests/golden/data/recording_rules/v2__judgment-thresholds__all-five-types.json b/tests/golden/data/recording_rules/v2__judgment-thresholds__all-five-types.json
+index 0b0f901..557691a 100644
+--- a/tests/golden/data/recording_rules/v2__judgment-thresholds__all-five-types.json
++++ b/tests/golden/data/recording_rules/v2__judgment-thresholds__all-five-types.json
+@@ -4,6 +4,15 @@
+       "interval": "30s",
+       "name": "credit-decision-agent_judgment_metrics",
+       "rules": [
++        {
++          "expr": "avg(ai_gate_calibration_brier{service=\"credit-decision-agent\"})",
++          "labels": {
++            "service": "credit-decision-agent",
++            "slo": "calibration",
++            "target": "0.05"
++          },
++          "record": "ai_gate:calibration:brier"
++        },
+         {
+           "expr": "histogram_quantile(0.5, rate(ai_gate_feedback_latency_seconds_bucket{service=\"credit-decision-agent\"}[5m]))",
+           "labels": {
+@@ -39,6 +48,30 @@
+         }
+       ]
+     },
++    {
++      "interval": "5m",
++      "name": "credit-decision-agent_judgment_thresholds_30d",
++      "rules": [
++        {
++          "expr": "histogram_quantile(0.5, sum by (le) (increase(ai_gate_feedback_latency_seconds_bucket{service=\"credit-decision-agent\"}[30d])))",
++          "labels": {
++            "service": "credit-decision-agent",
++            "slo": "feedback_latency",
++            "target": "3600.0"
++          },
++          "record": "ai_gate:feedback_latency:p50_30d"
++        },
++        {
++          "expr": "histogram_quantile(0.9, sum by (le) (increase(ai_gate_feedback_latency_seconds_bucket{service=\"credit-decision-agent\"}[30d])))",
++          "labels": {
++            "service": "credit-decision-agent",
++            "slo": "feedback_latency",
++            "target": "86400.0"
++          },
++          "record": "ai_gate:feedback_latency:p90_30d"
++        }
++      ]
++    },
+     {
+       "interval": "30s",
+       "name": "credit-decision-agent_health_metrics",
+diff --git a/tests/golden/data/recording_rules/v2__judgment-thresholds__calibration-both-bounds.json b/tests/golden/data/recording_rules/v2__judgment-thresholds__calibration-both-bounds.json
+index 23df501..cd74c1d 100644
+--- a/tests/golden/data/recording_rules/v2__judgment-thresholds__calibration-both-bounds.json
++++ b/tests/golden/data/recording_rules/v2__judgment-thresholds__calibration-both-bounds.json
+@@ -36,6 +36,15 @@
+             "service": "investigation-agent"
+           },
+           "record": "ai_gate:calibration_bucket:high"
++        },
++        {
++          "expr": "avg(ai_gate_calibration_brier{service=\"investigation-agent\"})",
++          "labels": {
++            "service": "investigation-agent",
++            "slo": "calibration",
++            "target": "0.05"
++          },
++          "record": "ai_gate:calibration:brier"
+         }
+       ]
+     },
+diff --git a/tests/golden/data/recording_rules/v2__judgment-thresholds__feedback-latency-p50-only.json b/tests/golden/data/recording_rules/v2__judgment-thresholds__feedback-latency-p50-only.json
+index 00a63c3..5674ba4 100644
+--- a/tests/golden/data/recording_rules/v2__judgment-thresholds__feedback-latency-p50-only.json
++++ b/tests/golden/data/recording_rules/v2__judgment-thresholds__feedback-latency-p50-only.json
+@@ -39,6 +39,21 @@
+         }
+       ]
+     },
++    {
++      "interval": "5m",
++      "name": "intake-agent_judgment_thresholds_30d",
++      "rules": [
++        {
++          "expr": "histogram_quantile(0.5, sum by (le) (increase(ai_gate_feedback_latency_seconds_bucket{service=\"intake-agent\"}[30d])))",
++          "labels": {
++            "service": "intake-agent",
++            "slo": "feedback_latency",
++            "target": "3600.0"
++          },
++          "record": "ai_gate:feedback_latency:p50_30d"
++        }
++      ]
++    },
+     {
+       "interval": "30s",
+       "name": "intake-agent_health_metrics",
+diff --git a/tests/golden/data/recording_rules/v2__judgment-thresholds__single-bounds.json b/tests/golden/data/recording_rules/v2__judgment-thresholds__single-bounds.json
+index 617ae92..38864cd 100644
+--- a/tests/golden/data/recording_rules/v2__judgment-thresholds__single-bounds.json
++++ b/tests/golden/data/recording_rules/v2__judgment-thresholds__single-bounds.json
+@@ -63,6 +63,21 @@
+         }
+       ]
+     },
++    {
++      "interval": "5m",
++      "name": "triage-agent_judgment_thresholds_30d",
++      "rules": [
++        {
++          "expr": "histogram_quantile(0.9, sum by (le) (increase(ai_gate_feedback_latency_seconds_bucket{service=\"triage-agent\"}[30d])))",
++          "labels": {
++            "service": "triage-agent",
++            "slo": "feedback_latency",
++            "target": "86400.0"
++          },
++          "record": "ai_gate:feedback_latency:p90_30d"
++        }
++      ]
++    },
+     {
+       "interval": "30s",
+       "name": "triage-agent_health_metrics",
+diff --git a/tests/test_docs_judgment_thresholds.py b/tests/test_docs_judgment_thresholds.py
+new file mode 100644
+index 0000000..95b7890
+--- /dev/null
++++ b/tests/test_docs_judgment_thresholds.py
+@@ -0,0 +1,141 @@
++"""The "Judgment thresholds" section of an ai-gate's api.md (opensrm-wo62.2, design §6).
++
++The section has one table row per declared (entry, bound). A bound with a
++recording rule names the rule and its two alerts; the others say
++nthlayer-workers evaluates them. Declared values come from the spec examples,
++and rule and alert names come from what generate actually emits.
++"""
++
++from __future__ import annotations
++
++import dataclasses
++import warnings
++from pathlib import Path
++from typing import Any
++
++import pytest
++import yaml
++from nthlayer_common.manifest import THRESHOLD_SERIES, ReliabilityManifest, load_manifest
++
++from nthlayer_generate.generators.docs import _api_docs_ai_gate, generate_service_docs
++from nthlayer_generate.generators.judgment_threshold_alerts import (
++    build_judgment_threshold_alerts,
++)
++
++# parents: [0]=tests/ [1]=nthlayer-generate/ [2]=<ecosystem>/
++THRESHOLDS = (
++    Path(__file__).resolve().parents[2]
++    / "opensrm"
++    / "spec"
++    / "v2"
++    / "examples"
++    / ("judgment-thresholds")
++)
++FIXTURES = tuple(
++    THRESHOLDS / f"{name}.yaml"
++    for name in (
++        "all-five-types",
++        "calibration-both-bounds",
++        "feedback-latency-p50-only",
++        "single-bounds",
++        "segments-two-dimensions",
++    )
++)
++HEADING = "## Judgment thresholds"
++
++
++def _load(path: Path) -> ReliabilityManifest:
++    with warnings.catch_warnings():
++        warnings.simplefilter("ignore")
++        return load_manifest(path)
++
++
++def _api_md(path: Path, tmp: Path) -> str:
++    result = generate_service_docs(path, tmp, include_api=True)
++    assert result.success, result.error
++    return (tmp / "api.md").read_text(encoding="utf-8")
++
++
++def _section(md: str) -> list[str]:
++    lines = md.splitlines()
++    start = lines.index(HEADING)
++    end = next((i for i in range(start + 1, len(lines)) if lines[i].startswith("## ")), len(lines))
++    return lines[start:end]
++
++
++def _rows(section: list[str]) -> list[list[str]]:
++    """Table body rows, as stripped cells (header and separator dropped)."""
++    table = [line for line in section if line.startswith("|")]
++    return [[c.strip() for c in line.strip("|").split("|")] for line in table[2:]]
++
++
++def _declared(path: Path) -> list[tuple[str, str, Any]]:
++    doc = yaml.safe_load(path.read_text())
++    return [
++        (t["type"], bound, value)
++        for t in doc["spec"]["judgment_threshold"]
++        for bound, value in t["bounds"].items()
++    ]
++
++
++def test_fixtures_are_present_and_cover_both_kinds_of_bound():
++    missing = [str(p) for p in FIXTURES if not p.is_file()]
++    assert not missing, f"missing fixtures: {missing}"
++    types = {t for p in FIXTURES for t, _, _ in _declared(p)}
++    assert {t for t in types if THRESHOLD_SERIES[t]} and {
++        t for t in types if not THRESHOLD_SERIES[t]
++    }
++
++
++@pytest.mark.parametrize("path", FIXTURES, ids=lambda p: p.stem)
++def test_one_row_per_declared_bound_with_its_declared_value(path: Path, tmp_path: Path):
++    rows = _rows(_section(_api_md(path, tmp_path)))
++
++    assert [(r[0], r[1], r[2]) for r in rows] == [(t, b, str(v)) for t, b, v in _declared(path)]
++
++
++@pytest.mark.parametrize("path", FIXTURES, ids=lambda p: p.stem)
++def test_evaluated_by_names_the_emitted_rule_and_alerts_or_workers(path: Path, tmp_path: Path):
++    manifest = _load(path)
++    alerts_by_bound: dict[str, set[str]] = {}
++    records_by_bound: dict[str, str] = {}
++    for alert in build_judgment_threshold_alerts(manifest):
++        alerts_by_bound.setdefault(alert.labels["bound"], set()).add(alert.name)
++        if alert.name.endswith("Breach"):
++            records_by_bound[alert.labels["bound"]] = alert.expr.split("{", 1)[0]
++
++    for threshold_type, bound, _value, evaluated_by in (
++        r[:4] for r in _rows(_section(_api_md(path, tmp_path)))
++    ):
++        if THRESHOLD_SERIES[threshold_type]:
++            assert f"`{records_by_bound[bound]}`" in evaluated_by
++            for name in alerts_by_bound[bound]:
++                assert f"`{name}`" in evaluated_by
++        else:
++            assert evaluated_by == "nthlayer-workers; no Prometheus rule"
++
++
++def test_measurement_fields_are_shown(tmp_path: Path):
++    path = THRESHOLDS / "segments-two-dimensions.yaml"
++    entries = yaml.safe_load(path.read_text())["spec"]["judgment_threshold"]
++
++    rows = _rows(_section(_api_md(path, tmp_path)))
++
++    for entry, row in zip(entries, rows, strict=True):
++        measurement = row[4]
++        # OPENSRM-CORE-v2 §5.5.1: segment_dimension/values sit on the entry itself.
++        assert entry["segment_dimension"] in measurement
++        for value in entry["segment_values"]:
++            assert value in measurement
++
++
++def test_section_follows_judgment_slos(tmp_path: Path):
++    md = _api_md(FIXTURES[0], tmp_path).splitlines()
++    assert md.index("## Judgment SLOs") < md.index(HEADING)
++
++
++def test_no_thresholds_means_no_section():
++    manifest = dataclasses.replace(_load(FIXTURES[0]), judgment_thresholds=[])
++    assert manifest.is_ai_gate()
++
++    assert HEADING not in _api_docs_ai_gate(manifest).splitlines()
+diff --git a/tests/test_judgment_threshold_alerts.py b/tests/test_judgment_threshold_alerts.py
+new file mode 100644
+index 0000000..9688b5d
+--- /dev/null
++++ b/tests/test_judgment_threshold_alerts.py
+@@ -0,0 +1,204 @@
++"""Judgment-threshold alerts (opensrm-wo62.2, design §5).
++
++Each declared bound with a data source gets two alerts:
++- ``…Breach``, which fires when the measured value is strictly above the
++  bound (OPENSRM-CORE-v2 §5.5.6 E1), with durations compared in seconds (E2);
++- ``…NotEvaluable``, which fires when the measurement is absent or NaN (E3).
++
++Bounds come from the spec examples. The record each alert reads is looked up
++in the recording rules generate actually emits, so an alert cannot quietly
++point at a series no rule produces.
++"""
++
++from __future__ import annotations
++
++import dataclasses
++import warnings
++from pathlib import Path
++from typing import Any
++
++import pytest
++import yaml
++from nthlayer_common.manifest import (
++    THRESHOLD_SERIES,
++    ReliabilityManifest,
++    duration_seconds,
++    load_manifest,
++)
++from nthlayer_common.manifest.thresholds import DURATION, THRESHOLD_BOUNDS
++
++from nthlayer_generate.generators.alerts import generate_alerts_from_manifest
++from nthlayer_generate.generators.judgment_threshold_alerts import (
++    build_judgment_threshold_alerts,
++)
++from nthlayer_generate.recording_rules.manifest_builder import (
++    build_recording_rules_from_manifest,
++)
++from nthlayer_generate.recording_rules.models import create_rule_groups
++
++# parents: [0]=tests/ [1]=nthlayer-generate/ [2]=<ecosystem>/
++THRESHOLDS = (
++    Path(__file__).resolve().parents[2]
++    / "opensrm"
++    / "spec"
++    / "v2"
++    / "examples"
++    / ("judgment-thresholds")
++)
++ALL_FIVE = THRESHOLDS / "all-five-types.yaml"
++CALIBRATION_BOTH = THRESHOLDS / "calibration-both-bounds.yaml"
++P50_ONLY = THRESHOLDS / "feedback-latency-p50-only.yaml"
++SINGLE_BOUNDS = THRESHOLDS / "single-bounds.yaml"
++SEGMENTS = THRESHOLDS / "segments-two-dimensions.yaml"
++WITH_SOURCE = (ALL_FIVE, CALIBRATION_BOTH, P50_ONLY, SINGLE_BOUNDS)
++
++# Design §2 D4 (Rob, 2026-10-27).
++BREACH = {"severity": "warning", "for": "15m"}
++NOT_EVALUABLE = {"severity": "info", "for": "1h"}
++
++
++def _load(path: Path) -> ReliabilityManifest:
++    with warnings.catch_warnings():
++        warnings.simplefilter("ignore")
++        return load_manifest(path)
++
++
++def _declared(path: Path) -> list[tuple[str, str, Any]]:
++    """(type, bound, value) for every declared bound whose type has a data source."""
++    doc = yaml.safe_load(path.read_text())
++    return [
++        (t["type"], bound, value)
++        for t in doc["spec"]["judgment_threshold"]
++        if THRESHOLD_SERIES[t["type"]]
++        for bound, value in t["bounds"].items()
++    ]
++
++
++def _comparison(threshold_type: str, bound: str, value: Any) -> float:
++    # E2: a Duration bound is compared in seconds; a Ratio as declared.
++    if THRESHOLD_BOUNDS[threshold_type][bound] == DURATION:
++        return duration_seconds(value)
++    return float(value)
++
++
++def _emitted_records(manifest: ReliabilityManifest) -> dict[tuple[str, str], str]:
++    """(record, target label) for every recording rule generate emits."""
++    doc = yaml.safe_load(create_rule_groups(build_recording_rules_from_manifest(manifest)))
++    return {
++        (r["record"], r.get("labels", {}).get("target", "")): r["record"]
++        for g in doc["groups"]
++        for r in g["rules"]
++    }
++
++
++def _alerts(manifest: ReliabilityManifest) -> dict[tuple[str, str], dict[str, Any]]:
++    """(alert name, bound label) -> Prometheus rule dict."""
++    return {
++        (a.name, a.labels["bound"]): a.to_prometheus()
++        for a in build_judgment_threshold_alerts(manifest)
++    }
++
++
++def test_fixtures_declare_every_bound_with_a_data_source():
++    """Anti-vacuity: the corpus exercises all four bounds that have a series."""
++    covered = {(t, b) for p in WITH_SOURCE for t, b, _ in _declared(p)}
++    with_source = {(t, b) for t, series in THRESHOLD_SERIES.items() for b in series}
++    assert covered == with_source
++
++
++@pytest.mark.parametrize("path", WITH_SOURCE, ids=lambda p: p.stem)
++def test_every_bound_gets_a_breach_alert_strictly_above_the_bound(path: Path):
++    manifest = _load(path)
++    alerts = _alerts(manifest)
++    records = _emitted_records(manifest)
++
++    for threshold_type, bound, value in _declared(path):
++        compared = _comparison(threshold_type, bound, value)
++        (rule,) = [r for (name, b), r in alerts.items() if b == bound and name.endswith("Breach")]
++        record = rule["expr"].split("{", 1)[0]
++        # The alert reads a record generate emits, with the bound as its target.
++        assert (record, str(compared)) in records
++        assert rule["expr"] == (
++            f'{record}{{service="{manifest.name}",target="{compared}"}} > {compared}'
++        )
++        assert rule["for"] == BREACH["for"]
++        assert rule["labels"]["severity"] == BREACH["severity"]
++        assert rule["labels"]["threshold_type"] == threshold_type
++
++
++@pytest.mark.parametrize("path", WITH_SOURCE, ids=lambda p: p.stem)
++def test_every_bound_gets_a_not_evaluable_alert_on_absent_or_nan(path: Path):
++    manifest = _load(path)
++    alerts = _alerts(manifest)
++
++    for _threshold_type, bound, _value in _declared(path):
++        (breach,) = [r for (n, b), r in alerts.items() if b == bound and n.endswith("Breach")]
++        (rule,) = [r for (n, b), r in alerts.items() if b == bound and n.endswith("NotEvaluable")]
++        series = breach["expr"].split(" > ", 1)[0]
++        assert rule["expr"] == f"absent({series}) or ({series} != {series})"
++        assert rule["for"] == NOT_EVALUABLE["for"]
++        assert rule["labels"]["severity"] == NOT_EVALUABLE["severity"]
++
++
++def test_e1_equality_is_within_bounds():
++    """§5.5.6 E1: a value equal to the bound is within bounds, so the operator is '>'."""
++    for alert in build_judgment_threshold_alerts(_load(ALL_FIVE)):
++        if alert.name.endswith("Breach"):
++            assert " > " in alert.expr
++            assert ">=" not in alert.expr
++
++
++def test_alert_names_name_the_type_and_bound():
++    names = {a.name for a in build_judgment_threshold_alerts(_load(ALL_FIVE))}
++    assert names == {
++        "AIGateCalibrationBrierBreach",
++        "AIGateCalibrationBrierNotEvaluable",
++        "AIGateFeedbackLatencyP50Breach",
++        "AIGateFeedbackLatencyP50NotEvaluable",
++        "AIGateFeedbackLatencyP90Breach",
++        "AIGateFeedbackLatencyP90NotEvaluable",
++    }
++
++
++def test_types_without_a_data_source_get_no_alerts():
++    assert build_judgment_threshold_alerts(_load(SEGMENTS)) == []
++
++
++def test_threshold_alerts_survive_low_tier_filtering():
++    """Design §3 Q2: a declared bound is an explicit request, whatever the tier."""
++    manifest = dataclasses.replace(_load(ALL_FIVE), tier="low")
++    expected = {a.name for a in build_judgment_threshold_alerts(manifest)}
++    assert {a.severity for a in build_judgment_threshold_alerts(manifest)} == {"warning", "info"}
++
++    emitted = {a.name for a in generate_alerts_from_manifest(manifest, quiet=True)}
++
++    assert expected <= emitted
++
++
++def test_threshold_alerts_are_written_without_any_dependency_alerts(tmp_path: Path):
++    manifest = _load(ALL_FIVE)
++    out = tmp_path / "alerts.yaml"
++
++    generate_alerts_from_manifest(manifest, output_file=out, quiet=True)
++
++    doc = yaml.safe_load(out.read_text())
++    written = {r["alert"] for g in doc["groups"] for r in g["rules"]}
++    assert written == {a.name for a in build_judgment_threshold_alerts(manifest)}
++
++
++def test_non_ai_gate_manifest_gets_no_threshold_alerts():
++    manifest = _load(ALL_FIVE)
++    plain = dataclasses.replace(manifest, judgment_thresholds=[])
++    assert build_judgment_threshold_alerts(plain) == []
++
++
++def test_alerting_for_duration_overrides_do_not_apply_to_threshold_alerts():
++    """Rob, 2026-10-27: D4's durations are fixed; the manifest's for_duration is for templates."""
++    manifest = dataclasses.replace(
++        _load(ALL_FIVE), alerting={"for_duration": {"page": "1m", "ticket": "2m"}}
++    )
++    expected = {"warning": BREACH["for"], "info": NOT_EVALUABLE["for"]}
++
++    for alert in generate_alerts_from_manifest(manifest, quiet=True):
++        if alert.technology == "judgment_threshold":
++            assert alert.duration == expected[alert.severity]
+diff --git a/tests/test_recording_rules_judgment.py b/tests/test_recording_rules_judgment.py
+index 4ef10e1..b4b5bb9 100644
+--- a/tests/test_recording_rules_judgment.py
++++ b/tests/test_recording_rules_judgment.py
+@@ -157,22 +157,26 @@ def test_ece_only_calibration_emits_ece_from_its_bound():
+         assert f"ai_gate:calibration_bucket:{bucket}" in rules
+ 
+ 
+-def test_all_five_types_emits_only_the_ported_families():
++def test_all_five_types_emits_rules_only_for_bounds_with_a_data_source():
+     declared = yaml.safe_load(ALL_FIVE.read_text())["spec"]["judgment_threshold"]
+     calibration = next(t for t in declared if t["type"] == "calibration")
+     # The fixture is the case under test: Brier only, no ECE bound.
+-    assert "maximum_expected_calibration_error" not in calibration["bounds"]
++    assert set(calibration["bounds"]) == {"maximum_brier_score"}
+     assert {t["type"] for t in declared} >= {"segments", "stability", "audit_backlog"}
+ 
+     manifest = _load(ALL_FIVE)
+     rules = _by_record(_judgment_rules(manifest))
+ 
+-    assert not [r for r in rules if r.startswith("ai_gate:calibration")]
++    assert rules["ai_gate:calibration:brier"]["labels"]["target"] == str(
++        calibration["bounds"]["maximum_brier_score"]
++    )
+     feedback = _declared_bounds(ALL_FIVE, "feedback_latency")
+     expected_seconds = str(duration_seconds(feedback["maximum_p50"]))
+     assert rules["ai_gate:feedback_latency:bucket"]["labels"]["target"] == expected_seconds
+-    # segments / stability / audit_backlog: nothing emitted (wo62.2).
++    # segments / stability / audit_backlog have no data source in common's
++    # THRESHOLD_SERIES, so they emit nothing (wo62.2 ruling D2).
+     assert set(rules) == {
++        "ai_gate:calibration:brier",
+         "ai_gate:feedback_latency:p50",
+         "ai_gate:feedback_latency:p95",
+         "ai_gate:feedback_latency:p99",
+diff --git a/tests/test_recording_rules_thresholds.py b/tests/test_recording_rules_thresholds.py
+new file mode 100644
+index 0000000..a568df3
+--- /dev/null
++++ b/tests/test_recording_rules_thresholds.py
+@@ -0,0 +1,214 @@
++"""Threshold recording rules added by opensrm-wo62.2.
++
++Brier calibration and the window-correct feedback-latency quantiles
++(``:p50_30d`` / ``:p90_30d``). Design:
++``nthlayer/docs/superpowers/specs/2026-10-27-wo62-2-judgment-threshold-rules-design.md`` §4.
++
++Every expected value comes from somewhere other than the code under test:
++- the bound values come from the OpenSRM v2 spec examples;
++- the quantile for each bound comes from the bound's name (OPENSRM-CORE-v2
++  §5.5.5: p50 and p90);
++- the window comes from common's series contract, which §5.5.5 fixes at 30
++  days.
++"""
++
++from __future__ import annotations
++
++import dataclasses
++import warnings
++from pathlib import Path
++from typing import Any
++
++import pytest
++import yaml
++from nthlayer_common.manifest import (
++    FEEDBACK_LATENCY_WINDOW,
++    THRESHOLD_SERIES,
++    ReliabilityManifest,
++    duration_seconds,
++    load_manifest,
++)
++
++from nthlayer_generate.recording_rules.manifest_builder import (
++    build_recording_rules_from_manifest,
++)
++from nthlayer_generate.recording_rules.models import create_rule_groups
++
++# parents: [0]=tests/ [1]=nthlayer-generate/ [2]=<ecosystem>/
++THRESHOLDS = (
++    Path(__file__).resolve().parents[2]
++    / "opensrm"
++    / "spec"
++    / "v2"
++    / "examples"
++    / ("judgment-thresholds")
++)
++ALL_FIVE = THRESHOLDS / "all-five-types.yaml"
++CALIBRATION_BOTH = THRESHOLDS / "calibration-both-bounds.yaml"
++P50_ONLY = THRESHOLDS / "feedback-latency-p50-only.yaml"
++SINGLE_BOUNDS = THRESHOLDS / "single-bounds.yaml"
++SEGMENTS = THRESHOLDS / "segments-two-dimensions.yaml"
++FIXTURES = (ALL_FIVE, CALIBRATION_BOTH, P50_ONLY, SINGLE_BOUNDS, SEGMENTS)
++
++# OPENSRM-CORE-v2 §5.5.5: maximum_p50 bounds the median, maximum_p90 the 90th percentile.
++QUANTILE = {"maximum_p50": 0.5, "maximum_p90": 0.9}
++WINDOW_RECORD = {
++    "maximum_p50": "ai_gate:feedback_latency:p50_30d",
++    "maximum_p90": "ai_gate:feedback_latency:p90_30d",
++}
++
++
++def _load(path: Path) -> ReliabilityManifest:
++    with warnings.catch_warnings():
++        warnings.simplefilter("ignore")
++        return load_manifest(path)
++
++
++def _groups(manifest: ReliabilityManifest) -> dict[str, dict[str, Any]]:
++    doc = yaml.safe_load(create_rule_groups(build_recording_rules_from_manifest(manifest)))
++    return {g["name"]: g for g in doc["groups"]}
++
++
++def _rules(manifest: ReliabilityManifest) -> dict[str, dict[str, Any]]:
++    """Rules from both threshold-bearing groups, keyed by record."""
++    groups = _groups(manifest)
++    names = (
++        f"{manifest.name}_judgment_metrics",
++        f"{manifest.name}_judgment_thresholds_{FEEDBACK_LATENCY_WINDOW}",
++    )
++    return {r["record"]: r for n in names if n in groups for r in groups[n]["rules"]}
++
++
++def _bounds(path: Path, threshold_type: str) -> dict[str, Any]:
++    doc = yaml.safe_load(path.read_text())
++    (entry,) = [t for t in doc["spec"]["judgment_threshold"] if t["type"] == threshold_type]
++    bounds: dict[str, Any] = entry["bounds"]
++    return bounds
++
++
++def test_fixtures_are_present():
++    """Guard against the silent-skip layout (CLAUDE.md): no fixture may be missing."""
++    missing = [str(p) for p in FIXTURES if not p.is_file()]
++    assert not missing, f"missing fixtures: {missing}"
++
++
++def test_the_spec_fixes_the_feedback_latency_window_at_30_days():
++    # §5.5.5: "computed over the decisions whose ground truth arrived in the last 30 days".
++    assert FEEDBACK_LATENCY_WINDOW == "30d"
++
++
++@pytest.mark.parametrize("path", [ALL_FIVE, CALIBRATION_BOTH], ids=lambda p: p.stem)
++def test_declared_brier_bound_emits_a_brier_rule(path: Path):
++    bound = _bounds(path, "calibration")["maximum_brier_score"]
++    manifest = _load(path)
++
++    rule = _rules(manifest)["ai_gate:calibration:brier"]
++
++    assert rule["expr"] == f'avg(ai_gate_calibration_brier{{service="{manifest.name}"}})'
++    assert rule["labels"] == {
++        "service": manifest.name,
++        "target": str(bound),
++        "slo": "calibration",
++    }
++
++
++def test_ece_only_calibration_emits_no_brier_rule():
++    assert set(_bounds(SINGLE_BOUNDS, "calibration")) == {"maximum_expected_calibration_error"}
++    assert "ai_gate:calibration:brier" not in _rules(_load(SINGLE_BOUNDS))
++
++
++def test_both_calibration_bounds_keep_ece_rules_before_brier():
++    records = list(_rules(_load(CALIBRATION_BOTH)))
++    assert records.index("ai_gate:calibration:ece") < records.index("ai_gate:calibration:brier")
++
++
++def _feedback_cases() -> list[tuple[Path, str]]:
++    cases = [
++        (path, bound)
++        for path in (ALL_FIVE, P50_ONLY, SINGLE_BOUNDS)
++        for bound in _bounds(path, "feedback_latency")
++    ]
++    # Anti-vacuity: both bounds are exercised, so a missing bound cannot
++    # quietly empty this list.
++    assert {b for _, b in cases} == set(QUANTILE)
++    return cases
++
++
++@pytest.mark.parametrize(
++    "path,bound", _feedback_cases(), ids=lambda v: v.stem if isinstance(v, Path) else v
++)
++def test_declared_feedback_bound_emits_a_30_day_quantile_rule(path: Path, bound: str):
++    declared = _bounds(path, "feedback_latency")[bound]
++    manifest = _load(path)
++
++    rule = _rules(manifest)[WINDOW_RECORD[bound]]
++
++    assert rule["expr"] == (
++        f"histogram_quantile({QUANTILE[bound]}, sum by (le) ("
++        f'increase(ai_gate_feedback_latency_seconds_bucket{{service="{manifest.name}"}}'
++        f"[{FEEDBACK_LATENCY_WINDOW}])))"
++    )
++    # E2: a Duration bound is carried in seconds.
++    assert rule["labels"] == {
++        "service": manifest.name,
++        "target": str(duration_seconds(declared)),
++        "slo": "feedback_latency",
++    }
++
++
++@pytest.mark.parametrize("path", [P50_ONLY, SINGLE_BOUNDS], ids=lambda p: p.stem)
++def test_undeclared_feedback_bound_emits_no_30_day_rule(path: Path):
++    declared = set(_bounds(path, "feedback_latency"))
++    undeclared = set(QUANTILE) - declared
++    assert undeclared, "fixture must leave one bound undeclared"
++
++    rules = _rules(_load(path))
++
++    for bound in undeclared:
++        assert WINDOW_RECORD[bound] not in rules
++
++
++def test_types_without_a_data_source_emit_nothing():
++    no_source = {t for t, series in THRESHOLD_SERIES.items() if not series}
++    # D2 rests on common's contract: these three have no series.
++    assert no_source == {"segments", "stability", "audit_backlog"}
++    declared = {
++        t["type"] for t in yaml.safe_load(SEGMENTS.read_text())["spec"]["judgment_threshold"]
++    }
++    assert declared == {"segments"}
++
++    assert _rules(_load(SEGMENTS)) == {}
++
++
++def test_non_duration_maximum_p90_raises_type_error():
++    manifest = _load(SINGLE_BOUNDS)
++    bad = [
++        dataclasses.replace(t, bounds={**t.bounds, "maximum_p90": 86400.0})
++        if t.type == "feedback_latency"
++        else t
++        for t in manifest.get_judgment_thresholds()
++    ]
++    manifest.get_judgment_thresholds = lambda: bad  # type: ignore[method-assign]
++    with pytest.raises(TypeError, match="maximum_p90 is not a Duration"):
++        build_recording_rules_from_manifest(manifest)
++
++
++def test_30_day_rules_have_their_own_5m_group():
++    """A 30-day range query every 30s is needless load (Rob, Checkpoint B)."""
++    manifest = _load(ALL_FIVE)
++    groups = _groups(manifest)
++
++    window = groups[f"{manifest.name}_judgment_thresholds_{FEEDBACK_LATENCY_WINDOW}"]
++    judgment = groups[f"{manifest.name}_judgment_metrics"]
++
++    assert window["interval"] == "5m"
++    assert {r["record"] for r in window["rules"]} == set(WINDOW_RECORD.values())
++    assert judgment["interval"] == "30s"
++    assert not set(WINDOW_RECORD.values()) & {r["record"] for r in judgment["rules"]}
++
++
++def test_no_feedback_bound_means_no_30_day_group():
++    manifest = _load(CALIBRATION_BOTH)
++    assert "feedback_latency" not in {t.type for t in manifest.get_judgment_thresholds()}
++
++    assert not [n for n in _groups(manifest) if "judgment_thresholds" in n]

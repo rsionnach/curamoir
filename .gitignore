@@ -13,6 +13,15 @@ __pycache__/
 # Working copy of the spec. Deliberately untracked: rsionnach/curamoir is a
 # public repo and the spec is not ready to publish. Remove this line when it is.
 docs/curamoir-spec.md
+# The R5 Gate v2 specs (Epic 5 gate mode and the full design), likewise
+# deliberately untracked: not ready to publish, and they describe NthLayer
+# internals. Remove these lines when they are.
+docs/r5-gate-v2-spec.md
+docs/r5-gate-v2-curamoir-spec.md
+# The v0.5 spec delta (review gate, verdicts, filing, runner and docs
+# additions), likewise untracked until the spec is published.
+docs/curamoir-spec-v0.5-delta.md
+docs/curamoir-spec-v0.1.md
 
 # R5 supervisor runtime files (cm-99l): the lock, the in-flight state and its
 # archived audit trails, and the local hook wiring.

@@ -1,0 +1,11 @@
+PASS 1 (CORRECTNESS) sequential R5 review on bead opensrm-l33e (rule-numbering commit).
+
+Template: read and follow ~/.claude/skills/rule-of-five-review/correctness-reviewer.md.
+
+Scope is THE DIFF: `git -C <workspace>/opensrm diff 6f3cac3..fab18cb` (OPENSRM-CORE-v2.md, spec/v2/AUTHORING.md). Do not raise findings outside it.
+Affected repos: opensrm: base=6f3cac3, head=fab18cb, path=<workspace>/opensrm
+
+Intent: a PURE RESTRUCTURE with NO change in meaning. The judgment-threshold evaluation rules were moved out of the CORE §5.5 intro paragraph into a new §5.5.6 "Evaluation" as E1 (breach: strictly exceeding; equal is within; every bound of every entry, each entry independently, breach of any is a breach), E2 (duration unit normalisation), E3 (not evaluable: cases, not a breach, MUST be reported, per bound and per listed segment; report form implementation-defined), E4 (precedence breach > not evaluable > within). The §13 conformance bullet was split per rule; citations in §5.5.1, §5.5.4 and AUTHORING were retargeted to §5.5.6 E<n>. The implementer's sentence-by-sentence old→new map is at <workspace>/nthlayer/.superpowers/sdd/2026-10-09-l33e-judgment-thresholds/task-A5-report.md — do not trust it; verify.
+Correctness here: (1) every normative sentence of the OLD §5.5 paragraph (`git show 6f3cac3:OPENSRM-CORE-v2.md`) survives with the same meaning somewhere in the NEW text — list any sentence lost, weakened, strengthened or duplicated with a different meaning; (2) the only intended additions are "equal to the bound is within bounds" (makes explicit what "exceeding" said) and "the form of the report is implementation-defined" — flag anything else new; (3) every new citation (§5.5.6, E1–E4) resolves and points at the rule it claims; (4) §13's split bullets together require exactly what the old single bullet required, no less. You may run `bash spec/v2/validate.sh` (~30s). Do not modify the repo.
+
+Report: CRITICAL / IMPORTANT / MINOR bullets, under 300 words, verdict PASS / PASS WITH FIXES / FAIL.

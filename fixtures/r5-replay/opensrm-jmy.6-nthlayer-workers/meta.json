@@ -1,0 +1,108 @@
+{
+ "schema_version": 1,
+ "entry": "opensrm-jmy.6-nthlayer-workers",
+ "bead": "opensrm-jmy.6",
+ "record": "jmy.6",
+ "archive": "r5-state-jmy.6-completed.json",
+ "record_repos": [
+  "nthlayer-workers",
+  "nthlayer"
+ ],
+ "repo": "nthlayer-workers",
+ "part": null,
+ "base": "95d22cacfd6e577e3334fe7b30913bd906faebe0",
+ "head": "1b43c0c3387b5ea786897cf1a86ef5993354f9a1",
+ "record_head": null,
+ "synthetic_base": "05a15174437c3391f3a0a6faa774eeb2b1b42250",
+ "synthetic_head": "b8a609916c7abf7ac55425995a185b1d2dc3c8e0",
+ "base_tree": "89f7e02c5f5048e5d4fe5051a18cef809fa140df",
+ "tree_sha": "dc3ef3c9a271fe28b50265e8870adaba5c020f6b",
+ "unavailable": null,
+ "bundle": {
+  "repo": "nthlayer-workers",
+  "sha256": "d75c0e5b32bd62e3dc7fc65be8889a2416fc5ec572bb74c9325d307406e73ee6"
+ },
+ "sequential_steps": null,
+ "record_sequential_steps": 11,
+ "bead_sequential_steps": 11,
+ "fidelity": "counts_only",
+ "blocking_findings": 9,
+ "escape": false,
+ "brief_source": "bead",
+ "roster": {
+  "record_version": 1,
+  "passes": [
+   "correctness",
+   "clarity",
+   "edge-cases",
+   "excellence"
+  ]
+ },
+ "lens_order": [
+  "correctness",
+  "clarity",
+  "edge-cases",
+  "excellence"
+ ],
+ "counts": {
+  "correctness": [
+   {
+    "critical": 1,
+    "important": 2,
+    "minor": 1
+   },
+   {}
+  ],
+  "clarity": [
+   {
+    "important": 4,
+    "minor": 5
+   },
+   {}
+  ],
+  "edge-cases": [
+   {
+    "critical": 0,
+    "important": 2,
+    "minor": 3
+   },
+   {}
+  ],
+  "excellence": [
+   {
+    "critical": 0,
+    "minor": 3
+   }
+  ]
+ },
+ "baseline": {
+  "correctness": {
+   "reviews": 2,
+   "fix_rounds": 1,
+   "findings_first_review": 4,
+   "unattributed": 0,
+   "steps": 3
+  },
+  "clarity": {
+   "reviews": 2,
+   "fix_rounds": 1,
+   "findings_first_review": 9,
+   "unattributed": 0,
+   "steps": 3
+  },
+  "edge-cases": {
+   "reviews": 2,
+   "fix_rounds": 1,
+   "findings_first_review": 5,
+   "unattributed": 0,
+   "steps": 3
+  },
+  "excellence": {
+   "reviews": 1,
+   "fix_rounds": 1,
+   "findings_first_review": 3,
+   "unattributed": 0,
+   "steps": 2
+  }
+ }
+}

@@ -1,0 +1,660 @@
+diff --git a/src/nthlayer_common/manifest/openslo/parser.py b/src/nthlayer_common/manifest/openslo/parser.py
+index e7cd34a..17a96f4 100644
+--- a/src/nthlayer_common/manifest/openslo/parser.py
++++ b/src/nthlayer_common/manifest/openslo/parser.py
+@@ -114,9 +114,7 @@ def _parse_openslo_document(data: dict[str, Any]) -> SLODefinition:
+         raise OpenSLOParseError(f"OpenSLO '{name}' has no objectives")
+ 
+     objective = objectives[0]
+-    target = objective.get("target")
+-    if target is None:
+-        raise OpenSLOParseError(f"OpenSLO '{name}' objective missing target")
++    target = _objective_target_percent(objective, name)
+ 
+     # Parse indicator
+     indicator = spec.get("indicator", {})
+@@ -195,6 +193,46 @@ def _parse_openslo_document(data: dict[str, Any]) -> SLODefinition:
+     )
+ 
+ 
++def _objective_target_percent(objective: dict[str, Any], name: str) -> float:
++    """An OpenSLO objective's target, as the canonical 0-100 percentage.
++
++    OpenSLO accepts EITHER ``target`` (a fraction in [0,1)) OR ``targetPercent``
++    (0-100), exactly one of them. NthLayer's internal convention is 0-100 for
++    every consumer (nthlayer-common CLAUDE.md hard rule 1), so a fraction is
++    converted here — at the inbound boundary — and a percentage is taken as-is.
++
++    This boundary was missing entirely [opensrm-ocvu]. The outbound one has
++    always existed (nthlayer_generate/slos/pipeline.py divides by 100), so a
++    ratio reached SLODefinition.target unconverted and every consumer comparing
++    a target to a measured value got an answer 100x out, silently, depending
++    only on which format the manifest happened to be written in.
++
++    It also broke the documented v1 -> v2 migration: v1_compat converts a v1
++    percentage to a ratio for the OpenSLO document it emits, and reading that
++    back without converting turned a 99.9 target into 0.999. The module
++    promised the output "round-trips through parse_opensrm_v2"; it did not.
++    """
++    has_target = "target" in objective and objective["target"] is not None
++    has_percent = (
++        "targetPercent" in objective and objective["targetPercent"] is not None
++    )
++
++    if has_target and has_percent:
++        # OpenSLO requires exactly one. Picking a winner here would let two
++        # disagreeing values sit in a manifest with only one taking effect.
++        raise OpenSLOParseError(
++            f"OpenSLO '{name}' objective sets both target and targetPercent; "
++            f"OpenSLO permits exactly one"
++        )
++    if has_percent:
++        return float(objective["targetPercent"])
++    if has_target:
++        return float(objective["target"]) * 100.0
++    raise OpenSLOParseError(
++        f"OpenSLO '{name}' objective missing target (or targetPercent)"
++    )
++
++
+ def _extract_query(metric_source: dict[str, Any]) -> str | None:
+     """Extract PromQL query from an OpenSLO metricSource."""
+     ms_type = metric_source.get("type", "")
+diff --git a/src/nthlayer_common/manifest/parser/v2.py b/src/nthlayer_common/manifest/parser/v2.py
+index d014be3..70bf291 100644
+--- a/src/nthlayer_common/manifest/parser/v2.py
++++ b/src/nthlayer_common/manifest/parser/v2.py
+@@ -410,19 +410,7 @@ def _extract_judgment_target(
+ 
+     Each judgment type has a different target field name in the spec.
+     """
+-    # Type-specific target field names
+-    target_fields: dict[str, str] = {
+-        "reversal_rate": "maximum_reversal_rate",
+-        "high_confidence_failure": "maximum_failure_rate",
+-        "audit_sampling": "audit_completion_rate",
+-        "outcomes": "desired_outcome_rate",
+-        "escalation": "maximum_escalation_rate",
+-        "segments": "maximum_variance_from_overall",
+-        "stability": "maximum_drift",
+-        "calibration": "maximum_brier_score",
+-    }
+-
+-    field_name = target_fields.get(judgment_type)
++    field_name = _JUDGMENT_TARGET_FIELDS.get(judgment_type)
+     if not field_name:
+         raise OpenSRMV2ParseError(
+             f"No target field mapping for judgment_type '{judgment_type}'"
+@@ -434,7 +422,77 @@ def _extract_judgment_target(
+             f"Judgment SLO '{name}' missing target.{field_name}"
+         )
+ 
+-    return float(value)
++    return _judgment_target_percent(field_name, float(value))
++
++
++# The REQUIRED target field for each judgment type, per opensrm/spec/v2's
++# if/then blocks. Module level because contract promises are keyed by judgment
++# TYPE while polarity is a property of the FIELD, so the contract parser needs
++# this indirection too [opensrm-ocvu].
++#
++# `calibration` requires TWO fields (maximum_brier_score and
++# maximum_expected_calibration_error) and only the first is read here —
++# pre-existing, and resolved by decision 3c, which removes calibration from the
++# SLO concept altogether.
++_JUDGMENT_TARGET_FIELDS: dict[str, str] = {
++    "reversal_rate": "maximum_reversal_rate",
++    "high_confidence_failure": "maximum_failure_rate",
++    "audit_sampling": "audit_completion_rate",
++    "outcomes": "desired_outcome_rate",
++    "escalation": "maximum_escalation_rate",
++    "segments": "maximum_variance_from_overall",
++    "stability": "maximum_drift",
++    "calibration": "maximum_brier_score",
++}
++
++# Polarity of each v2 judgment target FIELD, not of the judgment type
++# [opensrm-ocvu]. Keyed by field because that is where the schema puts it:
++# `maximum_*` is a ceiling on badness, `*_completion_rate` / `desired_*` /
++# `*_agreement_rate` are floors on goodness. Keying by TYPE happened to work
++# only because each type currently has one target field — `escalation` already
++# declares a second, `escalation_human_agreement_rate`, which is a FLOOR while
++# its type is in the maxima set. Unread today, so latent rather than live, but
++# a type-keyed map would silently invert it the moment anything read it.
++#
++#   CEILING  (1 - x) * 100   v2 says "at most x go wrong"
++#   FLOOR    x * 100         v2 says "at least x go right"
++#
++# Complementing a floor yields a plausible percentage that INVERTS the
++# constraint — audit_completion_rate 0.95 becomes 5.0 — with no exception and no
++# warning. An earlier draft of the decision record listed only `outcomes` as a
++# floor and would have done exactly that to `audit_sampling`.
++_TARGET_FIELD_IS_CEILING = {
++    "maximum_reversal_rate": True,
++    "maximum_failure_rate": True,
++    "maximum_escalation_rate": True,
++    "escalation_human_agreement_rate": False,
++    "desired_outcome_rate": False,
++    "audit_completion_rate": False,
++}
++
++# Deliberately absent: maximum_variance_from_overall, maximum_drift,
++# maximum_brier_score, maximum_expected_calibration_error. Those are error
++# MAGNITUDES — no complement exists, so there is no SLI-floor reading. They
++# leave the SLO concept entirely under decision 3c (see nthlayer/docs/
++# superpowers/decisions/slo-target-units-and-judgment-semantics.md) and pass
++# through unchanged until then. Converting them would mean inventing semantics
++# the spec does not define, which is how this defect arrived.
++
++
++def _judgment_target_percent(field_name: str, value: float) -> float:
++    """A judgment target as the canonical 0-100 SLI floor.
++
++    Fields absent from _TARGET_FIELD_IS_CEILING pass through unchanged rather
++    than being guessed at: a wrong conversion is indistinguishable from a right
++    one downstream, whereas an unconverted value still trips
++    TargetConventionWarning.
++    """
++    is_ceiling = _TARGET_FIELD_IS_CEILING.get(field_name)
++    if is_ceiling is True:
++        return (1.0 - value) * 100.0
++    if is_ceiling is False:
++        return value * 100.0
++    return value
+ 
+ 
+ def _parse_judgment_measurement(
+@@ -556,10 +614,23 @@ def _parse_contracts(contracts_data: list[dict[str, Any]]) -> list[ReliabilityCo
+         promise_data = c_data.get("promise", {})
+         judgment_promises = []
+         for jtype, threshold in promise_data.get("judgment", {}).items():
++            # Converted by the SAME polarity rule as SLO targets, so both sides
++            # of validate_contracts()' comparison live in one space
++            # [opensrm-ocvu]. Leaving thresholds raw while targets became 0-100
++            # made every judgment SLO report as looser than its contract, since
++            # any percentage exceeds any ratio.
++            #
++            # In SLI-floor space every promise is a FLOOR — "this must stay at
++            # or above X" — so direction is uniformly "above". The previous
++            # hardcoded "below" also carried the same polarity error the targets
++            # had: for outcomes and audit_sampling the declared value is a
++            # minimum, so the comparison ran backwards and never fired for them.
+             judgment_promises.append(JudgmentPromise(
+                 judgment_type=jtype,
+-                threshold=float(threshold),
+-                direction="below",  # contract thresholds are maximums (lower is better)
++                threshold=_judgment_target_percent(
++                    _JUDGMENT_TARGET_FIELDS.get(jtype, ""), float(threshold)
++                ),
++                direction="above",
+             ))
+ 
+         promise = ContractPromise(
+diff --git a/tests/test_manifest_models.py b/tests/test_manifest_models.py
+index da7f131..2247452 100644
+--- a/tests/test_manifest_models.py
++++ b/tests/test_manifest_models.py
+@@ -157,14 +157,28 @@ class TestReliabilityManifest:
+     def test_validate_contracts_judgment(self):
+         m = ReliabilityManifest(
+             name="svc", team="t", tier="critical", type="ai-gate",
++            # target is the canonical 0-100 SLI floor, the shape the v2 parser
++            # now emits. This fixture hand-built target=0.10 — a raw ratio the
++            # parser can no longer produce — and so stayed green while
++            # validate_contracts() was inverted for every judgment SLO
++            # (opensrm-ocvu). Derived from parser output rather than invented:
++            # maximum_reversal_rate 0.10 parses to 90.0.
+             slos=[SLODefinition(
+-                name="rev", target=0.10, slo_type="availability",
++                name="rev", target=90.0, slo_type="availability",
+                 judgment_type="reversal_rate",
+             )],
+             contracts=[ReliabilityContract(
+                 name="svc-api",
++                # Also the parser's shape: thresholds are converted to the same
++                # SLI-floor space as targets, which makes every judgment promise
++                # a floor and direction uniformly "above" (opensrm-ocvu).
++                # maximum_reversal_rate 0.05 -> 95.0. The SLO's 90.0 floor is
++                # below it, so the SLO is looser.
+                 promise=ContractPromise(judgment=[
+-                    JudgmentPromise(judgment_type="reversal_rate", threshold=0.05, direction="below"),
++                    JudgmentPromise(
++                        judgment_type="reversal_rate", threshold=95.0,
++                        direction="above",
++                    ),
+                 ]),
+             )],
+         )
+diff --git a/tests/test_manifest_parser.py b/tests/test_manifest_parser.py
+index 1508699..d341d51 100644
+--- a/tests/test_manifest_parser.py
++++ b/tests/test_manifest_parser.py
+@@ -263,7 +263,8 @@ class TestV2Parser:
+         slo = m.slos[0]
+         assert slo.name == "payment-availability"
+         assert slo.slo_type == "availability"
+-        assert slo.target == 0.9999
++        # 0.9999 declared as an OpenSLO ratio -> 99.99 canonical (opensrm-ocvu)
++        assert slo.target == pytest.approx(99.99)
+         assert slo.total_query is not None
+         assert slo.good_query is not None
+ 
+@@ -273,7 +274,9 @@ class TestV2Parser:
+         assert len(judgment) == 1
+         j = judgment[0]
+         assert j.judgment_type == "reversal_rate"
+-        assert j.target == 0.05
++        # reversal_rate is a MAXIMUM: "at most 5% reversed" is an SLI floor of
++        # 95% not-reversed (opensrm-ocvu)
++        assert j.target == pytest.approx(95.0)
+         assert j.measurement.source == "lineage"
+         assert j.measurement.window == "7d"
+         assert len(j.breach_actions) == 3
+@@ -370,27 +373,49 @@ class TestV2Parser:
+ # acceptance criterion: "All 8 judgment SLO types parseable"). Each type
+ # has a distinct target field name; the v2 parser maps them via
+ # _extract_judgment_target's target_fields dict.
++# (judgment_type, target_field, declared_value, expected_target)
++#
++# expected_target is the canonical 0-100 SLI floor, NOT the declared value.
++# These cases asserted `slo.target == target_value` until opensrm-ocvu — a
++# straight passthrough assertion written from the implementation, which
++# therefore agreed with it. It contradicted this repo's own CLAUDE.md hard
++# rule 1 ("reversal_rate target=98.5"), and nothing noticed because no test
++# compared the v1 and v2 parsers against each other.
++#
++# Three conversions, by polarity:
++#   MAXIMA  (1 - x) * 100   reversal_rate, high_confidence_failure, escalation
++#   FLOORS  x * 100         audit_sampling, outcomes
++#   PASS    unchanged       segments, stability, calibration — error
++#                           magnitudes, no SLI-floor reading; they leave the
++#                           SLO concept under decision 3c
++#
++# escalation 0.10 and outcomes 0.90 both land on 90.0 by DIFFERENT rules.
++# Applying the wrong one gives 10.0 for either, so the pair does not mask a
++# polarity mistake.
+ _JUDGMENT_TYPE_TARGETS = [
+-    ("reversal_rate", "maximum_reversal_rate", 0.05),
+-    ("high_confidence_failure", "maximum_failure_rate", 0.01),
+-    ("audit_sampling", "audit_completion_rate", 0.95),
+-    ("outcomes", "desired_outcome_rate", 0.90),
+-    ("escalation", "maximum_escalation_rate", 0.10),
+-    ("segments", "maximum_variance_from_overall", 0.15),
+-    ("stability", "maximum_drift", 0.05),
+-    ("calibration", "maximum_brier_score", 0.20),
++    ("reversal_rate", "maximum_reversal_rate", 0.05, 95.0),
++    ("high_confidence_failure", "maximum_failure_rate", 0.01, 99.0),
++    ("audit_sampling", "audit_completion_rate", 0.95, 95.0),
++    ("outcomes", "desired_outcome_rate", 0.90, 90.0),
++    ("escalation", "maximum_escalation_rate", 0.10, 90.0),
++    ("segments", "maximum_variance_from_overall", 0.15, 0.15),
++    ("stability", "maximum_drift", 0.05, 0.05),
++    ("calibration", "maximum_brier_score", 0.20, 0.20),
+ ]
+ 
+ 
+-@pytest.mark.parametrize("judgment_type,target_field,target_value", _JUDGMENT_TYPE_TARGETS)
++@pytest.mark.parametrize(
++    "judgment_type,target_field,target_value,expected_target", _JUDGMENT_TYPE_TARGETS
++)
+ def test_v2_parser_handles_each_judgment_slo_type(
+-    judgment_type: str, target_field: str, target_value: float
++    judgment_type: str, target_field: str, target_value: float, expected_target: float
+ ) -> None:
+     """Every judgment_type in OPENSRM-CORE-v2 §5.2 parses via the v2 parser.
+ 
+     Pins opensrm-b22.1 acceptance: "All 8 judgment SLO types parseable".
+-    Each type carries its own target field name; verifies the type
+-    survives the round-trip with the input target value.
++    Each type carries its own target field name; verifies the type survives the
++    round-trip and that its target is converted to the canonical 0-100 SLI
++    floor by the rule its polarity requires (opensrm-ocvu).
+     """
+     data = {
+         "apiVersion": "opensrm.nthlayer.io/v2",
+@@ -416,7 +441,7 @@ def test_v2_parser_handles_each_judgment_slo_type(
+     assert len(judgment_slos) == 1
+     slo = judgment_slos[0]
+     assert slo.judgment_type == judgment_type
+-    assert slo.target == target_value
++    assert slo.target == pytest.approx(expected_target)
+     assert slo.is_judgment_slo() is True
+ 
+ 
+diff --git a/tests/test_target_unit_equivalence.py b/tests/test_target_unit_equivalence.py
+new file mode 100644
+index 0000000..f03a576
+--- /dev/null
++++ b/tests/test_target_unit_equivalence.py
+@@ -0,0 +1,318 @@
++"""v1 and v2 must produce the same SLODefinition.target for the same SLO.
++
++The boundary no test crossed before opensrm-ocvu. Both format parsers had their
++own green suites; nothing compared them, so they were free to disagree — and
++they did, by a factor of 100.
++
++THE RULE, from the decision record
++(nthlayer/docs/superpowers/decisions/slo-target-units-and-judgment-semantics.md):
++
++    SLODefinition.target is a 0-100 percentage, always, for classical AND
++    judgment SLOs. It answers "how good must this be".
++
++    classical           OpenSLO objectives[].target is a ratio -> x100
++                        OpenSLO targetPercent is already 0-100 -> as-is
++    judgment MAXIMA     reversal_rate, high_confidence_failure, escalation
++                        v2 states "at most X reversed" -> (1 - X) * 100
++    judgment FLOORS     outcomes (desired_outcome_rate),
++                        audit_sampling (audit_completion_rate)
++                        v2 already states "at least X" -> X * 100, NO complement
++    error magnitudes    segments, stability, calibration — out of scope here,
++                        they leave the SLO concept entirely under 3c
++
++The maxima/floors distinction is the part that bites. Complementing a floor
++yields a plausible number in the right range that INVERTS the constraint: no
++exception, no warning, just a service judged against the opposite of what its
++author wrote. An earlier draft of the decision record named only `outcomes` as
++a floor and would have silently inverted `audit_sampling`.
++"""
++from __future__ import annotations
++
++import warnings
++
++import pytest
++import yaml
++
++from nthlayer_common.manifest.parser.v2 import (
++    OpenSRMV2ParseError,
++    parse_opensrm_v2,
++)
++from nthlayer_common.manifest.target_validation import TargetConventionWarning
++from nthlayer_common.manifest.v1_compat import convert_v1_to_v2
++
++V1_AVAILABILITY = """
++apiVersion: srm/v1
++kind: ServiceReliabilityManifest
++metadata: {name: svc, team: t, tier: critical}
++spec:
++  type: api
++  slos:
++    availability: {target: 99.9, window: 30d}
++"""
++
++
++def _v2_classical(objective: str) -> dict:
++    return yaml.safe_load(f"""
++apiVersion: opensrm.nthlayer.io/v2
++kind: ServiceManifest
++metadata: {{name: svc, labels: {{tier: critical}}}}
++spec:
++  owner: {{group: 'group:default/t'}}
++  service: {{name: svc, type: api}}
++  slo:
++    - metadata: {{name: availability}}
++      spec:
++        service: svc
++        objectives: [{{{objective}}}]
++""")
++
++
++def _v2_judgment(judgment_type: str, target_block: str) -> dict:
++    return yaml.safe_load(f"""
++apiVersion: opensrm.nthlayer.io/v2
++kind: ServiceManifest
++metadata: {{name: svc, labels: {{tier: critical}}}}
++spec:
++  owner: {{group: 'group:default/t'}}
++  service: {{name: svc, type: ai-gate}}
++  judgment_slo:
++    - metadata: {{name: guard}}
++      spec:
++        service: svc
++        judgment_type: {judgment_type}
++        target: {{{target_block}}}
++""")
++
++
++def _targets(manifest) -> list[float]:
++    return [s.target for s in manifest.slos]
++
++
++# --- classical -------------------------------------------------------------
++
++
++def test_v1_and_v2_agree_on_a_classical_target(tmp_path):
++    """The bead's headline acceptance criterion.
++
++    Measured before the fix: v1 gave 99.9 and v2 gave 0.999 for the same SLO.
++    """
++    from nthlayer_common.manifest import load_manifest
++
++    (tmp_path / "v1.yaml").write_text(V1_AVAILABILITY)
++    v1_target = _targets(
++        load_manifest(tmp_path / "v1.yaml", suppress_deprecation_warning=True)
++    )[0]
++    v2_target = _targets(
++        parse_opensrm_v2(_v2_classical("target: 0.999"), base_dir=tmp_path)
++    )[0]
++
++    assert v1_target == pytest.approx(v2_target), (
++        f"same SLO, different formats: v1={v1_target}, v2={v2_target}"
++    )
++    assert v2_target == pytest.approx(99.9)
++
++
++def test_openslo_target_percent_is_accepted(tmp_path):
++    """OpenSLO defines `targetPercent` alongside `target`; we ignored it.
++
++    A spec-legal manifest using targetPercent parsed as if it had no target at
++    all, or fell through to a default — either way silently wrong.
++    """
++    manifest = parse_opensrm_v2(
++        _v2_classical("targetPercent: 99.9"), base_dir=tmp_path
++    )
++    assert _targets(manifest)[0] == pytest.approx(99.9)
++
++
++def test_declaring_both_target_and_target_percent_is_rejected(tmp_path):
++    """OpenSLO requires exactly one. Accepting both invites silent divergence.
++
++    Asserts the error the CALLER sees: parse_opensrm_v2 wraps OpenSLOParseError
++    in OpenSRMV2ParseError, so matching the inner type would pass only by
++    reaching past the public surface.
++    """
++    with pytest.raises(OpenSRMV2ParseError, match="exactly one"):
++        parse_opensrm_v2(
++            _v2_classical("target: 0.999, targetPercent: 99.9"), base_dir=tmp_path
++        )
++
++
++def test_the_documented_v1_to_v2_migration_round_trips(tmp_path):
++    """v1_compat's docstring promises this and it did not hold.
++
++    `convert_v1_to_v2` divides a v1 percentage to a ratio, then
++    `parse_opensrm_v2` read that ratio back unconverted — so a MIGRATION
++    silently changed a service's SLO target by a factor of 100. Measured at
++    0.999 for a 99.9 manifest before the fix.
++    """
++    v1 = yaml.safe_load(V1_AVAILABILITY)
++    round_tripped = parse_opensrm_v2(convert_v1_to_v2(v1), base_dir=tmp_path)
++    assert _targets(round_tripped)[0] == pytest.approx(99.9)
++
++
++# --- judgment: maxima complement, floors do not ----------------------------
++
++
++@pytest.mark.parametrize(
++    ("judgment_type", "target_block", "expected"),
++    [
++        # MAXIMA — v2 says "at most X"; the SLI floor is its complement.
++        ("reversal_rate", "maximum_reversal_rate: 0.05", 95.0),
++        ("high_confidence_failure", "maximum_failure_rate: 0.02", 98.0),
++        ("escalation", "maximum_escalation_rate: 0.10", 90.0),
++        # FLOORS — v2 already says "at least X". Scale only.
++        ("outcomes", "desired_outcome_rate: 0.95", 95.0),
++        ("audit_sampling", "audit_completion_rate: 0.95", 95.0),
++    ],
++)
++def test_judgment_rate_targets_become_an_sli_floor(
++    judgment_type, target_block, expected, tmp_path
++):
++    manifest = parse_opensrm_v2(
++        _v2_judgment(judgment_type, target_block), base_dir=tmp_path
++    )
++    assert _targets(manifest)[0] == pytest.approx(expected)
++
++
++def test_a_floor_is_not_complemented(tmp_path):
++    """The specific inversion a blanket complement would cause.
++
++    `audit_completion_rate: 0.95` means "at least 95% of sampled decisions get
++    audited". Complemented it becomes 5.0 — still a plausible percentage, and
++    the exact opposite of the author's intent. This asserts the failing value
++    explicitly so the mistake cannot reappear as a passing test.
++    """
++    manifest = parse_opensrm_v2(
++        _v2_judgment("audit_sampling", "audit_completion_rate: 0.95"),
++        base_dir=tmp_path,
++    )
++    target = _targets(manifest)[0]
++    assert target == pytest.approx(95.0)
++    assert target != pytest.approx(5.0), "a floor was complemented"
++
++
++# --- the warning that flagged the parser's own output ----------------------
++
++
++def test_no_target_convention_warning_on_a_valid_v2_manifest(tmp_path):
++    """TargetConventionWarning fired on every ordinary v2 manifest.
++
++    The validator was correctly flagging the parser's own output. Nothing acted
++    on it and the unconverted value flowed on, which is what made this silent.
++
++    MUST go through ``load_manifest``, not ``parse_opensrm_v2``. The warning is
++    emitted by ``warn_target_convention_mismatches`` in ``parser/loader.py``,
++    which only ``load_manifest`` calls — an earlier version of this test used
++    ``parse_opensrm_v2`` and therefore passed against fully pre-fix code. It
++    asserted nothing at all. Verified by re-running it on the unpatched tree:
++    1 passed.
++
++    Scoped to classical and rate SLOs: the error-magnitude types still warn
++    until 3c moves them out of the SLO concept entirely.
++    """
++    from nthlayer_common.manifest import load_manifest
++
++    cases = {
++        "classical.yaml": _v2_classical("target: 0.999"),
++        "judgment.yaml": _v2_judgment(
++            "reversal_rate", "maximum_reversal_rate: 0.05"
++        ),
++    }
++    for filename, doc in cases.items():
++        path = tmp_path / filename
++        path.write_text(yaml.safe_dump(doc))
++        with warnings.catch_warnings():
++            warnings.simplefilter("error", TargetConventionWarning)
++            load_manifest(path, suppress_deprecation_warning=True)
++
++
++# --- out of scope: error magnitudes are untouched until 3c -----------------
++
++
++@pytest.mark.parametrize(
++    ("judgment_type", "target_block"),
++    [
++        ("segments", "maximum_variance_from_overall: 0.15"),
++        ("stability", "maximum_drift: 0.10"),
++        ("calibration", "maximum_brier_score: 0.20"),
++    ],
++)
++def test_error_magnitude_targets_are_left_alone(judgment_type, target_block, tmp_path):
++    """Deliberately unchanged by sections 1 and 2.
++
++    These leave the SLO concept under 3c and have no SLI-floor reading: there is
++    no complement of a drift or a Brier score. Converting them here would be
++    inventing semantics the spec does not define — the very thing that produced
++    this bead. They keep parsing as they do today, and keep warning, until 3c
++    is implemented.
++    """
++    manifest = parse_opensrm_v2(
++        _v2_judgment(judgment_type, target_block), base_dir=tmp_path
++    )
++    raw = float(target_block.split(":")[1])
++    assert _targets(manifest)[0] == pytest.approx(raw)
++
++
++# --- contract validation must compare like with like -----------------------
++
++
++def _v2_with_contract(judgment_type: str, slo_target: str, promise: float) -> dict:
++    return yaml.safe_load(f"""
++apiVersion: opensrm.nthlayer.io/v2
++kind: ServiceManifest
++metadata: {{name: svc, labels: {{tier: critical}}}}
++spec:
++  owner: {{group: 'group:default/t'}}
++  service: {{name: svc, type: ai-gate}}
++  judgment_slo:
++    - metadata: {{name: guard}}
++      spec:
++        service: svc
++        judgment_type: {judgment_type}
++        target: {{{slo_target}}}
++  contracts:
++    - name: caller-contract
++      promise:
++        judgment: {{{judgment_type}: {promise}}}
++""")
++
++
++@pytest.mark.parametrize(
++    ("judgment_type", "slo_target", "promise", "expect_error"),
++    [
++        # MAXIMUM type. Contract promises "at most 5% reversed" -> SLI floor 95.
++        # An SLO at 2% reversed is a floor of 98 — STRICTER, so no error.
++        ("reversal_rate", "maximum_reversal_rate: 0.02", 0.05, False),
++        # An SLO at 8% reversed is a floor of 92 — LOOSER than the contract.
++        ("reversal_rate", "maximum_reversal_rate: 0.08", 0.05, True),
++        # FLOOR type. Contract promises "at least 95% desired outcomes".
++        # An SLO promising only 90% is LOOSER. This case passed silently before
++        # opensrm-ocvu: direction was hardcoded "below", so the comparison ran
++        # backwards for floor types and never fired.
++        ("outcomes", "desired_outcome_rate: 0.90", 0.95, True),
++        ("outcomes", "desired_outcome_rate: 0.98", 0.95, False),
++    ],
++)
++def test_contract_validation_compares_in_sli_floor_space(
++    judgment_type, slo_target, promise, expect_error, tmp_path
++):
++    """Both sides of the comparison must be in the same space.
++
++    `slo.target` became a 0-100 SLI floor under opensrm-ocvu while
++    `JudgmentPromise.threshold` was still parsed as a raw ratio with
++    `direction="below"` hardcoded — so every judgment SLO paired with a contract
++    reported as looser, because any 0-100 value exceeds any ratio. The
++    availability branch beside it already converted its promise
++    (`promise.availability * 100`); the judgment branch did not.
++
++    Thresholds are now converted by the same polarity rule as targets, which
++    makes every judgment promise a floor and `direction` uniformly "above".
++    """
++    manifest = parse_opensrm_v2(
++        _v2_with_contract(judgment_type, slo_target, promise), base_dir=tmp_path
++    )
++    errors = [e for e in manifest.validate_contracts() if "looser" in e]
++    if expect_error:
++        assert errors, "expected a looser-than-contract error, got none"
++    else:
++        assert not errors, f"unexpected error: {errors}"
+diff --git a/uv.lock b/uv.lock
+index 6d001c6..360771a 100644
+--- a/uv.lock
++++ b/uv.lock
+@@ -872,7 +872,7 @@ wheels = [
+ 
+ [[package]]
+ name = "nthlayer-common"
+-version = "2.1.0"
++version = "2.1.2"
+ source = { editable = "." }
+ dependencies = [
+     { name = "anthropic" },

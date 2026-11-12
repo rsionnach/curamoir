@@ -1,0 +1,74 @@
+{
+ "schema_version": 1,
+ "entry": "opensrm-jmy.7",
+ "bead": "opensrm-jmy.7",
+ "record": "jmy.7",
+ "archive": "r5-state-jmy.7-completed.json",
+ "record_repos": [
+  "nthlayer-override-adapter"
+ ],
+ "repo": "nthlayer-override-adapter",
+ "part": null,
+ "base": null,
+ "head": "ed37072eac7c5d480c2c1233f6903009a6fd4dbb",
+ "record_head": null,
+ "synthetic_base": null,
+ "synthetic_head": null,
+ "base_tree": null,
+ "tree_sha": "5c00a08b209ab988f6cc5886849b3f1acab9ecee",
+ "unavailable": "base or head is not in the local repo",
+ "bundle": null,
+ "sequential_steps": 10,
+ "record_sequential_steps": 10,
+ "bead_sequential_steps": 10,
+ "fidelity": "counts_only",
+ "blocking_findings": null,
+ "escape": false,
+ "brief_source": "bead",
+ "roster": {
+  "record_version": 1,
+  "passes": [
+   "correctness",
+   "clarity",
+   "edge-cases",
+   "excellence"
+  ]
+ },
+ "lens_order": [
+  "correctness",
+  "clarity",
+  "edge-cases",
+  "excellence"
+ ],
+ "counts": {},
+ "baseline": {
+  "correctness": {
+   "reviews": 1,
+   "fix_rounds": 0,
+   "findings_first_review": 4,
+   "unattributed": 4,
+   "steps": 1
+  },
+  "clarity": {
+   "reviews": 2,
+   "fix_rounds": 1,
+   "findings_first_review": 5,
+   "unattributed": 5,
+   "steps": 3
+  },
+  "edge-cases": {
+   "reviews": 2,
+   "fix_rounds": 1,
+   "findings_first_review": 4,
+   "unattributed": 4,
+   "steps": 3
+  },
+  "excellence": {
+   "reviews": 2,
+   "fix_rounds": 1,
+   "findings_first_review": 3,
+   "unattributed": 3,
+   "steps": 3
+  }
+ }
+}

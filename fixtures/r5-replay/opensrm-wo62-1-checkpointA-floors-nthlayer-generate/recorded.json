@@ -1,0 +1,88 @@
+{
+ "schema_version": 1,
+ "entry": "opensrm-wo62-1-checkpointA-floors-nthlayer-generate",
+ "fidelity": "recorded",
+ "lens_order": [
+  "correctness",
+  "clarity",
+  "edge-cases",
+  "provenance",
+  "excellence"
+ ],
+ "iterations": {
+  "correctness": 1,
+  "clarity": 1,
+  "edge-cases": 1,
+  "provenance": 1
+ },
+ "rounds": [
+  {
+   "lens": "correctness",
+   "iteration": 1,
+   "recorded_iteration": null,
+   "counts": {
+    "critical": 0,
+    "important": 0,
+    "minor": 2
+   },
+   "findings": null
+  },
+  {
+   "lens": "clarity",
+   "iteration": 1,
+   "recorded_iteration": null,
+   "counts": {
+    "critical": 0,
+    "important": 1,
+    "minor": 3
+   },
+   "findings": [
+    {
+     "lens": "clarity",
+     "severity": "IMPORTANT",
+     "path": null,
+     "start_line": 51,
+     "end_line": 58,
+     "claim": "Inconsistent WHY pattern across repos (nthlayer-generate:51-58 vs the other four). Generate states the 5.4.0 reason and keeps a History: block. Core keeps a Raised to 5.3.1 line. Bench, workers and override-adapter state no reason beyond the version this repo is now built and tested against.",
+     "evidence": null,
+     "fix": null,
+     "fingerprint": "31f18efad805e56b",
+     "verification_level": "asserted",
+     "resolves": null,
+     "regression": false,
+     "status": null,
+     "derived_from": "reviewer_transcript",
+     "extracted_by": "model",
+     "handback_sha256": "ca518b3e6b273bbf616e699cec5e272e3dfc2fb70a99c854a6ed02bce413a52a",
+     "fix_commit": "149fdc9a1cad23292bd832af1c1db36124e0ff68",
+     "reported_path": "nthlayer-generate",
+     "path_in_tree": false
+    }
+   ]
+  },
+  {
+   "lens": "edge_cases",
+   "iteration": 1,
+   "recorded_iteration": null,
+   "counts": {
+    "critical": 0,
+    "important": 0,
+    "minor": 0
+   },
+   "findings": null
+  },
+  {
+   "lens": "provenance",
+   "iteration": 1,
+   "recorded_iteration": null,
+   "counts": {
+    "critical": 0,
+    "important": 0,
+    "minor": 0
+   },
+   "findings": null
+  }
+ ],
+ "cross_repo_findings": [],
+ "escaped": []
+}

@@ -1,0 +1,2889 @@
+diff --git a/tests/golden/data/cli_legacy_apply_text/checkout-service.json b/tests/golden/data/cli_legacy_apply_text/checkout-service.json
+new file mode 100644
+index 0000000..3676642
+--- /dev/null
++++ b/tests/golden/data/cli_legacy_apply_text/checkout-service.json
+@@ -0,0 +1,15 @@
++{
++  "exit": 0,
++  "text": [
++    "",
++    "  ✓ SLOs  3 created",
++    "  ✓ Recording  20 rules",
++    "  ✓ Backstage  1 created",
++    "  ✓ Alerts  26 generated",
++    "  ✓ Dashboard  1 generated",
++    "  ✓ PagerDuty  configured",
++    "",
++    "Applied 52 resources in <duration> → <tmp>/out/",
++    ""
++  ]
++}
+diff --git a/tests/golden/data/cli_legacy_apply_text/checkout-service__pagerduty_failure.json b/tests/golden/data/cli_legacy_apply_text/checkout-service__pagerduty_failure.json
+new file mode 100644
+index 0000000..e22245f
+--- /dev/null
++++ b/tests/golden/data/cli_legacy_apply_text/checkout-service__pagerduty_failure.json
+@@ -0,0 +1,17 @@
++{
++  "exit": 1,
++  "text": [
++    "",
++    "  ✓ SLOs  3 created",
++    "  ✓ Recording  20 rules",
++    "  ✓ Backstage  1 created",
++    "  ✓ Alerts  26 generated",
++    "  ✓ Dashboard  1 generated",
++    "",
++    "Applied 51 resources with errors in <duration>",
++    "",
++    "Warnings:",
++    "  • Pagerduty generation failed: PagerDuty API returned 401 Unauthorized for POST...",
++    ""
++  ]
++}
+diff --git a/tests/golden/data/cli_legacy_apply_text/checkout-service__pagerduty_failure__verbose.json b/tests/golden/data/cli_legacy_apply_text/checkout-service__pagerduty_failure__verbose.json
+new file mode 100644
+index 0000000..d8415ac
+--- /dev/null
++++ b/tests/golden/data/cli_legacy_apply_text/checkout-service__pagerduty_failure__verbose.json
+@@ -0,0 +1,34 @@
++{
++  "exit": 1,
++  "text": [
++    "[1/6] Generating SLOs...",
++    "✅ 3 SLOs created",
++    "[2/6] Generating recording rules...",
++    "✅ 20 recording rules created",
++    "[3/6] Generating Backstage entity...",
++    "✅ 1 Backstage entity created",
++    "[4/6] Generating alerts...",
++    "✅ 26 alerts created",
++    "[5/6] Generating dashboard...",
++    "✅ Dashboard created",
++    "[6/6] Generating PagerDuty...",
++    "",
++    "  ✓ SLOs  3 created",
++    "  ✓ Recording  20 rules",
++    "  ✓ Backstage  1 created",
++    "  ✓ Alerts  26 generated",
++    "  ✓ Dashboard  1 generated",
++    "",
++    "Applied 51 resources with errors in <duration>",
++    "",
++    "Warnings:",
++    "  • Pagerduty generation failed: PagerDuty API returned 401 Unauthorized for POST /teams: the API key is invalid or has been revoked",
++    "",
++    "Generated files:",
++    "  • alerts.yaml (12.7KB)",
++    "  • backstage.json (1.8KB)",
++    "  • dashboard.json (12.7KB)",
++    "  • recording-rules.yaml (4.7KB)",
++    ""
++  ]
++}
+diff --git a/tests/golden/data/cli_legacy_apply_text/checkout-service__pagerduty_failure_short.json b/tests/golden/data/cli_legacy_apply_text/checkout-service__pagerduty_failure_short.json
+new file mode 100644
+index 0000000..877f7f9
+--- /dev/null
++++ b/tests/golden/data/cli_legacy_apply_text/checkout-service__pagerduty_failure_short.json
+@@ -0,0 +1,17 @@
++{
++  "exit": 1,
++  "text": [
++    "",
++    "  ✓ SLOs  3 created",
++    "  ✓ Recording  20 rules",
++    "  ✓ Backstage  1 created",
++    "  ✓ Alerts  26 generated",
++    "  ✓ Dashboard  1 generated",
++    "",
++    "Applied 51 resources with errors in <duration>",
++    "",
++    "Warnings:",
++    "  • Pagerduty generation failed: PagerDuty API returned 503 Service Unavailable",
++    ""
++  ]
++}
+diff --git a/tests/golden/data/cli_legacy_apply_text/checkout-service__verbose.json b/tests/golden/data/cli_legacy_apply_text/checkout-service__verbose.json
+new file mode 100644
+index 0000000..7b53a7a
+--- /dev/null
++++ b/tests/golden/data/cli_legacy_apply_text/checkout-service__verbose.json
+@@ -0,0 +1,34 @@
++{
++  "exit": 0,
++  "text": [
++    "[1/6] Generating SLOs...",
++    "✅ 3 SLOs created",
++    "[2/6] Generating recording rules...",
++    "✅ 20 recording rules created",
++    "[3/6] Generating Backstage entity...",
++    "✅ 1 Backstage entity created",
++    "[4/6] Generating alerts...",
++    "✅ 26 alerts created",
++    "[5/6] Generating dashboard...",
++    "✅ Dashboard created",
++    "[6/6] Generating PagerDuty...",
++    "✅ PagerDuty service created",
++    "",
++    "  ✓ SLOs  3 created",
++    "  ✓ Recording  20 rules",
++    "  ✓ Backstage  1 created",
++    "  ✓ Alerts  26 generated",
++    "  ✓ Dashboard  1 generated",
++    "  ✓ PagerDuty  configured",
++    "",
++    "Applied 52 resources in <duration> → <tmp>/out/",
++    "",
++    "Generated files:",
++    "  • alerts.yaml (12.7KB)",
++    "  • backstage.json (1.8KB)",
++    "  • dashboard.json (12.7KB)",
++    "  • pagerduty-config.json (456B)",
++    "  • recording-rules.yaml (4.7KB)",
++    ""
++  ]
++}
+diff --git a/tests/golden/data/cli_legacy_apply_text/staged__search-api__env-prod__dry_run.json b/tests/golden/data/cli_legacy_apply_text/staged__search-api__env-prod__dry_run.json
+new file mode 100644
+index 0000000..b778476
+--- /dev/null
++++ b/tests/golden/data/cli_legacy_apply_text/staged__search-api__env-prod__dry_run.json
+@@ -0,0 +1,42 @@
++{
++  "exit": 0,
++  "text": [
++    "",
++    "",
++    "╭──╮",
++    "│ Plan: search-api  │",
++    "╰──╯",
++    "",
++    "The following resources will be created:",
++    "",
++    "  ✓ SLOs  3 defined",
++    "  └ search-availability (99.5%, 30d)",
++    "  └ search-latency-p95 (99.0%, 30d)",
++    "  └ search-quality (95.0%, 7d)",
++    "",
++    "  ✓ Alerts  31 generated",
++    "  └ Unknown (14 alerts)",
++    "  └ Unknown (2 alerts)",
++    "  └ Unknown (15 alerts)",
++    "",
++    "  ✓ Dashboard  1 generated",
++    "  └ search-api-dashboard (12+ panels)",
++    "",
++    "  ✓ Recording  30 rules",
++    "  └ search-api_slo_metrics (26 rules)",
++    "  └ search-api_health_metrics (4 rules)",
++    "",
++    "  ✓ PagerDuty  configured",
++    "  └ Team: search",
++    "  └ Schedules: search-primary, search-secondary, search-manager",
++    "  └ Escalation: search-escalation",
++    "  └ Service: search-api (tier=high, support=self)",
++    "",
++    "Total: 14 resources",
++    "",
++    "To apply these changes, run:",
++    "  nthlayer apply <tmp>/_staged/services/search-api.yaml",
++    ""
++  ],
++  "wrote": []
++}
+diff --git a/tests/golden/data/cli_legacy_generator_flags/generate_alerts__dry_run.json b/tests/golden/data/cli_legacy_generator_flags/generate_alerts__dry_run.json
+new file mode 100644
+index 0000000..b889524
+--- /dev/null
++++ b/tests/golden/data/cli_legacy_generator_flags/generate_alerts__dry_run.json
+@@ -0,0 +1,36 @@
++{
++  "exit": 0,
++  "files": {},
++  "text": [
++    "",
++    "╭──╮",
++    "│ Generate Alerts  │",
++    "╰──╯",
++    "",
++    "╭──╮",
++    "│ Generate Alerts  │",
++    "╰──╯",
++    "",
++    "Service: examples/services/checkout-service.yaml",
++    "Mode: Dry run (preview only)",
++    "",
++    "📊 Loading alerts for dependencies: mysql, redis",
++    "  ✓ mysql: 14 alerts (5 fixed)",
++    "  ✓ redis: 12 alerts (7 fixed)",
++    "",
++    "✅ Generated 26 total alerts",
++    "  Breakdown: mysql=14, redis=12",
++    "",
++    "Dry run - alerts not written to file",
++    "",
++    "Sample alerts generated:",
++    "  1. MysqlDown (critical, mysql)",
++    "  2. MysqlTooManyConnections(>80%) (warning, mysql)",
++    "  3. MysqlHighPreparedStatementsUtilization(>80%) (warning, mysql)",
++    "  4. MysqlHighThreadsRunning (warning, mysql)",
++    "  5. MysqlSlaveIoThreadNotRunning (critical, mysql)",
++    "  ... and 21 more",
++    "",
++    "Run without --dry-run to write to <tmp>/out/alerts.yaml"
++  ]
++}
+diff --git a/tests/golden/data/cli_legacy_generator_flags/generate_alerts__links.json b/tests/golden/data/cli_legacy_generator_flags/generate_alerts__links.json
+new file mode 100644
+index 0000000..14d7917
+--- /dev/null
++++ b/tests/golden/data/cli_legacy_generator_flags/generate_alerts__links.json
+@@ -0,0 +1,539 @@
++{
++  "exit": 0,
++  "files": {
++    "alerts.yaml": {
++      "groups": [
++        {
++          "name": "checkout-service-mysql",
++          "rules": [
++            {
++              "alert": "MysqlDown",
++              "annotations": {
++                "channel": "slack",
++                "dashboard": "https://grafana.example.invalid/d/checkout-service-overview?var-service=checkout-service",
++                "description": "MySQL instance is down on {{ $labels.instance }}\n  VALUE = {{ $value }}\n  LABELS = {{ $labels }}",
++                "runbook": "https://runbooks.example.invalid/checkout-service/MysqlDown",
++                "summary": "MySQL down (instance {{ $labels.instance }})"
++              },
++              "expr": "mysql_up == 0",
++              "for": "1m",
++              "labels": {
++                "routing": "self",
++                "service": "checkout-service",
++                "severity": "critical",
++                "team": "commerce",
++                "tier": "critical"
++              }
++            },
++            {
++              "alert": "MysqlHighPreparedStatementsUtilization(>80%)",
++              "annotations": {
++                "channel": "slack",
++                "dashboard": "https://grafana.example.invalid/d/checkout-service-overview?var-service=checkout-service",
++                "description": "High utilization of prepared statements (>80%) on {{ $labels.instance }}\n  VALUE = {{ $value }}\n  LABELS = {{ $labels }}",
++                "runbook": "https://runbooks.example.invalid/checkout-service/MysqlHighPreparedStatementsUtilization(>80%)",
++                "summary": "MySQL high prepared statements utilization (> 80%) (instance {{ $labels.instance }})"
++              },
++              "expr": "max_over_time(mysql_global_status_prepared_stmt_count[1m]) / mysql_global_variables_max_prepared_stmt_count * 100 > 80",
++              "for": "2m",
++              "labels": {
++                "routing": "self",
++                "service": "checkout-service",
++                "severity": "warning",
++                "team": "commerce",
++                "tier": "critical"
++              }
++            },
++            {
++              "alert": "MysqlHighQps",
++              "annotations": {
++                "channel": "slack",
++                "dashboard": "https://grafana.example.invalid/d/checkout-service-overview?var-service=checkout-service",
++                "description": "MySQL is being overload with unusual QPS (> 10k QPS).\n  VALUE = {{ $value }}\n  LABELS = {{ $labels }}",
++                "runbook": "https://runbooks.example.invalid/checkout-service/MysqlHighQps",
++                "summary": "MySQL High QPS (instance {{ $labels.instance }})"
++              },
++              "expr": "irate(mysql_global_status_questions[1m]) > 10000",
++              "for": "2m",
++              "labels": {
++                "routing": "self",
++                "service": "checkout-service",
++                "severity": "info",
++                "team": "commerce",
++                "tier": "critical"
++              }
++            },
++            {
++              "alert": "MysqlHighThreadsRunning",
++              "annotations": {
++                "channel": "slack",
++                "dashboard": "https://grafana.example.invalid/d/checkout-service-overview?var-service=checkout-service",
++                "description": "More than 60% of MySQL connections are in running state on {{ $labels.instance }}\n  VALUE = {{ $value }}\n  LABELS = {{ $labels }}",
++                "runbook": "https://runbooks.example.invalid/checkout-service/MysqlHighThreadsRunning",
++                "summary": "MySQL high threads running (instance {{ $labels.instance }})"
++              },
++              "expr": "max_over_time(mysql_global_status_threads_running[1m]) / mysql_global_variables_max_connections * 100 > 60",
++              "for": "2m",
++              "labels": {
++                "routing": "self",
++                "service": "checkout-service",
++                "severity": "warning",
++                "team": "commerce",
++                "tier": "critical"
++              }
++            },
++            {
++              "alert": "MysqlInnodbForceRecoveryIsEnabled",
++              "annotations": {
++                "channel": "slack",
++                "dashboard": "https://grafana.example.invalid/d/checkout-service-overview?var-service=checkout-service",
++                "description": "MySQL InnoDB force recovery is enabled on {{ $labels.instance }}\n  VALUE = {{ $value }}\n  LABELS = {{ $labels }}",
++                "runbook": "https://runbooks.example.invalid/checkout-service/MysqlInnodbForceRecoveryIsEnabled",
++                "summary": "MySQL InnoDB Force Recovery is enabled (instance {{ $labels.instance }})"
++              },
++              "expr": "mysql_global_variables_innodb_force_recovery != 0",
++              "for": "2m",
++              "labels": {
++                "routing": "self",
++                "service": "checkout-service",
++                "severity": "warning",
++                "team": "commerce",
++                "tier": "critical"
++              }
++            },
++            {
++              "alert": "MysqlInnodbHistory_lenTooLong",
++              "annotations": {
++                "channel": "slack",
++                "dashboard": "https://grafana.example.invalid/d/checkout-service-overview?var-service=checkout-service",
++                "description": "MySQL history_len (undo log) too long on {{ $labels.instance }}\n  VALUE = {{ $value }}\n  LABELS = {{ $labels }}",
++                "runbook": "https://runbooks.example.invalid/checkout-service/MysqlInnodbHistory_lenTooLong",
++                "summary": "MySQL InnoDB history_len too long (instance {{ $labels.instance }})"
++              },
++              "expr": "mysql_info_schema_innodb_metrics_transaction_trx_rseg_history_len > 50000",
++              "for": "2m",
++              "labels": {
++                "routing": "self",
++                "service": "checkout-service",
++                "severity": "warning",
++                "team": "commerce",
++                "tier": "critical"
++              }
++            },
++            {
++              "alert": "MysqlInnodbLogWaits",
++              "annotations": {
++                "channel": "slack",
++                "dashboard": "https://grafana.example.invalid/d/checkout-service-overview?var-service=checkout-service",
++                "description": "MySQL innodb log writes stalling\n  VALUE = {{ $value }}\n  LABELS = {{ $labels }}",
++                "runbook": "https://runbooks.example.invalid/checkout-service/MysqlInnodbLogWaits",
++                "summary": "MySQL InnoDB log waits (instance {{ $labels.instance }})"
++              },
++              "expr": "rate(mysql_global_status_innodb_log_waits[15m]) > 10",
++              "for": "1m",
++              "labels": {
++                "routing": "self",
++                "service": "checkout-service",
++                "severity": "warning",
++                "team": "commerce",
++                "tier": "critical"
++              }
++            },
++            {
++              "alert": "MysqlRestarted",
++              "annotations": {
++                "channel": "slack",
++                "dashboard": "https://grafana.example.invalid/d/checkout-service-overview?var-service=checkout-service",
++                "description": "MySQL has just been restarted, less than one minute ago on {{ $labels.instance }}.\n  VALUE = {{ $value }}\n  LABELS = {{ $labels }}",
++                "runbook": "https://runbooks.example.invalid/checkout-service/MysqlRestarted",
++                "summary": "MySQL restarted (instance {{ $labels.instance }})"
++              },
++              "expr": "mysql_global_status_uptime < 60",
++              "for": "1m",
++              "labels": {
++                "routing": "self",
++                "service": "checkout-service",
++                "severity": "info",
++                "team": "commerce",
++                "tier": "critical"
++              }
++            },
++            {
++              "alert": "MysqlSlaveIoThreadNotRunning",
++              "annotations": {
++                "channel": "slack",
++                "dashboard": "https://grafana.example.invalid/d/checkout-service-overview?var-service=checkout-service",
++                "description": "MySQL Slave IO thread not running on {{ $labels.instance }}\n  VALUE = {{ $value }}\n  LABELS = {{ $labels }}",
++                "runbook": "https://runbooks.example.invalid/checkout-service/MysqlSlaveIoThreadNotRunning",
++                "summary": "MySQL Slave IO thread not running (instance {{ $labels.instance }})"
++              },
++              "expr": "( mysql_slave_status_slave_io_running and ON (instance) mysql_slave_status_master_server_id > 0 ) == 0",
++              "for": "1m",
++              "labels": {
++                "routing": "self",
++                "service": "checkout-service",
++                "severity": "critical",
++                "team": "commerce",
++                "tier": "critical"
++              }
++            },
++            {
++              "alert": "MysqlSlaveReplicationLag",
++              "annotations": {
++                "channel": "slack",
++                "dashboard": "https://grafana.example.invalid/d/checkout-service-overview?var-service=checkout-service",
++                "description": "MySQL replication lag on {{ $labels.instance }}\n  VALUE = {{ $value }}\n  LABELS = {{ $labels }}",
++                "runbook": "https://runbooks.example.invalid/checkout-service/MysqlSlaveReplicationLag",
++                "summary": "MySQL Slave replication lag (instance {{ $labels.instance }})"
++              },
++              "expr": "( (mysql_slave_status_seconds_behind_master - mysql_slave_status_sql_delay) and ON (instance) mysql_slave_status_master_server_id > 0 ) > 30",
++              "for": "1m",
++              "labels": {
++                "routing": "self",
++                "service": "checkout-service",
++                "severity": "critical",
++                "team": "commerce",
++                "tier": "critical"
++              }
++            },
++            {
++              "alert": "MysqlSlaveSqlThreadNotRunning",
++              "annotations": {
++                "channel": "slack",
++                "dashboard": "https://grafana.example.invalid/d/checkout-service-overview?var-service=checkout-service",
++                "description": "MySQL Slave SQL thread not running on {{ $labels.instance }}\n  VALUE = {{ $value }}\n  LABELS = {{ $labels }}",
++                "runbook": "https://runbooks.example.invalid/checkout-service/MysqlSlaveSqlThreadNotRunning",
++                "summary": "MySQL Slave SQL thread not running (instance {{ $labels.instance }})"
++              },
++              "expr": "( mysql_slave_status_slave_sql_running and ON (instance) mysql_slave_status_master_server_id > 0) == 0",
++              "for": "1m",
++              "labels": {
++                "routing": "self",
++                "service": "checkout-service",
++                "severity": "critical",
++                "team": "commerce",
++                "tier": "critical"
++              }
++            },
++            {
++              "alert": "MysqlSlowQueries",
++              "annotations": {
++                "channel": "slack",
++                "dashboard": "https://grafana.example.invalid/d/checkout-service-overview?var-service=checkout-service",
++                "description": "MySQL server mysql has some new slow query.\n  VALUE = {{ $value }}\n  LABELS = {{ $labels }}",
++                "runbook": "https://runbooks.example.invalid/checkout-service/MysqlSlowQueries",
++                "summary": "MySQL slow queries (instance {{ $labels.instance }})"
++              },
++              "expr": "increase(mysql_global_status_slow_queries[1m]) > 0",
++              "for": "2m",
++              "labels": {
++                "routing": "self",
++                "service": "checkout-service",
++                "severity": "warning",
++                "team": "commerce",
++                "tier": "critical"
++              }
++            },
++            {
++              "alert": "MysqlTooManyConnections(>80%)",
++              "annotations": {
++                "channel": "slack",
++                "dashboard": "https://grafana.example.invalid/d/checkout-service-overview?var-service=checkout-service",
++                "description": "More than 80% of MySQL connections are in use on {{ $labels.instance }}\n  VALUE = {{ $value }}\n  LABELS = {{ $labels }}",
++                "runbook": "https://runbooks.example.invalid/checkout-service/MysqlTooManyConnections(>80%)",
++                "summary": "MySQL too many connections (> 80%) (instance {{ $labels.instance }})"
++              },
++              "expr": "max_over_time(mysql_global_status_threads_connected[1m]) / mysql_global_variables_max_connections * 100 > 80",
++              "for": "2m",
++              "labels": {
++                "routing": "self",
++                "service": "checkout-service",
++                "severity": "warning",
++                "team": "commerce",
++                "tier": "critical"
++              }
++            },
++            {
++              "alert": "MysqlTooManyOpenFiles",
++              "annotations": {
++                "channel": "slack",
++                "dashboard": "https://grafana.example.invalid/d/checkout-service-overview?var-service=checkout-service",
++                "description": "MySQL has too many open files, consider increase variables open_files_limit on {{ $labels.instance }}.\n  VALUE = {{ $value }}\n  LABELS = {{ $labels }}",
++                "runbook": "https://runbooks.example.invalid/checkout-service/MysqlTooManyOpenFiles",
++                "summary": "MySQL too many open files (instance {{ $labels.instance }})"
++              },
++              "expr": "mysql_global_status_innodb_num_open_files / mysql_global_variables_open_files_limit * 100 > 75",
++              "for": "2m",
++              "labels": {
++                "routing": "self",
++                "service": "checkout-service",
++                "severity": "warning",
++                "team": "commerce",
++                "tier": "critical"
++              }
++            }
++          ]
++        },
++        {
++          "name": "checkout-service-redis",
++          "rules": [
++            {
++              "alert": "RedisClusterFlapping",
++              "annotations": {
++                "channel": "slack",
++                "dashboard": "https://grafana.example.invalid/d/checkout-service-overview?var-service=checkout-service",
++                "description": "Changes have been detected in Redis replica connection. This can occur when replica nodes lose connection to the master and reconnect (a.k.a flapping).\n  VALUE = {{ $value }}\n  LABELS = {{ $labels }}",
++                "runbook": "https://runbooks.example.invalid/checkout-service/RedisClusterFlapping",
++                "summary": "Redis cluster flapping (instance {{ $labels.instance }})"
++              },
++              "expr": "changes(redis_connected_slaves[1m]) > 1",
++              "for": "2m",
++              "labels": {
++                "routing": "self",
++                "service": "checkout-service",
++                "severity": "critical",
++                "team": "commerce",
++                "tier": "critical"
++              }
++            },
++            {
++              "alert": "RedisDisconnectedSlaves",
++              "annotations": {
++                "channel": "slack",
++                "dashboard": "https://grafana.example.invalid/d/checkout-service-overview?var-service=checkout-service",
++                "description": "Redis not replicating for all slaves. Consider reviewing the redis replication status.\n  VALUE = {{ $value }}\n  LABELS = {{ $labels }}",
++                "runbook": "https://runbooks.example.invalid/checkout-service/RedisDisconnectedSlaves",
++                "summary": "Redis disconnected slaves (instance [instance unavailable])"
++              },
++              "expr": "count without (instance, job) (redis_connected_slaves) - sum without (instance, job) (redis_connected_slaves) - 1 > 0",
++              "for": "1m",
++              "labels": {
++                "routing": "self",
++                "service": "checkout-service",
++                "severity": "critical",
++                "team": "commerce",
++                "tier": "critical"
++              }
++            },
++            {
++              "alert": "RedisDown",
++              "annotations": {
++                "channel": "slack",
++                "dashboard": "https://grafana.example.invalid/d/checkout-service-overview?var-service=checkout-service",
++                "description": "Redis instance is down\n  VALUE = {{ $value }}\n  LABELS = {{ $labels }}",
++                "runbook": "https://runbooks.example.invalid/checkout-service/RedisDown",
++                "summary": "Redis down (instance {{ $labels.instance }})"
++              },
++              "expr": "redis_up == 0",
++              "for": "1m",
++              "labels": {
++                "routing": "self",
++                "service": "checkout-service",
++                "severity": "critical",
++                "team": "commerce",
++                "tier": "critical"
++              }
++            },
++            {
++              "alert": "RedisMissingBackup",
++              "annotations": {
++                "channel": "slack",
++                "dashboard": "https://grafana.example.invalid/d/checkout-service-overview?var-service=checkout-service",
++                "description": "Redis has not been backuped for 24 hours\n  VALUE = {{ $value }}\n  LABELS = {{ $labels }}",
++                "runbook": "https://runbooks.example.invalid/checkout-service/RedisMissingBackup",
++                "summary": "Redis missing backup (instance {{ $labels.instance }})"
++              },
++              "expr": "time() - redis_rdb_last_save_timestamp_seconds > 60 * 60 * 24",
++              "for": "1m",
++              "labels": {
++                "routing": "self",
++                "service": "checkout-service",
++                "severity": "critical",
++                "team": "commerce",
++                "tier": "critical"
++              }
++            },
++            {
++              "alert": "RedisMissingMaster",
++              "annotations": {
++                "channel": "slack",
++                "dashboard": "https://grafana.example.invalid/d/checkout-service-overview?var-service=checkout-service",
++                "description": "Redis cluster has no node marked as master.\n  VALUE = {{ $value }}\n  LABELS = {{ $labels }}",
++                "runbook": "https://runbooks.example.invalid/checkout-service/RedisMissingMaster",
++                "summary": "Redis missing master (instance [instance unavailable])"
++              },
++              "expr": "(count(redis_instance_info{role=\"master\"}) or vector(0)) < 1",
++              "for": "1m",
++              "labels": {
++                "routing": "self",
++                "service": "checkout-service",
++                "severity": "critical",
++                "team": "commerce",
++                "tier": "critical"
++              }
++            },
++            {
++              "alert": "RedisNotEnoughConnections",
++              "annotations": {
++                "channel": "slack",
++                "dashboard": "https://grafana.example.invalid/d/checkout-service-overview?var-service=checkout-service",
++                "description": "Redis instance should have more connections (> 5)\n  VALUE = {{ $value }}\n  LABELS = {{ $labels }}",
++                "runbook": "https://runbooks.example.invalid/checkout-service/RedisNotEnoughConnections",
++                "summary": "Redis not enough connections (instance {{ $labels.instance }})"
++              },
++              "expr": "redis_connected_clients < 5",
++              "for": "2m",
++              "labels": {
++                "routing": "self",
++                "service": "checkout-service",
++                "severity": "warning",
++                "team": "commerce",
++                "tier": "critical"
++              }
++            },
++            {
++              "alert": "RedisOutOfConfiguredMaxmemory",
++              "annotations": {
++                "channel": "slack",
++                "dashboard": "https://grafana.example.invalid/d/checkout-service-overview?var-service=checkout-service",
++                "description": "Redis is running out of configured maxmemory (> 90%)\n  VALUE = {{ $value }}\n  LABELS = {{ $labels }}",
++                "runbook": "https://runbooks.example.invalid/checkout-service/RedisOutOfConfiguredMaxmemory",
++                "summary": "Redis out of configured maxmemory (instance {{ $labels.instance }})"
++              },
++              "expr": "redis_memory_used_bytes / redis_memory_max_bytes * 100 > 90 and on(instance) redis_memory_max_bytes > 0",
++              "for": "2m",
++              "labels": {
++                "routing": "self",
++                "service": "checkout-service",
++                "severity": "warning",
++                "team": "commerce",
++                "tier": "critical"
++              }
++            },
++            {
++              "alert": "RedisOutOfSystemMemory",
++              "annotations": {
++                "channel": "slack",
++                "dashboard": "https://grafana.example.invalid/d/checkout-service-overview?var-service=checkout-service",
++                "description": "Redis is running out of system memory (> 90%)\n  VALUE = {{ $value }}\n  LABELS = {{ $labels }}",
++                "runbook": "https://runbooks.example.invalid/checkout-service/RedisOutOfSystemMemory",
++                "summary": "Redis out of system memory (instance {{ $labels.instance }})"
++              },
++              "expr": "redis_memory_used_bytes / redis_total_system_memory_bytes * 100 > 90",
++              "for": "2m",
++              "labels": {
++                "routing": "self",
++                "service": "checkout-service",
++                "severity": "warning",
++                "team": "commerce",
++                "tier": "critical"
++              }
++            },
++            {
++              "alert": "RedisRejectedConnections",
++              "annotations": {
++                "channel": "slack",
++                "dashboard": "https://grafana.example.invalid/d/checkout-service-overview?var-service=checkout-service",
++                "description": "Some connections to Redis has been rejected\n  VALUE = {{ $value }}\n  LABELS = {{ $labels }}",
++                "runbook": "https://runbooks.example.invalid/checkout-service/RedisRejectedConnections",
++                "summary": "Redis rejected connections (instance {{ $labels.instance }})"
++              },
++              "expr": "increase(redis_rejected_connections_total[1m]) > 0",
++              "for": "1m",
++              "labels": {
++                "routing": "self",
++                "service": "checkout-service",
++                "severity": "critical",
++                "team": "commerce",
++                "tier": "critical"
++              }
++            },
++            {
++              "alert": "RedisReplicationBroken",
++              "annotations": {
++                "channel": "slack",
++                "dashboard": "https://grafana.example.invalid/d/checkout-service-overview?var-service=checkout-service",
++                "description": "Redis instance lost a slave\n  VALUE = {{ $value }}\n  LABELS = {{ $labels }}",
++                "runbook": "https://runbooks.example.invalid/checkout-service/RedisReplicationBroken",
++                "summary": "Redis replication broken (instance {{ $labels.instance }})"
++              },
++              "expr": "delta(redis_connected_slaves[1m]) < 0",
++              "for": "1m",
++              "labels": {
++                "routing": "self",
++                "service": "checkout-service",
++                "severity": "critical",
++                "team": "commerce",
++                "tier": "critical"
++              }
++            },
++            {
++              "alert": "RedisTooManyConnections",
++              "annotations": {
++                "channel": "slack",
++                "dashboard": "https://grafana.example.invalid/d/checkout-service-overview?var-service=checkout-service",
++                "description": "Redis is running out of connections (> 90% used)\n  VALUE = {{ $value }}\n  LABELS = {{ $labels }}",
++                "runbook": "https://runbooks.example.invalid/checkout-service/RedisTooManyConnections",
++                "summary": "Redis too many connections (instance {{ $labels.instance }})"
++              },
++              "expr": "redis_connected_clients / redis_config_maxclients * 100 > 90",
++              "for": "2m",
++              "labels": {
++                "routing": "self",
++                "service": "checkout-service",
++                "severity": "warning",
++                "team": "commerce",
++                "tier": "critical"
++              }
++            },
++            {
++              "alert": "RedisTooManyMasters",
++              "annotations": {
++                "channel": "slack",
++                "dashboard": "https://grafana.example.invalid/d/checkout-service-overview?var-service=checkout-service",
++                "description": "Redis cluster has too many nodes marked as master.\n  VALUE = {{ $value }}\n  LABELS = {{ $labels }}",
++                "runbook": "https://runbooks.example.invalid/checkout-service/RedisTooManyMasters",
++                "summary": "Redis too many masters (instance [instance unavailable])"
++              },
++              "expr": "count(redis_instance_info{role=\"master\"}) > 1",
++              "for": "1m",
++              "labels": {
++                "routing": "self",
++                "service": "checkout-service",
++                "severity": "critical",
++                "team": "commerce",
++                "tier": "critical"
++              }
++            }
++          ]
++        }
++      ]
++    }
++  },
++  "text": [
++    "",
++    "╭──╮",
++    "│ Generate Alerts  │",
++    "╰──╯",
++    "",
++    "╭──╮",
++    "│ Generate Alerts  │",
++    "╰──╯",
++    "",
++    "Service: examples/services/checkout-service.yaml",
++    "Output: <tmp>/out/alerts.yaml",
++    "",
++    "📊 Loading alerts for dependencies: mysql, redis",
++    "  ✓ mysql: 14 alerts (5 fixed)",
++    "  ✓ redis: 12 alerts (7 fixed)",
++    "",
++    "✅ Generated 26 total alerts",
++    "  Breakdown: mysql=14, redis=12",
++    "  Written to: <tmp>/out/alerts.yaml",
++    "",
++    "Next steps:",
++    "  1. Review generated alerts: cat <tmp>/out/alerts.yaml",
++    "  2. Deploy to Prometheus: kubectl apply -f <tmp>/out/alerts.yaml",
++    "  3. Verify alerts are firing: check Prometheus UI"
++  ]
++}
+diff --git a/tests/golden/data/cli_legacy_generator_flags/generate_dashboard__dry_run.json b/tests/golden/data/cli_legacy_generator_flags/generate_dashboard__dry_run.json
+new file mode 100644
+index 0000000..58dfb69
+--- /dev/null
++++ b/tests/golden/data/cli_legacy_generator_flags/generate_dashboard__dry_run.json
+@@ -0,0 +1,551 @@
++{
++  "dashboard": {
++    "dashboard": {
++      "annotations": {},
++      "description": "Auto-generated dashboard for checkout-service service",
++      "editable": true,
++      "fiscalYearStartMonth": 0,
++      "graphTooltip": 0,
++      "panels": [
++        {
++          "collapsed": false,
++          "gridPos": {
++            "h": 1,
++            "w": 24,
++            "x": 0,
++            "y": 0
++          },
++          "id": "<masked>",
++          "panels": [],
++          "title": "SLO Metrics",
++          "type": "row"
++        },
++        {
++          "description": "Target: 99.95%",
++          "fieldConfig": {
++            "defaults": {},
++            "overrides": []
++          },
++          "gridPos": {
++            "h": 9,
++            "w": 12,
++            "x": 0,
++            "y": 1
++          },
++          "options": null,
++          "repeatDirection": "h",
++          "targets": [
++            {
++              "expr": "sum(rate(http_requests_total{service=\"checkout-service\"}[5m]))",
++              "refId": "A"
++            }
++          ],
++          "title": "availability",
++          "transformations": [],
++          "transparent": false,
++          "type": "timeseries"
++        },
++        {
++          "description": "Target: 99.0%",
++          "fieldConfig": {
++            "defaults": {},
++            "overrides": []
++          },
++          "gridPos": {
++            "h": 9,
++            "w": 12,
++            "x": 12,
++            "y": 1
++          },
++          "options": null,
++          "repeatDirection": "h",
++          "targets": [
++            {
++              "expr": "sum(rate(http_requests_total{service=\"checkout-service\"}[5m]))",
++              "refId": "A"
++            }
++          ],
++          "title": "latency-p95",
++          "transformations": [],
++          "transparent": false,
++          "type": "timeseries"
++        },
++        {
++          "description": "Target: 95.0%",
++          "fieldConfig": {
++            "defaults": {},
++            "overrides": []
++          },
++          "gridPos": {
++            "h": 9,
++            "w": 12,
++            "x": 0,
++            "y": 10
++          },
++          "options": null,
++          "repeatDirection": "h",
++          "targets": [
++            {
++              "expr": "sum(rate(http_requests_total{service=\"checkout-service\"}[5m]))",
++              "refId": "A"
++            }
++          ],
++          "title": "latency-p99",
++          "transformations": [],
++          "transparent": false,
++          "type": "timeseries"
++        },
++        {
++          "collapsed": false,
++          "gridPos": {
++            "h": 1,
++            "w": 24,
++            "x": 0,
++            "y": 19
++          },
++          "id": "<masked>",
++          "panels": [],
++          "title": "Service Health",
++          "type": "row"
++        },
++        {
++          "description": "Total requests per second",
++          "fieldConfig": {
++            "defaults": {},
++            "overrides": []
++          },
++          "gridPos": {
++            "h": 9,
++            "w": 12,
++            "x": 0,
++            "y": 20
++          },
++          "options": null,
++          "repeatDirection": "h",
++          "targets": [
++            {
++              "expr": "sum(rate(http_requests_total{service=\"checkout-service\"}[5m]))",
++              "legendFormat": "{{http}}",
++              "refId": "A"
++            }
++          ],
++          "title": "Request Rate",
++          "transformations": [],
++          "transparent": false,
++          "type": "timeseries"
++        },
++        {
++          "description": "Percentage of requests returning 5xx errors",
++          "fieldConfig": {
++            "defaults": {},
++            "overrides": []
++          },
++          "gridPos": {
++            "h": 9,
++            "w": 12,
++            "x": 12,
++            "y": 20
++          },
++          "options": null,
++          "repeatDirection": "h",
++          "targets": [
++            {
++              "expr": "sum(rate(http_requests_total{service=\"checkout-service\",status=~\"5..\"}[5m])) / sum(rate(http_requests_total{service=\"checkout-service\"}[5m])) * 100",
++              "legendFormat": "error %",
++              "refId": "A"
++            }
++          ],
++          "title": "Error Rate",
++          "transformations": [],
++          "transparent": false,
++          "type": "timeseries"
++        },
++        {
++          "description": "95th percentile request duration",
++          "fieldConfig": {
++            "defaults": {},
++            "overrides": []
++          },
++          "gridPos": {
++            "h": 9,
++            "w": 12,
++            "x": 0,
++            "y": 29
++          },
++          "options": null,
++          "repeatDirection": "h",
++          "targets": [
++            {
++              "expr": "histogram_quantile(0.95, sum by (le) (rate(http_request_duration_seconds_bucket{service=\"checkout-service\"}[5m])))",
++              "legendFormat": "{{http}}",
++              "refId": "A"
++            }
++          ],
++          "title": "Request Latency (p95)",
++          "transformations": [],
++          "transparent": false,
++          "type": "timeseries"
++        },
++        {
++          "collapsed": false,
++          "gridPos": {
++            "h": 1,
++            "w": 24,
++            "x": 0,
++            "y": 38
++          },
++          "id": "<masked>",
++          "panels": [],
++          "title": "Dependencies",
++          "type": "row"
++        },
++        {
++          "description": "Active database connections vs max connections limit",
++          "fieldConfig": {
++            "defaults": {},
++            "overrides": []
++          },
++          "gridPos": {
++            "h": 9,
++            "w": 12,
++            "x": 0,
++            "y": 39
++          },
++          "options": null,
++          "repeatDirection": "h",
++          "targets": [
++            {
++              "expr": "mysql_global_status_threads_connected{service=\"mysql\"}",
++              "legendFormat": "Current connections",
++              "refId": "A"
++            },
++            {
++              "expr": "mysql_global_variables_max_connections{service=\"mysql\"}",
++              "legendFormat": "Max connections",
++              "refId": "B"
++            }
++          ],
++          "title": "MySQL Connections",
++          "transformations": [],
++          "transparent": false,
++          "type": "timeseries"
++        },
++        {
++          "description": "Total queries executed per second",
++          "fieldConfig": {
++            "defaults": {},
++            "overrides": []
++          },
++          "gridPos": {
++            "h": 9,
++            "w": 12,
++            "x": 12,
++            "y": 39
++          },
++          "options": null,
++          "repeatDirection": "h",
++          "targets": [
++            {
++              "expr": "rate(mysql_global_status_queries_total{service=\"mysql\"}[5m])",
++              "legendFormat": "{{mysql}}",
++              "refId": "A"
++            }
++          ],
++          "title": "MySQL Queries/sec",
++          "transformations": [],
++          "transparent": false,
++          "type": "timeseries"
++        },
++        {
++          "description": "Connection pool utilization percentage",
++          "fieldConfig": {
++            "defaults": {},
++            "overrides": []
++          },
++          "gridPos": {
++            "h": 9,
++            "w": 12,
++            "x": 0,
++            "y": 48
++          },
++          "options": null,
++          "repeatDirection": "h",
++          "targets": [
++            {
++              "expr": "mysql_global_status_threads_connected{service=\"mysql\"} / \non() mysql_global_variables_max_connections{service=\"mysql\"} * 100",
++              "legendFormat": "Pool usage %",
++              "refId": "A"
++            }
++          ],
++          "title": "Connection Pool Utilization",
++          "transformations": [],
++          "transparent": false,
++          "type": "gauge"
++        },
++        {
++          "description": "Redis memory consumption",
++          "fieldConfig": {
++            "defaults": {},
++            "overrides": []
++          },
++          "gridPos": {
++            "h": 9,
++            "w": 12,
++            "x": 12,
++            "y": 48
++          },
++          "options": null,
++          "repeatDirection": "h",
++          "targets": [
++            {
++              "expr": "redis_memory_used_bytes{service=\"redis\"}",
++              "legendFormat": "{{redis}}",
++              "refId": "A"
++            }
++          ],
++          "title": "Redis Memory Usage",
++          "transformations": [],
++          "transparent": false,
++          "type": "timeseries"
++        },
++        {
++          "description": "Cache hit rate - should be >90% for good performance",
++          "fieldConfig": {
++            "defaults": {},
++            "overrides": []
++          },
++          "gridPos": {
++            "h": 9,
++            "w": 12,
++            "x": 0,
++            "y": 57
++          },
++          "options": null,
++          "repeatDirection": "h",
++          "targets": [
++            {
++              "expr": "sum(rate(cache_hits_total{service=\"redis\"}[5m])) /\n(sum(rate(cache_hits_total{service=\"redis\"}[5m])) +\nsum(rate(cache_misses_total{service=\"redis\"}[5m]))) * 100",
++              "legendFormat": "Hit rate %",
++              "refId": "A"
++            }
++          ],
++          "title": "Cache Hit Rate",
++          "transformations": [],
++          "transparent": false,
++          "type": "gauge"
++        },
++        {
++          "description": "Number of connected clients",
++          "fieldConfig": {
++            "defaults": {},
++            "overrides": []
++          },
++          "gridPos": {
++            "h": 9,
++            "w": 12,
++            "x": 12,
++            "y": 57
++          },
++          "options": null,
++          "repeatDirection": "h",
++          "targets": [
++            {
++              "expr": "redis_connected_clients{service=\"redis\"}",
++              "legendFormat": "{{redis}}",
++              "refId": "A"
++            }
++          ],
++          "title": "Connected Clients",
++          "transformations": [],
++          "transparent": false,
++          "type": "timeseries"
++        },
++        {
++          "description": "Cache hits and misses per second",
++          "fieldConfig": {
++            "defaults": {},
++            "overrides": []
++          },
++          "gridPos": {
++            "h": 9,
++            "w": 12,
++            "x": 0,
++            "y": 66
++          },
++          "options": null,
++          "repeatDirection": "h",
++          "targets": [
++            {
++              "expr": "rate(cache_hits_total{service=\"redis\"}[5m])",
++              "legendFormat": "Hits/sec",
++              "refId": "A"
++            },
++            {
++              "expr": "rate(cache_misses_total{service=\"redis\"}[5m])",
++              "legendFormat": "Misses/sec",
++              "refId": "B"
++            }
++          ],
++          "title": "Cache Hits vs Misses",
++          "transformations": [],
++          "transparent": false,
++          "type": "timeseries"
++        },
++        {
++          "description": "Keys evicted due to memory pressure - should be zero",
++          "fieldConfig": {
++            "defaults": {},
++            "overrides": []
++          },
++          "gridPos": {
++            "h": 9,
++            "w": 12,
++            "x": 12,
++            "y": 66
++          },
++          "options": null,
++          "repeatDirection": "h",
++          "targets": [
++            {
++              "expr": "rate(redis_evicted_keys_total{service=\"redis\"}[5m])",
++              "legendFormat": "{{redis}}",
++              "refId": "A"
++            }
++          ],
++          "title": "Evicted Keys",
++          "transformations": [],
++          "transparent": false,
++          "type": "timeseries"
++        },
++        {
++          "description": "Keys expired per second due to TTL",
++          "fieldConfig": {
++            "defaults": {},
++            "overrides": []
++          },
++          "gridPos": {
++            "h": 9,
++            "w": 12,
++            "x": 0,
++            "y": 75
++          },
++          "options": null,
++          "repeatDirection": "h",
++          "targets": [
++            {
++              "expr": "rate(redis_expired_keys_total{service=\"redis\"}[5m])",
++              "legendFormat": "{{redis}}",
++              "refId": "A"
++            }
++          ],
++          "title": "Expired Keys",
++          "transformations": [],
++          "transparent": false,
++          "type": "timeseries"
++        },
++        {
++          "description": "Redis commands processed per second",
++          "fieldConfig": {
++            "defaults": {},
++            "overrides": []
++          },
++          "gridPos": {
++            "h": 9,
++            "w": 12,
++            "x": 12,
++            "y": 75
++          },
++          "options": null,
++          "repeatDirection": "h",
++          "targets": [
++            {
++              "expr": "rate(redis_commands_processed_total{service=\"redis\"}[5m])",
++              "legendFormat": "{{redis}}",
++              "refId": "A"
++            }
++          ],
++          "title": "Commands/sec",
++          "transformations": [],
++          "transparent": false,
++          "type": "timeseries"
++        },
++        {
++          "description": "Total number of keys in database",
++          "fieldConfig": {
++            "defaults": {},
++            "overrides": []
++          },
++          "gridPos": {
++            "h": 9,
++            "w": 12,
++            "x": 0,
++            "y": 84
++          },
++          "options": null,
++          "repeatDirection": "h",
++          "targets": [
++            {
++              "expr": "sum(redis_db_keys{service=\"redis\"})",
++              "legendFormat": "{{redis}}",
++              "refId": "A"
++            }
++          ],
++          "title": "Total Keys",
++          "transformations": [],
++          "transparent": false,
++          "type": "stat"
++        }
++      ],
++      "schemaVersion": 36,
++      "style": "dark",
++      "tags": [
++        "commerce",
++        "critical",
++        "api"
++      ],
++      "templating": {},
++      "time": {
++        "from": "now-6h",
++        "to": "now"
++      },
++      "timezone": "browser",
++      "title": "checkout-service - Service Dashboard",
++      "uid": "checkout-service-overview"
++    },
++    "message": "Auto-generated dashboard for checkout-service",
++    "overwrite": true
++  },
++  "exit": 0,
++  "files": {},
++  "text": [
++    "",
++    "╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮",
++    "│ Generate Grafana Dashboard                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   │",
++    "╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯",
++    "",
++    "Service: examples/services/checkout-service.yaml",
++    "Mode: Dry run (preview only)",
++    "",
++    "Parsing service specification...",
++    "   Service: checkout-service",
++    "   Team: commerce",
++    "   Tier: critical",
++    "   Type: api",
++    "   Resources: 6 defined",
++    "",
++    "   SLOs: 3",
++    "   Dependencies: 1",
++    "",
++    "Building dashboard...",
++    "   Mode: Overview panels (key metrics)",
++    "   Title: checkout-service",
++    "   UID: checkout-service-overview",
++    "   Panels: 0",
++    "",
++    "Dashboard JSON (dry run):",
++    "",
++    "",
++    "",
++    "Dashboard generated successfully (dry run)"
++  ]
++}
+diff --git a/tests/golden/data/cli_legacy_generator_flags/generate_dashboard__full_panels.json b/tests/golden/data/cli_legacy_generator_flags/generate_dashboard__full_panels.json
+new file mode 100644
+index 0000000..3669b4c
+--- /dev/null
++++ b/tests/golden/data/cli_legacy_generator_flags/generate_dashboard__full_panels.json
+@@ -0,0 +1,551 @@
++{
++  "exit": 0,
++  "files": {
++    "dashboard.json": {
++      "dashboard": {
++        "annotations": {},
++        "description": "Auto-generated dashboard for checkout-service service",
++        "editable": true,
++        "fiscalYearStartMonth": 0,
++        "graphTooltip": 0,
++        "panels": [
++          {
++            "collapsed": false,
++            "gridPos": {
++              "h": 1,
++              "w": 24,
++              "x": 0,
++              "y": 0
++            },
++            "id": "<masked>",
++            "panels": [],
++            "title": "SLO Metrics",
++            "type": "row"
++          },
++          {
++            "description": "Target: 99.95%",
++            "fieldConfig": {
++              "defaults": {},
++              "overrides": []
++            },
++            "gridPos": {
++              "h": 9,
++              "w": 12,
++              "x": 0,
++              "y": 1
++            },
++            "options": null,
++            "repeatDirection": "h",
++            "targets": [
++              {
++                "expr": "sum(rate(http_requests_total{service=\"checkout-service\"}[5m]))",
++                "refId": "A"
++              }
++            ],
++            "title": "availability",
++            "transformations": [],
++            "transparent": false,
++            "type": "timeseries"
++          },
++          {
++            "description": "Target: 99.0%",
++            "fieldConfig": {
++              "defaults": {},
++              "overrides": []
++            },
++            "gridPos": {
++              "h": 9,
++              "w": 12,
++              "x": 12,
++              "y": 1
++            },
++            "options": null,
++            "repeatDirection": "h",
++            "targets": [
++              {
++                "expr": "sum(rate(http_requests_total{service=\"checkout-service\"}[5m]))",
++                "refId": "A"
++              }
++            ],
++            "title": "latency-p95",
++            "transformations": [],
++            "transparent": false,
++            "type": "timeseries"
++          },
++          {
++            "description": "Target: 95.0%",
++            "fieldConfig": {
++              "defaults": {},
++              "overrides": []
++            },
++            "gridPos": {
++              "h": 9,
++              "w": 12,
++              "x": 0,
++              "y": 10
++            },
++            "options": null,
++            "repeatDirection": "h",
++            "targets": [
++              {
++                "expr": "sum(rate(http_requests_total{service=\"checkout-service\"}[5m]))",
++                "refId": "A"
++              }
++            ],
++            "title": "latency-p99",
++            "transformations": [],
++            "transparent": false,
++            "type": "timeseries"
++          },
++          {
++            "collapsed": false,
++            "gridPos": {
++              "h": 1,
++              "w": 24,
++              "x": 0,
++              "y": 19
++            },
++            "id": "<masked>",
++            "panels": [],
++            "title": "Service Health",
++            "type": "row"
++          },
++          {
++            "description": "Total requests per second",
++            "fieldConfig": {
++              "defaults": {},
++              "overrides": []
++            },
++            "gridPos": {
++              "h": 9,
++              "w": 12,
++              "x": 0,
++              "y": 20
++            },
++            "options": null,
++            "repeatDirection": "h",
++            "targets": [
++              {
++                "expr": "sum(rate(http_requests_total{service=\"checkout-service\"}[5m]))",
++                "legendFormat": "{{http}}",
++                "refId": "A"
++              }
++            ],
++            "title": "Request Rate",
++            "transformations": [],
++            "transparent": false,
++            "type": "timeseries"
++          },
++          {
++            "description": "Percentage of requests returning 5xx errors",
++            "fieldConfig": {
++              "defaults": {},
++              "overrides": []
++            },
++            "gridPos": {
++              "h": 9,
++              "w": 12,
++              "x": 12,
++              "y": 20
++            },
++            "options": null,
++            "repeatDirection": "h",
++            "targets": [
++              {
++                "expr": "sum(rate(http_requests_total{service=\"checkout-service\",status=~\"5..\"}[5m])) / sum(rate(http_requests_total{service=\"checkout-service\"}[5m])) * 100",
++                "legendFormat": "error %",
++                "refId": "A"
++              }
++            ],
++            "title": "Error Rate",
++            "transformations": [],
++            "transparent": false,
++            "type": "timeseries"
++          },
++          {
++            "description": "95th percentile request duration",
++            "fieldConfig": {
++              "defaults": {},
++              "overrides": []
++            },
++            "gridPos": {
++              "h": 9,
++              "w": 12,
++              "x": 0,
++              "y": 29
++            },
++            "options": null,
++            "repeatDirection": "h",
++            "targets": [
++              {
++                "expr": "histogram_quantile(0.95, sum by (le) (rate(http_request_duration_seconds_bucket{service=\"checkout-service\"}[5m])))",
++                "legendFormat": "{{http}}",
++                "refId": "A"
++              }
++            ],
++            "title": "Request Latency (p95)",
++            "transformations": [],
++            "transparent": false,
++            "type": "timeseries"
++          },
++          {
++            "collapsed": false,
++            "gridPos": {
++              "h": 1,
++              "w": 24,
++              "x": 0,
++              "y": 38
++            },
++            "id": "<masked>",
++            "panels": [],
++            "title": "Dependencies",
++            "type": "row"
++          },
++          {
++            "description": "Active database connections vs max connections limit",
++            "fieldConfig": {
++              "defaults": {},
++              "overrides": []
++            },
++            "gridPos": {
++              "h": 9,
++              "w": 12,
++              "x": 0,
++              "y": 39
++            },
++            "options": null,
++            "repeatDirection": "h",
++            "targets": [
++              {
++                "expr": "mysql_global_status_threads_connected{service=\"mysql\"}",
++                "legendFormat": "Current connections",
++                "refId": "A"
++              },
++              {
++                "expr": "mysql_global_variables_max_connections{service=\"mysql\"}",
++                "legendFormat": "Max connections",
++                "refId": "B"
++              }
++            ],
++            "title": "MySQL Connections",
++            "transformations": [],
++            "transparent": false,
++            "type": "timeseries"
++          },
++          {
++            "description": "Total queries executed per second",
++            "fieldConfig": {
++              "defaults": {},
++              "overrides": []
++            },
++            "gridPos": {
++              "h": 9,
++              "w": 12,
++              "x": 12,
++              "y": 39
++            },
++            "options": null,
++            "repeatDirection": "h",
++            "targets": [
++              {
++                "expr": "rate(mysql_global_status_queries_total{service=\"mysql\"}[5m])",
++                "legendFormat": "{{mysql}}",
++                "refId": "A"
++              }
++            ],
++            "title": "MySQL Queries/sec",
++            "transformations": [],
++            "transparent": false,
++            "type": "timeseries"
++          },
++          {
++            "description": "Connection pool utilization percentage",
++            "fieldConfig": {
++              "defaults": {},
++              "overrides": []
++            },
++            "gridPos": {
++              "h": 9,
++              "w": 12,
++              "x": 0,
++              "y": 48
++            },
++            "options": null,
++            "repeatDirection": "h",
++            "targets": [
++              {
++                "expr": "mysql_global_status_threads_connected{service=\"mysql\"} / \non() mysql_global_variables_max_connections{service=\"mysql\"} * 100",
++                "legendFormat": "Pool usage %",
++                "refId": "A"
++              }
++            ],
++            "title": "Connection Pool Utilization",
++            "transformations": [],
++            "transparent": false,
++            "type": "gauge"
++          },
++          {
++            "description": "Redis memory consumption",
++            "fieldConfig": {
++              "defaults": {},
++              "overrides": []
++            },
++            "gridPos": {
++              "h": 9,
++              "w": 12,
++              "x": 12,
++              "y": 48
++            },
++            "options": null,
++            "repeatDirection": "h",
++            "targets": [
++              {
++                "expr": "redis_memory_used_bytes{service=\"redis\"}",
++                "legendFormat": "{{redis}}",
++                "refId": "A"
++              }
++            ],
++            "title": "Redis Memory Usage",
++            "transformations": [],
++            "transparent": false,
++            "type": "timeseries"
++          },
++          {
++            "description": "Cache hit rate - should be >90% for good performance",
++            "fieldConfig": {
++              "defaults": {},
++              "overrides": []
++            },
++            "gridPos": {
++              "h": 9,
++              "w": 12,
++              "x": 0,
++              "y": 57
++            },
++            "options": null,
++            "repeatDirection": "h",
++            "targets": [
++              {
++                "expr": "sum(rate(cache_hits_total{service=\"redis\"}[5m])) /\n(sum(rate(cache_hits_total{service=\"redis\"}[5m])) +\nsum(rate(cache_misses_total{service=\"redis\"}[5m]))) * 100",
++                "legendFormat": "Hit rate %",
++                "refId": "A"
++              }
++            ],
++            "title": "Cache Hit Rate",
++            "transformations": [],
++            "transparent": false,
++            "type": "gauge"
++          },
++          {
++            "description": "Number of connected clients",
++            "fieldConfig": {
++              "defaults": {},
++              "overrides": []
++            },
++            "gridPos": {
++              "h": 9,
++              "w": 12,
++              "x": 12,
++              "y": 57
++            },
++            "options": null,
++            "repeatDirection": "h",
++            "targets": [
++              {
++                "expr": "redis_connected_clients{service=\"redis\"}",
++                "legendFormat": "{{redis}}",
++                "refId": "A"
++              }
++            ],
++            "title": "Connected Clients",
++            "transformations": [],
++            "transparent": false,
++            "type": "timeseries"
++          },
++          {
++            "description": "Cache hits and misses per second",
++            "fieldConfig": {
++              "defaults": {},
++              "overrides": []
++            },
++            "gridPos": {
++              "h": 9,
++              "w": 12,
++              "x": 0,
++              "y": 66
++            },
++            "options": null,
++            "repeatDirection": "h",
++            "targets": [
++              {
++                "expr": "rate(cache_hits_total{service=\"redis\"}[5m])",
++                "legendFormat": "Hits/sec",
++                "refId": "A"
++              },
++              {
++                "expr": "rate(cache_misses_total{service=\"redis\"}[5m])",
++                "legendFormat": "Misses/sec",
++                "refId": "B"
++              }
++            ],
++            "title": "Cache Hits vs Misses",
++            "transformations": [],
++            "transparent": false,
++            "type": "timeseries"
++          },
++          {
++            "description": "Keys evicted due to memory pressure - should be zero",
++            "fieldConfig": {
++              "defaults": {},
++              "overrides": []
++            },
++            "gridPos": {
++              "h": 9,
++              "w": 12,
++              "x": 12,
++              "y": 66
++            },
++            "options": null,
++            "repeatDirection": "h",
++            "targets": [
++              {
++                "expr": "rate(redis_evicted_keys_total{service=\"redis\"}[5m])",
++                "legendFormat": "{{redis}}",
++                "refId": "A"
++              }
++            ],
++            "title": "Evicted Keys",
++            "transformations": [],
++            "transparent": false,
++            "type": "timeseries"
++          },
++          {
++            "description": "Keys expired per second due to TTL",
++            "fieldConfig": {
++              "defaults": {},
++              "overrides": []
++            },
++            "gridPos": {
++              "h": 9,
++              "w": 12,
++              "x": 0,
++              "y": 75
++            },
++            "options": null,
++            "repeatDirection": "h",
++            "targets": [
++              {
++                "expr": "rate(redis_expired_keys_total{service=\"redis\"}[5m])",
++                "legendFormat": "{{redis}}",
++                "refId": "A"
++              }
++            ],
++            "title": "Expired Keys",
++            "transformations": [],
++            "transparent": false,
++            "type": "timeseries"
++          },
++          {
++            "description": "Redis commands processed per second",
++            "fieldConfig": {
++              "defaults": {},
++              "overrides": []
++            },
++            "gridPos": {
++              "h": 9,
++              "w": 12,
++              "x": 12,
++              "y": 75
++            },
++            "options": null,
++            "repeatDirection": "h",
++            "targets": [
++              {
++                "expr": "rate(redis_commands_processed_total{service=\"redis\"}[5m])",
++                "legendFormat": "{{redis}}",
++                "refId": "A"
++              }
++            ],
++            "title": "Commands/sec",
++            "transformations": [],
++            "transparent": false,
++            "type": "timeseries"
++          },
++          {
++            "description": "Total number of keys in database",
++            "fieldConfig": {
++              "defaults": {},
++              "overrides": []
++            },
++            "gridPos": {
++              "h": 9,
++              "w": 12,
++              "x": 0,
++              "y": 84
++            },
++            "options": null,
++            "repeatDirection": "h",
++            "targets": [
++              {
++                "expr": "sum(redis_db_keys{service=\"redis\"})",
++                "legendFormat": "{{redis}}",
++                "refId": "A"
++              }
++            ],
++            "title": "Total Keys",
++            "transformations": [],
++            "transparent": false,
++            "type": "stat"
++          }
++        ],
++        "schemaVersion": 36,
++        "style": "dark",
++        "tags": [
++          "commerce",
++          "critical",
++          "api"
++        ],
++        "templating": {},
++        "time": {
++          "from": "now-6h",
++          "to": "now"
++        },
++        "timezone": "browser",
++        "title": "checkout-service - Service Dashboard",
++        "uid": "checkout-service-overview"
++      },
++      "message": "Auto-generated dashboard for checkout-service",
++      "overwrite": true
++    }
++  },
++  "text": [
++    "",
++    "╭──╮",
++    "│ Generate Grafana Dashboard  │",
++    "╰──╯",
++    "",
++    "Service: examples/services/checkout-service.yaml",
++    "Output: <tmp>/out/dashboard.json",
++    "",
++    "Parsing service specification...",
++    "  Service: checkout-service",
++    "  Team: commerce",
++    "  Tier: critical",
++    "  Type: api",
++    "  Resources: 6 defined",
++    "",
++    "  SLOs: 3",
++    "  Dependencies: 1",
++    "",
++    "Building dashboard...",
++    "  Mode: Full panels (all templates)",
++    "  Title: checkout-service",
++    "  UID: checkout-service-overview",
++    "  Panels: 0",
++    "",
++    "Writing dashboard to <tmp>/out/dashboard.json...",
++    "",
++    "Dashboard generated successfully!",
++    ""
++  ]
++}
+diff --git a/tests/golden/data/cli_legacy_generator_flags/generate_loki_alerts__dry_run.json b/tests/golden/data/cli_legacy_generator_flags/generate_loki_alerts__dry_run.json
+new file mode 100644
+index 0000000..4f983b4
+--- /dev/null
++++ b/tests/golden/data/cli_legacy_generator_flags/generate_loki_alerts__dry_run.json
+@@ -0,0 +1,96 @@
++{
++  "exit": 0,
++  "files": {},
++  "text": [
++    "",
++    "╭──╮",
++    "│ Generate Loki Alerts  │",
++    "╰──╯",
++    "",
++    "╭──╮",
++    "│ Generate Loki Alerts  │",
++    "╰──╯",
++    "",
++    "Service: examples/services/checkout-service.yaml",
++    "Mode: Dry run (preview only)",
++    "",
++    "Service: checkout-service",
++    "Type: api",
++    "Tier: critical",
++    "Dependencies: mysql, redis",
++    "",
++    "✓ Generated 16 Loki alerts",
++    "",
++    "Alert breakdown:",
++    "  Service alerts: 3",
++    "  Dependency alerts: 13",
++    "",
++    "Preview of generated alerts:",
++    "──",
++    "groups:",
++    "- name: checkout-service",
++    "  rules:",
++    "  - alert: checkout-service_ApplicationError",
++    "  expr: sum(count_over_time({app=\"checkout-service\"} |~ \"(?i)error|exception|fatal\"",
++    "  [5m])) > 10",
++    "  for: 5m",
++    "  labels:",
++    "  severity: warning",
++    "  source: service",
++    "  service: checkout-service",
++    "  tier: critical",
++    "  team: commerce",
++    "  technology: api",
++    "  annotations:",
++    "  summary: '[checkout-service] Application errors detected'",
++    "  description: Error-level log entries detected in application logs.",
++    "  - alert: checkout-service_ApplicationPanic",
++    "  expr: count_over_time({app=\"checkout-service\"} |~ \"(?i)panic|segfault|SIGSEGV\"",
++    "  [1m]) > 0",
++    "  for: 0m",
++    "  labels:",
++    "  severity: critical",
++    "  source: service",
++    "  service: checkout-service",
++    "  tier: critical",
++    "  team: commerce",
++    "  technology: api",
++    "  annotations:",
++    "  summary: '[checkout-service] Application panic/crash detected'",
++    "  description: Application appears to have crashed or panicked.",
++    "  - alert: checkout-service_ApplicationHighErrorRate",
++    "  expr: sum(count_over_time({app=\"checkout-service\"} |~ \"(?i)error|exception\" [5m]))",
++    "  > 100",
++    "  for: 5m",
++    "  labels:",
++    "  severity: critical",
++    "  source: service",
++    "  service: checkout-service",
++    "  tier: critical",
++    "  team: commerce",
++    "  technology: api",
++    "  annotations:",
++    "  summary: '[checkout-service] High error rate in application'",
++    "  description: Application is experiencing a high rate of errors.",
++    "  - alert: checkout-service_mysql_MysqlError",
++    "  expr: count_over_time({app=\"mysql\", service=\"checkout-service\"} |~ \"\\\\[ERROR\\\\]\"",
++    "  [1m]) > 0",
++    "  for: 0m",
++    "  labels:",
++    "  severity: critical",
++    "  source: dependency",
++    "  dependency: mysql",
++    "  service: checkout-service",
++    "  tier: critical",
++    "  team: commerce",
++    "  technology: mysql",
++    "  annotations:",
++    "  summary: '[checkout-service/mysql] MySQL error detected'",
++    "  description: MySQL logged an ERROR level message.",
++    "  - alert: checkout-service_mysql_MysqlConnectionRefused",
++    "  expr: count_",
++    "... (8372 total characters)",
++    "",
++    "✓ Done!"
++  ]
++}
+diff --git a/tests/golden/data/cli_legacy_generator_flags/generate_recording_rules__dry_run.json b/tests/golden/data/cli_legacy_generator_flags/generate_recording_rules__dry_run.json
+new file mode 100644
+index 0000000..293fb51
+--- /dev/null
++++ b/tests/golden/data/cli_legacy_generator_flags/generate_recording_rules__dry_run.json
+@@ -0,0 +1,144 @@
++{
++  "exit": 0,
++  "files": {},
++  "text": [
++    "",
++    "╭──╮",
++    "│ Generate Prometheus Recording Rules  │",
++    "╰──╯",
++    "",
++    "Service: examples/services/checkout-service.yaml",
++    "Mode: Dry run (preview only)",
++    "",
++    "Parsing service specification...",
++    "  Service: checkout-service",
++    "  Team: commerce",
++    "  Tier: critical",
++    "  Type: api",
++    "  SLOs: 3",
++    "",
++    "Building recording rules...",
++    "  Groups: 2",
++    "  Rules: 20",
++    "  • checkout-service_slo_metrics: 16 rules (interval: 30s)",
++    "  • checkout-service_health_metrics: 4 rules (interval: 30s)",
++    "",
++    "Recording rules YAML (dry run):",
++    "",
++    "groups:",
++    "- name: checkout-service_slo_metrics",
++    "  interval: 30s",
++    "  rules:",
++    "  - record: slo:requests_total:30d",
++    "  expr: sum(increase(http_requests_total{service=\"checkout-service\"}[30d]))",
++    "  labels:",
++    "  service: checkout-service",
++    "  slo: availability",
++    "  - record: slo:requests_success:30d",
++    "  expr: sum(increase(http_requests_total{service=\"checkout-service\",status!~\"5..\"}[30d]))",
++    "  labels:",
++    "  service: checkout-service",
++    "  slo: availability",
++    "  - record: slo:availability:ratio",
++    "  expr: slo:requests_success:30d{service=\"checkout-service\",slo=\"availability\"}",
++    "  / slo:requests_total:30d{service=\"checkout-service\",slo=\"availability\"}",
++    "  labels:",
++    "  service: checkout-service",
++    "  slo: availability",
++    "  objective: '99.95'",
++    "  - record: slo:error_budget_remaining:ratio",
++    "  expr: 1 - ((1 - slo:availability:ratio{service=\"checkout-service\",slo=\"availability\"})",
++    "  / (1 - 0.9995))",
++    "  labels:",
++    "  service: checkout-service",
++    "  slo: availability",
++    "  objective: '99.95'",
++    "  - record: slo:latency_requests_total:30d",
++    "  expr: sum(increase(http_request_duration_seconds_count{service=\"checkout-service\"}[30d]))",
++    "  labels:",
++    "  service: checkout-service",
++    "  slo: latency-p95",
++    "  - record: slo:latency_requests_fast:30d",
++    "  expr: sum(increase(http_request_duration_seconds_bucket{service=\"checkout-service\",le=\"0.5\"}[30d]))",
++    "  labels:",
++    "  service: checkout-service",
++    "  slo: latency-p95",
++    "  threshold: 500ms",
++    "  - record: slo:latency:ratio",
++    "  expr: slo:latency_requests_fast:30d{service=\"checkout-service\",slo=\"latency-p95\"}",
++    "  / slo:latency_requests_total:30d{service=\"checkout-service\",slo=\"latency-p95\"}",
++    "  labels:",
++    "  service: checkout-service",
++    "  slo: latency-p95",
++    "  objective: '99.0'",
++    "  - record: slo:http_request_duration_seconds:p50",
++    "  expr: histogram_quantile(0.5, rate(http_request_duration_seconds_bucket{service=\"checkout-service\"}[5m]))",
++    "  labels:",
++    "  service: checkout-service",
++    "  slo: latency-p95",
++    "  - record: slo:http_request_duration_seconds:p95",
++    "  expr: histogram_quantile(0.95, rate(http_request_duration_seconds_bucket{service=\"checkout-service\"}[5m]))",
++    "  labels:",
++    "  service: checkout-service",
++    "  slo: latency-p95",
++    "  - record: slo:http_request_duration_seconds:p99",
++    "  expr: histogram_quantile(0.99, rate(http_request_duration_seconds_bucket{service=\"checkout-service\"}[5m]))",
++    "  labels:",
++    "  service: checkout-service",
++    "  slo: latency-p95",
++    "  - record: slo:latency_requests_total:30d",
++    "  expr: sum(increase(http_request_duration_seconds_count{service=\"checkout-service\"}[30d]))",
++    "  labels:",
++    "  service: checkout-service",
++    "  slo: latency-p99",
++    "  - record: slo:latency_requests_fast:30d",
++    "  expr: sum(increase(http_request_duration_seconds_bucket{service=\"checkout-service\",le=\"0.5\"}[30d]))",
++    "  labels:",
++    "  service: checkout-service",
++    "  slo: latency-p99",
++    "  threshold: 500ms",
++    "  - record: slo:latency:ratio",
++    "  expr: slo:latency_requests_fast:30d{service=\"checkout-service\",slo=\"latency-p99\"}",
++    "  / slo:latency_requests_total:30d{service=\"checkout-service\",slo=\"latency-p99\"}",
++    "  labels:",
++    "  service: checkout-service",
++    "  slo: latency-p99",
++    "  objective: '95.0'",
++    "  - record: slo:http_request_duration_seconds:p50",
++    "  expr: histogram_quantile(0.5, rate(http_request_duration_seconds_bucket{service=\"checkout-service\"}[5m]))",
++    "  labels:",
++    "  service: checkout-service",
++    "  slo: latency-p99",
++    "  - record: slo:http_request_duration_seconds:p95",
++    "  expr: histogram_quantile(0.95, rate(http_request_duration_seconds_bucket{service=\"checkout-service\"}[5m]))",
++    "  labels:",
++    "  service: checkout-service",
++    "  slo: latency-p99",
++    "  - record: slo:http_request_duration_seconds:p99",
++    "  expr: histogram_quantile(0.99, rate(http_request_duration_seconds_bucket{service=\"checkout-service\"}[5m]))",
++    "  labels:",
++    "  service: checkout-service",
++    "  slo: latency-p99",
++    "- name: checkout-service_health_metrics",
++    "  interval: 30s",
++    "  rules:",
++    "  - record: service:http_requests:rate5m",
++    "  expr: sum(rate(http_requests_total{service=\"checkout-service\"}[5m]))",
++    "  labels:",
++    "  service: checkout-service",
++    "  - record: service:http_errors:rate5m",
++    "  expr: sum(rate(http_requests_total{service=\"checkout-service\",status=~\"5..\"}[5m]))",
++    "  / sum(rate(http_requests_total{service=\"checkout-service\"}[5m]))",
++    "  labels:",
++    "  service: checkout-service",
++    "  - record: service:http_request_duration_seconds:p95",
++    "  expr: histogram_quantile(0.95, rate(http_request_duration_seconds_bucket{service=\"checkout-service\"}[5m]))",
++    "  labels:",
++    "  service: checkout-service",
++    "  - record: service:http_request_duration_seconds:p99",
++    "  expr: histogram_quantile(0.99, rate(http_request_duration_seconds_bucket{service=\"checkout-service\"}[5m]))",
++    "  labels:",
++    "  service: checkout-service",
++    ""
++  ]
++}
+diff --git a/tests/golden/data/cli_legacy_generator_flags/generate_slo__dry_run.json b/tests/golden/data/cli_legacy_generator_flags/generate_slo__dry_run.json
+new file mode 100644
+index 0000000..9a9323a
+--- /dev/null
++++ b/tests/golden/data/cli_legacy_generator_flags/generate_slo__dry_run.json
+@@ -0,0 +1,15 @@
++{
++  "exit": 0,
++  "files": {},
++  "text": [
++    "",
++    "╭──╮",
++    "│ Generate SLOs  │",
++    "╰──╯",
++    "",
++    "ℹ DRY RUN MODE - No files will be written",
++    "",
++    "Would generate Sloth spec to: <tmp>/out/sloth",
++    ""
++  ]
++}
+diff --git a/tests/golden/data/cli_legacy_generator_flags/generate_slo__format_openslo.json b/tests/golden/data/cli_legacy_generator_flags/generate_slo__format_openslo.json
+new file mode 100644
+index 0000000..2fa2099
+--- /dev/null
++++ b/tests/golden/data/cli_legacy_generator_flags/generate_slo__format_openslo.json
+@@ -0,0 +1,14 @@
++{
++  "exit": 1,
++  "files": {},
++  "text": [
++    "",
++    "╭──╮",
++    "│ Generate SLOs  │",
++    "╰──╯",
++    "",
++    "✗ Unsupported format: openslo",
++    "  Supported formats: sloth",
++    ""
++  ]
++}
+diff --git a/tests/golden/data/cli_legacy_ownership_demo/json.json b/tests/golden/data/cli_legacy_ownership_demo/json.json
+new file mode 100644
+index 0000000..5eaf834
+--- /dev/null
++++ b/tests/golden/data/cli_legacy_ownership_demo/json.json
+@@ -0,0 +1,64 @@
++{
++  "exit": 0,
++  "json": {
++    "confidence": 1.0,
++    "contact": {
++      "email": null,
++      "opsgenie_team": null,
++      "pagerduty_escalation": "payments-escalation",
++      "slack_channel": "#team-payments"
++    },
++    "owner": "payments-team",
++    "owner_type": "team",
++    "service": "payment-api",
++    "signals": [
++      {
++        "confidence": 1.0,
++        "metadata": {
++          "field": "team"
++        },
++        "owner": "payments-team",
++        "owner_type": "team",
++        "source": "declared"
++      },
++      {
++        "confidence": 0.95,
++        "metadata": {
++          "escalation_policy": "payments-escalation"
++        },
++        "owner": "payments-team",
++        "owner_type": "team",
++        "source": "pagerduty"
++      },
++      {
++        "confidence": 0.9,
++        "metadata": {
++          "namespace": "default"
++        },
++        "owner": "team-payments",
++        "owner_type": "team",
++        "source": "backstage"
++      },
++      {
++        "confidence": 0.85,
++        "metadata": {
++          "file": ".github/CODEOWNERS"
++        },
++        "owner": "@acme/payments",
++        "owner_type": "group",
++        "source": "codeowners"
++      },
++      {
++        "confidence": 0.75,
++        "metadata": {
++          "label": "team=payments",
++          "namespace": "default"
++        },
++        "owner": "payments",
++        "owner_type": "team",
++        "source": "kubernetes"
++      }
++    ],
++    "source": "declared"
++  }
++}
+diff --git a/tests/golden/data/cli_legacy_ownership_demo/table.json b/tests/golden/data/cli_legacy_ownership_demo/table.json
+new file mode 100644
+index 0000000..7ceaf30
+--- /dev/null
++++ b/tests/golden/data/cli_legacy_ownership_demo/table.json
+@@ -0,0 +1,27 @@
++{
++  "exit": 0,
++  "text": [
++    "",
++    "",
++    "╭──╮",
++    "│ Ownership: payment-api  │",
++    "╰──╯",
++    "",
++    "┏━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━┓",
++    "┃ Source  ┃ Owner  ┃ Confidence ┃ Details  ┃",
++    "┡━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━━━┩",
++    "│ declared  │ payments-team  │ ██████████ │ service.yaml (team)  │",
++    "│ pagerduty  │ payments-team  │ █████████░ │ via payments-escalation │",
++    "│ backstage  │ team-payments  │ █████████░ │ catalog owner  │",
++    "│ codeowners │ @acme/payments │ ████████░░ │ .github/CODEOWNERS  │",
++    "│ kubernetes │ payments  │ ███████░░░ │ label: team=payments  │",
++    "└──┴──┴──┴──┘",
++    "",
++    "Resolved: payments-team (declared, confidence: 100%)",
++    "",
++    "Contact:",
++    "  PagerDuty: payments-escalation",
++    "  Slack: #team-payments",
++    ""
++  ]
++}
+diff --git a/tests/golden/data/cli_legacy_plan_formats/payment-api-pagerduty-demo__markdown.json b/tests/golden/data/cli_legacy_plan_formats/payment-api-pagerduty-demo__markdown.json
+new file mode 100644
+index 0000000..4d8a3e6
+--- /dev/null
++++ b/tests/golden/data/cli_legacy_plan_formats/payment-api-pagerduty-demo__markdown.json
+@@ -0,0 +1,20 @@
++{
++  "exit": 0,
++  "text": [
++    "<!-- nthlayer -->",
++    "## 🛡️ NthLayer Reliability Check",
++    "",
++    "### payment-api",
++    "",
++    "| Check | Status | Details |",
++    "|-------|--------|---------|",
++    "| SLO Definition | ✅ Pass | 2 SLOs defined |",
++    "| Alert Generation | ✅ Pass | 27 alerts will be generated |",
++    "| Dashboard Generation | ✅ Pass | 1 dashboards will be generated |",
++    "| Recording Rules | ✅ Pass | 14 recording rules will be generated |",
++    "",
++    "---",
++    "",
++    "<sub>Generated by [NthLayer](https://github.com/rsionnach/nthlayer) • [Docs](https://rsionnach.github.io/nthlayer/)</sub>"
++  ]
++}
+diff --git a/tests/golden/data/cli_legacy_plan_formats/payment-api-pagerduty-demo__table.json b/tests/golden/data/cli_legacy_plan_formats/payment-api-pagerduty-demo__table.json
+new file mode 100644
+index 0000000..041cea1
+--- /dev/null
++++ b/tests/golden/data/cli_legacy_plan_formats/payment-api-pagerduty-demo__table.json
+@@ -0,0 +1,39 @@
++{
++  "exit": 0,
++  "text": [
++    "",
++    "",
++    "╭──╮",
++    "│ Plan: payment-api  │",
++    "╰──╯",
++    "",
++    "The following resources will be created:",
++    "",
++    "  ✓ SLOs  2 defined",
++    "  └ availability (99.95%, 30d)",
++    "  └ latency-p95 (99.0%, 30d)",
++    "",
++    "  ✓ Alerts  27 generated",
++    "  └ Unknown (14 alerts)",
++    "  └ Unknown (13 alerts)",
++    "",
++    "  ✓ Dashboard  1 generated",
++    "  └ payment-api-dashboard (12+ panels)",
++    "",
++    "  ✓ Recording  14 rules",
++    "  └ payment-api_slo_metrics (10 rules)",
++    "  └ payment-api_health_metrics (4 rules)",
++    "",
++    "  ✓ PagerDuty  configured",
++    "  └ Team: payments",
++    "  └ Schedules: payments-primary, payments-secondary, payments-manager",
++    "  └ Escalation: payments-escalation",
++    "  └ Service: payment-api (tier=critical, support=shared)",
++    "",
++    "Total: 12 resources",
++    "",
++    "To apply these changes, run:",
++    "  nthlayer apply examples/services/payment-api-pagerduty-demo.yaml",
++    ""
++  ]
++}
+diff --git a/tests/golden/data/cli_legacy_recommend_metrics_formats/checkout-service__table.json b/tests/golden/data/cli_legacy_recommend_metrics_formats/checkout-service__table.json
+new file mode 100644
+index 0000000..be77485
+--- /dev/null
++++ b/tests/golden/data/cli_legacy_recommend_metrics_formats/checkout-service__table.json
+@@ -0,0 +1,37 @@
++{
++  "exit": 0,
++  "text": [
++    "",
++    "╭──╮",
++    "│ Metric Recommendations  │",
++    "╰──╯",
++    "",
++    "Service: checkout-service",
++    "Type: api",
++    "Tier: critical",
++    "",
++    "Standard: OpenTelemetry Semantic Conventions",
++    "",
++    "REQUIRED (SLO-critical)",
++    "┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━┳━━━━━━━━━┓",
++    "┃ Metric  ┃ Type  ┃ Unit  ┃",
++    "┡━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━╇━━━━━━━━━┩",
++    "│ http.server.request.duration │ histogram │ seconds │",
++    "└──┴──┴──┘",
++    "",
++    "RECOMMENDED",
++    "┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━┳━━━━━━━━━━━┓",
++    "┃ Metric  ┃ Type  ┃ Unit  ┃",
++    "┡━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━╇━━━━━━━━━━━┩",
++    "│ http.server.active_requests │ updown_counter │ {request} │",
++    "│ http.server.request.size  │ histogram  │ bytes  │",
++    "│ http.server.response.size  │ histogram  │ bytes  │",
++    "└──┴──┴──┘",
++    "",
++    "SUMMARY",
++    "  Required:  1 metrics",
++    "  Recommended: 3 metrics",
++    "",
++    "Run with --check to validate against live Prometheus"
++  ]
++}
+diff --git a/tests/golden/data/cli_legacy_recommend_metrics_formats/checkout-service__table_recommended_show_code.json b/tests/golden/data/cli_legacy_recommend_metrics_formats/checkout-service__table_recommended_show_code.json
+new file mode 100644
+index 0000000..8e5b462
+--- /dev/null
++++ b/tests/golden/data/cli_legacy_recommend_metrics_formats/checkout-service__table_recommended_show_code.json
+@@ -0,0 +1,32 @@
++{
++  "exit": 0,
++  "text": [
++    "",
++    "╭──╮",
++    "│ Metric Recommendations  │",
++    "╰──╯",
++    "",
++    "Service: checkout-service",
++    "Type: api",
++    "Tier: critical",
++    "",
++    "Standard: OpenTelemetry Semantic Conventions",
++    "",
++    "RECOMMENDED",
++    "┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━┳━━━━━━━━━━━┓",
++    "┃ Metric  ┃ Type  ┃ Unit  ┃",
++    "┡━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━╇━━━━━━━━━━━┩",
++    "│ http.server.active_requests │ updown_counter │ {request} │",
++    "│ http.server.request.size  │ histogram  │ bytes  │",
++    "│ http.server.response.size  │ histogram  │ bytes  │",
++    "└──┴──┴──┘",
++    "",
++    "SUMMARY",
++    "  Required:  1 metrics",
++    "  Recommended: 3 metrics",
++    "",
++    "Run with --check to validate against live Prometheus",
++    "",
++    "✓ All checked metrics are present!"
++  ]
++}
+diff --git a/tests/golden/data/cli_legacy_recommend_metrics_formats/checkout-service__table_required.json b/tests/golden/data/cli_legacy_recommend_metrics_formats/checkout-service__table_required.json
+new file mode 100644
+index 0000000..eae3fdf
+--- /dev/null
++++ b/tests/golden/data/cli_legacy_recommend_metrics_formats/checkout-service__table_required.json
+@@ -0,0 +1,28 @@
++{
++  "exit": 0,
++  "text": [
++    "",
++    "╭──╮",
++    "│ Metric Recommendations  │",
++    "╰──╯",
++    "",
++    "Service: checkout-service",
++    "Type: api",
++    "Tier: critical",
++    "",
++    "Standard: OpenTelemetry Semantic Conventions",
++    "",
++    "REQUIRED (SLO-critical)",
++    "┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━┳━━━━━━━━━┓",
++    "┃ Metric  ┃ Type  ┃ Unit  ┃",
++    "┡━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━╇━━━━━━━━━┩",
++    "│ http.server.request.duration │ histogram │ seconds │",
++    "└──┴──┴──┘",
++    "",
++    "SUMMARY",
++    "  Required:  1 metrics",
++    "  Recommended: 3 metrics",
++    "",
++    "Run with --check to validate against live Prometheus"
++  ]
++}
+diff --git a/tests/golden/data/cli_legacy_recommend_metrics_formats/checkout-service__yaml.json b/tests/golden/data/cli_legacy_recommend_metrics_formats/checkout-service__yaml.json
+new file mode 100644
+index 0000000..4b05401
+--- /dev/null
++++ b/tests/golden/data/cli_legacy_recommend_metrics_formats/checkout-service__yaml.json
+@@ -0,0 +1,65 @@
++{
++  "exit": 0,
++  "text": [
++    "",
++    "╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮",
++    "│ Metric Recommendations                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       │",
++    "╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯",
++    "",
++    "Service: checkout-service",
++    "Type: api",
++    "Tier: critical",
++    "",
++    "recommended:",
++    "- description: Number of active HTTP server requests",
++    "  found_as: null",
++    "  match_confidence: 0.0",
++    "  name: http.server.active_requests",
++    "  requirement_level: recommended",
++    "  slo_usage:",
++    "  - saturation",
++    "  status: unknown",
++    "  type: updown_counter",
++    "  unit: '{request}'",
++    "- description: Size of HTTP server request bodies",
++    "  found_as: null",
++    "  match_confidence: 0.0",
++    "  name: http.server.request.size",
++    "  requirement_level: recommended",
++    "  slo_usage: []",
++    "  status: unknown",
++    "  type: histogram",
++    "  unit: bytes",
++    "- description: Size of HTTP server response bodies",
++    "  found_as: null",
++    "  match_confidence: 0.0",
++    "  name: http.server.response.size",
++    "  requirement_level: recommended",
++    "  slo_usage: []",
++    "  status: unknown",
++    "  type: histogram",
++    "  unit: bytes",
++    "required:",
++    "- description: Duration of HTTP server requests",
++    "  found_as: null",
++    "  match_confidence: 0.0",
++    "  name: http.server.request.duration",
++    "  requirement_level: required",
++    "  slo_usage:",
++    "  - latency",
++    "  - availability",
++    "  status: unknown",
++    "  type: histogram",
++    "  unit: seconds",
++    "runtime: null",
++    "runtime_metrics: []",
++    "service: checkout-service",
++    "service_type: api",
++    "summary:",
++    "  recommended_coverage: 0.0",
++    "  required_coverage: 0.0",
++    "  slo_ready: false",
++    "tier: critical",
++    ""
++  ]
++}
+diff --git a/tests/golden/data/cli_legacy_validate_slo_table/checkout-service.json b/tests/golden/data/cli_legacy_validate_slo_table/checkout-service.json
+new file mode 100644
+index 0000000..163825c
+--- /dev/null
++++ b/tests/golden/data/cli_legacy_validate_slo_table/checkout-service.json
+@@ -0,0 +1,21 @@
++{
++  "exit": 0,
++  "text": [
++    "",
++    "",
++    "╭──╮",
++    "│ SLO Metric Validation: checkout-service  │",
++    "╰──╯",
++    "",
++    "┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓",
++    "┃ SLO  ┃ Metrics ┃ Status  ┃",
++    "┡━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┩",
++    "│ checkout-service-availability │ none  │ ! No metrics found in query │",
++    "│ checkout-service-latency-p95  │ none  │ ! No metrics found in query │",
++    "│ checkout-service-latency-p99  │ none  │ ! No metrics found in query │",
++    "└──┴──┴──┘",
++    "",
++    "3/3 SLOs have valid metrics",
++    ""
++  ]
++}
+diff --git a/tests/golden/data/cli_legacy_validate_slo_table/demo.json b/tests/golden/data/cli_legacy_validate_slo_table/demo.json
+new file mode 100644
+index 0000000..dea3add
+--- /dev/null
++++ b/tests/golden/data/cli_legacy_validate_slo_table/demo.json
+@@ -0,0 +1,21 @@
++{
++  "exit": 1,
++  "text": [
++    "",
++    "",
++    "╭──╮",
++    "│ SLO Metric Validation: payment-api  │",
++    "╰──╯",
++    "",
++    "┏━━━━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓",
++    "┃ SLO  ┃ Metrics  ┃ Status  ┃",
++    "┡━━━━━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━━━━━━┩",
++    "│ payment-api-availability │ http_requests_total  │ Found  │",
++    "│ payment-api-latency  │ http_request_duration_seconds_bucket  │ Found  │",
++    "│ payment-api-error-rate  │ http_errors_total, http_requests_total │ Missing: http_errors_total │",
++    "└──┴──┴──┘",
++    "",
++    "2/3 SLOs have valid metrics",
++    ""
++  ]
++}
+diff --git a/tests/golden/test_golden_legacy_cli.py b/tests/golden/test_golden_legacy_cli.py
+index e885f8c..e22bef3 100644
+--- a/tests/golden/test_golden_legacy_cli.py
++++ b/tests/golden/test_golden_legacy_cli.py
+@@ -640,6 +640,236 @@ def ownership_table_backstage(env: Env) -> Any:
+     return {"exit": code, "text": env.text()}
+ 
+ 
++# --- non-default formats and flags (opensrm-9dbl sweep) -----------------------
++#
++# The corpus cells above call each command one way: plan/apply/validate-slo/
++# recommend-metrics/ownership as JSON, the generators without --dry-run. A
++# mutation sweep of cli/ found every other renderer and flag unpinned; these
++# cells pin each one once, on a shipped example that reaches the branch.
++
++PD_DEMO_SERVICE = EX / "services" / "payment-api-pagerduty-demo.yaml"
++
++# PagerDuty API failures as apply reports them ("Pagerduty generation failed:
++# <message>"). Without --verbose, print_apply_summary cuts an error longer
++# than 80 characters to 77 plus "..." (cli/apply.py:64-65): the long one is
++# cut, the short one (75 characters reported) sits just under the threshold.
++PD_API_FAILURE_LONG = (
++    "PagerDuty API returned 401 Unauthorized for POST /teams: "
++    "the API key is invalid or has been revoked"
++)
++PD_API_FAILURE_SHORT = "PagerDuty API returned 503 Service Unavailable"
++
++
++def _sorted_dependency_extractors(env: Env) -> None:
++    """Fix the order of both legacy list(set(...)) extractors.
++
++    The dry-run previews print rules in extraction order, as text that cannot
++    be re-sorted afterwards (the loki preview is cut at 2,000 characters), so
++    hand the commands the same dependencies sorted. generate_alerts looks
++    extract_dependencies up in its own module; cli/generate_loki.py imports
++    the loki one in its function body, so both are patched at their source.
++    """
++    import nthlayer_generate.generators.alerts as alerts_gen
++    import nthlayer_generate.loki.generator as loki_gen
++
++    for module, name in (
++        (alerts_gen, "extract_dependencies"),
++        (loki_gen, "extract_dependencies_from_resources"),
++    ):
++        real = getattr(module, name)
++        env.monkeypatch.setattr(module, name, lambda resources, _r=real: sorted(_r(resources)))
++
++
++def plan_table(env: Env) -> Any:
++    # The default table renderer (cli/plan.py:20-111). payment-api-pagerduty-demo
++    # plans every resource kind, including all four PagerDuty sub-resources.
++    env.discard_output()
++    code = plan_command(str(PD_DEMO_SERVICE))
++    return {"exit": code, "text": env.text()}
++
++
++def plan_markdown(env: Env) -> Any:
++    # plan_to_report through a non-JSON formatter (cli/plan.py:114-210).
++    env.discard_output()
++    code = plan_command(str(PD_DEMO_SERVICE), output_format="markdown")
++    return {"exit": code, "text": env.text()}
++
++
++def _apply_text(path: Path, env: Env, environment: str | None = None, **kwargs: Any) -> Any:
++    env.discard_output()
++    code = apply_command(str(path), env=environment, output_dir=str(env.tmp / "out"), **kwargs)
++    # The summary line carries the wall-clock duration ("in 0.3s").
++    text = [re.sub(r" in \d+\.\ds\b", " in <duration>", line) for line in env.text()]
++    return {"exit": code, "text": text}
++
++
++def apply_text(env: Env) -> Any:
++    # The default text summary (cli/apply.py:14-78).
++    return _apply_text(APPLY_FILTER_SERVICE, env)
++
++
++def apply_text_verbose(env: Env) -> Any:
++    # --verbose adds the generated-file list with sizes (cli/apply.py:69-76).
++    return _apply_text(APPLY_FILTER_SERVICE, env, verbose=True)
++
++
++def apply_dry_run_env(env: Env) -> Any:
++    # --dry-run is plan's table (cli/apply.py:27-28) and must keep --env:
++    # search-api plans 14 resources in prod against 12 in dev.
++    case = next(c for c in ENV_CASES if c.id == "staged__search-api__env-prod")
++    out = _apply_text(case.target(env.tmp), env, case.environment, dry_run=True)
++    out["wrote"] = sorted(
++        p.relative_to(env.tmp).as_posix()
++        for p in env.tmp.rglob("*")
++        if p.is_file() and not p.is_relative_to(env.tmp / STAGING)
++    )
++    return out
++
++
++def _apply_pd_failure(message: str, verbose: bool = False) -> Callable[[Env], Any]:
++    def cell(env: Env) -> Any:
++        # With a key, the PagerDuty handler calls the API; make that call fail
++        # so the summary's warning marker and error list are reached
++        # (cli/apply.py:39-40, 59-66). No shipped example produces an error.
++        def failing_manager(*args: Any, **kwargs: Any) -> Any:
++            raise RuntimeError(message)
++
++        env.monkeypatch.setenv("PAGERDUTY_API_KEY", "stub-key")
++        env.monkeypatch.setattr(
++            "nthlayer_generate.orchestration.handlers.PagerDutyResourceManager", failing_manager
++        )
++        return _apply_text(APPLY_FILTER_SERVICE, env, verbose=verbose)
++
++    return cell
++
++
++def _recommend_table(env: Env, **kwargs: Any) -> Any:
++    env.discard_output()
++    code = recommend_metrics_command(str(APPLY_FILTER_SERVICE), **kwargs)
++    return {"exit": code, "text": env.text()}
++
++
++def recommend_table(env: Env) -> Any:
++    return _recommend_table(env)
++
++
++def recommend_table_required(env: Env) -> Any:
++    return _recommend_table(env, level="required")
++
++
++def recommend_table_recommended_code(env: Env) -> Any:
++    return _recommend_table(env, level="recommended", show_code=True)
++
++
++def recommend_yaml(env: Env) -> Any:
++    env.discard_output()
++    code = recommend_metrics_command(str(APPLY_FILTER_SERVICE), output_format="yaml")
++    out = env.capsys.readouterr().out
++    # The header precedes the YAML document on the same stream.
++    return {"exit": code, "text": _lines(out)}
++
++
++def validate_slo_table(env: Env) -> Any:
++    # Offline, every SLO counts as found: the all-valid summary.
++    env.discard_output()
++    code = validate_slo_command(str(APPLY_FILTER_SERVICE))
++    return {"exit": code, "text": env.text()}
++
++
++def validate_slo_table_demo(env: Env) -> Any:
++    # --demo has a missing metric: the Missing status and partial summary.
++    env.discard_output()
++    code = validate_slo_command("unused.yaml", demo=True)
++    return {"exit": code, "text": env.text()}
++
++
++def generate_slo_dry_run(env: Env) -> Any:
++    env.discard_output()
++    code = generate_slo_command(
++        str(APPLY_FILTER_SERVICE), output_dir=str(env.tmp / "out"), dry_run=True
++    )
++    return {"exit": code, "files": env.files(), "text": env.text()}
++
++
++def generate_slo_unsupported_format(env: Env) -> Any:
++    # The CLI offers sloth/prometheus/openslo; only sloth is implemented.
++    env.discard_output()
++    code = generate_slo_command(
++        str(APPLY_FILTER_SERVICE), output_dir=str(env.tmp / "out"), format="openslo"
++    )
++    return {"exit": code, "files": env.files(), "text": env.text()}
++
++
++def generate_alerts_dry_run(env: Env) -> Any:
++    _sorted_dependency_extractors(env)
++    env.discard_output()
++    out = env.tmp / "out" / "alerts.yaml"
++    code = generate_alerts_command(str(APPLY_FILTER_SERVICE), output=str(out), dry_run=True)
++    return {"exit": code, "files": env.files(), "text": env.text()}
++
++
++def generate_alerts_links(env: Env) -> Any:
++    # --runbook-url, --notification-channel and --grafana-url reach the rules.
++    env.discard_output()
++    out = env.tmp / "out" / "alerts.yaml"
++    code = generate_alerts_command(
++        str(APPLY_FILTER_SERVICE),
++        output=str(out),
++        runbook_url="https://runbooks.example.invalid",
++        notification_channel="slack",
++        grafana_url="https://grafana.example.invalid",
++    )
++    return {"exit": code, "files": env.files(rules_unordered=lambda rel: True), "text": env.text()}
++
++
++def generate_recording_rules_dry_run(env: Env) -> Any:
++    env.discard_output()
++    code = generate_recording_rules_command(str(APPLY_FILTER_SERVICE), dry_run=True)
++    return {"exit": code, "files": env.files(env.tmp), "text": env.text()}
++
++
++def generate_loki_dry_run(env: Env) -> Any:
++    _sorted_dependency_extractors(env)
++    env.discard_output()
++    code = generate_loki_command(str(APPLY_FILTER_SERVICE), dry_run=True)
++    return {"exit": code, "files": env.files(env.tmp), "text": env.text()}
++
++
++def generate_dashboard_dry_run(env: Env) -> Any:
++    env.discard_output()
++    code = generate_dashboard_command(str(APPLY_FILTER_SERVICE), dry_run=True)
++    printed = env.capsys.readouterr().out
++    start = printed.index("\n{") + 1
++    end = printed.rindex("}") + 1
++    return {
++        "exit": code,
++        "files": env.files(env.tmp),
++        "dashboard": json.loads(printed[start:end]),
++        "text": _lines(printed[:start]) + _lines(printed[end:]),
++    }
++
++
++def generate_dashboard_full_panels(env: Env) -> Any:
++    # --full-panels changes only the "Mode:" log line today: build_dashboard
++    # passes it to DashboardBuilderSDK, which stores self.full_panels and never
++    # reads it (dashboards/builder_sdk.py:57).
++    env.discard_output()
++    out = env.tmp / "out" / "dashboard.json"
++    code = generate_dashboard_command(str(APPLY_FILTER_SERVICE), output=str(out), full_panels=True)
++    return {"exit": code, "files": env.files(), "text": env.text()}
++
++
++def _ownership_demo(output_format: str) -> Callable[[Env], Any]:
++    def cell(env: Env) -> Any:
++        env.discard_output()
++        code = ownership_command("unused.yaml", output_format=output_format, demo=True)
++        if output_format == "json":
++            return {"exit": code, "json": env.stdout_json()}
++        return {"exit": code, "text": env.text()}
++
++    return cell
++
++
+ SINGLETONS: dict[str, dict[str, Callable[[Env], Any]]] = {
+     "cli_legacy_apply_filter": {
+         "checkout-service__skip": apply_skip,
+@@ -655,6 +885,44 @@ SINGLETONS: dict[str, dict[str, Callable[[Env], Any]]] = {
+     "cli_legacy_validate_slo_exit": {
+         "demo": validate_slo_demo,
+     },
++    "cli_legacy_plan_formats": {
++        "payment-api-pagerduty-demo__table": plan_table,
++        "payment-api-pagerduty-demo__markdown": plan_markdown,
++    },
++    "cli_legacy_apply_text": {
++        "checkout-service": apply_text,
++        "checkout-service__verbose": apply_text_verbose,
++        "checkout-service__pagerduty_failure": _apply_pd_failure(PD_API_FAILURE_LONG),
++        "checkout-service__pagerduty_failure__verbose": _apply_pd_failure(
++            PD_API_FAILURE_LONG, verbose=True
++        ),
++        "checkout-service__pagerduty_failure_short": _apply_pd_failure(PD_API_FAILURE_SHORT),
++        "staged__search-api__env-prod__dry_run": apply_dry_run_env,
++    },
++    "cli_legacy_recommend_metrics_formats": {
++        "checkout-service__table": recommend_table,
++        "checkout-service__table_required": recommend_table_required,
++        "checkout-service__table_recommended_show_code": recommend_table_recommended_code,
++        "checkout-service__yaml": recommend_yaml,
++    },
++    "cli_legacy_validate_slo_table": {
++        "checkout-service": validate_slo_table,
++        "demo": validate_slo_table_demo,
++    },
++    "cli_legacy_generator_flags": {
++        "generate_slo__dry_run": generate_slo_dry_run,
++        "generate_slo__format_openslo": generate_slo_unsupported_format,
++        "generate_alerts__dry_run": generate_alerts_dry_run,
++        "generate_alerts__links": generate_alerts_links,
++        "generate_recording_rules__dry_run": generate_recording_rules_dry_run,
++        "generate_loki_alerts__dry_run": generate_loki_dry_run,
++        "generate_dashboard__dry_run": generate_dashboard_dry_run,
++        "generate_dashboard__full_panels": generate_dashboard_full_panels,
++    },
++    "cli_legacy_ownership_demo": {
++        "json": _ownership_demo("json"),
++        "table": _ownership_demo("table"),
++    },
+ }
+ 
+ GOLDEN_CELLS = {

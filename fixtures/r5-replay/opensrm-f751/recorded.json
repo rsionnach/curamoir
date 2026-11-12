@@ -1,0 +1,99 @@
+{
+ "schema_version": 1,
+ "entry": "opensrm-f751",
+ "fidelity": "recorded",
+ "lens_order": [
+  "correctness",
+  "clarity",
+  "edge-cases",
+  "provenance",
+  "excellence"
+ ],
+ "iterations": {
+  "correctness": 1,
+  "clarity": 2,
+  "edge-cases": 1,
+  "provenance": 1
+ },
+ "rounds": [
+  {
+   "lens": "correctness",
+   "iteration": 1,
+   "recorded_iteration": 1,
+   "counts": {
+    "critical": 0,
+    "important": 0,
+    "minor": 0
+   },
+   "findings": null
+  },
+  {
+   "lens": "clarity",
+   "iteration": 1,
+   "recorded_iteration": 1,
+   "counts": {
+    "critical": 0,
+    "important": 1,
+    "minor": 2
+   },
+   "findings": [
+    {
+     "lens": "clarity",
+     "severity": "IMPORTANT",
+     "path": "src/nthlayer_generate/cli/apply.py",
+     "start_line": 160,
+     "end_line": 162,
+     "claim": "The comment understates what the redirect does",
+     "evidence": null,
+     "fix": null,
+     "fingerprint": "7a6ea036eafb2120",
+     "verification_level": "asserted",
+     "resolves": null,
+     "regression": false,
+     "status": null,
+     "derived_from": "reviewer_transcript",
+     "extracted_by": "model",
+     "handback_sha256": "232b8913b1ae7b9f752b83881ad84655633197ed46f12758f50da8197d3ef463",
+     "fix_commit": "bfd5a355d32dff588531f428a5aaa9a2509ac6a6",
+     "reported_path": "src/nthlayer_generate/cli/apply.py",
+     "path_in_tree": true
+    }
+   ]
+  },
+  {
+   "lens": "clarity",
+   "iteration": 2,
+   "recorded_iteration": 2,
+   "counts": {
+    "critical": 0,
+    "important": 0,
+    "minor": 0
+   },
+   "findings": null
+  },
+  {
+   "lens": "edge_cases",
+   "iteration": 1,
+   "recorded_iteration": 1,
+   "counts": {
+    "critical": 0,
+    "important": 0,
+    "minor": 2
+   },
+   "findings": null
+  },
+  {
+   "lens": "provenance",
+   "iteration": 1,
+   "recorded_iteration": 1,
+   "counts": {
+    "critical": 0,
+    "important": 0,
+    "minor": 1
+   },
+   "findings": null
+  }
+ ],
+ "cross_repo_findings": [],
+ "escaped": []
+}

@@ -1,0 +1,56 @@
+diff --git a/src/nthlayer_generate/recording_rules/manifest_builder.py b/src/nthlayer_generate/recording_rules/manifest_builder.py
+index d663c17..52530e5 100644
+--- a/src/nthlayer_generate/recording_rules/manifest_builder.py
++++ b/src/nthlayer_generate/recording_rules/manifest_builder.py
+@@ -16,6 +16,7 @@ from __future__ import annotations
+ from decimal import Decimal
+ 
+ from nthlayer_common.manifest import (
++    ERROR_BUDGET_REMAINING,
+     FEEDBACK_LATENCY_WINDOW,
+     JudgmentThreshold,
+     ReliabilityManifest,
+@@ -190,10 +191,12 @@ class ManifestRecordingRuleBuilder:
+             )
+         )
+ 
+-        # Error budget remaining (as ratio)
++        # Error budget remaining (as ratio). The name and labels are
++        # nthlayer-common's contract, which measure, correlate and drift read
++        # back (opensrm-h0at).
+         rules.append(
+             RecordingRule(
+-                record="slo:error_budget_remaining:ratio",
++                record=ERROR_BUDGET_REMAINING.metric,
+                 expr=(
+                     f'1 - ((1 - slo:availability:ratio{{service="{service}",slo="{slo_name}"}}) / '
+                     f"(1 - {objective / 100}))"
+diff --git a/tests/test_recording_rules.py b/tests/test_recording_rules.py
+index 91d8f82..96ea7fe 100644
+--- a/tests/test_recording_rules.py
++++ b/tests/test_recording_rules.py
+@@ -297,6 +297,24 @@ def test_availability_slo_rules():
+     }
+ 
+ 
++def test_error_budget_rule_follows_the_shared_contract():
++    # opensrm-h0at: measure read slo:error_budget:ratio, a name nothing wrote.
++    # Writer and readers now share nthlayer-common's ERROR_BUDGET_REMAINING;
++    # every rule generate writes under that name must carry exactly the
++    # labels the contract promises readers they can filter on.
++    from nthlayer_common.manifest import ERROR_BUDGET_REMAINING
++
++    written = [
++        rule
++        for path in SHIPPED
++        for rule in _rules(path)
++        if rule.record == ERROR_BUDGET_REMAINING.metric
++    ]
++    assert written, "no shipped manifest wrote the error-budget series"
++    for rule in written:
++        assert set(rule.labels) == set(ERROR_BUDGET_REMAINING.labels), rule.labels
++
++
+ def test_latency_slo_rules():
+     # payment-api.yaml declares latency-p95 (a legacy latency SLO with a
+     # threshold, 30d window). Not an srm/v1 example: those write latency as

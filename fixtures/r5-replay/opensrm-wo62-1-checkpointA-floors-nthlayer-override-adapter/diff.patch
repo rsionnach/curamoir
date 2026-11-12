@@ -1,0 +1,30 @@
+diff --git a/pyproject.toml b/pyproject.toml
+index 53b726b..cfe301f 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -14,10 +14,10 @@ dependencies = [
+     # tests/test_dependency_declarations.py and
+     # tests/smoke/test_resolved_dependencies.py; see CLAUDE.md hard rule 16
+     # for why both are needed [opensrm-p3bm].
+-    # WHY 5.3.1 (opensrm-dww5): the version this repo is now built and tested
++    # WHY 5.4.0 (opensrm-wo62.1): the version this repo is now built and tested
+     # against (rule 16: the floor is the installed sibling). Bump it on
+     # every nthlayer-common minor release: the floor guard fails until you do.
+-    "nthlayer-common>=5.3.1,<6.0.0",
++    "nthlayer-common>=5.4.0,<6.0.0",
+     "starlette>=0.40",
+     "uvicorn>=0.30",
+     "opentelemetry-api>=1.28",
+diff --git a/uv.lock b/uv.lock
+index ab4fe07..f662f98 100644
+--- a/uv.lock
++++ b/uv.lock
+@@ -913,7 +913,7 @@ wheels = [
+ 
+ [[package]]
+ name = "nthlayer-common"
+-version = "5.3.1"
++version = "5.4.0"
+ source = { editable = "../nthlayer-common" }
+ dependencies = [
+     { name = "anthropic" },

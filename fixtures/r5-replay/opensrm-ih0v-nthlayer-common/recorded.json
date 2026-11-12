@@ -1,0 +1,69 @@
+{
+ "schema_version": 1,
+ "entry": "opensrm-ih0v-nthlayer-common",
+ "fidelity": "counts_only",
+ "lens_order": [
+  "correctness",
+  "clarity",
+  "edge-cases",
+  "excellence"
+ ],
+ "iterations": {
+  "correctness": 3
+ },
+ "rounds": [
+  {
+   "lens": "correctness",
+   "iteration": 1,
+   "recorded_iteration": null,
+   "counts": {
+    "critical": 0,
+    "important": 2,
+    "minor": 0
+   },
+   "findings": null
+  },
+  {
+   "lens": "correctness",
+   "iteration": 2,
+   "recorded_iteration": 2,
+   "counts": {
+    "critical": 0,
+    "important": 3,
+    "minor": 1
+   },
+   "findings": null
+  },
+  {
+   "lens": "correctness",
+   "iteration": 3,
+   "recorded_iteration": 3,
+   "counts": {
+    "critical": 0,
+    "important": 1,
+    "minor": 1
+   },
+   "findings": null
+  }
+ ],
+ "cross_repo_findings": [],
+ "escaped": [
+  {
+   "lens": "provenance",
+   "severity": "CRITICAL",
+   "path": "tests/test_manifest_v2_archetypes.py",
+   "start_line": 50,
+   "end_line": 53,
+   "claim": "The module-level skipif skips the whole module when the layout-relative spec path misses, so under one worktree layout the suite stays green while it tests nothing.",
+   "evidence": null,
+   "fix": null,
+   "fingerprint": "b1a0adc9dcb9db56",
+   "verification_level": "asserted",
+   "resolves": null,
+   "regression": false,
+   "status": null,
+   "derived_from": "known_escape",
+   "at_commit": "28d7add"
+  }
+ ]
+}

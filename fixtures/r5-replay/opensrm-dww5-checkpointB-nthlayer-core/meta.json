@@ -1,0 +1,136 @@
+{
+ "schema_version": 1,
+ "entry": "opensrm-dww5-checkpointB-nthlayer-core",
+ "bead": "opensrm-dww5",
+ "record": "dww5-checkpointB",
+ "archive": "r5-state-dww5-checkpointB-completed.json",
+ "record_repos": [
+  "nthlayer-core",
+  "nthlayer-generate",
+  "nthlayer-bench",
+  "nthlayer-workers",
+  "nthlayer-override-adapter",
+  "nthlayer-common",
+  "nthlayer"
+ ],
+ "repo": "nthlayer-core",
+ "part": "checkpointB",
+ "base": "ca3087c2a1aa6580a35d56c899017d46b34301cf",
+ "head": "53ac90aee71b2be9f1997b195808cf067e02e811",
+ "record_head": null,
+ "synthetic_base": "5934f6c2d466b382a380cfa7bdbafefcc365762d",
+ "synthetic_head": "24c676177aa42a6e1a616b87c7f646beb8eb583a",
+ "base_tree": "b18f12e7b2389fca60ba75dc16a48a651c2d9a5d",
+ "tree_sha": "06596cbb731b143c6994b5af26b9070a1854749b",
+ "unavailable": null,
+ "bundle": {
+  "repo": "nthlayer-core",
+  "sha256": "70fcccb855b859bf88da08e67a14474356216341a31dada3eb10365d2c6e6e1c"
+ },
+ "sequential_steps": null,
+ "record_sequential_steps": 12,
+ "bead_sequential_steps": 21,
+ "fidelity": "counts_only",
+ "blocking_findings": null,
+ "escape": false,
+ "brief_source": "reviewer_prompt",
+ "roster": {
+  "record_version": 2,
+  "passes": [
+   "correctness",
+   "clarity",
+   "edge-cases",
+   "provenance"
+  ]
+ },
+ "lens_order": [
+  "correctness",
+  "clarity",
+  "edge-cases",
+  "provenance",
+  "excellence"
+ ],
+ "counts": {
+  "correctness": [
+   {
+    "critical": 0,
+    "important": 0,
+    "minor": 1
+   }
+  ],
+  "clarity": [
+   {
+    "critical": 0,
+    "important": 2,
+    "minor": 5
+   },
+   {
+    "critical": 0,
+    "important": 0,
+    "minor": 2
+   }
+  ],
+  "edge-cases": [
+   {
+    "critical": 0,
+    "important": 1,
+    "minor": 3
+   },
+   {
+    "critical": 0,
+    "important": 0,
+    "minor": 0
+   }
+  ],
+  "provenance": [
+   {},
+   {
+    "critical": 3,
+    "important": 1,
+    "minor": 2
+   },
+   {
+    "critical": 0,
+    "important": 0,
+    "minor": 1
+   }
+  ]
+ },
+ "baseline": {
+  "correctness": {
+   "reviews": 1,
+   "fix_rounds": 0,
+   "findings_first_review": 1,
+   "unattributed": 0,
+   "steps": 1
+  },
+  "clarity": {
+   "reviews": 2,
+   "fix_rounds": 1,
+   "findings_first_review": 7,
+   "unattributed": 0,
+   "steps": 3
+  },
+  "edge-cases": {
+   "reviews": 2,
+   "fix_rounds": 1,
+   "findings_first_review": 4,
+   "unattributed": 0,
+   "steps": 3
+  },
+  "provenance": {
+   "reviews": 3,
+   "fix_rounds": 1,
+   "findings_first_review": 6,
+   "unattributed": 6,
+   "steps": 4
+  },
+  "excellence": {
+   "reviews": 1,
+   "fix_rounds": 0,
+   "findings_first_review": 3,
+   "unattributed": 0,
+   "steps": 1
+  }
+ }
+}

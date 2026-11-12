@@ -1,0 +1,824 @@
+diff --git a/.release-please-manifest.json b/.release-please-manifest.json
+index cb46325..f36f388 100644
+--- a/.release-please-manifest.json
++++ b/.release-please-manifest.json
+@@ -1 +1 @@
+-{".":"4.0.12"}
++{".":"3.0.1"}
+diff --git a/AGENTS.md b/AGENTS.md
+index cf85b30..f9dbd48 100644
+--- a/AGENTS.md
++++ b/AGENTS.md
+@@ -25,8 +25,8 @@ uv run pytest tests/test_<name>.py -v  # single file
+ uv run pytest -k "<expr>" -v           # single test by name
+ uv run ruff check src/ tests/          # lint
+ uv run python scripts/regen_openapi.py # regen docs/api/openapi.json
+-nthlayer-core serve --host 0.0.0.0 --port 8000   # start the HTTP server
+-nthlayer-core -V                               # print version
++nthlayer serve --host 0.0.0.0 --port 8000   # start the HTTP server
++nthlayer -V                                  # print version
+ ```
+ 
+ **OpenAPI spec discipline (opensrm-tu04.1).** Any edit to a
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index 6d50964..2e95ad2 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -6,130 +6,6 @@ across the ecosystem under the v1.5 epic plan; we did not reconstruct phase-by-p
+ git history because that history did not exist as commits at the time the work
+ was being done. This narrative is the honest substitute.
+ 
+-## [4.0.12](https://github.com/rsionnach/nthlayer-core/compare/v4.0.11...v4.0.12) (2026-11-04)
+-
+-
+-### Bug Fixes
+-
+-* require nthlayer-common 5.12.0 ([c1de963](https://github.com/rsionnach/nthlayer-core/commit/c1de963f47fa4744a52b64fbcc8135f14aa1f469))
+-
+-## [4.0.11](https://github.com/rsionnach/nthlayer-core/compare/v4.0.10...v4.0.11) (2026-11-02)
+-
+-
+-### Bug Fixes
+-
+-* require nthlayer-common 5.11.0 ([da65414](https://github.com/rsionnach/nthlayer-core/commit/da65414b286cf78ecc9666405fa5ee3ceef1c822))
+-* require nthlayer-common 5.11.0 ([f9da8d5](https://github.com/rsionnach/nthlayer-core/commit/f9da8d5d1d08463e86bef60c61d0896dc20ca7b5))
+-
+-## [4.0.10](https://github.com/rsionnach/nthlayer-core/compare/v4.0.9...v4.0.10) (2026-11-02)
+-
+-
+-### Bug Fixes
+-
+-* require nthlayer-common 5.10.1 ([035dbba](https://github.com/rsionnach/nthlayer-core/commit/035dbba13017df514e7ab12435a8a85699aeabf8))
+-* require nthlayer-common 5.10.1 ([8b3b618](https://github.com/rsionnach/nthlayer-core/commit/8b3b61819653398f32b7843412aefe78f8e5ea73))
+-
+-## [4.0.9](https://github.com/rsionnach/nthlayer-core/compare/v4.0.8...v4.0.9) (2026-11-02)
+-
+-
+-### Bug Fixes
+-
+-* require nthlayer-common 5.10.0 ([a345c66](https://github.com/rsionnach/nthlayer-core/commit/a345c66f13af9dcd7d93dc01f9444d63ff57cfe4))
+-* require nthlayer-common 5.10.0 ([b31bfe3](https://github.com/rsionnach/nthlayer-core/commit/b31bfe3ac689f53d7b14b96d12d5db5065a020d0))
+-
+-## [4.0.8](https://github.com/rsionnach/nthlayer-core/compare/v4.0.7...v4.0.8) (2026-11-01)
+-
+-
+-### Bug Fixes
+-
+-* require nthlayer-common 5.9.1 ([db1fc4e](https://github.com/rsionnach/nthlayer-core/commit/db1fc4edc7065cc289f52ac3c45698b25fc585e7))
+-* require nthlayer-common 5.9.1 ([8923a09](https://github.com/rsionnach/nthlayer-core/commit/8923a09c99dc40dde31719096ff9907f1fa00705))
+-
+-## [4.0.7](https://github.com/rsionnach/nthlayer-core/compare/v4.0.6...v4.0.7) (2026-11-01)
+-
+-
+-### Bug Fixes
+-
+-* require nthlayer-common 5.9.0 ([8f92f6c](https://github.com/rsionnach/nthlayer-core/commit/8f92f6c8376bb8c0f836f49e7cd1ad8ab2b5c698))
+-* require nthlayer-common 5.9.0 ([ea5e917](https://github.com/rsionnach/nthlayer-core/commit/ea5e917576464812f343df719b819db813c158a0))
+-
+-## [4.0.6](https://github.com/rsionnach/nthlayer-core/compare/v4.0.5...v4.0.6) (2026-10-31)
+-
+-
+-### Bug Fixes
+-
+-* require nthlayer-common 5.8.1 ([05b16a2](https://github.com/rsionnach/nthlayer-core/commit/05b16a2afb4b821f4f4c1ee3c81d733905defc49))
+-* require nthlayer-common 5.8.1 ([04850a5](https://github.com/rsionnach/nthlayer-core/commit/04850a5065babd18bb2bc3fadaa336e35380ace7))
+-
+-## [4.0.5](https://github.com/rsionnach/nthlayer-core/compare/v4.0.4...v4.0.5) (2026-10-31)
+-
+-
+-### Bug Fixes
+-
+-* ship the Apache-2.0 LICENSE and declare it in package metadata (opensrm-bqfj) ([c900f92](https://github.com/rsionnach/nthlayer-core/commit/c900f9219d935a82c5330687b2d76552241d4112))
+-* ship the Apache-2.0 LICENSE and declare it in package metadata (opensrm-bqfj) ([6a6c677](https://github.com/rsionnach/nthlayer-core/commit/6a6c67747acd41e82fe734b7b41113cb3fce6b7f))
+-
+-## [4.0.4](https://github.com/rsionnach/nthlayer-core/compare/v4.0.3...v4.0.4) (2026-10-29)
+-
+-
+-### Bug Fixes
+-
+-* require nthlayer-common 5.8.0 (opensrm-wo62.4.13) ([668437b](https://github.com/rsionnach/nthlayer-core/commit/668437b6a2d048548639d2663e84ceae821a6c4e))
+-* require nthlayer-common 5.8.0 (opensrm-wo62.4.13) ([af7da36](https://github.com/rsionnach/nthlayer-core/commit/af7da36114e3fb4f002ab8bc40c3502f4cb09cd6))
+-
+-## [4.0.3](https://github.com/rsionnach/nthlayer-core/compare/v4.0.2...v4.0.3) (2026-10-28)
+-
+-
+-### Bug Fixes
+-
+-* require nthlayer-common 5.6.0 (opensrm-wo62.4.1) ([a91f6cc](https://github.com/rsionnach/nthlayer-core/commit/a91f6cc56f923e62143417e070fab0396eec2877))
+-* require nthlayer-common 5.6.0 (opensrm-wo62.4.1) ([75395d5](https://github.com/rsionnach/nthlayer-core/commit/75395d5c7c8cc078dd31c7544edd28523f42e6e6))
+-* require nthlayer-common 5.7.0 (opensrm-wo62.4.7) ([1c455c8](https://github.com/rsionnach/nthlayer-core/commit/1c455c8254093ff50c6f82c4de1b67b3b4c6e7d8))
+-* require nthlayer-common 5.7.0 (opensrm-wo62.4.7) ([5e64917](https://github.com/rsionnach/nthlayer-core/commit/5e649179b47548add1677dd150d68686dc909f0a))
+-
+-## [4.0.2](https://github.com/rsionnach/nthlayer-core/compare/v4.0.1...v4.0.2) (2026-10-27)
+-
+-
+-### Dependencies
+-
+-* require nthlayer-common 5.5.0 (opensrm-wo62.1) ([d38ffc4](https://github.com/rsionnach/nthlayer-core/commit/d38ffc414b8779d87013f2617cd2f4166342840e))
+-
+-## [4.0.1](https://github.com/rsionnach/nthlayer-core/compare/v4.0.0...v4.0.1) (2026-10-24)
+-
+-
+-### Dependencies
+-
+-* require nthlayer-common 5.4.0 (opensrm-wo62.1) ([013abf0](https://github.com/rsionnach/nthlayer-core/commit/013abf0c420a7afeb2f7158cb0bd9d2d239af702))
+-
+-## [4.0.0](https://github.com/rsionnach/nthlayer-core/compare/v3.0.2...v4.0.0) (2026-10-23)
+-
+-
+-### ⚠ BREAKING CHANGES
+-
+-* **deploying:** upgrading from 3.x in an environment shared with nthlayer-generate removes the `nthlayer` script; reinstall nthlayer-generate afterwards.
+-* **cli:** the `nthlayer` console script is now `nthlayer-core`. Replace `nthlayer serve` with `nthlayer-core serve`.
+-
+-### Features
+-
+-* **cli:** rename console script nthlayer → nthlayer-core (opensrm-dww5) ([53ac90a](https://github.com/rsionnach/nthlayer-core/commit/53ac90aee71b2be9f1997b195808cf067e02e811))
+-
+-
+-### Dependencies
+-
+-* require nthlayer-common 5.3.1 (opensrm-dww5) ([c0fd415](https://github.com/rsionnach/nthlayer-core/commit/c0fd415436f29c671454787d0525c8398878f3d0))
+-
+-
+-### Documentation
+-
+-* **deploying:** reinstall nthlayer-generate after upgrading from core 3.x (opensrm-dww5) ([5053adc](https://github.com/rsionnach/nthlayer-core/commit/5053adc6c1a8488ad9a7a00e8a53be7a8bb6af1c))
+-
+-## [3.0.2](https://github.com/rsionnach/nthlayer-core/compare/v3.0.1...v3.0.2) (2026-10-23)
+-
+-
+-### Dependencies
+-
+-* require nthlayer-common 5.3.0 (opensrm-pnmv) ([0303506](https://github.com/rsionnach/nthlayer-core/commit/0303506d90942370baf5e41bff4efe759197302f))
+-
+ ## [3.0.1](https://github.com/rsionnach/nthlayer-core/compare/v3.0.0...v3.0.1) (2026-10-21)
+ 
+ 
+diff --git a/CONTRIBUTING.md b/CONTRIBUTING.md
+index 079322f..103833f 100644
+--- a/CONTRIBUTING.md
++++ b/CONTRIBUTING.md
+@@ -29,7 +29,7 @@ cd nthlayer-core
+ uv sync --extra dev                  # creates .venv with test/lint tools
+ 
+ # Run the API locally (optional; Ctrl-C to stop, not needed before tests)
+-uv run nthlayer-core serve --host 0.0.0.0 --port 8000
++uv run nthlayer serve --host 0.0.0.0 --port 8000
+ 
+ # Run the test suite
+ uv run pytest -q                     # full suite
+diff --git a/LICENSE b/LICENSE
+deleted file mode 100644
+index b485d9a..0000000
+--- a/LICENSE
++++ /dev/null
+@@ -1,190 +0,0 @@
+-                                 Apache License
+-                           Version 2.0, January 2004
+-                        http://www.apache.org/licenses/
+-
+-   TERMS AND CONDITIONS FOR USE, REPRODUCTION, AND DISTRIBUTION
+-
+-   1. Definitions.
+-
+-      "License" shall mean the terms and conditions for use, reproduction,
+-      and distribution as defined by Sections 1 through 9 of this document.
+-
+-      "Licensor" shall mean the copyright owner or entity authorized by
+-      the copyright owner that is granting the License.
+-
+-      "Legal Entity" shall mean the union of the acting entity and all
+-      other entities that control, are controlled by, or are under common
+-      control with that entity. For the purposes of this definition,
+-      "control" means (i) the power, direct or indirect, to cause the
+-      direction or management of such entity, whether by contract or
+-      otherwise, or (ii) ownership of fifty percent (50%) or more of the
+-      outstanding shares, or (iii) beneficial ownership of such entity.
+-
+-      "You" (or "Your") shall mean an individual or Legal Entity
+-      exercising permissions granted by this License.
+-
+-      "Source" form shall mean the preferred form for making modifications,
+-      including but not limited to software source code, documentation
+-      source, and configuration files.
+-
+-      "Object" form shall mean any form resulting from mechanical
+-      transformation or translation of a Source form, including but
+-      not limited to compiled object code, generated documentation,
+-      and conversions to other media types.
+-
+-      "Work" shall mean the work of authorship, whether in Source or
+-      Object form, made available under the License, as indicated by a
+-      copyright notice that is included in or attached to the work
+-      (an example is provided in the Appendix below).
+-
+-      "Derivative Works" shall mean any work, whether in Source or Object
+-      form, that is based on (or derived from) the Work and for which the
+-      editorial revisions, annotations, elaborations, or other modifications
+-      represent, as a whole, an original work of authorship. For the purposes
+-      of this License, Derivative Works shall not include works that remain
+-      separable from, or merely link (or bind by name) to the interfaces of,
+-      the Work and Derivative Works thereof.
+-
+-      "Contribution" shall mean any work of authorship, including
+-      the original version of the Work and any modifications or additions
+-      to that Work or Derivative Works thereof, that is intentionally
+-      submitted to the Licensor for inclusion in the Work by the copyright owner
+-      or by an individual or Legal Entity authorized to submit on behalf of
+-      the copyright owner. For the purposes of this definition, "submitted"
+-      means any form of electronic, verbal, or written communication sent
+-      to the Licensor or its representatives, including but not limited to
+-      communication on electronic mailing lists, source code control systems,
+-      and issue tracking systems that are managed by, or on behalf of, the
+-      Licensor for the purpose of discussing and improving the Work, but
+-      excluding communication that is conspicuously marked or otherwise
+-      designated in writing by the copyright owner as "Not a Contribution."
+-
+-      "Contributor" shall mean Licensor and any individual or Legal Entity
+-      on behalf of whom a Contribution has been received by Licensor and
+-      subsequently incorporated within the Work.
+-
+-   2. Grant of Copyright License. Subject to the terms and conditions of
+-      this License, each Contributor hereby grants to You a perpetual,
+-      worldwide, non-exclusive, no-charge, royalty-free, irrevocable
+-      copyright license to reproduce, prepare Derivative Works of,
+-      publicly display, publicly perform, sublicense, and distribute the
+-      Work and such Derivative Works in Source or Object form.
+-
+-   3. Grant of Patent License. Subject to the terms and conditions of
+-      this License, each Contributor hereby grants to You a perpetual,
+-      worldwide, non-exclusive, no-charge, royalty-free, irrevocable
+-      (except as stated in this section) patent license to make, have made,
+-      use, offer to sell, sell, import, and otherwise transfer the Work,
+-      where such license applies only to those patent claims licensable
+-      by such Contributor that are necessarily infringed by their
+-      Contribution(s) alone or by combination of their Contribution(s)
+-      with the Work to which such Contribution(s) was submitted. If You
+-      institute patent litigation against any entity (including a
+-      cross-claim or counterclaim in a lawsuit) alleging that the Work
+-      or a Contribution incorporated within the Work constitutes direct
+-      or contributory patent infringement, then any patent licenses
+-      granted to You under this License for that Work shall terminate
+-      as of the date such litigation is filed.
+-
+-   4. Redistribution. You may reproduce and distribute copies of the
+-      Work or Derivative Works thereof in any medium, with or without
+-      modifications, and in Source or Object form, provided that You
+-      meet the following conditions:
+-
+-      (a) You must give any other recipients of the Work or
+-          Derivative Works a copy of this License; and
+-
+-      (b) You must cause any modified files to carry prominent notices
+-          stating that You changed the files; and
+-
+-      (c) You must retain, in the Source form of any Derivative Works
+-          that You distribute, all copyright, patent, trademark, and
+-          attribution notices from the Source form of the Work,
+-          excluding those notices that do not pertain to any part of
+-          the Derivative Works; and
+-
+-      (d) If the Work includes a "NOTICE" text file as part of its
+-          distribution, then any Derivative Works that You distribute must
+-          include a readable copy of the attribution notices contained
+-          within such NOTICE file, excluding those notices that do not
+-          pertain to any part of the Derivative Works, in at least one
+-          of the following places: within a NOTICE text file distributed
+-          as part of the Derivative Works; within the Source form or
+-          documentation, if provided along with the Derivative Works; or,
+-          within a display generated by the Derivative Works, if and
+-          wherever such third-party notices normally appear. The contents
+-          of the NOTICE file are for informational purposes only and
+-          do not modify the License. You may add Your own attribution
+-          notices within Derivative Works that You distribute, alongside
+-          or as an addendum to the NOTICE text from the Work, provided
+-          that such additional attribution notices cannot be construed
+-          as modifying the License.
+-
+-      You may add Your own copyright statement to Your modifications and
+-      may provide additional or different license terms and conditions
+-      for use, reproduction, or distribution of Your modifications, or
+-      for any such Derivative Works as a whole, provided Your use,
+-      reproduction, and distribution of the Work otherwise complies with
+-      the conditions stated in this License.
+-
+-   5. Submission of Contributions. Unless You explicitly state otherwise,
+-      any Contribution intentionally submitted for inclusion in the Work
+-      by You to the Licensor shall be under the terms and conditions of
+-      this License, without any additional terms or conditions.
+-      Notwithstanding the above, nothing herein shall supersede or modify
+-      the terms of any separate license agreement you may have executed
+-      with Licensor regarding such Contributions.
+-
+-   6. Trademarks. This License does not grant permission to use the trade
+-      names, trademarks, service marks, or product names of the Licensor,
+-      except as required for reasonable and customary use in describing the
+-      origin of the Work and reproducing the content of the NOTICE file.
+-
+-   7. Disclaimer of Warranty. Unless required by applicable law or
+-      agreed to in writing, Licensor provides the Work (and each
+-      Contributor provides its Contributions) on an "AS IS" BASIS,
+-      WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+-      implied, including, without limitation, any warranties or conditions
+-      of TITLE, NON-INFRINGEMENT, MERCHANTABILITY, or FITNESS FOR A
+-      PARTICULAR PURPOSE. You are solely responsible for determining the
+-      appropriateness of using or redistributing the Work and assume any
+-      risks associated with Your exercise of permissions under this License.
+-
+-   8. Limitation of Liability. In no event and under no legal theory,
+-      whether in tort (including negligence), contract, or otherwise,
+-      unless required by applicable law (such as deliberate and grossly
+-      negligent acts) or agreed to in writing, shall any Contributor be
+-      liable to You for damages, including any direct, indirect, special,
+-      incidental, or consequential damages of any character arising as a
+-      result of this License or out of the use or inability to use the
+-      Work (including but not limited to damages for loss of goodwill,
+-      work stoppage, computer failure or malfunction, or any and all
+-      other commercial damages or losses), even if such Contributor
+-      has been advised of the possibility of such damages.
+-
+-   9. Accepting Warranty or Additional Liability. While redistributing
+-      the Work or Derivative Works thereof, You may choose to offer,
+-      and charge a fee for, acceptance of support, warranty, indemnity,
+-      or other liability obligations and/or rights consistent with this
+-      License. However, in accepting such obligations, You may act only
+-      on Your own behalf and on Your sole responsibility, not on behalf
+-      of any other Contributor, and only if You agree to indemnify,
+-      defend, and hold each Contributor harmless for any liability
+-      incurred by, or claims asserted against, such Contributor by reason
+-      of your accepting any such warranty or additional liability.
+-
+-   END OF TERMS AND CONDITIONS
+-
+-   Copyright 2026 NthLayer Contributors
+-
+-   Licensed under the Apache License, Version 2.0 (the "License");
+-   you may not use this file except in compliance with the License.
+-   You may obtain a copy of the License at
+-
+-       http://www.apache.org/licenses/LICENSE-2.0
+-
+-   Unless required by applicable law or agreed to in writing, software
+-   distributed under the License is distributed on an "AS IS" BASIS,
+-   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+-   See the License for the specific language governing permissions and
+-   limitations under the License.
+diff --git a/README.md b/README.md
+index 01f3eb7..883a51c 100644
+--- a/README.md
++++ b/README.md
+@@ -4,13 +4,9 @@
+ 
+ ```bash
+ pip install nthlayer-core
+-nthlayer-core serve --host 0.0.0.0 --port 8000
++nthlayer serve --host 0.0.0.0 --port 8000
+ ```
+ 
+-The console script was `nthlayer` before 4.0.0; it was renamed to `nthlayer-core` because nthlayer-generate owns `nthlayer` (opensrm-dww5).
+-
+-**Upgrading from 3.x:** if nthlayer-generate is installed in the same environment, reinstall it after upgrading core, because the 3.x core package owned the `nthlayer` script file and the upgrade removes it: `pip install --force-reinstall --no-deps nthlayer-generate` (or `uv pip install --reinstall-package nthlayer-generate nthlayer-generate`).
+-
+ ## What it is
+ 
+ `nthlayer-core` is the single source of truth for the NthLayer runtime. It owns the SQLite store, exposes an HTTP API, and is the only component that touches the database. Tier 2 workers ([`nthlayer-workers`](https://github.com/rsionnach/nthlayer-workers)) and the Tier 3 operator TUI ([`nthlayer-bench`](https://github.com/rsionnach/nthlayer-bench)) talk to core exclusively over HTTP — never directly to SQLite.
+@@ -86,8 +82,8 @@ WAL mode + `PRAGMA synchronous=NORMAL` + `busy_timeout=5000`. Thread-local conne
+ ## CLI
+ 
+ ```bash
+-nthlayer-core serve [--host 0.0.0.0] [--port 8000]   # start the HTTP server
+-nthlayer-core -V                                    # print version
++nthlayer serve [--host 0.0.0.0] [--port 8000]   # start the HTTP server
++nthlayer -V                                       # print version
+ ```
+ 
+ ## NthLayer ecosystem
+diff --git a/docs/architecture.md b/docs/architecture.md
+index 9eee5f7..2813724 100644
+--- a/docs/architecture.md
++++ b/docs/architecture.md
+@@ -11,7 +11,7 @@ reference.
+ nthlayer-core/
+   src/nthlayer_core/
+     __init__.py
+-    cli.py        # nthlayer-core serve [--host 0.0.0.0] [--port 8000]
++    cli.py        # nthlayer serve [--host 0.0.0.0] [--port 8000]
+     catalogue.py  # ManifestCatalogue: loads/caches OpenSRM manifests
+                   # from dir, mtime-based polling (load, poll, get,
+                   # list_all, to_dict_list). _manifest_to_dict()
+@@ -57,7 +57,7 @@ nthlayer-core/
+                   # __all__ resolves; asserts CLI on PATH + --help
+                   # exits 0
+   pyproject.toml  # name="nthlayer-core", version="1.0.0"; script:
+-                  # nthlayer-core → nthlayer_core.cli:main; deps:
++                  # nthlayer → nthlayer_core.cli:main; deps:
+                   # nthlayer-common, starlette, uvicorn, httpx
+ ```
+ 
+@@ -325,7 +325,7 @@ Core-specific methods (not on the VerdictStore ABC):
+ - `tests/smoke/test_imports.py` — walks every module under
+   `nthlayer_core` via `pkgutil`; asserts every `__all__` symbol
+   resolves via `getattr`.
+-- `tests/smoke/test_cli.py` — asserts the `nthlayer-core` console script is
++- `tests/smoke/test_cli.py` — asserts the `nthlayer` console script is
+   on PATH and `--help` exits 0 with non-empty stdout.
+ 
+ ## Runtime dependencies
+diff --git a/docs/deploying.md b/docs/deploying.md
+index f096d72..826a3d2 100644
+--- a/docs/deploying.md
++++ b/docs/deploying.md
+@@ -27,17 +27,13 @@ uv tool install nthlayer-core
+ Verify the install:
+ 
+ ```bash
+-nthlayer-core --version
++nthlayer --version
+ ```
+ 
+ ```
+-nthlayer-core X.Y.Z
++nthlayer 1.7.0
+ ```
+ 
+-The console script was `nthlayer` before 4.0.0; it was renamed to `nthlayer-core` because nthlayer-generate owns `nthlayer` (opensrm-dww5).
+-
+-**Upgrading from 3.x:** if nthlayer-generate is installed in the same environment, reinstall it after upgrading core, because the 3.x core package owned the `nthlayer` script file and the upgrade removes it: `pip install --force-reinstall --no-deps nthlayer-generate` (or `uv pip install --reinstall-package nthlayer-generate nthlayer-generate`).
+-
+ ### 3. Choose a manifests directory
+ 
+ `nthlayer-core` serves a read-only catalogue of OpenSRM service
+@@ -71,7 +67,7 @@ This tutorial uses Option A from here on (Option B users substitute
+ From inside the `opensrm/` directory:
+ 
+ ```bash
+-NTHLAYER_MANIFESTS_DIR=./examples nthlayer-core serve
++NTHLAYER_MANIFESTS_DIR=./examples nthlayer serve
+ ```
+ 
+ You should see the server come up on port 8000:
+@@ -152,8 +148,8 @@ API surface via the OpenAPI spec at `GET /openapi.json`.
+ ### CLI
+ 
+ ```
+-nthlayer-core serve [--host HOST] [--port PORT]   # defaults 0.0.0.0:8000
+-nthlayer-core --version                            # also -V
++nthlayer serve [--host HOST] [--port PORT]   # defaults 0.0.0.0:8000
++nthlayer --version                            # also -V
+ ```
+ 
+ The CLI surface is intentionally minimal: one subcommand (`serve`) with
+@@ -225,10 +221,10 @@ problem. Table summarises symptoms; paragraphs below give the diagnosis.
+ 
+ | # | Symptom | Cause | Fix |
+ |---|---|---|---|
+-| 1 | `nthlayer-core: command not found` after install | uv tool-shim dir not on `PATH` | `uv tool update-shell` (or add `~/.local/bin` to `PATH`) |
+-| 2 | `OSError: [Errno 48/98] Address already in use` | Port 8000 taken | `nthlayer-core serve --port 8001` or kill the prior process |
++| 1 | `nthlayer: command not found` after install | uv tool-shim dir not on `PATH` | `uv tool update-shell` (or add `~/.local/bin` to `PATH`) |
++| 2 | `OSError: [Errno 48/98] Address already in use` | Port 8000 taken | `nthlayer serve --port 8001` or kill the prior process |
+ | 3 | `sqlite3.OperationalError: unable to open database file` | Cwd not writable, or `NTHLAYER_STORE_PATH` points at a missing dir, **or points at a directory itself instead of a file** | `NTHLAYER_STORE_PATH=/var/lib/nthlayer/store.db` (ensure dir exists and is writable; the path is the file, not the directory) or chdir to a writable dir |
+-| 4 | `sqlite3.OperationalError: database is locked` (persistent, not transient) | Two `nthlayer-core serve` processes on the same DB | Kill the duplicate; one writer per store. WAL + 5s busy-timeout handles transient contention, not two writers |
++| 4 | `sqlite3.OperationalError: database is locked` (persistent, not transient) | Two `nthlayer serve` processes on the same DB | Kill the duplicate; one writer per store. WAL + 5s busy-timeout handles transient contention, not two writers |
+ | 5 | `GET /manifests` returns `[]` despite `NTHLAYER_MANIFESTS_DIR` set | Relative path resolved from wrong cwd, or dir is empty/missing | Use an absolute path; check server logs for the load summary |
+ | 6 | One manifest missing from `GET /manifests` even though the file exists | Invalid YAML or schema mismatch; catalogue skips bad manifests rather than crashing the server | Check server logs for the parse error; fix the YAML; `POST /manifests/-/reload` |
+ | 7 | Local `curl` works, remote `curl` times out | Cloud firewall / security group / host firewall blocks 8000 | Open the port, or bind `--host 127.0.0.1` and SSH-tunnel |
+@@ -238,7 +234,7 @@ problem. Table summarises symptoms; paragraphs below give the diagnosis.
+ `uv tool install` writes a shim to `~/.local/bin` (Linux/macOS) and
+ prints a warning if that directory is not on `PATH`. If you missed the
+ warning, `uv tool update-shell` edits your shell rc to add it; opening
+-a new terminal then resolves `nthlayer-core`. Verify with `which nthlayer-core`.
++a new terminal then resolves `nthlayer`. Verify with `which nthlayer`.
+ On macOS with zsh, a stale `~/.zshrc` cache or a non-login shell can
+ also hide the shim — `exec zsh -l` forces a re-read.
+ 
+@@ -248,7 +244,7 @@ The exact error is `OSError: [Errno 48] Address already in use` on
+ macOS and `[Errno 98]` on Linux. Confirm with `lsof -i :8000` (macOS)
+ or `ss -ltnp 'sport = :8000'` (Linux); the output names the process
+ holding the port. Either kill it or pass `--port 8001` (or any free
+-port) to `nthlayer-core serve`. Re-running a backgrounded server without
++port) to `nthlayer serve`. Re-running a backgrounded server without
+ killing the prior process is the usual cause.
+ 
+ #### 3. Store path not writable
+@@ -280,7 +276,7 @@ The store opens with `PRAGMA journal_mode=WAL`,
+ writer, and the 5s busy-timeout absorbs transient contention from a
+ single process's connection pool. A `database is locked` error that
+ persists past 5s indicates two writers on the same file — typically a
+-second `nthlayer-core serve` started against the same `NTHLAYER_STORE_PATH`.
++second `nthlayer serve` started against the same `NTHLAYER_STORE_PATH`.
+ Kill the duplicate; the single-writer invariant is load-bearing. A
+ stale `nthlayer.db-wal` file alone is not the cause and should not be
+ deleted while any process holds the database open.
+@@ -311,7 +307,7 @@ appear "missing" — the later file wins in load order.
+ 
+ #### 7. Remote curl times out
+ 
+-`nthlayer-core serve` binds to `0.0.0.0:8000` by default, so a local
++`nthlayer serve` binds to `0.0.0.0:8000` by default, so a local
+ `curl localhost:8000/health` returns `{"status":"ok"}` even when
+ remote clients time out. The timeout (as opposed to a connection
+ refused) is the tell: the SYN is being dropped, not rejected, which
+@@ -364,7 +360,7 @@ operational guidance is the upstream documentation at
+ 
+ #### Process layout
+ 
+-`nthlayer-core serve` and `litestream replicate` run side-by-side, both
++`nthlayer serve` and `litestream replicate` run side-by-side, both
+ pointed at the same SQLite file (the path in `NTHLAYER_STORE_PATH`).
+ There are two patterns.
+ 
+@@ -373,7 +369,7 @@ systemd unit, both pointed at the same path:
+ 
+ ```bash
+ # Terminal 1 (or systemd unit nthlayer-core.service)
+-NTHLAYER_STORE_PATH=/var/lib/nthlayer/store.db nthlayer-core serve
++NTHLAYER_STORE_PATH=/var/lib/nthlayer/store.db nthlayer serve
+ 
+ # Terminal 2 (or systemd unit nthlayer-litestream.service)
+ litestream replicate -config /etc/litestream.yml
+@@ -382,7 +378,7 @@ litestream replicate -config /etc/litestream.yml
+ **Wrapper.** Let Litestream supervise the serve process via `-exec`:
+ 
+ ```bash
+-litestream replicate -config /etc/litestream.yml -exec "nthlayer-core serve"
++litestream replicate -config /etc/litestream.yml -exec "nthlayer serve"
+ ```
+ 
+ The wrapper pattern is recommended: it gives single-process semantics
+@@ -413,7 +409,7 @@ retention tuning.
+ 
+ Verify replication is actually happening (a wrong bucket name or wrong
+ credentials lets `litestream replicate` log errors and retry while
+-`nthlayer-core serve` writes locally — the operator believes the store is
++`nthlayer serve` writes locally — the operator believes the store is
+ durable when it is not). Run `litestream snapshots /var/lib/nthlayer/store.db`
+ after a few writes; a successful replica produces at least one snapshot
+ entry. No snapshots after sustained writes means the replica isn't
+@@ -430,7 +426,7 @@ litestream restore -o /var/lib/nthlayer/store.db s3://YOUR_BUCKET/nthlayer-core
+ You would run this in two situations: cold-starting a new VM that has
+ no local store yet, or recovering from disk loss on the existing host.
+ The server must not be running while the restore is in progress —
+-Litestream and `nthlayer-core serve` both want to own the SQLite file, and
++Litestream and `nthlayer serve` both want to own the SQLite file, and
+ overlapping ownership corrupts the restore.
+ 
+ #### What this does NOT give you
+diff --git a/pyproject.toml b/pyproject.toml
+index 0696889..7c8558b 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -4,10 +4,9 @@ build-backend = "setuptools.build_meta"
+ 
+ [project]
+ name = "nthlayer-core"
+-version = "4.0.12"
++version = "3.0.1"
+ description = "NthLayer core — reliability-critical verdict store, case management, and HTTP API"
+ readme = "README.md"
+-license = {text = "Apache-2.0"}
+ requires-python = ">=3.11"
+ dependencies = [
+     # Floor is the version this repo is built and tested against, NOT the
+@@ -21,19 +20,17 @@ dependencies = [
+     # every threshold entry [opensrm-7zpz]; catalogue.manifest_to_dict
+     # serialises each threshold via threshold_to_v2_entry, common's validated
+     # emitter of the v2 spec.judgment_threshold entry, never a hand-copy.
+-    # WHY 5.5.0 (opensrm-wo62.1): the version this repo is now built and tested
++    # WHY 5.3.0 (opensrm-pnmv): the version this repo is now built and tested
+     # against (rule 10: the floor is the installed sibling). Bump it on
+     # every nthlayer-common minor release: the floor guard fails until you do.
+-    # History: raised to 5.3.1 (opensrm-dww5, a patch) because its opensrm/v1
+-    # rejection names a command that runs in a co-install.
+-    "nthlayer-common>=5.12.0,<6.0.0",
++    "nthlayer-common>=5.3.0,<6.0.0",
+     "starlette>=0.40",
+     "uvicorn>=0.30",
+     "httpx>=0.27",
+ ]
+ 
+ [project.scripts]
+-nthlayer-core = "nthlayer_core.cli:main"
++nthlayer = "nthlayer_core.cli:main"
+ 
+ [project.optional-dependencies]
+ dev = [
+diff --git a/src/nthlayer_core/cli.py b/src/nthlayer_core/cli.py
+index 59c4dfd..bec0dfc 100644
+--- a/src/nthlayer_core/cli.py
++++ b/src/nthlayer_core/cli.py
+@@ -9,7 +9,7 @@ def build_parser() -> argparse.ArgumentParser:
+     """Build the CLI parser. Exposed so tests can introspect the surface
+     without running ``main``'s side effects (see
+     ``tests/test_deploying_doc_parity.py``)."""
+-    parser = argparse.ArgumentParser(prog="nthlayer-core", description="NthLayer core")
++    parser = argparse.ArgumentParser(description="NthLayer core")
+     parser.add_argument("-V", "--version", action="version", version=f"%(prog)s {__version__}")
+     sub = parser.add_subparsers(dest="command")
+ 
+diff --git a/tests/smoke/test_cli.py b/tests/smoke/test_cli.py
+index bfa52d0..8d7d6e2 100644
+--- a/tests/smoke/test_cli.py
++++ b/tests/smoke/test_cli.py
+@@ -5,7 +5,7 @@ import shutil
+ import subprocess
+ 
+ 
+-CONSOLE_SCRIPT = "nthlayer-core"
++CONSOLE_SCRIPT = "nthlayer"
+ 
+ 
+ def test_console_script_on_path():
+diff --git a/tests/test_console_script_name.py b/tests/test_console_script_name.py
+deleted file mode 100644
+index 5227fc6..0000000
+--- a/tests/test_console_script_name.py
++++ /dev/null
+@@ -1,126 +0,0 @@
+-"""The console script is ``nthlayer-core``, never ``nthlayer``.
+-
+-nthlayer-generate owns ``nthlayer``. Both packages registering it made the
+-installed one depend on install order, so core declares only ``nthlayer-core``
+-(symmetric naming: PyPI name = repo = script). Bead: opensrm-dww5.
+-"""
+-from __future__ import annotations
+-
+-import pathlib
+-import re
+-import tomllib
+-
+-import pytest
+-
+-from nthlayer_core.cli import build_parser
+-
+-REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
+-
+-# Lines containing any of these are exempt from the guard: they name the old
+-# script on purpose (the rename note and the 3.x upgrade note). Keep in sync
+-# with those notes in README.md and docs/deploying.md.
+-RENAME_NOTE_MARKERS = ("before 4.0.0", "Upgrading from 3.x")
+-
+-# Legitimate mentions of the bare name that are NOT the console script: the
+-# `nthlayer` meta-package on PyPI. Matched by line substring, not by weakening
+-# the regex.
+-ALLOWED_LINE_SUBSTRINGS = ("front door + meta-package",)
+-
+-# The bare word `nthlayer` (not preceded by a word char, `/`, `.` or `-`) in a
+-# stale-invocation position: followed by a subcommand/flag (`serve`,
+-# `--version`, `-V`, `--help`), a version number (`nthlayer 1.7.0` output), a
+-# backtick, `:`, `→`, or end of line. So it ignores nthlayer-core,
+-# nthlayer-generate, nthlayer_core, NTHLAYER_*, /var/lib/nthlayer/, nthlayer.io.
+-STALE_SCRIPT_RE = re.compile(
+-    r"(?<![\w/.-])nthlayer"
+-    r"(?=\s+(?:serve\b|--version|-V\b|--help|\d+\.\d+)|\s*$|`|:|\s*→)",
+-    re.MULTILINE,
+-)
+-
+-
+-def _scripts() -> dict[str, str]:
+-    data = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+-    return data["project"]["scripts"]
+-
+-
+-def test_pyproject_declares_nthlayer_core_script() -> None:
+-    assert _scripts().get("nthlayer-core") == "nthlayer_core.cli:main"
+-
+-
+-def test_pyproject_does_not_declare_nthlayer_script() -> None:
+-    assert "nthlayer" not in _scripts(), (
+-        "core must not register `nthlayer`; nthlayer-generate owns it"
+-    )
+-
+-
+-def test_parser_prog_is_nthlayer_core() -> None:
+-    assert build_parser().prog == "nthlayer-core"
+-
+-
+-@pytest.mark.parametrize(
+-    "text",
+-    [
+-        "nthlayer serve --port 8000",
+-        "nthlayer --version",
+-        "nthlayer -V",
+-        "nthlayer --help",
+-        "nthlayer 1.7.0",
+-        "run nthlayer",
+-        "see nthlayer:",
+-        "the `nthlayer` script",
+-        "nthlayer \u2192 nthlayer_core.cli:main",
+-    ],
+-)
+-def test_stale_script_regex_matches(text: str) -> None:
+-    assert STALE_SCRIPT_RE.search(text), text
+-
+-
+-@pytest.mark.parametrize(
+-    "text",
+-    [
+-        "nthlayer-core serve",
+-        "nthlayer-generate build",
+-        "import nthlayer_core",
+-        "nthlayer-common>=1.5.0",
+-        "NTHLAYER_STORE_PATH=/x",
+-        "/var/lib/nthlayer/data",
+-        "https://nthlayer.io/docs",
+-        "nthlayer.db-wal",
+-        "pip install nthlayer-core",
+-        "nthlayer-core --version",
+-        # `-` in the lookbehind: a hyphenated prefix is another name, not
+-        # the bare script (e.g. a `foo-nthlayer` binary or path segment).
+-        "foo-nthlayer serve",
+-    ],
+-)
+-def test_stale_script_regex_ignores(text: str) -> None:
+-    assert not STALE_SCRIPT_RE.search(text), text
+-
+-
+-# Top-level docs that tell a reader how to run core. CHANGELOG.md is excluded:
+-# it is a historical record and names the old script on purpose.
+-_ROOT_DOCS = ("README.md", "AGENTS.md", "CONTRIBUTING.md", "CLAUDE.md")
+-
+-
+-def _doc_paths() -> list[pathlib.Path]:
+-    return [
+-        *(REPO_ROOT / name for name in _ROOT_DOCS),
+-        *sorted((REPO_ROOT / "docs").glob("*.md")),
+-    ]
+-
+-
+-def test_docs_exist_so_guard_is_not_vacuous() -> None:
+-    names = {p.name for p in _doc_paths()}
+-    assert {*_ROOT_DOCS, "deploying.md", "architecture.md"} <= names
+-
+-
+-@pytest.mark.parametrize("path", _doc_paths(), ids=lambda p: p.name)
+-def test_docs_invoke_nthlayer_core_not_nthlayer(path: pathlib.Path) -> None:
+-    lines = [
+-        ln
+-        for ln in path.read_text(encoding="utf-8").splitlines()
+-        if not any(m in ln for m in RENAME_NOTE_MARKERS)
+-        and not any(a in ln for a in ALLOWED_LINE_SUBSTRINGS)
+-    ]
+-    bare = STALE_SCRIPT_RE.findall("\n".join(lines))
+-    assert not bare, f"{path.name} still names the old script: {bare}"
+diff --git a/tests/test_deploying_doc_parity.py b/tests/test_deploying_doc_parity.py
+index fc4e357..6a2bf14 100644
+--- a/tests/test_deploying_doc_parity.py
++++ b/tests/test_deploying_doc_parity.py
+@@ -109,7 +109,7 @@ def test_cli_subsection_matches_argparse() -> None:
+     (plus any subparsers) so the test sees exactly what users see.
+ 
+     Pins both *flag* parity and *subcommand-name* parity — a new top-level
+-    subcommand (e.g. ``nthlayer-core migrate``) added to cli.py without a
++    subcommand (e.g. ``nthlayer migrate``) added to cli.py without a
+     matching mention in the deploying.md CLI section fails this test.
+     """
+     section = _doc_section("### CLI")
+@@ -144,7 +144,7 @@ def test_cli_subsection_matches_argparse() -> None:
+ 
+     # Subcommand-name parity: each subcommand registered with the parser
+     # must appear verbatim in the CLI section (typically inside a code
+-    # block like ``nthlayer-core serve``). Catches "new subcommand added,
++    # block like ``nthlayer serve``). Catches "new subcommand added,
+     # nobody updated the docs."
+     missing_subcommands = {sc for sc in src_subcommands if sc not in section}
+     assert not missing_subcommands, (
+diff --git a/uv.lock b/uv.lock
+index 971a334..d734a5d 100644
+--- a/uv.lock
++++ b/uv.lock
+@@ -926,7 +926,7 @@ wheels = [
+ 
+ [[package]]
+ name = "nthlayer-common"
+-version = "5.12.0"
++version = "5.3.0"
+ source = { editable = "../nthlayer-common" }
+ dependencies = [
+     { name = "anthropic" },
+@@ -954,10 +954,7 @@ requires-dist = [
+     { name = "instructor", specifier = ">=1.5" },
+     { name = "jsonschema", marker = "extra == 'dev'", specifier = ">=4.21" },
+     { name = "openai", specifier = ">=1.50" },
+-    { name = "opentelemetry-api", specifier = ">=1.38,<2" },
+-    { name = "opentelemetry-exporter-otlp-proto-grpc", marker = "extra == 'otel'", specifier = ">=1.38,<2" },
+-    { name = "opentelemetry-sdk", marker = "extra == 'dev'", specifier = ">=1.38,<2" },
+-    { name = "opentelemetry-sdk", marker = "extra == 'otel'", specifier = ">=1.38,<2" },
++    { name = "opentelemetry-api", specifier = ">=1.28" },
+     { name = "pagerduty", specifier = ">=6.0.0,<8.0.0" },
+     { name = "prometheus-client", specifier = ">=0.21" },
+     { name = "pydantic", specifier = ">=2.7.0,<3.0.0" },
+@@ -969,11 +966,11 @@ requires-dist = [
+     { name = "structlog", specifier = ">=24.1.0" },
+     { name = "tenacity", specifier = ">=8.2.3,<10.0.0" },
+ ]
+-provides-extras = ["otel", "dev"]
++provides-extras = ["dev"]
+ 
+ [[package]]
+ name = "nthlayer-core"
+-version = "4.0.12"
++version = "3.0.1"
+ source = { editable = "." }
+ dependencies = [
+     { name = "httpx" },

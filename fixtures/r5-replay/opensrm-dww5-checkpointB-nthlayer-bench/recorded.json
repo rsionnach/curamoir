@@ -1,0 +1,106 @@
+{
+ "schema_version": 1,
+ "entry": "opensrm-dww5-checkpointB-nthlayer-bench",
+ "fidelity": "counts_only",
+ "lens_order": [
+  "correctness",
+  "clarity",
+  "edge-cases",
+  "provenance",
+  "excellence"
+ ],
+ "iterations": {
+  "correctness": 1,
+  "clarity": 2,
+  "edge-cases": 2,
+  "provenance": 3
+ },
+ "rounds": [
+  {
+   "lens": "correctness",
+   "iteration": 1,
+   "recorded_iteration": null,
+   "counts": {
+    "critical": 0,
+    "important": 0,
+    "minor": 1
+   },
+   "findings": null
+  },
+  {
+   "lens": "clarity",
+   "iteration": 1,
+   "recorded_iteration": null,
+   "counts": {
+    "critical": 0,
+    "important": 2,
+    "minor": 5
+   },
+   "findings": null
+  },
+  {
+   "lens": "clarity",
+   "iteration": 2,
+   "recorded_iteration": 2,
+   "counts": {
+    "critical": 0,
+    "important": 0,
+    "minor": 2
+   },
+   "findings": null
+  },
+  {
+   "lens": "edge_cases",
+   "iteration": 1,
+   "recorded_iteration": null,
+   "counts": {
+    "critical": 0,
+    "important": 1,
+    "minor": 3
+   },
+   "findings": null
+  },
+  {
+   "lens": "edge_cases",
+   "iteration": 2,
+   "recorded_iteration": 2,
+   "counts": {
+    "critical": 0,
+    "important": 0,
+    "minor": 0
+   },
+   "findings": null
+  },
+  {
+   "lens": "provenance",
+   "iteration": 1,
+   "recorded_iteration": null,
+   "counts": {},
+   "findings": null
+  },
+  {
+   "lens": "provenance",
+   "iteration": 2,
+   "recorded_iteration": null,
+   "counts": {
+    "critical": 3,
+    "important": 1,
+    "minor": 2
+   },
+   "findings": null
+  },
+  {
+   "lens": "provenance",
+   "iteration": 3,
+   "recorded_iteration": 2,
+   "counts": {
+    "critical": 0,
+    "important": 0,
+    "minor": 1
+   },
+   "findings": null
+  }
+ ],
+ "cross_repo_findings": [],
+ "escaped": []
+}

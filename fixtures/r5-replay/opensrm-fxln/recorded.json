@@ -1,0 +1,12 @@
+{
+ "schema_version": 1,
+ "entry": "opensrm-fxln",
+ "fidelity": "counts_only",
+ "lens_order": [
+  "correctness"
+ ],
+ "iterations": {},
+ "rounds": [],
+ "cross_repo_findings": [],
+ "escaped": []
+}

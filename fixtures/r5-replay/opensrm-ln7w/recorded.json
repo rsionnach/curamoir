@@ -1,0 +1,132 @@
+{
+ "schema_version": 1,
+ "entry": "opensrm-ln7w",
+ "fidelity": "counts_only",
+ "lens_order": [
+  "correctness",
+  "clarity",
+  "edge-cases",
+  "provenance",
+  "excellence"
+ ],
+ "iterations": {
+  "correctness": 2,
+  "clarity": 2,
+  "edge-cases": 4,
+  "provenance": 2
+ },
+ "rounds": [
+  {
+   "lens": "correctness",
+   "iteration": 1,
+   "recorded_iteration": null,
+   "counts": {
+    "critical": 0,
+    "important": 4,
+    "minor": 4
+   },
+   "findings": null
+  },
+  {
+   "lens": "correctness",
+   "iteration": 2,
+   "recorded_iteration": 1,
+   "counts": {
+    "critical": 0,
+    "important": 0,
+    "minor": 2
+   },
+   "findings": null
+  },
+  {
+   "lens": "clarity",
+   "iteration": 1,
+   "recorded_iteration": null,
+   "counts": {
+    "critical": 0,
+    "important": 3,
+    "minor": 7
+   },
+   "findings": null
+  },
+  {
+   "lens": "clarity",
+   "iteration": 2,
+   "recorded_iteration": 1,
+   "counts": {
+    "critical": 0,
+    "important": 0,
+    "minor": 4
+   },
+   "findings": null
+  },
+  {
+   "lens": "edge_cases",
+   "iteration": 1,
+   "recorded_iteration": null,
+   "counts": {
+    "critical": 2,
+    "important": 2,
+    "minor": 4
+   },
+   "findings": null
+  },
+  {
+   "lens": "edge_cases",
+   "iteration": 2,
+   "recorded_iteration": 1,
+   "counts": {
+    "critical": 0,
+    "important": 2,
+    "minor": 2
+   },
+   "findings": null
+  },
+  {
+   "lens": "edge_cases",
+   "iteration": 3,
+   "recorded_iteration": 2,
+   "counts": {
+    "critical": 0,
+    "important": 1,
+    "minor": 2
+   },
+   "findings": null
+  },
+  {
+   "lens": "edge_cases",
+   "iteration": 4,
+   "recorded_iteration": 3,
+   "counts": {
+    "critical": 0,
+    "important": 0,
+    "minor": 2
+   },
+   "findings": null
+  },
+  {
+   "lens": "provenance",
+   "iteration": 1,
+   "recorded_iteration": null,
+   "counts": {
+    "critical": 1,
+    "important": 1,
+    "minor": 2
+   },
+   "findings": null
+  },
+  {
+   "lens": "provenance",
+   "iteration": 2,
+   "recorded_iteration": 1,
+   "counts": {
+    "critical": 0,
+    "important": 0,
+    "minor": 0
+   },
+   "findings": null
+  }
+ ],
+ "cross_repo_findings": [],
+ "escaped": []
+}

@@ -1,0 +1,141 @@
+diff --git a/docs/architecture.md b/docs/architecture.md
+index fc2cc30..c3ae8f1 100644
+--- a/docs/architecture.md
++++ b/docs/architecture.md
+@@ -238,9 +238,9 @@ Implements C-X.2 (manifest format migration).
+   `MigrationResult.lossy` is True only when something was dropped; assumed
+   entries are informational, so they alone must not force `--allow-lossy`.
+   Unconvertible input raises `OpenSRMV1MigrationError(ValueError)`.
+-  `OPENSRM_V1_REJECTION` is the loader's message template. `load_manifest` raises `ManifestLoadError` naming
+-  `nthlayer migrate-manifest` for any `opensrm/v1` document, whatever `format=`
+-  says (opensrm-pnmv).
++  `OPENSRM_V1_REJECTION` is the loader's message template. `load_manifest`
++  raises `ManifestLoadError` naming `nthlayer-generate migrate-manifest` for
++  any `opensrm/v1` document, whatever `format=` says (opensrm-pnmv).
+ 
+ **Scanning a mixed directory** (`manifest/scan.py`). `load_manifest`
+ raises for any YAML it cannot parse as a manifest, including files that
+diff --git a/docs/upgrading-5.0.md b/docs/upgrading-5.0.md
+index 464a0e2..b1befa8 100644
+--- a/docs/upgrading-5.0.md
++++ b/docs/upgrading-5.0.md
+@@ -140,8 +140,10 @@ no `method`, `frequency` or `sampling`.
+   does not know, so a reader survives a newer writer. `Status`, `MissingReason`
+   and `ResultReason` are exported for typing.
+ - **New in 5.3.0:** `load_manifest` rejects `apiVersion: opensrm/v1` (the
+-  published v1 schema) with an error naming `nthlayer migrate-manifest`, instead
+-  of "service.name is required". `convert_opensrm_v1_to_v2(data, *,
++  published v1 schema) with an error naming `nthlayer-generate
++  migrate-manifest`, instead of "service.name is required". (Not bare
++  `nthlayer`: nthlayer-core registers that script too, so it is ambiguous when
++  both are installed; opensrm-dww5.) `convert_opensrm_v1_to_v2(data, *,
+   service_type=None) -> MigrationResult(manifest, unmapped)` converts it to v2
+   following AUTHORING §7. `unmapped` lists every field not carried over
+   exactly, each with a `kind`: `"dropped"` (no v2 home) or `"assumed"`
+diff --git a/src/nthlayer_common/manifest/opensrm_v1.py b/src/nthlayer_common/manifest/opensrm_v1.py
+index d1afd8e..178a859 100644
+--- a/src/nthlayer_common/manifest/opensrm_v1.py
++++ b/src/nthlayer_common/manifest/opensrm_v1.py
+@@ -44,7 +44,8 @@ _NOT_IN_SCHEMA = "not part of the opensrm/v1 schema"
+ OPENSRM_V1_REJECTION = (
+     "{path}: apiVersion 'opensrm/v1' is the published OpenSRM v1 schema, which "
+     "NthLayer does not load. NthLayer reads opensrm.nthlayer.io/v2 (and srm/v1, "
+-    "its own v1 dialect). Convert it with: nthlayer migrate-manifest {path}"
++    "its own v1 dialect). Convert it with "
++    "the nthlayer-generate package: nthlayer-generate migrate-manifest {path}"
+ )
+ 
+ UnmappedKind = Literal["dropped", "assumed"]
+diff --git a/src/nthlayer_common/manifest/parser/loader.py b/src/nthlayer_common/manifest/parser/loader.py
+index 8253ce9..3374e9c 100644
+--- a/src/nthlayer_common/manifest/parser/loader.py
++++ b/src/nthlayer_common/manifest/parser/loader.py
+@@ -12,6 +12,7 @@ Usage:
+ from __future__ import annotations
+ 
+ import contextlib
++import shlex
+ import warnings
+ from pathlib import Path
+ from typing import Any, Literal
+@@ -89,7 +90,7 @@ def load_manifest(
+     # into a parser that misreads it (opensrm-pnmv). See
+     # docs/superpowers/decisions/opensrm-v1-support.md in the nthlayer front door.
+     if is_opensrm_v1_format(data):
+-        raise ManifestLoadError(OPENSRM_V1_REJECTION.format(path=file_path))
++        raise ManifestLoadError(OPENSRM_V1_REJECTION.format(path=shlex.quote(str(file_path))))
+ 
+     # Detect format
+     detected_format = _detect_format(data)
+diff --git a/tests/test_opensrm_v1_against_spec.py b/tests/test_opensrm_v1_against_spec.py
+index e87eecf..5b39c62 100644
+--- a/tests/test_opensrm_v1_against_spec.py
++++ b/tests/test_opensrm_v1_against_spec.py
+@@ -218,7 +218,7 @@ def test_unmapped_is_in_document_order_depth_first(name):
+ 
+ @pytest.mark.parametrize("name", sorted(EXPECTED))
+ def test_load_manifest_rejects_every_example(name):
+-    with pytest.raises(ManifestLoadError, match="nthlayer migrate-manifest"):
++    with pytest.raises(ManifestLoadError, match="nthlayer-generate migrate-manifest"):
+         load_manifest(EXAMPLES / name)
+ 
+ 
+diff --git a/tests/test_opensrm_v1_loader.py b/tests/test_opensrm_v1_loader.py
+index 9758fce..b72622f 100644
+--- a/tests/test_opensrm_v1_loader.py
++++ b/tests/test_opensrm_v1_loader.py
+@@ -1,4 +1,6 @@
+ """load_manifest rejects opensrm/v1 clearly (opensrm-pnmv)."""
++import re
++import shlex
+ import warnings
+ 
+ import pytest
+@@ -21,7 +23,10 @@ def test_opensrm_v1_is_rejected_with_the_migrate_command(tmp_path, fmt):
+         with pytest.raises(ManifestLoadError) as exc:
+             load_manifest(path, format=fmt)
+     msg = str(exc.value)
+-    assert "opensrm/v1" in msg and "nthlayer migrate-manifest" in msg
++    assert "opensrm/v1" in msg and "nthlayer-generate migrate-manifest" in msg
++    # Bare script is ambiguous (opensrm-dww5). The lookbehind keeps this from
++    # matching inside "nthlayer-generate migrate-manifest".
++    assert re.search(r"(?<![\w-])nthlayer migrate-manifest", msg) is None
+     assert "service.name is required" not in msg
+ 
+ 
+@@ -42,14 +47,14 @@ def test_exported_rejection_is_the_one_the_loader_raises(tmp_path):
+     path.write_text(yaml.safe_dump(_DOC))
+     with pytest.raises(ManifestLoadError) as exc:
+         load_manifest(path)
+-    assert str(exc.value) == manifest.OPENSRM_V1_REJECTION.format(path=path)
++    assert str(exc.value) == manifest.OPENSRM_V1_REJECTION.format(path=shlex.quote(str(path)))
+ 
+ 
+ def test_is_manifest_file_counts_opensrm_v1_so_scans_reach_the_rejection(tmp_path):
+     path = tmp_path / "svc.yaml"          # not *.reliability.yaml, not service.yaml
+     path.write_text(yaml.safe_dump(_DOC))
+     assert manifest.is_manifest_file(path)
+-    with pytest.raises(ManifestLoadError, match="nthlayer migrate-manifest"):
++    with pytest.raises(ManifestLoadError, match="nthlayer-generate migrate-manifest"):
+         load_manifest(path)
+ 
+ 
+@@ -57,3 +62,18 @@ def test_foreign_yaml_reason_does_not_treat_opensrm_v1_as_foreign(tmp_path):
+     path = tmp_path / "svc.yaml"
+     path.write_text(yaml.safe_dump(_DOC))
+     assert manifest.foreign_yaml_reason(path) is None
++
++
++def test_rejection_command_is_shell_safe_and_ends_the_message(tmp_path):
++    d = tmp_path / "my dir"
++    d.mkdir()
++    path = d / "svc.yaml"
++    path.write_text(yaml.safe_dump(_DOC))
++    with pytest.raises(ManifestLoadError) as exc:
++        load_manifest(path)
++    msg = str(exc.value)
++    marker = "nthlayer-generate migrate-manifest "
++    assert msg.count(marker) == 1
++    tail = msg.split(marker)[1]          # nothing may follow the quoted path
++    assert shlex.split(tail) == [str(path)]
++    assert msg.endswith(tail)

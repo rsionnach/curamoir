@@ -1,0 +1,282 @@
+diff --git a/CLAUDE.md b/CLAUDE.md
+index 0d438d9..10dc97c 100644
+--- a/CLAUDE.md
++++ b/CLAUDE.md
+@@ -51,6 +51,9 @@ These are load-bearing — wrong-side mistakes cause silent breakage.
+          `threshold_to_v2_entry()`, which are public and re-exported from
+          `manifest/__init__.py` (the latter so consumers serialise a
+          threshold through the one validated emitter, opensrm-7zpz).
++         `threshold_from_v2_entry()` (opensrm-908x; public, re-exported;
++         defined in `parser/v2.py` because it wraps
++         `_parse_judgment_threshold`) is its inverse.
+        - domain guards, used on the CLASSICAL writers too, not just
+          judgment — `require_number()` (numeric or a string spelling
+          one; raises ValueError where a bare `float()` raised an
+diff --git a/docs/upgrading-5.0.md b/docs/upgrading-5.0.md
+index 072b7a5..d9b608d 100644
+--- a/docs/upgrading-5.0.md
++++ b/docs/upgrading-5.0.md
+@@ -113,9 +113,22 @@ no `method`, `frequency` or `sampling`.
+   emits (raising `ValueError` for a threshold the parser could never produce), and picks up future fields without a consumer change. nthlayer-core's
+   `/manifests` serialiser must move to it (and its inline `segments` fixtures
+   gain `metric`).
++- **New in 5.1.0:** read an entry back with
++  `nthlayer_common.manifest.threshold_from_v2_entry` (opensrm-908x) rather
++  than parsing the dict by hand. It turns a served entry (e.g. an item of
++  core 3.0's `/manifests` `judgment_thresholds`) into a `JudgmentThreshold`
++  with exactly the manifest parser's per-entry rules. Pass `where` as a path
++  to the entry in your own document, e.g.
++  `threshold_from_v2_entry(item, where=f"/manifests[{i}].judgment_thresholds[{j}]")`;
++  errors then read `<where>: <reason>`. It raises `OpenSRMV2ParseError`, which
++  is not a `ValueError` (what `threshold_to_v2_entry` raises): catch both.
++  Entries are closed, so a key a newer nthlayer-common adds is an error here:
++  upgrade nthlayer-common no later than the service serving the entries.
+ - nthlayer-generate and nthlayer-workers read no `ThresholdMeasurement` field
+   today, so they need only the version bump and any `segments` fixtures; an
+-  evaluator added to workers later must read `metric` and its parameters.
++  evaluator added to workers later should get its thresholds through
++  `threshold_from_v2_entry` and read `metric` and its parameters from the
++  result.
+ - Evaluators compare the rate `metric` names, per CORE §5.5.1. For `outcomes`,
+   count only decisions in `measurement.window` whose `outcome_signal.window` has
+   elapsed; a listed segment with none is not evaluable (CORE §5.5.6 E3).
+diff --git a/src/nthlayer_common/manifest/__init__.py b/src/nthlayer_common/manifest/__init__.py
+index 80e8937..7916c63 100644
+--- a/src/nthlayer_common/manifest/__init__.py
++++ b/src/nthlayer_common/manifest/__init__.py
+@@ -77,7 +77,7 @@ from nthlayer_common.manifest.parser.loader import (
+     load_manifest,
+ )
+ from nthlayer_common.manifest.parser.v1 import OpenSRMParseError
+-from nthlayer_common.manifest.parser.v2 import OpenSRMV2ParseError
++from nthlayer_common.manifest.parser.v2 import OpenSRMV2ParseError, threshold_from_v2_entry
+ from nthlayer_common.manifest.scan import (
+     MANIFEST_SUFFIXES,
+     ManifestCollisionWarning,
+@@ -131,6 +131,7 @@ __all__ = [
+     "JudgmentThreshold",
+     "ThresholdMeasurement",
+     "duration_seconds",
++    "threshold_from_v2_entry",
+     "threshold_to_v2_entry",
+     "BreachAction",
+     "StatisticalRequirements",
+diff --git a/src/nthlayer_common/manifest/parser/v2.py b/src/nthlayer_common/manifest/parser/v2.py
+index 3af95be..9aaf85f 100644
+--- a/src/nthlayer_common/manifest/parser/v2.py
++++ b/src/nthlayer_common/manifest/parser/v2.py
+@@ -633,6 +633,37 @@ def _parse_threshold_entries(prefix: str, entries: list[Any]) -> list[JudgmentTh
+     return parsed
+ 
+ 
++def threshold_from_v2_entry(
++    entry: Any, where: str = "judgment_threshold entry"
++) -> JudgmentThreshold:
++    """Parse one flat ``spec.judgment_threshold`` entry into a JudgmentThreshold.
++
++    Public inverse of ``threshold_to_v2_entry`` (opensrm-908x), for consumers
++    that receive entries outside a manifest - e.g. nthlayer-core's /manifests
++    ``judgment_thresholds`` items. It applies exactly the rules the manifest
++    parser applies to the same entry, so a consumer never re-implements them.
++    Pass *where* as a path to the entry in the caller's own document, e.g.
++    ``/manifests[3].judgment_thresholds[1]``; errors read ``<where>: <reason>``
++    (or ``<where> must be a mapping, ...``). Never mutates *entry*.
++
++    Only per-entry rules apply. Manifest-level ones - the ai-gate service
++    requirement, template concatenation - cannot be checked on a lone entry;
++    an entry served by core already passed them.
++
++    Entries are closed (CORE §5.5), so a key, bound or type added by a newer
++    nthlayer-common is an error here: upgrade nthlayer-common no later than
++    the producer (e.g. nthlayer-core), or catch the error per entry.
++
++    Raises OpenSRMV2ParseError, which is not a ValueError: a consumer using
++    both this and threshold_to_v2_entry (ValueError) catches both.
++    """
++    if not isinstance(entry, dict):
++        raise OpenSRMV2ParseError(
++            f"{where} must be a mapping, got {type(entry).__name__}."
++        )
++    return _parse_judgment_threshold(where, entry)
++
++
+ def _parse_judgment_threshold(where: str, data: dict[str, Any]) -> JudgmentThreshold:
+     """Parse one flat threshold entry (§5.5, opensrm-l33e); *where* locates it
+     in the document that declares it, for errors."""
+diff --git a/tests/test_threshold_from_v2_entry.py b/tests/test_threshold_from_v2_entry.py
+new file mode 100644
+index 0000000..4fe994b
+--- /dev/null
++++ b/tests/test_threshold_from_v2_entry.py
+@@ -0,0 +1,158 @@
++"""threshold_from_v2_entry: the public inverse of threshold_to_v2_entry
++(opensrm-908x). API consumers (nthlayer-workers reading core's /manifests)
++turn a served v2 entry back into a JudgmentThreshold with the parser's own
++rules, instead of hand-parsing the dict."""
++
++from __future__ import annotations
++
++from pathlib import Path
++from typing import Any
++
++import pytest
++import yaml
++
++from nthlayer_common.manifest import (
++    JudgmentThreshold,
++    OpenSRMV2ParseError,
++    threshold_from_v2_entry,
++    threshold_to_v2_entry,
++)
++from nthlayer_common.manifest.parser.v2 import parse_opensrm_v2
++
++_SPEC_V2 = Path(__file__).resolve().parents[2] / "opensrm" / "spec" / "v2"
++_SOURCES = [
++    _SPEC_V2 / "examples" / "judgment-thresholds" / "all-five-types.yaml",
++    _SPEC_V2 / "examples" / "judgment-thresholds" / "segments-two-dimensions.yaml",
++    _SPEC_V2 / "examples" / "services" / "ai-gate.yaml",
++]
++_INVALID = _SPEC_V2 / "tests" / "invalid"
++
++
++def _entries(source: Path) -> list[dict[str, Any]]:
++    assert source.is_file(), f"spec example missing: {source}"
++    entries = yaml.safe_load(source.read_text(encoding="utf-8"))["spec"]["judgment_threshold"]
++    assert entries, f"{source.name} declares no thresholds"
++    return entries
++
++
++def _shell(entries: list[Any]) -> dict[str, Any]:
++    return {
++        "apiVersion": "opensrm.nthlayer.io/v2",
++        "kind": "ServiceManifest",
++        "metadata": {"name": "svc", "labels": {"tier": "critical"}},
++        "spec": {
++            "owner": {"group": "group:default/team"},
++            "service": {"name": "svc", "type": "ai-gate"},
++            "judgment_threshold": entries,
++        },
++    }
++
++
++def test_is_public():
++    """Listed in the package's __all__ (the public-API rule)."""
++    import nthlayer_common.manifest as manifest
++
++    assert "threshold_from_v2_entry" in manifest.__all__
++
++
++@pytest.mark.parametrize("source", _SOURCES, ids=lambda p: p.name)
++def test_matches_the_manifest_parser_entry_for_entry(source):
++    """Same result as parsing the entry inside a manifest: one set of rules."""
++    entries = _entries(source)
++    parsed = parse_opensrm_v2(_shell(entries)).judgment_thresholds
++    assert [threshold_from_v2_entry(e) for e in entries] == list(parsed)
++
++
++@pytest.mark.parametrize("source", _SOURCES, ids=lambda p: p.name)
++def test_inverts_threshold_to_v2_entry(source):
++    """from(to(t)) == t and to(from(e)) is the served entry (what core 3.0
++    serves on /manifests), for every threshold the spec ships."""
++    for threshold in parse_opensrm_v2(_shell(_entries(source))).judgment_thresholds:
++        served = threshold_to_v2_entry(threshold)
++        back = threshold_from_v2_entry(served)
++        assert isinstance(back, JudgmentThreshold)
++        assert back == threshold
++        assert threshold_to_v2_entry(back) == served
++
++
++# The spec negatives whose only defect is inside a judgment_threshold entry:
++# opensrm-7zpz added n67-n92. Presence is asserted below, never skipped.
++_FIRST_THRESHOLD_NEGATIVE = 67
++_LAST_THRESHOLD_NEGATIVE = 92
++_THRESHOLD_NEGATIVE_COUNT = _LAST_THRESHOLD_NEGATIVE - _FIRST_THRESHOLD_NEGATIVE + 1
++
++
++def _threshold_negatives() -> list[Path]:
++    return sorted(
++        p for p in _INVALID.glob("n*.yaml")
++        if _FIRST_THRESHOLD_NEGATIVE
++        <= int(p.name[1:].split("-", 1)[0])
++        <= _LAST_THRESHOLD_NEGATIVE
++    )
++
++
++def test_the_threshold_negatives_are_present():
++    assert len(_threshold_negatives()) == _THRESHOLD_NEGATIVE_COUNT
++
++
++@pytest.mark.parametrize("path", _threshold_negatives(), ids=lambda p: p.name)
++def test_rejects_every_spec_threshold_negative(path):
++    entry = yaml.safe_load(path.read_text(encoding="utf-8"))["spec"]["judgment_threshold"][0]
++    with pytest.raises(OpenSRMV2ParseError):
++        threshold_from_v2_entry(entry)
++
++
++@pytest.mark.parametrize("bad", [None, [], "segments", 3], ids=["none", "list", "str", "int"])
++def test_rejects_a_non_mapping(bad):
++    with pytest.raises(OpenSRMV2ParseError):
++        threshold_from_v2_entry(bad)
++
++
++def test_error_names_the_caller_location():
++    with pytest.raises(OpenSRMV2ParseError) as err:
++        threshold_from_v2_entry({"type": "segments"}, where="/manifests[3].judgment_thresholds[1]")
++    assert str(err.value).startswith("/manifests[3].judgment_thresholds[1]")
++
++
++def test_does_not_mutate_the_entry():
++    entry = _entries(_SOURCES[0])[0]
++    before = yaml.safe_dump(entry)
++    threshold_from_v2_entry(entry)
++    assert yaml.safe_dump(entry) == before
++
++
++def test_json_decoded_entries_equal_yaml_parsed_ones():
++    """The consumer reads JSON (core's /manifests); ints and floats decode
++    differently from YAML but must give an equal threshold."""
++    import json
++
++    for source in _SOURCES:
++        for entry in _entries(source):
++            assert threshold_from_v2_entry(json.loads(json.dumps(entry))) == threshold_from_v2_entry(entry)
++
++
++@pytest.mark.parametrize("token", ["NaN", "Infinity", "-Infinity"])
++def test_rejects_json_non_finite_bounds(token):
++    import json
++
++    entry = json.loads(
++        '{"type": "stability", "probe": {"frozen_input_set": "s3://p", '
++        '"frequency": "daily"}, "bounds": {"maximum_drift": ' + token + "}}"
++    )
++    with pytest.raises(OpenSRMV2ParseError):
++        threshold_from_v2_entry(entry)
++
++
++def test_accepts_a_dict_subclass():
++    from collections import OrderedDict
++
++    entry = _entries(_SOURCES[0])[0]
++    assert threshold_from_v2_entry(OrderedDict(entry)) == threshold_from_v2_entry(entry)
++
++
++def test_a_key_from_a_newer_common_is_an_error_not_ignored():
++    """Forward compatibility is deliberately strict (closed entries, CORE
++    §5.5): consumers upgrade nthlayer-common no later than the producer."""
++    entry = dict(_entries(_SOURCES[0])[0], added_in_a_later_version=1)
++    with pytest.raises(OpenSRMV2ParseError):
++        threshold_from_v2_entry(entry)
+diff --git a/uv.lock b/uv.lock
+index da41fab..9e0ab2c 100644
+--- a/uv.lock
++++ b/uv.lock
+@@ -903,7 +903,7 @@ wheels = [
+ 
+ [[package]]
+ name = "nthlayer-common"
+-version = "4.0.0"
++version = "5.0.0"
+ source = { editable = "." }
+ dependencies = [
+     { name = "anthropic" },
