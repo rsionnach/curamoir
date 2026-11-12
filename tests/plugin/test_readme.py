@@ -12,10 +12,16 @@ parked). The command table's rows are test_routine_command.py's.
 
 How the security statements are pinned (user decision 2026-11-12, after the
 provenance review of cm-2qp.7, round 2): the boundary table is the boundary
-contract, so every cell of it, in both columns, is pinned exactly
-(whitespace-normalised) against the literal table in BOUNDARY_CELLS below.
-Every security statement outside the table is pinned as a whole sentence or
-clause, up to and including its closing punctuation. Round 1 had pinned a
+contract, so every row of it, in order and none twice, and every cell, in
+both columns, is pinned exactly (whitespace-normalised) against the literal
+table in BOUNDARY_CELLS below. Outside the table, the security sentences the
+tests below name are pinned whole, from a sentence boundary up to and
+including their closing punctuation: every sentence of the Guardrails
+bullets and of the boundary section's prose (all but its "Each runner, as
+built:" lead-in), and the named ones in "Current status", "Install", "Local
+adapter", "Hosted runner limits" and "Cost". A sentence added elsewhere is
+not caught; that is the accepted cost. The sections read refuse an HTML
+comment, which would hide a pinned sentence when rendered. Round 1 had pinned a
 key phrase per claim instead, and a negation appended to a phrase ("The
 supervisor lock does not hold here", "so you need not protect it") or put
 inside it ("This is not enforced in code") still passed. Whole cells and
@@ -85,7 +91,9 @@ def section(heading, text=None):
     level, _, _, body_start = found[0]
     end = next((start for other, _, start, _ in headings
                 if start >= body_start and other <= level), len(text))
-    return text[body_start:end]
+    body = text[body_start:end]
+    assert "<!--" not in body, f"the {heading!r} section has an HTML comment"
+    return body
 
 
 def prose(heading):
@@ -93,12 +101,25 @@ def prose(heading):
     return " ".join(flat(section(heading)))
 
 
+#: What may come just before a pinned sentence in `flat()` text: the text's
+#: start, or a clause's end (`. `, `: `, `; `, `! `, `? `, also after a
+#: closing `)` or `**`, as in `.** ` or `.) `), or an opening `(`. A bullet
+#: flattens to `- ` (or `* `, `+ `) after the previous line's end, so the
+#: marker may follow either of the first two.
+SENTENCE_START = re.compile(r"(?:(?:^|[.:;!?][)*]*\s)(?:[-*+]\s)?|\()$")
+
+
 def assert_whole(text, *sentences):
     """Each of `sentences` is in `text` whole: a full sentence or clause,
-    ending at its punctuation, so a word put inside it fails."""
+    from a sentence boundary (SENTENCE_START) to its closing punctuation,
+    so a word put inside it, before it or after it fails. Every occurrence
+    must start at a boundary."""
     for sentence in sentences:
         assert re.search(r"[.:;!?)*]$", sentence), f"not a whole clause: {sentence!r}"
-        assert sentence in text, sentence
+        starts = [match.start() for match in re.finditer(re.escape(sentence), text)]
+        assert starts, sentence
+        for start in starts:
+            assert SENTENCE_START.search(text[:start]), f"not at a sentence start: {sentence!r}"
 
 
 def test_flat_strips_nested_blockquote_markers():
@@ -126,6 +147,38 @@ def test_section_refuses_a_repeated_or_missing_heading():
 def test_assert_whole_refuses_a_fragment():
     with pytest.raises(AssertionError, match="not a whole clause"):
         assert_whole("so protect it, as the recipe says.", "so protect it")
+
+
+@pytest.mark.parametrize("text", [
+    "It is false that This is enforced.",
+    "A. It is false that This is enforced.",
+    "said so - This is enforced.",
+])
+def test_assert_whole_refuses_a_prefixed_sentence(text):
+    with pytest.raises(AssertionError, match="not at a sentence start"):
+        assert_whole(text, "This is enforced.")
+
+
+@pytest.mark.parametrize("text", [
+    "This is enforced.",
+    "A. This is enforced.",
+    "A: This is enforced.",
+    "A; This is enforced.",
+    "A.** This is enforced.",
+    "A.) This is enforced.",
+    "A (This is enforced.",
+    "say so: - This is enforced.",
+    "- This is enforced.",
+])
+def test_assert_whole_accepts_a_sentence_boundary(text):
+    assert_whole(text, "This is enforced.")
+
+
+def test_section_refuses_an_html_comment():
+    for text in ("## Guardrails\n\n<!-- This is not solved yet. -->\n",
+                 "## Guardrails\n\n<!--\n- **A bullet.**\n"):
+        with pytest.raises(AssertionError, match="HTML comment"):
+            section("Guardrails", text)
 
 
 def test_the_readme_no_longer_says_nothing_is_scheduled():
@@ -273,12 +326,24 @@ def test_install_says_github_hosted_runners_only():
 TEMPLATES = ROOT / "templates"
 
 
-def boundary_rows():
-    """The boundary table's rows, `{row name: [name, hosted, local]}`, each
-    cell whitespace-normalised."""
+def boundary_table():
+    """The boundary table's body rows in README order, duplicates kept, each
+    `[name, hosted, local]` and each cell whitespace-normalised (the header
+    row, named "", and the `|---|` line are left out)."""
     boundary = section("Where the security boundary is")
-    return {cells[0]: cells for line in boundary.splitlines() if line.startswith("| ")
-            for cells in [[" ".join(cell.split()) for cell in line.strip().strip("|").split("|")]]}
+    rows = [[" ".join(cell.split()) for cell in line.strip().strip("|").split("|")]
+            for line in boundary.splitlines() if line.startswith("| ")]
+    return [cells for cells in rows if cells[0] not in ("", "---")]
+
+
+def boundary_rows():
+    """The boundary table's rows, `{row name: [name, hosted, local]}`; a row
+    name that occurs twice fails, so a contradicting duplicate row is never
+    hidden behind the original."""
+    table = boundary_table()
+    names = [cells[0] for cells in table]
+    assert len(names) == len(set(names)), f"a boundary row occurs twice: {names}"
+    return {cells[0]: cells for cells in table}
 
 
 def routine_state_branch():
@@ -371,8 +436,8 @@ BOUNDARY_CELLS = [
 
 
 def test_the_boundary_cells_cover_every_row():
-    assert [row for row, _, _ in BOUNDARY_CELLS] == [
-        name for name in boundary_rows() if name not in ("", "---")]
+    """The ordered row names, duplicates kept, are BOUNDARY_CELLS' rows."""
+    assert [cells[0] for cells in boundary_table()] == [row for row, _, _ in BOUNDARY_CELLS]
 
 
 @pytest.mark.parametrize(("row", "hosted", "local"), BOUNDARY_CELLS,
@@ -414,10 +479,16 @@ def test_the_guardrails_keep_their_bullets_and_per_runner_caveats():
         " run.",
         "If a run would overspend, it refuses to start.",
         "It does not yet hold on a hosted runner (the table's Spend row).",
+        "**Destructive mistakes are caught.** During a job, `git reset --hard`,"
+        " `git push --force`, `rm -rf`, a redirect that empties its own input and"
+        " similar commands are refused, and each refusal names the safe alternative.",
         "This guard catches an agent's honest mistakes; it is not what keeps a hostile"
         " agent in (see below).",
         "**An open-PR cap.** You will never come back to a wall of PRs.",
         "**It works in a throwaway clone, never your checkout.**",
+        "The git c\u00faram\u00f3ir runs there is hardened: no hooks, filters, diff drivers, pager"
+        " or other configuration the clone could plant ever run, and a planted `.git` or"
+        " `.gitattributes`, in any case, refuses the run.",
         "Only the reviewed patch of the files in scope leaves the clone; anything else the"
         " agent touched is put back or refuses the run.",
         "A Routine is the exception for its own session: see [Hosted runner"
@@ -433,6 +504,8 @@ def test_an_unmarked_hosted_declaration_is_said_to_be_refused():
 
     assert_whole(
         prose("Where the security boundary is"),
+        "What contains an agent that has gone wrong, by accident or because something it"
+        " read told it to, is not the command guard but the runner.",
         "Which runner a run is on is declared, never guessed:"
         f" `{config.RUNNER_VARIABLE}=hosted`, which the workflow and the Routine prompt"
         " set, is accepted only where a GitHub-hosted Actions runner's or a Claude Code"
