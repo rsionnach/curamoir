@@ -2,13 +2,17 @@
 the README's "Current status" and "Guardrails" are written against the
 runner-kinds table.
 
-What is pinned is what the bead and the user's instruction name, not the
-prose: the sentence the direction retires ("nothing is scheduled for you
-yet") and the removed command (`/curamoir:schedule`, R1) stay out; the
-README links the direction doc; the boundary table has a column per runner
-kind; and the "Local adapter" subsection says plainly that the local
-agent's own `claude -p` is not OS-sandboxed (user decision 2026-10-29,
-cm-xy9.8 parked). The command table's rows are test_routine_command.py's.
+What is pinned is what the bead and the user's instruction name: the
+sentence the direction retires ("nothing is scheduled for you yet") and the
+removed command (`/curamoir:schedule`, R1) stay out; the README links the
+direction doc; the boundary table has a column per runner kind and every
+row; and the "Local adapter" subsection says plainly that the local agent's
+own `claude -p` is not OS-sandboxed (user decision 2026-10-29, cm-xy9.8
+parked). The three facts the correctness review fixed (a Routine's own
+session loads the repository's configuration, the runner check reads
+markers, which platform gets loopback) are pinned by their key phrases,
+not by whole sentences, so the prose around them can be reworded. The
+command table's rows are test_routine_command.py's.
 """
 
 import re
@@ -66,9 +70,9 @@ def test_the_boundary_table_has_a_column_per_runner():
     header = next(line for line in boundary.splitlines() if line.startswith("| |"))
 
     assert "Hosted" in header and "Local" in header
-    for row in ("Process boundary", "Credentials at risk", "Agents' tools",
-                "Your tests", "One sweep at a time", "Kill switch",
-                "Memory between runs"):
+    for row in ("Process boundary", "Your checkout", "Credentials at risk",
+                "Agents' tools", "Your tests", "One sweep at a time",
+                "Kill switch", "Spend", "Memory between runs"):
         assert f"| {row} |" in boundary, row
 
 
@@ -96,9 +100,8 @@ def test_a_routines_own_session_is_said_to_load_the_repositorys_configuration():
 
     assert "never loads" not in guardrails
     assert "never reaches the scan or the fix agent" in guardrails
-    assert ("loads the default branch's `CLAUDE.md`, settings and hooks, and they run with "
-            "the session's GitHub access and Claude credentials") in limits
-    assert "that is a prompt, not a fence: a hook still runs" in limits
+    assert "loads the default branch's" in limits
+    assert "a hook still runs" in limits
 
 
 def test_the_runner_declaration_is_said_to_check_markers_not_prove_the_runner():
@@ -107,14 +110,16 @@ def test_the_runner_declaration_is_said_to_check_markers_not_prove_the_runner():
     boundary = " ".join(flat(section("Where the security boundary is")))
 
     assert "refused anywhere else" not in boundary
-    assert "own environment markers are set, and refused where they are absent" in boundary
+    assert "environment markers" in boundary
     assert "it does not prove where the run is" in boundary
 
 
 def test_the_local_test_network_row_says_which_platform_gets_loopback():
     """os_sandbox: bwrap's --unshare-net always gives a private loopback;
-    `sweep.test_loopback` gates loopback on macOS only."""
-    boundary = " ".join(flat(section("Where the security boundary is")))
+    `sweep.test_loopback` gates loopback on macOS only. The table row and
+    the Local adapter's bullet both say so."""
+    for heading in ("Where the security boundary is", "Local adapter"):
+        text = " ".join(flat(section(heading)))
 
-    assert ("on macOS not even loopback unless `sweep.test_loopback: true`, on Linux a "
-            "private loopback only") in boundary
+        assert "`sweep.test_loopback: true`" in text, heading
+        assert "private loopback" in text, heading

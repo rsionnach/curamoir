@@ -190,8 +190,8 @@ runner weakens one, the bullet and the table below say so:
 
 - **It never writes to your default branch.** Work goes to `curamoir/*` branches
   and arrives as a PR. This is enforced in code, not in a prompt.
-- **One sweep at a time**, where the runner can hold it: a Routine cannot
-  (the table says how each runner does).
+- **One sweep at a time**, where the runner can enforce it. A Routine
+  cannot (see the table's One sweep at a time row).
 - **A kill switch.** The `curamoir:paused` label, or a `.curamoir/PAUSE`
   file, stops every scheduled job. A label that cannot be read does not
   pause: the run goes ahead, and its ledger line says the label was not
@@ -226,19 +226,20 @@ run is on is declared, never guessed: `CURAMOIR_RUNNER=hosted`, which the
 workflow and the Routine prompt set, is accepted only where a GitHub-hosted
 Actions runner's or a Claude Code cloud session's own environment markers
 are set, and refused where they are absent. The check catches a mistaken
-declaration; it does not prove where the run is. Unset, the run is local. Each runner, as built:
+declaration; it does not prove where the run is. Unset, the run is local.
+Each runner, as built:
 
 | | Hosted (GitHub Actions, Claude Code Routine) | Local (your machine) |
 |---|---|---|
 | Process boundary | The VM, discarded after the run | An OS sandbox (`sandbox-exec`, `bwrap`) around your tests, self-tested before every gate; missing or failing, the sweep refuses |
 | Your checkout | Not on the VM | Out of reach: the work happens in a throwaway clone |
-| Credentials at risk | What the run holds: on Actions its `GITHUB_TOKEN`, scoped by the workflow's `permissions:`; on a Routine the session's GitHub access, which acts as you; and its model credentials | Your home directory |
-| Agents' tools | Scan: Read, Grep, Glob. Fix: those, Edit, and Bash for the repository's own test command (no Bash if that command cannot be named safely) and Claude Code's built-in read-only commands; git denied | Scan: Read, Grep, Glob. Fix: those and Edit; no shell |
+| Credentials at risk | What the run holds: on Actions its `GITHUB_TOKEN`, scoped by the workflow's `permissions:`; on a Routine the session's GitHub access, which acts as you; and, on both, the run's model credentials | Your home directory |
+| Agents' tools | Scan: Read, Grep, Glob. Fix: Read, Grep, Glob, Edit; Bash limited to the repository's own test command and Claude Code's built-in read-only commands (no Bash at all if that command cannot be named safely); git denied | Scan: Read, Grep, Glob. Fix: those and Edit; no shell |
 | Your tests | Run unsandboxed in the clone, with the VM's network | Run in the OS sandbox, with no network: on macOS not even loopback unless `sweep.test_loopback: true`, on Linux a private loopback only |
 | One sweep at a time | On Actions, the workflow's concurrency group queues a second run. On a Routine nothing does: each run's lock is on its own VM, so a scheduled run and **Run now** can overlap; don't start a run while one is going | The supervisor lock ([Local adapter](#local-adapter)) |
 | Kill switch | The label, or a committed `.curamoir/PAUSE` | The label, or `.curamoir/PAUSE` in your checkout |
 | Spend | The ledger records tokens; GitHub Actions bills the API key, a Routine your Claude usage. The monthly ceiling does not yet see earlier hosted runs, so it does not stop them | The ledger prices tokens against the monthly ceiling |
-| Memory between runs | Only what is committed: the ledger lines go to a state branch, never the default branch: `curamoir/state` from the workflow (its `CURAMOIR_STATE_BRANCH` variable can name another), `claude/curamoir-state` from a Routine (the prompt's own name, so the two runners' ledgers never mix) | The checkout |
+| Memory between runs | Only what is committed. Ledger lines go to a state branch, never the default branch. Workflow: `curamoir/state` (its `CURAMOIR_STATE_BRANCH` variable can name another). Routine: `claude/curamoir-state` (the prompt's own name, so the two runners' ledgers never mix) | The checkout |
 
 ### Hosted runner limits
 
@@ -246,14 +247,6 @@ The fix agent's prompt on a hosted runner forbids git, `bd`, `gh`, installs
 and the network, but the prompt is not the fence: a git command that writes
 the clone's `.git` (or moves HEAD) refuses the whole run, and a stray file
 is dropped from the patch.
-
-On a Routine, the session that runs the sweep is itself a Claude Code
-session in a clone of your repository, so it loads the default branch's
-`CLAUDE.md`, settings and hooks, and they run with the session's GitHub
-access and Claude credentials. The prompt tells it to ignore the
-repository's instructions, but that is a prompt, not a fence: a hook still
-runs. Only what is on the default branch loads, so protect it, as the
-Routine recipe says.
 
 Past that, the boundary is the disposable VM and the scope of the run's
 token, nothing finer. Your tests run there unsandboxed, as the runner's
@@ -263,8 +256,20 @@ what the sweep holds (on Actions, the run's `GITHUB_TOKEN` and
 `ANTHROPIC_API_KEY`), and a process either leaves behind can reach the
 run's later steps, the PR included. This is not solved yet. Keep the
 workflow's `permissions:` as written. Add no other secret to the sweep
-step's `env:`: only the GitHub and Actions tokens are kept from the agent,
-by name, so a secret under any other name reaches it.
+step's `env:`. The agent is kept from these names only, so a secret under
+any other name reaches it: `GITHUB_TOKEN`, `GH_TOKEN`,
+`GH_ENTERPRISE_TOKEN`, `GITHUB_ENTERPRISE_TOKEN`, `ACTIONS_RUNTIME_TOKEN`,
+`ACTIONS_RUNTIME_URL`, `ACTIONS_ID_TOKEN_REQUEST_TOKEN`,
+`ACTIONS_ID_TOKEN_REQUEST_URL`, `ACTIONS_CACHE_URL` and
+`ACTIONS_RESULTS_URL`.
+
+On a Routine, the session that runs the sweep is itself a Claude Code
+session in a clone of your repository, so it loads the default branch's
+`CLAUDE.md`, settings and hooks, and they run with the session's GitHub
+access and Claude credentials. The prompt tells it to ignore the
+repository's instructions, but that is a prompt, not a fence: a hook still
+runs. Only what is on the default branch loads, so protect it, as the
+Routine recipe says.
 
 ### Local adapter
 
@@ -278,12 +283,12 @@ launchd entry, the sweep runs as the local adapter, behind these instead:
   reused venv and interpreter, PATH, a version manager's installed versions;
   never a credential directory such as `~/.ssh` or `~/.config`); have no
   network (on macOS not even loopback unless `sweep.test_loopback: true` is
-  committed, for a suite that starts a local server); and reach no daemon's
-  socket and, on macOS, no system service that acts outside the sandbox
-  (`open`, `launchctl`, AppleEvents, DNS). Where the sandbox is missing or
-  fails its self-test, the sweep refuses rather than run the tests
-  unconfined. On macOS the tests can still read files outside your home
-  directory.
+  committed, for a suite that starts a local server; on Linux a private
+  loopback only); and reach no daemon's socket and, on macOS, no system
+  service that acts outside the sandbox (`open`, `launchctl`, AppleEvents,
+  DNS). Where the sandbox is missing or fails its self-test, the sweep
+  refuses rather than run the tests unconfined. On macOS the tests can
+  still read files outside your home directory.
 - **No local job's agent has a shell.** Any tool beyond those in the table,
   Bash above all, is refused when the job is set up; only a hosted runner's
   fix agent gets one. With no shell, a file the agent writes is never run by
@@ -293,8 +298,9 @@ launchd entry, the sweep runs as the local adapter, behind these instead:
   Code's permission rules (scoped to the clone, with every other path
   denied), which Claude Code applies to Grep and Glob on a best-effort
   basis. Nothing outside the clone is reviewed by the sweep.
-- **A killed job can leave its lock.** The lock is per repository, so while
-  a job runs every session in that repository is treated as inside it, yours
+- **The supervisor lock holds one job per repository.** A killed job can
+  leave its lock behind. Because the lock is per repository, while a job
+  runs every session in that repository is treated as inside it, yours
   included, and the command guard is on there. A stale lock, left by a job
   that was killed, is reported, never overridden, and keeps the guard on in
   your own sessions until you clear it; the denial says so, and
