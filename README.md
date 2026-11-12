@@ -216,11 +216,15 @@ runner weakens one, the bullet and the table below say so:
   `.gitattributes`, in any case, refuses the run. Only the reviewed patch
   of the files in scope leaves the clone; anything else the agent touched is
   put back or refuses the run.
-- **The repository's own Claude Code configuration never reaches the scan
-  or the fix agent.** Both run Claude Code in restricted mode, so the
-  clone's settings, hooks and plugins are not read; the command guard above
-  comes back through cúramóir's own settings. A Routine is the exception
-  for its own session: see [Hosted runner limits](#hosted-runner-limits).
+- **The repository's own Claude Code settings, hooks and plugins never
+  reach the scan or the fix agent.** Both run Claude Code in restricted
+  mode, so the clone's settings, hooks and plugins are not read; the command
+  guard above comes back through cúramóir's own settings. The clone's
+  `CLAUDE.md` is still read, as instructions: on a hosted runner the fix
+  agent's prompt says its instructions about committing, pushing, filing
+  issues or syncing do not apply, but that is a prompt, not a fence. A
+  Routine is the exception for its own session: see
+  [Hosted runner limits](#hosted-runner-limits).
 - **Redaction** on everything it writes.
 
 ### Where the security boundary is
@@ -358,8 +362,10 @@ On every runner:
 The GitHub Actions workflow costs API money: its model calls are billed per
 token to the `ANTHROPIC_API_KEY` it is given. (Whether a Claude subscription
 may be used unattended there is an open question, so the workflow does not
-wire it.) A Routine runs as you and counts against your Claude usage, as
-does a sweep on your own machine. The ledger records every run's tokens.
+wire it.) A Routine runs as you and counts against your Claude usage. A
+sweep on your own machine uses whatever credentials your `claude` CLI
+uses: your Claude usage, or the `ANTHROPIC_API_KEY` if you have one
+exported. The ledger records every run's tokens.
 
 A measured cost table will replace this paragraph before release. The current
 estimate for the workflow on a small repo is roughly $4–5 a month against a

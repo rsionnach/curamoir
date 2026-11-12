@@ -246,10 +246,16 @@ def test_a_routines_own_session_is_said_to_load_the_repositorys_configuration():
     assert "never loads" not in guardrails
     assert_whole(
         guardrails,
-        "**The repository's own Claude Code configuration never reaches the scan or the"
-        " fix agent.** Both run Claude Code in restricted mode, so the clone's settings,"
-        " hooks and plugins are not read; the command guard above comes back through"
-        " cúramóir's own settings.",
+        "**The repository's own Claude Code settings, hooks and plugins never reach the"
+        " scan or the fix agent.** Both run Claude Code in restricted mode, so the clone's"
+        " settings, hooks and plugins are not read; the command guard above comes back"
+        " through cúramóir's own settings.",
+        # Final correctness (cm-2qp.7 redo): `--restricted` ignores settings files and
+        # drops the code-running tools, but does not skip CLAUDE.md (only `--bare` does),
+        # so the README must not claim the clone's configuration never reaches the agents.
+        "The clone's `CLAUDE.md` is still read, as instructions: on a hosted runner the"
+        " fix agent's prompt says its instructions about committing, pushing, filing"
+        " issues or syncing do not apply, but that is a prompt, not a fence.",
     )
     assert_whole(
         prose("Hosted runner limits"),
@@ -608,8 +614,11 @@ def test_cost_states_the_configs_ceiling_and_who_pays():
         " to the `ANTHROPIC_API_KEY` it is given.",
         "(Whether a Claude subscription may be used unattended there is an open question,"
         " so the workflow does not wire it.)",
-        "A Routine runs as you and counts against your Claude usage, as does a sweep on"
-        " your own machine.",
+        "A Routine runs as you and counts against your Claude usage.",
+        # A local `claude -p` inherits ANTHROPIC_API_KEY (git_guard.scrubbed_environment
+        # drops only GIT_* variables), so who pays locally depends on the CLI's login.
+        "A sweep on your own machine uses whatever credentials your `claude` CLI uses:"
+        " your Claude usage, or the `ANTHROPIC_API_KEY` if you have one exported.",
         "The ledger records every run's tokens.",
         # An estimate with no source in the code: pinned against itself.
         "The current estimate for the workflow on a small repo is roughly"
