@@ -37,6 +37,9 @@ README = ROOT / "README.md"
 #: The placeholder the developer replaces with a cúramóir tag or commit.
 REF_PLACEHOLDER = "REPLACE-WITH-A-CURAMOIR-TAG-OR-COMMIT"
 #: The recipe's network-level heading, as the environment's selector names it.
+#: From https://code.claude.com/docs/en/cloud-environments, "Access levels"
+#: (checked 2026-11-11): a new environment starts at Limited with Allow
+#: package managers checked, and one saved as Trusted opens as that.
 NETWORK_LEVEL = "**Network access: Limited, with Allow package managers checked**"
 #: The Routine's state branch: the user's decision (2026-10-30, on the
 #: bead), the project's name for it, kept apart from the workflow's
@@ -202,12 +205,22 @@ def test_the_setup_script_installs_only_what_is_missing_and_exits_0():
         assert f'echo "setup: {tool} not installed"' in script, tool
 
 
+def test_the_recipe_states_the_setup_scripts_two_rules():
+    text = flat(recipe(COMMAND))
+
+    assert "It must exit 0, or the session does not start" in text
+    assert ("finish in under five minutes, or the environment is not cached and the "
+            "script runs again before every run.") in text
+
+
 def test_the_setup_script_pins_ast_grep_to_the_workflows_version():
     workflow = (ROOT / "templates" / "github" / "curamoir-sweep.yml").read_text(encoding="utf-8")
     (pinned,) = re.findall(r'AST_GREP_VERSION: "([^"]+)"', workflow)
 
     assert f"AST_GREP_VERSION={pinned}\n" in setup_script()
     assert 'uv tool install "ast-grep-cli==${AST_GREP_VERSION}"' in setup_script()
+    assert ("ast-grep is pinned to the GitHub Actions workflow's `AST_GREP_VERSION`; raise "
+            "both together.") in flat(recipe(COMMAND))
     assert re.search(r'npm install --global --silent "@beads/bd@\$\{BD_VERSION\}"',
                      setup_script())
 
@@ -290,26 +303,47 @@ def test_the_recipe_gives_the_users_variables_exactly():
 
     assert variables.split() == ["CURAMOIR_RUNNER=hosted", "BASH_DEFAULT_TIMEOUT_MS=1800000",
                                  "CLAUDE_CODE_RETRY_WATCHDOG=1"]
+    assert ("`CURAMOIR_RUNNER=hosted` declares the hosted runner for every cúramóir "
+            "command in the session") in flat(text)
+    assert "makes the Bash tool's default timeout 30 minutes (the default is 2)." in flat(text)
+    assert "where it can run up to 30 more minutes before Claude Code stops it" in flat(text)
     assert "only a value above 1800000 lengthens that background limit" in flat(text)
+    assert "So a sweep gets about an hour in all" in flat(text)
     assert ("The prompt stops nothing itself: this limit is the only stop, a backstop that "
             "records the run as a failure. If your sweeps take longer than an hour, set a "
             "larger value here.") in flat(text)
     assert "Put no token or key here" in flat(text)
+    assert "A spend limit or exhausted usage credits still fail at once." in flat(text)
 
 
 def test_the_recipe_names_the_network_level_branch_protection_and_the_fetch():
     text = flat(recipe(COMMAND))
 
     assert NETWORK_LEVEL in text
+    assert "If it is set too narrow, the setup log shows" in text
     assert "step 2's `uvx` build fails" in text
     # A too-narrow level breaks step 2's build, not step 1: the recipe no
     # longer says "a run's step 1 or 2 fails to fetch cúramóir".
     assert "step 1 or 2 fails" not in text
     assert "git ls-remote" in text and "uvx --from git+https://github.com/rsionnach/curamoir" in text
     assert "is not enabled for this session" in text
+    assert "A Routine that sweeps rsionnach/curamoir itself has it attached." in text
+    assert ("if step 1 reports that 403, this Routine cannot fetch cúramóir, and that "
+            "repository's sweep has to run from the GitHub Actions workflow instead.") in text
     assert "**Also on GitHub: branch protection on the default branch.**" in text
     assert "with no bypass for you" in text
     assert "`claude/curamoir-state`" in text
+
+
+def test_the_branch_protection_rule_guards_the_default_branch_only():
+    """It requires a pull request and blocks force pushes on the default
+    branch, and leaves the state branch pushable."""
+    text = flat(recipe(COMMAND))
+
+    assert "(or a branch protection rule) that requires a pull request" in text
+    assert "and blocks force pushes, with no bypass for you" in text
+    assert "Target the default branch only:" in text
+    assert "the Routine must still be able to push `claude/curamoir-state`" in text
 
 
 def test_the_recipe_says_github_goes_through_rest_and_what_the_job_line_says():

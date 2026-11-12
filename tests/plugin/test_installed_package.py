@@ -16,17 +16,19 @@ for the fix step name a command that exists and denies `rm -rf build`, run
 through a shell as Claude Code runs a command hook (tests/test_job_env.py
 does the same from the checkout).
 
-Skipped, with the reason, only when uv is absent or uv says the build
-backend or PyYAML is not in its offline cache (OFFLINE_CACHE_MISS): no
-install is no evidence either way. Any other build or install failure (a
-force-include of a path that is gone, a dependency that cannot be
-resolved) is a broken package and fails; and with `CI` set nothing skips,
-since there the tools are meant to be present.
+Skipped, with the reason, only when uv is absent or a probe finds the
+offline cache lacks the known-good inputs (KNOWN_GOOD: the build backend
+and PyYAML, installed into a scratch venv of their own): no install is no
+evidence either way. WHY a probe and not uv's error text: offline, uv
+hints "the network was disabled" for ANY resolution failure, a misspelt
+dependency included. Once the probe has installed them, any build or
+install failure (a force-include of a path that is gone, a dependency that
+cannot be resolved) is a broken package and fails; and with `CI` set
+nothing skips, since there the tools are meant to be present.
 """
 
 import json
 import os
-import re
 import shlex
 import shutil
 import subprocess
@@ -36,16 +38,27 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
 
-#: uv's words for "the network is off and the cache lacks it" (uv 0.9:
-#: "... was not found in the cache", "the network was disabled").
-OFFLINE_CACHE_MISS = re.compile(r"not found in the cache|the network was disabled")
+#: What building and installing the wheel needs from the uv cache, written
+#: here rather than read from pyproject.toml: the build backend
+#: ([build-system] requires) and the one runtime dependency. Read from
+#: pyproject.toml, a dependency that cannot be resolved would fail the probe
+#: and skip, the very failure this module is to catch.
+KNOWN_GOOD = ("hatchling", "pyyaml>=6")
 
 
-def _skip_or_fail(what, stderr):
-    """Skip on a genuine offline cache miss outside CI; fail otherwise."""
-    if OFFLINE_CACHE_MISS.search(stderr) and not os.environ.get("CI"):
-        pytest.skip(f"{what} not possible offline from the uv cache: {stderr[-500:]}")
-    pytest.fail(f"{what} failed: {stderr[-2000:]}")
+def _skip_unless_cached(step, base):
+    """Skip outside CI when the offline cache cannot install KNOWN_GOOD into
+    a scratch venv; return otherwise, so that any later failure fails."""
+    probe = base / "probe"
+    made = step("venv", "--offline", "--quiet", str(probe))
+    assert made.returncode == 0, made.stderr
+    probed = step("pip", "install", "--offline", "--quiet", "--python",
+                  str(probe / "bin" / "python"), *KNOWN_GOOD)
+    if probed.returncode != 0:
+        if os.environ.get("CI"):
+            pytest.fail(f"the uv cache lacks {KNOWN_GOOD} in CI: {probed.stderr[-2000:]}")
+        pytest.skip(f"the uv cache lacks {KNOWN_GOOD}, so nothing can be built or "
+                    f"installed offline: {probed.stderr[-500:]}")
 
 
 def _clean_environment():
@@ -73,17 +86,16 @@ def installed_venv(tmp_path_factory):
         return subprocess.run([uv, *argv], capture_output=True, text=True, env=environment,
                               cwd=base, timeout=300)
 
+    _skip_unless_cached(step, base)
     built = step("build", "--wheel", "--offline", "--out-dir", str(base / "dist"), str(ROOT))
-    if built.returncode != 0:
-        _skip_or_fail("building the wheel", built.stderr)
+    assert built.returncode == 0, f"building the wheel failed: {built.stderr[-2000:]}"
     (wheel,) = (base / "dist").glob("curamoir-*.whl")
     venv = base / "venv"
     made = step("venv", "--offline", "--quiet", str(venv))
     assert made.returncode == 0, made.stderr
     added = step("pip", "install", "--offline", "--quiet", "--python",
                  str(venv / "bin" / "python"), str(wheel))
-    if added.returncode != 0:
-        _skip_or_fail("installing the wheel and PyYAML", added.stderr)
+    assert added.returncode == 0, f"installing the wheel and PyYAML failed: {added.stderr[-2000:]}"
     work = base / "work"
     work.mkdir()
     return venv / "bin", work
