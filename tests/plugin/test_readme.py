@@ -29,20 +29,55 @@ def readme():
 
 def flat(text):
     """`text` as one line, without the blockquote markers: the README wraps
-    at about 78 columns, and "Current status" is a blockquote."""
-    return " ".join(re.sub(r"^>\s?", "", line) for line in text.splitlines()).split()
+    at about 78 columns, and "Current status" is a blockquote. Every
+    leading `>` goes, so a nested blockquote (`>>`, `> >`) flattens too."""
+    return " ".join(re.sub(r"^(?:>\s?)+", "", line) for line in text.splitlines()).split()
 
 
-def section(heading):
-    """The body of the `## `/`### ` section titled `heading`, up to the next
-    heading of the same or a higher level."""
-    text = readme()
-    match = re.search(rf"^(#+) {re.escape(heading)}\n", text, re.MULTILINE)
-    assert match, f"the README has no {heading!r} heading"
-    level = len(match.group(1))
-    rest = text[match.end():]
-    end = re.search(rf"^#{{1,{level}}} ", rest, re.MULTILINE)
-    return rest[:end.start()] if end else rest
+def section(heading, text=None):
+    """The body of the `## `/`### ` section titled `heading` in `text` (the
+    README by default), up to the next heading of the same or a higher
+    level. The heading must occur exactly once, at any level, so a repeated
+    heading fails loudly rather than cutting the wrong section; a `#` line
+    inside a fenced code block is not a heading."""
+    text = readme() if text is None else text
+    headings = []  # (level, start of the heading line, end of it)
+    fenced = False
+    offset = 0
+    for line in text.splitlines(keepends=True):
+        if re.match(r"\s*(```|~~~)", line):
+            fenced = not fenced
+        elif not fenced and (match := re.match(r"(#+) (.*?)\n?$", line)):
+            headings.append((len(match.group(1)), match.group(2), offset, offset + len(line)))
+        offset += len(line)
+    found = [entry for entry in headings if entry[1] == heading]
+    assert len(found) == 1, f"the text has {len(found)} {heading!r} headings, not one"
+    level, _, _, body_start = found[0]
+    end = next((start for other, _, start, _ in headings
+                if start >= body_start and other <= level), len(text))
+    return text[body_start:end]
+
+
+def test_flat_strips_nested_blockquote_markers():
+    assert flat("> a\n>> b\n> > c\nd > e") == ["a", "b", "c", "d", ">", "e"]
+
+
+def test_section_ignores_a_hash_line_inside_a_fenced_block():
+    text = ("## Known limits\n\nok\n\n```bash\n# set it\nexport X=1  # stale\n```\n\n"
+            "after the fence\n\n### Sub\n\nsub text\n\n## Next\n\nnot in it\n")
+    body = section("Known limits", text)
+
+    assert "after the fence" in body and "sub text" in body
+    assert "not in it" not in body
+
+
+def test_section_refuses_a_repeated_or_missing_heading():
+    for text in ("## Known limits\n\na\n\n### Known limits\n\nb\n", "## Other\n\nc\n"):
+        try:
+            section("Known limits", text)
+        except AssertionError:
+            continue
+        raise AssertionError(f"section() accepted {text!r}")
 
 
 def test_the_readme_no_longer_says_nothing_is_scheduled():
@@ -70,10 +105,21 @@ def test_the_boundary_table_has_a_column_per_runner():
     header = next(line for line in boundary.splitlines() if line.startswith("| |"))
 
     assert "Hosted" in header and "Local" in header
+    rows = {cells[0]: cells for line in boundary.splitlines() if line.startswith("| ")
+            for cells in [[cell.strip() for cell in line.strip().strip("|").split("|")]]}
     for row in ("Process boundary", "Your checkout", "Credentials at risk",
                 "Agents' tools", "Your tests", "One sweep at a time",
                 "Kill switch", "Spend", "Memory between runs"):
-        assert f"| {row} |" in boundary, row
+        assert row in rows, row
+        cells = rows[row]
+        assert len(cells) == 3 and all(cells), (row, cells)
+
+
+def test_the_hosted_kill_switch_names_the_default_branch():
+    boundary = section("Where the security boundary is")
+    kill_switch = next(line for line in boundary.splitlines() if line.startswith("| Kill switch |"))
+
+    assert "`.curamoir/PAUSE` committed to the default branch" in kill_switch
 
 
 def test_the_local_adapter_says_its_agent_is_not_os_sandboxed():
@@ -123,3 +169,31 @@ def test_the_local_test_network_row_says_which_platform_gets_loopback():
 
         assert "`sweep.test_loopback: true`" in text, heading
         assert "private loopback" in text, heading
+
+
+def test_the_local_adapter_is_said_to_count_as_a_runner():
+    """cm-2qp.7 redo, edge cases: a laptop cron sweep alongside a hosted
+    runner overlaps it (the local lock is in the checkout, a hosted run's on
+    its VM) and its ceiling misses hosted spend, so both "one runner per
+    repository" and the Local adapter say the local adapter counts."""
+    status = " ".join(flat(section("Current status")))
+    local = " ".join(flat(section("Local adapter")))
+
+    assert "The local adapter counts as a runner" in status
+    assert "remove any cron or launchd entry from an earlier setup" in status
+    assert "The local adapter counts as a runner" in local
+    assert "remove any cron or launchd entry from an earlier setup" in local
+    assert "only by hand while no hosted run is going" in local
+    assert "the local ledger never sees hosted spend" in local
+
+
+def test_install_says_github_hosted_runners_only():
+    """config.resolve_runner refuses `hosted` on a GitHub runner whose
+    RUNNER_ENVIRONMENT is not `github-hosted` (Reason.RUNNER, exit 3), and
+    the workflow shows exit 3 as a green job with a warning."""
+    install = " ".join(flat(section("Install")))
+
+    assert "GitHub-hosted runners only" in install
+    assert "self-hosted runner" in install and "GitHub Enterprise Server" in install
+    assert "refused with reason `runner`" in install
+    assert "still shows green, with a warning" in install

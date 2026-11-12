@@ -95,9 +95,11 @@ cúramóir enforces *your project's own* principles. It is not a general linter.
 > The sweep is scheduled on a hosted runner, a disposable VM: the GitHub
 > Actions workflow `/curamoir:init` offers to write, or a Claude Code Routine
 > whose prompt and `/schedule` steps `/curamoir:routine` shows. Use one runner
-> per repository: the two share no lock and no ledger. Neither has yet been
-> exercised end to end. The Routine's cloud environment (setup script,
-> variables, network level, branch protection) is in
+> per repository: the two share no lock and no ledger. The local adapter
+> counts as a runner too: with a hosted runner, remove any cron or launchd
+> entry from an earlier setup (see [Local adapter](#local-adapter)). Neither
+> hosted runner has yet been exercised end to end. The Routine's cloud
+> environment (setup script, variables, network level, branch protection) is in
 > [Runners](docs/runners.md#routine-environment), and `/curamoir:routine`
 > shows it too. `scripts/curamoir run sweep --repo <root>`
 > still runs the sweep on your own machine, as the
@@ -151,7 +153,10 @@ For the scheduled sweep on GitHub Actions, accept the workflow
 `ANTHROPIC_API_KEY` secret, the `CURAMOIR_REF` variable, the setting that
 lets Actions open PRs, and, if a ruleset covers the state branch
 (`curamoir/state` unless the `CURAMOIR_STATE_BRANCH` variable names
-another), a rule letting `github-actions[bot]` push to it.
+another), a rule letting `github-actions[bot]` push to it. It runs on
+GitHub-hosted runners only: on a self-hosted runner, or on GitHub
+Enterprise Server, the sweep is refused with reason `runner`, and the job
+still shows green, with a warning. Run the local adapter there instead.
 
 For development, load the plugin in place:
 
@@ -237,7 +242,7 @@ Each runner, as built:
 | Agents' tools | Scan: Read, Grep, Glob. Fix: Read, Grep, Glob, Edit; Bash limited to the repository's own test command and Claude Code's built-in read-only commands (no Bash at all if that command cannot be named safely); git denied | Scan: Read, Grep, Glob. Fix: those and Edit; no shell |
 | Your tests | Run unsandboxed in the clone, with the VM's network | Run in the OS sandbox, with no network: on macOS not even loopback unless `sweep.test_loopback: true`, on Linux a private loopback only |
 | One sweep at a time | On Actions, the workflow's concurrency group queues a second run. On a Routine nothing does: each run's lock is on its own VM, so a scheduled run and **Run now** can overlap; don't start a run while one is going | The supervisor lock ([Local adapter](#local-adapter)) |
-| Kill switch | The label, or a committed `.curamoir/PAUSE` | The label, or `.curamoir/PAUSE` in your checkout |
+| Kill switch | The label, or a `.curamoir/PAUSE` committed to the default branch (a run started by hand on another branch reads that branch's) | The label, or `.curamoir/PAUSE` in your checkout |
 | Spend | The ledger records tokens; GitHub Actions bills the API key, a Routine your Claude usage. The monthly ceiling does not yet see earlier hosted runs, so it does not stop them | The ledger prices tokens against the monthly ceiling |
 | Memory between runs | Only what is committed. Ledger lines go to a state branch, never the default branch. Workflow: `curamoir/state` (its `CURAMOIR_STATE_BRANCH` variable can name another). Routine: `claude/curamoir-state` (the prompt's own name, so the two runners' ledgers never mix) | The checkout |
 
@@ -275,7 +280,15 @@ Routine recipe says.
 
 With `CURAMOIR_RUNNER` unset (or `local`), on your own machine, by hand
 (`scripts/curamoir run sweep --repo <root>`) or from your own cron or
-launchd entry, the sweep runs as the local adapter, behind these instead:
+launchd entry, the sweep runs as the local adapter.
+
+The local adapter counts as a runner. On a repository with a hosted
+runner, remove any cron or launchd entry from an earlier setup, and run a
+local sweep only by hand while no hosted run is going: the local lock lives
+in your checkout and a hosted run's on its VM, so neither sees the other,
+and the local ledger never sees hosted spend.
+
+The local adapter runs behind these instead:
 
 - **Your tests run OS-sandboxed**, under `sandbox-exec` (macOS) or `bwrap`
   (Linux). They can write only inside the clone and their own temporary
