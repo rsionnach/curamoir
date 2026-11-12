@@ -13,16 +13,40 @@ with its meaning; the test command's refusals are fix_step's own lists; and
 the Routine environment section is a subsection of the Routine section (its
 text, the same as /curamoir:routine's section 3, is pinned in
 tests/plugin/test_routine_command.py, cm-2qp.10). The user's instruction
-says "No adapter code", so the page carries no Python.
+says "No adapter code", so the page's fences are only the languages it
+uses, each with known content.
+
+The standard (the user's decision of 2026-11-12, made for README.md): a
+table is pinned row by row, cell for cell; a security or behaviour sentence
+is pinned whole, starting at a sentence boundary (assert_whole, copied
+from tests/plugin/test_readme.py); and where the code is the source, the
+test derives from it or runs it: the resolve_runner table is run through
+config.resolve_runner, the exit tables are checked against the template's
+`case "$status"` arms, the not-started path and `--model` are run through
+fix_step, and the payload's error and unrecorded rules through sweep_job.
+A wholly new contradicting sentence appended after a pinned one still
+passes; that is the accepted cost of the standard.
+
+Wording tripwires: some pins have no outside source and hold the page to
+its own words only, not to the code. They are the Codex `AGENTS.md`
+sentence (there is no Codex artefact, by design), "A CLI that cannot keep
+... cannot be a runner.", the "Today: ..." clauses of Seam B's requirement
+bullets (backed only where a test below also reads fix_step_argv or the
+environment), the Cursor and Codex runner-kind sentences (backed only by
+config having no Cursor marker and by the resolve_runner table), and the
+setup items' and security sentences' exact wording. A change to one of
+them fails here until the page is reread, which is all they promise.
 """
 
 import inspect
 import re
+import subprocess
 from pathlib import Path
 
 import pytest
 
-from curamoir import budget, config, fix_step, lint, runner, state_branch
+from curamoir import budget, config, fix_step, lint, runner, state_branch, sweep_job, tier1
+from curamoir.git_guard import prepare_sandbox
 from curamoir.guards.reasons import Reason
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -77,6 +101,80 @@ def lines_without_indent(text):
     return [line.strip() for line in text.splitlines() if line.strip()]
 
 
+#: Copied from tests/plugin/test_readme.py (tests/plugin has no
+#: __init__.py): what may precede a pinned sentence, the start of its
+#: paragraph or a sentence's closing punctuation, a list marker allowed.
+SENTENCE_START = re.compile(r"(?:(?:^|[.:;!?][)*]*\s)(?:[-*+]\s)?|\()$")
+
+
+def paragraphs(text):
+    """`text`'s paragraphs (split at blank lines), each flattened to one
+    line, so a sentence that opens a paragraph after a table starts at `^`
+    rather than after the table's last `|`."""
+    return [flat(part) for part in re.split(r"\n[ \t]*\n", text) if part.strip()]
+
+
+def assert_whole(text, *sentences):
+    """test_readme.py's assert_whole, per paragraph of `text`: each of
+    `sentences` is in it whole, from a sentence boundary (SENTENCE_START)
+    to its closing punctuation, so a word put inside it or before it fails.
+    Every occurrence must start at a boundary."""
+    parts = paragraphs(text)
+    for sentence in sentences:
+        assert re.search(r"[.:;!?)*]$", sentence), f"not a whole clause: {sentence!r}"
+        starts = [(part, match.start()) for part in parts
+                  for match in re.finditer(re.escape(sentence), part)]
+        assert starts, sentence
+        for part, start in starts:
+            assert SENTENCE_START.search(part[:start]), f"not at a sentence start: {sentence!r}"
+
+
+def table_rows(text, header):
+    """The body rows of the Markdown table under `header` (its exact
+    `| ... |` line) in `text`, as tuples of stripped cells. `header` must
+    occur once."""
+    lines = text.splitlines()
+    found = [index for index, line in enumerate(lines) if line == header]
+    assert len(found) == 1, f"{len(found)} tables headed {header!r}"
+    rows = []
+    for line in lines[found[0] + 2:]:
+        if not line.startswith("|"):
+            break
+        rows.append(tuple(cell.strip() for cell in line.strip().strip("|").split(" | ")))
+    return rows
+
+
+def template_case_arms(step):
+    """The `case "$status"` arms of the template's step named `step`:
+    {pattern: body}, `0) ;;` giving an empty body."""
+    after = TEMPLATE.read_text(encoding="utf-8").split(f"- name: {step}\n", 1)[1]
+    case = after.split('case "$status" in\n', 1)[1].split("esac", 1)[0]
+    arms = {}
+    for line in filter(str.strip, case.splitlines()):
+        match = re.fullmatch(r"\s*(\S+)\)\s*(.*?)\s*;;\s*", line)
+        assert match, line
+        arms[match.group(1)] = match.group(2)
+    return arms
+
+
+def fence_openings(text):
+    """(info string, body) for every fenced block of `text`."""
+    blocks = []
+    opening = None
+    body = []
+    for line in text.splitlines(keepends=True):
+        if re.match(r"\s*(```|~~~)", line):
+            if opening is None:
+                opening, body = line.strip()[3:], []
+            else:
+                blocks.append((opening, "".join(body)))
+                opening = None
+        elif opening is not None:
+            body.append(line)
+    assert opening is None, "an unclosed fence"
+    return blocks
+
+
 def test_the_runners_page_exists():
     assert RUNNERS.is_file()
 
@@ -100,6 +198,122 @@ def test_seam_a_states_the_acceptance_rule_with_configs_own_names():
     assert "a marker without the declaration runs local" in text.lower()
 
 
+def _declaration_environments():
+    """Each row's first two cells of the resolve_runner table, exactly as
+    the page spells them, and the environments that row describes. The
+    outcome cell is not written here: it is what config.resolve_runner
+    returns for every one of the environments."""
+    claude = {config.CLAUDE_MARKER: "true"}
+    github = {config.GITHUB_MARKER: "true",
+              config.RUNNER_ENVIRONMENT_VARIABLE: config.GITHUB_HOSTED}
+    markers = ({}, claude, github, {config.GITHUB_MARKER: "true"})
+    variable = config.RUNNER_VARIABLE
+    return {
+        ("unset, empty, or `local`", "any"):
+            [{**marker, **declared} for marker in markers
+             for declared in ({}, {variable: ""}, {variable: "local"})],
+        ("`hosted`", f"`{config.CLAUDE_MARKER}=true` (every Claude Code cloud session)"):
+            [{variable: "hosted", **claude}],
+        ("`hosted`", f"`{config.GITHUB_MARKER}=true` with "
+                     f"`{config.RUNNER_ENVIRONMENT_VARIABLE}={config.GITHUB_HOSTED}`"):
+            [{variable: "hosted", **github}],
+        ("`hosted`", f"`{config.GITHUB_MARKER}=true`, `{config.RUNNER_ENVIRONMENT_VARIABLE}` "
+                     "anything else or unset (self-hosted, `act`, GitHub Enterprise Server, "
+                     "an older runner)"):
+            [{variable: "hosted", config.GITHUB_MARKER: "true"},
+             {variable: "hosted", config.GITHUB_MARKER: "true",
+              config.RUNNER_ENVIRONMENT_VARIABLE: "self-hosted"},
+             {variable: "hosted", config.GITHUB_MARKER: "true",
+              config.RUNNER_ENVIRONMENT_VARIABLE: "GitHub-Hosted"}],
+        ("`hosted`", "neither"):
+            [{variable: "hosted"}, {variable: "hosted", config.CLAUDE_MARKER: "True"},
+             {variable: "hosted", config.CLAUDE_MARKER: "1"},
+             {variable: "hosted", config.GITHUB_MARKER: "TRUE",
+              config.RUNNER_ENVIRONMENT_VARIABLE: config.GITHUB_HOSTED}],
+        ("anything else (`Hosted`, `ci`, a value with a space)", "any"):
+            [{**marker, variable: value} for marker in markers
+             for value in ("Hosted", "ci", " hosted", "hosted ", "HOSTED", "Local")],
+    }
+
+
+def _resolved(environ):
+    try:
+        return config.resolve_runner(environ).kind.value
+    except config.RunnerDeclarationError:
+        return "refused"
+
+
+def test_seam_a_s_resolve_runner_table_is_what_resolve_runner_returns():
+    """Every row of the table, run: its first two cells name the
+    environments (_declaration_environments), and its outcome cell is what
+    config.resolve_runner gives for each, case-sensitivity included."""
+    seam = section("Seam A: the scheduler")
+    rows = table_rows(seam, "| `CURAMOIR_RUNNER` | Hosted marker | The run |")
+    environments = _declaration_environments()
+
+    assert [row[:2] for row in rows] == list(environments)
+    for declared, marker, outcome in rows:
+        for environ in environments[(declared, marker)]:
+            assert _resolved(environ) == outcome, (declared, marker, environ)
+    assert_whole(seam, "Its rule is exact and case-sensitive:")
+    assert _resolved({config.RUNNER_VARIABLE: "Hosted", config.CLAUDE_MARKER: "true"}) \
+        == "refused"
+
+
+def test_seam_a_s_order_and_default_branch_sentences():
+    """Backed by tests that already exist: the order by
+    tests/test_runner_kind.py's
+    test_a_paused_repo_with_a_bad_declaration_is_refused_as_paused and
+    test_a_bad_declaration_is_refused_after_the_kill_switch_and_the_lock;
+    the default branch by tests/test_state_branch.py's
+    test_the_default_branch_on_origin_is_never_moved."""
+    seam = section("Seam A: the scheduler")
+
+    assert_whole(seam,
+                 "It is checked after the kill switch and the lock, so a paused repository "
+                 "reads paused even when misdeclared.",
+                 "**The state push** commits the run's new ledger lines to a state branch "
+                 "(`state_branch.py`), never the default branch, because the VM is discarded "
+                 "with them.")
+    tests = ROOT / "tests"
+    kind = (tests / "test_runner_kind.py").read_text(encoding="utf-8")
+    assert "def test_a_paused_repo_with_a_bad_declaration_is_refused_as_paused(" in kind
+    assert "def test_a_bad_declaration_is_refused_after_the_kill_switch_and_the_lock(" in kind
+    assert "def test_the_default_branch_on_origin_is_never_moved(" in \
+        (tests / "test_state_branch.py").read_text(encoding="utf-8")
+
+
+def test_seam_a_and_the_worked_example_pin_the_security_sentences_whole():
+    """Where the boundary is, and which secrets to pass, as whole sentences.
+    The "add no other secrets" advice is the template header's own."""
+    seam = section("Seam A: the scheduler")
+    example = section("The worked example: GitHub Actions")
+
+    assert_whole(seam,
+                 "**A new hosted scheduler must be a disposable VM**: fresh for the run, "
+                 "holding no developer's home, discarded afterwards.",
+                 "That is what `hosted` means, and why its tests run unsandboxed and its fix "
+                 "agent gets a shell.",
+                 "A scheduler on a machine someone keeps (a laptop, a self-hosted runner) is "
+                 "the local adapter: leave `CURAMOIR_RUNNER` unset, and the OS sandbox holds "
+                 "the run.",
+                 "That list is fixed names, not a pattern: another platform's own run tokens, "
+                 "and any secret under another name, reach the agent, so pass the run none it "
+                 "does not need.",
+                 "On hosted the boundary is the VM and the scope of the run's tokens "
+                 "([Hosted runner limits](../README.md#hosted-runner-limits)).")
+    assert_whole(example,
+                 "**Add no other secrets to the sweep step's `env:`.**",
+                 "Any other secret you put in the sweep step's `env:` reaches the agent, so "
+                 "add none.",
+                 "Even so, the agent runs as the runner's user on the same VM and can still "
+                 "reach what the sweep holds: the boundary is the VM and the token's scope "
+                 "(the README's [Hosted runner limits](../README.md#hosted-runner-limits)).")
+    header = flat(TEMPLATE.read_text(encoding="utf-8").split("\nname:", 1)[0].replace("#", ""))
+    assert "Add no other secrets to the sweep step's `env:`" in header
+    assert "a secret under any other name" in header and "reaches it." in header
+
+
 def test_seam_a_says_a_new_marker_is_a_code_change_in_config():
     text = flat(section("Seam A: the scheduler"))
 
@@ -108,22 +322,52 @@ def test_seam_a_says_a_new_marker_is_a_code_change_in_config():
 
 
 def test_seam_a_gives_the_runner_and_state_push_exit_codes():
-    """Each table row as code plus meaning, so two meanings swapped fail."""
-    text = flat(section("Seam A: the scheduler"))
+    """Both tables whole, row by row and cell for cell, with the codes from
+    runner and state_branch; then each row's "A scheduler should" checked
+    against what the template's step does with that code: a row that says
+    fail is a code the step's `case "$status"` exits on, a pass or "show
+    it" row one it does not (and "show it" is the run's ::warning)."""
+    seam = section("Seam A: the scheduler")
+    text = flat(seam)
+    header = "| Exit | Means | A scheduler should |"
+    run_part, push_part = seam.split("**The state push**", 1)
+    run_rows, push_rows = table_rows(run_part, header), table_rows(push_part, header)
 
     assert "curamoir run <job>" in text
     assert "curamoir state push --branch" in text
-    assert f"| `{runner.EXIT_SUCCESS}` | success | pass |" in text
-    assert f"| `{runner.EXIT_REFUSED}` | refused: a guard or the sweep declined" in text
-    assert "| anything else | failure | fail |" in text
+    assert run_rows == [
+        (f"`{runner.EXIT_SUCCESS}`", "success", "pass"),
+        (f"`{runner.EXIT_REFUSED}`", "refused: a guard or the sweep declined, reason in the "
+         "sentence and the ledger line", "show it, not fail (an expected outcome)"),
+        ("anything else", "failure", "fail"),
+    ]
     codes = state_branch.EXIT_CODES
-    for outcome, meaning in ((state_branch.PUSHED, "pushed | pass"),
-                             (state_branch.NOTHING_TO_PUSH, "nothing new to push | pass"),
-                             (state_branch.REFUSED, "refused (the default branch"),
-                             (state_branch.FAILED, "failed (git or a ruleset")):
-        assert f"| `{codes[outcome]}` | {meaning}" in text, outcome
-    assert "| anything else | failure | fail: the lines were not kept |" in text
+    kept = "fail: the lines were not kept"
+    assert push_rows == [
+        (f"`{codes[state_branch.PUSHED]}`", "pushed", "pass"),
+        (f"`{codes[state_branch.NOTHING_TO_PUSH]}`", "nothing new to push", "pass"),
+        (f"`{codes[state_branch.REFUSED]}`", "refused (the default branch, a branch that is "
+         "not a state branch, among others)", kept),
+        (f"`{codes[state_branch.FAILED]}`", "failed (git or a ruleset rejected the push, or "
+         "the branch kept moving)", kept),
+        ("anything else", "failure", kept),
+    ]
     assert set(codes.values()) == {0, 1, 3, 5}, "a new state-push code needs a row"
+    for step, rows in (("curamoir run sweep", run_rows), ("curamoir state push", push_rows)):
+        arms = template_case_arms(step)
+        assert arms["*"] == 'exit "$status"', step
+        for code, _means, should in rows:
+            body = arms.get(code.strip("`"), arms["*"])
+            if should.startswith("fail"):
+                assert body.startswith("exit"), (step, code)
+            else:
+                assert not body.startswith("exit"), (step, code)
+                assert body.startswith('echo "::warning') == should.startswith("show it"), \
+                    (step, code)
+    assert_whole(seam,
+                 "A refusal still needs an alert when it repeats run after run, because it is "
+                 "a misconfiguration and every later run is refused the same way, so a "
+                 "scheduler that only shows exit 3 stays green while nothing is swept.")
     assert "It skipped" in text
 
 
@@ -295,13 +539,158 @@ def test_the_test_command_refusals_are_fix_steps_own():
 
 
 def test_the_page_and_fix_steps_docstring_agree_on_the_contract():
-    """The additions the page makes to "Out" and "In" are in the source too."""
-    contract = flat(fix_step.__doc__.split("**The run_fix_step contract**", 1)[1]
-                    .split("tests/test_fix_step.py pins", 1)[0])
+    """Each of In / Must / Out / Not its job whole, in fix_step's module
+    docstring (the source the page names) as on the page."""
+    contract = (fix_step.__doc__.split("**The run_fix_step contract**", 1)[1]
+                .split("tests/test_fix_step.py pins", 1)[0])
 
-    for name in ("`test_command`", "NOT_STARTED", "`git_state`", "`--model <model>`",
-                 "`usage`", "`total_cost_usd`"):
-        assert name in contract, name
+    assert_whole(
+        contract,
+        "In: the clone (a git_guard.Sandbox, never a checkout); the prompt, which carries the "
+        "work list (fix_prompt); the model; the tools; the timeout; max_turns; before_call; "
+        "the runner kind (config.Runner); and `test_command`, the base's, which the hosted "
+        "Bash rules name.",
+        "Must: snapshot `git_state` (git_guard.snapshot_git_state) before the agent starts; "
+        "call `before_call` right before the process that may spend starts; kill the whole "
+        "process group at the timeout; leave the edits in the clone's work tree and never "
+        "commit them.",
+        "Out: a FixStepRun. `started`, `exit_code` and `timed_out` say whether and how the "
+        "agent ran; `stderr` starts with NOT_STARTED when the process could not be started; "
+        "`git_state` is the snapshot taken before the agent started, returned for "
+        "fix_scope.verify_fix and the tier-1 scan to hold the clone to; `argv` is the command "
+        "line run, and carries `--model <model>` (the tier-1 scan reads the model it records "
+        "from there); and its `stdout` parses, through payload(), to `claude -p "
+        "--output-format json`'s result object, whose `usage` (token counts) and "
+        "`total_cost_usd` the ledger records.",
+        "That is the shape another CLI's fix step must emit, or translate its own output "
+        "into.",
+        "Not its job: the scope check (fix_scope.verify_fix, which reads the diff from the "
+        "clone against `git_state`), the green gate (green_gate) and publish stay the "
+        "caller's, and run_fix_step calls none of them.")
+
+
+def test_seam_b_s_contract_bullets_are_pinned_whole():
+    seam = section("Seam B: the agent runner")
+
+    assert_whole(
+        seam,
+        "**In.** The clone (a `git_guard.Sandbox`, never a checkout); the prompt, which "
+        "carries the work list; the model; the tools; the timeout; `max_turns`; "
+        "`before_call`; the runner kind; and `test_command`, the base's.",
+        "**Must.** Snapshot `git_state` (`git_guard.snapshot_git_state`) before the agent "
+        "starts; call `before_call` right before the process that may spend starts (the "
+        "ledger notes the call as unrecorded there, so a run killed mid-call never reads as "
+        "free); kill the whole process group at the timeout; leave the edits in the clone's "
+        "work tree, never committed.",
+        "**Out.** A `FixStepRun`: `started`, `exit_code` and `timed_out` say whether and how "
+        "the agent ran. `started` is derived (`exit_code` set, or `timed_out` true), so "
+        "`exit_code` must be set for any process that started: `None` with `timed_out` false "
+        "means never started, which is recorded as spending nothing. "
+        "`stderr` starts with `fix_step.NOT_STARTED` when the process could not start; "
+        "`git_state` is the snapshot, returned for `fix_scope.verify_fix` and the scan to "
+        "hold the clone to; `argv` carries `--model <model>` (the scan reads the model from "
+        "there, and fails after spending without it); `stdout` is the payload below.",
+        "**Not its job.** The scope check (`fix_scope.verify_fix`, which reads the diff from "
+        "the clone against `git_state`), the green gate and publish stay the caller's.")
+
+
+def test_seam_b_s_not_started_and_model_claims_are_fix_steps_behaviour(tmp_path):
+    """`argv` carries `--model <model>`; a process that cannot start leaves
+    `stderr` starting with NOT_STARTED, `started` false, and the snapshot
+    returned. Run with a `claude` that does not exist: no model call."""
+    argv = fix_step.fix_step_argv("p", "the-model", tmp_path)
+    assert argv[argv.index("--model") + 1] == "the-model"
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    for command in (["init", "-q"], ["commit", "-q", "--allow-empty", "-m", "base"]):
+        subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@example.com",
+                        "-c", "commit.gpgsign=false", *command],
+                       cwd=repo, check=True, capture_output=True)
+    calls = []
+    with prepare_sandbox(repo, "HEAD", parent=tmp_path) as sandbox:
+        run = fix_step.run_fix_step(sandbox, "p", model="the-model",
+                                    claude=str(tmp_path / "no-such-claude"),
+                                    before_call=lambda: calls.append("before_call"))
+
+    assert run.stderr.startswith(fix_step.NOT_STARTED)
+    assert run.stdout == "" and not run.started
+    assert run.git_state is not None
+    assert run.argv[run.argv.index("--model") + 1] == "the-model"
+    assert calls == ["before_call"]
+
+
+def test_seam_b_s_requirement_bullets_are_pinned_whole(monkeypatch):
+    """The sentences that say what another CLI must meet, whole. The GIT_*
+    claim is run through git_guard.scrubbed_environment, which run_fix_step
+    builds its process's environment from."""
+    seam = section("Seam B: the agent runner")
+
+    assert_whole(
+        seam,
+        "A CLI that cannot be held to that set cannot be a local runner.",
+        "It catches mistakes; the VM is still the boundary.",
+        "Today: inherited `GIT_*` variables dropped, the rest kept, `CURAMOIR_JOB` included "
+        "(the denylist's signal in a clone with no lock), and `CLAUDE_PLUGIN_ROOT` set (where "
+        "the hook is found).",
+        "The tools are a set of cúramóir's names (Read, Grep, Glob, Edit, Bash); a runner "
+        "translates them into its CLI's own tool and approval settings, and refuses a set it "
+        "cannot express exactly rather than run wider.")
+    monkeypatch.setenv("GIT_DIR", "/elsewhere")
+    monkeypatch.setenv("CURAMOIR_JOB", "sweep")
+    environment = fix_step.scrubbed_environment()
+    assert "GIT_DIR" not in environment and environment["CURAMOIR_JOB"] == "sweep"
+    assert "environment = scrubbed_environment()" in inspect.getsource(fix_step.run_fix_step)
+
+
+def _run(stdout, exit_code=0):
+    return fix_step.FixStepRun(argv=(), exit_code=exit_code, stdout=stdout, stderr="")
+
+
+def test_seam_b_s_payload_table_and_pricing_caveats():
+    """The payload table row by row, and the rules it states run through
+    the code that reads the payload: sweep_job._unfinished (is_error,
+    subtype), tier1's scan (is_error only, never subtype),
+    sweep_job.line_cost_fields (no usable usage is unrecorded, never 0),
+    and budget's unpriced-model refusal to enforce the ceiling."""
+    seam = section("Seam B: the agent runner")
+
+    assert table_rows(seam, "| Field | Required | Who reads it |") == [
+        ("`usage.input_tokens`, `usage.output_tokens`", "yes, numbers", "the ledger (spend)"),
+        ("`usage.cache_creation_input_tokens`, `usage.cache_read_input_tokens`",
+         "when the provider caches", "the ledger"),
+        ("`usage.cache_creation.ephemeral_5m_input_tokens`, `ephemeral_1h_input_tokens`",
+         "optional", "the ledger; unsplit writes are priced at the 1-hour rate"),
+        ("`total_cost_usd`", "expected", "the ledger, for the record (not the ceiling)"),
+        ("`is_error`", "on an error, a real boolean `true`",
+         "the sweep and the scan (the scan ignores `subtype`)"),
+        ("`subtype`", "on an error, starting `error` (`error_max_turns`)", "the sweep"),
+        ("`result`", "yes, for the scan", "the scan (its findings), the fix step (its replies)"),
+    ]
+    assert_whole(
+        seam,
+        "A call that started and printed no usable `usage` is recorded as unrecorded, never "
+        "as zero.",
+        "The tokens are priced by model from `budget.prices` (defaults in `config.py`, "
+        "overridable in `.curamoir/curamoir.yaml`): for a model with no price there, the "
+        "budget guard is degraded and the monthly ceiling is NOT enforced until one is added.",
+        "On hosted, even a priced model's ceiling does not see earlier runs "
+        "([Seam A](#seam-a-the-scheduler)).")
+    # is_error and subtype, as the sweep reads them.
+    assert sweep_job._unfinished(_run('{"is_error": true}'))
+    assert sweep_job._unfinished(_run('{"is_error": false, "subtype": "error_max_turns"}'))
+    assert sweep_job._unfinished(_run('{"is_error": false, "subtype": "success"}')) == ""
+    # The scan reads is_error as a real boolean and never subtype.
+    scan_source = inspect.getsource(tier1)
+    assert 'payload.get("is_error") is True' in scan_source
+    assert "subtype" not in scan_source
+    # No usable usage: unrecorded, never zero.
+    for stdout in ("", "{}", '{"usage": {"input_tokens": "3", "output_tokens": 4}}'):
+        fields = sweep_job.line_cost_fields("m", fix_run=_run(stdout))
+        assert fields["input_tokens"] == fields["output_tokens"] == budget.UNRECORDED, stdout
+    assert budget.UNRECORDED != 0
+    # An unpriced model degrades the guard and the ceiling is not enforced.
+    assert "the ceiling was NOT enforced" in inspect.getsource(budget.Budget.__call__)
 
 
 def test_every_yaml_excerpt_is_still_in_the_template():
@@ -330,9 +719,116 @@ def test_the_worked_example_walks_the_template():
         assert point in text, point
 
 
+def test_the_worked_example_s_setup_items_are_the_template_header_s():
+    """The numbered list item by item, and each item's requirement in the
+    template header's "Secrets and settings" list, which is the source."""
+    example = section("The worked example: GitHub Actions")
+    listed = example.split("**The four setup items:**\n\n", 1)[1].split("\n\n", 1)[0]
+    items = [flat(item) for item in re.split(r"^\d+\. ", listed, flags=re.MULTILINE)[1:]]
+
+    assert items == [
+        "The `ANTHROPIC_API_KEY` repository secret: the model calls are billed per token to "
+        "that key. The subscription OAuth token is not wired; whether its terms permit "
+        "unattended scheduled use is open (Platform-first runners §7, billing note).",
+        "The `CURAMOIR_REF` repository variable: a cúramóir tag or commit.",
+        "Settings > Actions > General > \"Allow GitHub Actions to create and approve pull "
+        "requests\", or the sweep's PR cannot open.",
+        "If a ruleset or branch protection covers the state branch, it must let "
+        "`github-actions[bot]` push to it, or every run's ledger lines are lost and the job "
+        "fails at its last step.",
+    ]
+    header = flat(TEMPLATE.read_text(encoding="utf-8").split("\nname:", 1)[0].replace("#", ""))
+    for source in ("ANTHROPIC_API_KEY (repository secret, required)",
+                   "is NOT wired here",
+                   "CURAMOIR_REF (repository variable, required: a tag or commit SHA)",
+                   "Settings > Actions > General > \"Allow GitHub Actions to create and "
+                   "approve pull requests\" must be on, or the sweep's PR cannot open.",
+                   "must let github-actions[bot] push to it, or every run's ledger lines are "
+                   "lost and the job fails at its last step."):
+        assert source in header, source
+
+
+def test_the_page_says_uv_is_not_pinned_and_the_template_does_not_pin_it():
+    seam = section("Seam A: the scheduler")
+    template = TEMPLATE.read_text(encoding="utf-8")
+    setup_uv = template.split("- uses: astral-sh/setup-uv@", 1)[1].split("\n\n", 1)[0]
+
+    assert_whole(seam,
+                 "uv, and the claude CLI and ast-grep pinned to a version (the worked example "
+                 "pins those two; its setup-uv step names no uv version);")
+    assert "with:" in setup_uv and "enable-cache: false" in setup_uv
+    assert not re.search(r"^\s*version:", setup_uv, flags=re.MULTILINE)
+    assert re.search(r'^  CLAUDE_CODE_VERSION: "[0-9.]+"$', template, flags=re.MULTILINE)
+    assert re.search(r'^  AST_GREP_VERSION: "[0-9.]+"$', template, flags=re.MULTILINE)
+
+
+def test_the_worked_example_says_a_runner_refusal_is_a_green_job_with_a_warning():
+    """The sweep step's `case "$status"` warns on 3 and does not exit, and
+    the template's comment says the same."""
+    assert_whole(section("The worked example: GitHub Actions"),
+                 "A runner refusal (not GitHub-hosted, or no marker) is exit 3 too, so it also "
+                 "shows as a green job with a warning: read the warning.")
+    arms = template_case_arms("curamoir run sweep")
+    assert arms[str(runner.EXIT_REFUSED)].startswith('echo "::warning')
+    assert "also shows as a green job with a warning: read the warning" in \
+        flat(TEMPLATE.read_text(encoding="utf-8").replace("#", ""))
+
+
+def test_the_hosted_test_command_says_an_unnameable_command_gets_no_shell():
+    """fix_tools gives no Bash when bash_rules can name nothing."""
+    assert_whole(section("The hosted test command"),
+                 "A command no rule can name exactly gets no shell at all, so the agent cannot "
+                 "run tests (the green gate still does).")
+    assert not fix_step.bash_rules("make test; rm -rf /")
+    hosted = config.Runner(config.RunnerKind.HOSTED)
+    assert "Bash" not in fix_step.fix_tools(hosted, "make test; rm -rf /")
+    assert "Bash" in fix_step.fix_tools(hosted, "pytest")
+
+
+#: The one ```sh block: Seam A's two commands. The ```bash and ```text
+#: blocks are the shared Routine environment's setup script and variables,
+#: compared with commands/routine.md by tests/plugin/test_routine_command.py.
+SEAM_A_COMMANDS = ("CURAMOIR_RUNNER=hosted curamoir run sweep\n"
+                   "curamoir state push --branch <state branch>\n")
+
+
 def test_there_is_no_adapter_code():
-    assert not fences(page(), "python")
+    """Only the fence languages the page uses, each with known content:
+    yaml is checked against the template (test_every_yaml_excerpt_...), sh
+    is Seam A's two commands, and bash and text are the shared Routine
+    environment's, held in commands/routine.md too."""
+    blocks = fence_openings(page())
+    environment = section("Routine environment")
+    command = COMMAND.read_text(encoding="utf-8")
+
+    assert {language for language, _ in blocks} == {"sh", "yaml", "bash", "text"}
+    assert [body for language, body in blocks if language == "sh"] == [SEAM_A_COMMANDS]
+    for language, body in blocks:
+        if language in ("bash", "text"):
+            assert f"```{language}\n{body}```" in environment, body
+            assert f"```{language}\n{body}```" in command, body
+    assert len([language for language, _ in blocks if language in ("bash", "text")]) == 2
     assert "def " not in page()
+
+
+def test_cursor_and_codex_runner_kind_sentences():
+    """Cursor cannot declare `hosted`: config has no Cursor marker (only
+    CLAUDE_MARKER and GITHUB_MARKER are markers), so resolve_runner refuses
+    a hosted declaration with neither (the "neither" row)."""
+    assert_whole(section("Cursor"),
+                 "It cannot declare `hosted` yet: no marker `config.resolve_runner` accepts is "
+                 "set there, so the contribution starts with a marker only Cursor's disposable "
+                 "VMs set, added to `config.py` with its tests.")
+    assert_whole(section("Codex"),
+                 "Seam A: a Codex Automation runs locally, through the Codex app with the "
+                 "laptop awake, so it is not a hosted runner: it is the local adapter, seam A "
+                 "with `CURAMOIR_RUNNER` unset, the OS sandbox around the tests, no shell for "
+                 "the agent, and the run's lock as on any local run.")
+    assert not [name for name in vars(config) if "CURSOR" in name.upper()]
+    assert not [value for value in vars(config).values()
+                if isinstance(value, str) and "CURSOR" in value.upper()]
+    assert [name for name in vars(config) if name.endswith("_MARKER")] == \
+        ["CLAUDE_MARKER", "GITHUB_MARKER"]
 
 
 def test_it_has_the_routine_cursor_and_codex_sections():
