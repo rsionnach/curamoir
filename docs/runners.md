@@ -51,7 +51,7 @@ It also needs, in the VM:
 | Exit | Means | A scheduler should |
 |---|---|---|
 | `0` | success | pass |
-| exit 3 | refused: a guard or the sweep declined, reason in the sentence and the ledger line | show it, not fail (an expected outcome) |
+| `3` | refused: a guard or the sweep declined, reason in the sentence and the ledger line | show it, not fail (an expected outcome) |
 | anything else | failure | fail |
 
 **The runner kind is declared, never inferred.** `config.resolve_runner` is
@@ -66,11 +66,11 @@ the one reader of the declaration. Its rule is exact and case-sensitive:
 | `hosted` | neither | refused |
 | anything else (`Hosted`, `ci`, a value with a space) | any | refused |
 
-A refusal is reason `runner`, exit 3. Its sentence gives the value's length
-at most: the value itself is never echoed, since the sentence lands in the
-committed ledger, and a secret pasted into the variable by mistake would
-land with it. It is checked after the kill switch and the lock, so a paused
-repository reads paused even when misdeclared.
+A refusal is reason `runner`, exit 3. Its sentence names at most the
+value's length; the value itself is never echoed, since the sentence lands
+in the committed ledger, and a secret pasted into the variable by mistake
+would land with it. It is checked after the kill switch and the lock, so a
+paused repository reads paused even when misdeclared.
 
 A marker without the declaration runs local. On a GitHub runner with
 `CURAMOIR_RUNNER` unset, the sweep wants the OS sandbox around the tests,
@@ -141,26 +141,8 @@ is the VM and the token's scope (the README's
 [Hosted runner limits](../README.md#hosted-runner-limits)).
 
 **The agent's test command.** On hosted the fix agent may run the base's
-test command, through a Claude Code permission rule that names it. A
-command no rule can name exactly gets no shell at all, so the agent cannot
-run tests (the green gate still does). `fix_step.offered_test_command`
-decides. It refuses a command:
-
-- with a character that is not printable (a newline, a tab, a no-break
-  space);
-- that redaction would change (a word that looks like a secret, or a
-  `name=value` with a secret-like name);
-- with an empty part between `&&`s (`&&` is the only separator it splits
-  on);
-- with a part that holds any of `` ( ) * , ; & | < > $ ` ' " \ # ``, so a
-  lone `&`, a pipe, a quote or a substitution;
-- with a part whose first word is a `NAME=value` or `NAME+=value`
-  assignment, or, compared by its last path component (so `/usr/bin/git`
-  counts), a wrapper Claude Code strips (`timeout`, `time`, `nice`,
-  `nohup`, `stdbuf`, `command`, `builtin`, `noglob`, `xargs`), an exec
-  wrapper (`watch`, `setsid`, `ionice`, `flock`), a shell or another
-  general command runner (`sh`, `bash` and the other shells, `eval`,
-  `source`, `.`, `exec`, `sudo`, `su`, `doas`, `env`), or git.
+test command, or gets no shell if no permission rule can name it exactly:
+see [The hosted test command](#the-hosted-test-command).
 
 The steps, in order:
 
@@ -265,12 +247,11 @@ commit, runs `CURAMOIR_RUNNER=hosted curamoir run sweep`, then always
 GitHub identity, your Claude usage). Remove its connectors: the sweep needs
 none, and a run can use any connector it is given.
 
-Nothing in cúramóir keeps two Routine runs apart: each run's lock is on its
-own VM. Whether a scheduled run can start while a **Run now** run is going
-has not been verified; the state push's lease keeps either from
-overwriting the other's lines, but do not press Run now while a run is
-going. "Succeeded" means only that the session ended; read the run's
-report for what the sweep did.
+Run one at a time ([Routine environment](#routine-environment), "One run
+at a time"). Whether a scheduled run can start while a **Run now** run is
+going has not been verified; the state push's lease keeps either from
+overwriting the other's lines. "Succeeded" means only that the session
+ended; read the run's report for what the sweep did.
 
 ### Routine environment
 
@@ -431,9 +412,10 @@ CLI's runner must meet the same requirements by its own means:
   On local a shell-capable toolset is refused before the process starts. No
   tool that creates files, no web access, no MCP server. Reads and edits
   are scoped to the clone with its `.git` denied; on hosted the shell is
-  approved for the base's test command and Claude Code's built-in
-  read-only commands, with git denied. A CLI that cannot be held to that
-  set cannot be a local runner.
+  approved for the base's test command
+  ([which commands qualify](#the-hosted-test-command)) and Claude Code's
+  built-in read-only commands, with git denied. A CLI that cannot be held
+  to that set cannot be a local runner.
 - **The clone's settings, hooks, plugins and MCP servers never load.**
   Today: `--restricted`, which ignores the settings files (so the clone's
   settings, hooks and plugins are not read), and `--strict-mcp-config` with
@@ -486,6 +468,29 @@ unrecorded, never as zero. The tokens are priced by model from
 guard is degraded and the monthly ceiling is NOT enforced until one is
 added.
 
+### The hosted test command
+
+On hosted the fix agent may run the base's test command, through a Claude
+Code permission rule that names it. A command no rule can name exactly
+gets no shell at all, so the agent cannot run tests (the green gate still
+does). `fix_step.offered_test_command` decides. It refuses a command:
+
+- with a character that is not printable (a newline, a tab, a no-break
+  space);
+- that redaction would change (a word that looks like a secret, or a
+  `name=value` with a secret-like name);
+- with an empty part between `&&`s (`&&` is the only separator it splits
+  on);
+- with a part that holds any of `` ( ) * , ; & | < > $ ` ' " \ # ``, so a
+  lone `&`, a pipe, a quote or a substitution;
+- with a part whose first word is a `NAME=value` or `NAME+=value`
+  assignment, or, compared by its last path component (so `/usr/bin/git`
+  counts), a wrapper Claude Code strips (`timeout`, `time`, `nice`,
+  `nohup`, `stdbuf`, `command`, `builtin`, `noglob`, `xargs`), an exec
+  wrapper (`watch`, `setsid`, `ionice`, `flock`), a shell or another
+  general command runner (`sh`, `bash` and the other shells, `eval`,
+  `source`, `.`, `exec`, `sudo`, `su`, `doas`, `env`), or git.
+
 ## Other providers
 
 Neither is built. Each is what a contributor would write, through the two
@@ -508,17 +513,18 @@ Without it the agent stays `claude -p`.
 
 ### Codex
 
-A Codex Automation runs locally, through the Codex app with the laptop
-awake, so it is not a hosted runner: it is the local adapter, seam A with
-`CURAMOIR_RUNNER` unset, the OS sandbox around the tests, no shell for the
-agent, and the supervisor lock as on any local run. Its step is
+Seam A: a Codex Automation runs locally, through the Codex app with the
+laptop awake, so it is not a hosted runner: it is the local adapter, seam A
+with `CURAMOIR_RUNNER` unset, the OS sandbox around the tests, no shell for
+the agent, and the run's lock as on any local run. Its step is
 `curamoir run sweep` with no declaration; if it runs in your checkout, the
-ledger stays there and no state push is needed. A seam-B runner would wrap
-`codex exec`, Codex's non-interactive mode, behind the `run_fix_step`
-contract: the clone as its working directory, the toolset translated into
-Codex's own settings (read and edit in the clone only, no shell on the
-local runner), the clone's own Codex settings kept from loading, and its
-output translated into the payload [Seam B](#seam-b-the-agent-runner)
-describes. The clone's `AGENTS.md` would still reach the agent: Codex reads
+ledger stays there and no state push is needed.
+
+Seam B, optionally: a runner that wraps `codex exec`, Codex's
+non-interactive mode, behind the `run_fix_step` contract: the clone as its
+working directory, the toolset translated into Codex's own settings (read
+and edit in the clone only, no shell on the local runner), the clone's own
+Codex settings kept from loading, and its output translated into the
+payload [Seam B](#seam-b-the-agent-runner) describes. The clone's `AGENTS.md` would still reach the agent: Codex reads
 it as instructions, as Claude Code reads the clone's `CLAUDE.md` today, and
 only the prompt answers it, which is not a fence.
