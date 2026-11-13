@@ -44,6 +44,7 @@ from curamoir.fix_step import (
     FIX_TOOLS,
     HOSTED_FIX_TOOLS,
     HOSTED_RUN_TOKEN_VARIABLES,
+    HOSTED_SHELL_TOOLS,
     HOSTED_TEST_ENVIRONMENT,
     SCOPE_LIMITS,
     SHELL_FREE_TOOLS,
@@ -578,6 +579,83 @@ def test_every_local_job_toolset_is_shell_free(tmp_path):
     for tools in (FIX_TOOLS, SCAN_TOOLS):
         fix_step_argv("p", "m", tmp_path, tools=tools)
         assert set(tools) <= SHELL_FREE_TOOLS
+
+
+# The refusal holds only for a `claude -p` that fix_step_argv builds, so the
+# three tests below pin that structurally, over every module under
+# src/curamoir/: a new job that builds its own argv, or a new toolset with a
+# shell in it, fails here rather than slipping past the refusal.
+
+def _source_trees():
+    import ast
+    import pathlib
+
+    import curamoir
+
+    root = pathlib.Path(curamoir.__file__).parent
+    for path in sorted(root.rglob("*.py")):
+        yield path.relative_to(root).as_posix(), ast.parse(path.read_text(encoding="utf-8"))
+
+
+#: The flags that set what a `claude -p` agent may do. Only fix_step_argv
+#: writes them; a second builder would have to.
+_AGENT_FLAGS = ("--tools", "--allowedTools", "--allowed-tools", "--disallowedTools",
+                "--disallowed-tools", "--permission-mode", "--dangerously-skip-permissions")
+
+
+def test_only_run_fix_step_calls_fix_step_argv():
+    import ast
+
+    callers = []
+    for name, tree in _source_trees():
+        for func in ast.walk(tree):
+            if not isinstance(func, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            for node in ast.walk(func):
+                if isinstance(node, ast.Call):
+                    called = node.func
+                    called = getattr(called, "id", None) or getattr(called, "attr", None)
+                    if called == "fix_step_argv":
+                        callers.append((name, func.name))
+    assert sorted(set(callers)) == [("fix_step.py", "run_fix_step")]
+
+
+def test_no_module_but_fix_step_writes_an_agent_permission_flag():
+    import ast
+
+    writers = set()
+    for name, tree in _source_trees():
+        for node in ast.walk(tree):
+            if (isinstance(node, ast.Constant) and isinstance(node.value, str)
+                    and node.value.split("=", 1)[0] in _AGENT_FLAGS):
+                writers.add(name)
+    assert writers == {"fix_step.py"}
+
+
+def test_every_toolset_constant_is_shell_free_or_hosted():
+    """Every module-level `*_TOOLS` constant under src/curamoir/, found rather
+    than listed: each is within SHELL_FREE_TOOLS, and only a HOSTED_ one may
+    add HOSTED_SHELL_TOOLS. A new job's toolset with a shell in it fails
+    here even before anything calls fix_step_argv with it."""
+    import ast
+    import importlib
+
+    found = {}
+    for name, tree in _source_trees():
+        module = "curamoir." + name[:-3].replace("/", ".").removesuffix(".__init__")
+        for node in tree.body:
+            targets = (node.targets if isinstance(node, ast.Assign)
+                       else [node.target] if isinstance(node, ast.AnnAssign) else [])
+            for target in targets:
+                if isinstance(target, ast.Name) and target.id.endswith("_TOOLS"):
+                    found[f"{module}.{target.id}"] = getattr(
+                        importlib.import_module(module), target.id)
+    assert {"curamoir.fix_step.FIX_TOOLS", "curamoir.tier1.SCAN_TOOLS",
+            "curamoir.fix_step.HOSTED_FIX_TOOLS"} <= set(found)
+    for qualified, tools in found.items():
+        permitted = SHELL_FREE_TOOLS | (
+            HOSTED_SHELL_TOOLS if qualified.rsplit(".", 1)[1].startswith("HOSTED_") else frozenset())
+        assert set(tools) <= permitted, qualified
 
 
 # --- by runner kind (cm-2qp.3, E14.3; docs/direction-platform-first.md §5 R4) -------------
