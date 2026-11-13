@@ -22,6 +22,8 @@ docs/r5-gate-v2-curamoir-spec.md
 # additions), likewise untracked until the spec is published.
 docs/curamoir-spec-v0.5-delta.md
 docs/curamoir-spec-v0.1.md
+# Every versioned spec and delta (v0.6 and later), likewise untracked.
+docs/curamoir-spec-*.md
 
 # R5 supervisor runtime files (cm-99l): the lock, the in-flight state and its
 # archived audit trails, and the local hook wiring.
