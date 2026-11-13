@@ -577,11 +577,27 @@ def test_on_linux_a_link_to_a_directory_holding_a_grant_is_recreated(grant_tmp, 
     monkeypatch.setattr(sys, "platform", "linux")
     monkeypatch.setattr(os_sandbox, "_is_executable", lambda path: True)
     monkeypatch.setattr(os_sandbox, "homes", lambda: [os.path.realpath(grant_tmp / "account")])
-    through, venv = an_aliased_venv(grant_tmp)
+    through, _venv = an_aliased_venv(grant_tmp)
     argv = os_sandbox.wrap(["true"], clone=grant_tmp / "c", run_dir=grant_tmp / "r",
                            read_only=[str(through)], links=[str(through / "bin" / "t")])
     triples = list(zip(argv, argv[1:], argv[2:], strict=False))
     assert ("--symlink", "real", os.path.realpath(grant_tmp) + "/alias") in triples
+
+
+def test_on_linux_a_link_wrap_already_makes_or_binds_is_not_made_again(grant_tmp, monkeypatch):
+    """The system loop already makes merged-/usr's /bin -> usr/bin and binds
+    /etc's parts as they are: _links leaves those to it, so no --symlink is
+    emitted twice (an older bwrap refuses a second one onto the same path,
+    cm-4st, R5 correctness)."""
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr(os_sandbox, "_is_executable", lambda path: True)
+    asked = [*os_sandbox._LINUX_SYSTEM, *(f"{root}/python3" for root in os_sandbox._LINUX_SYSTEM),
+             *os_sandbox._LINUX_ETC]
+    argv = os_sandbox.wrap(["true"], clone=grant_tmp / "c", run_dir=grant_tmp / "r",
+                           links=asked)
+    made = [link for flag, _target, link in zip(argv, argv[1:], argv[2:], strict=False)
+            if flag == "--symlink"]
+    assert len(made) == len(set(made)), made
 
 
 @real_sandbox

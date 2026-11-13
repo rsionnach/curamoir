@@ -350,7 +350,10 @@ def _links(paths, grants):
     "No such file or directory", the shell's exit 127). Of the links met
     while resolving each of `paths` (_link_chain), one is recreated only
     where (a) it is not already visible: in no grant and in no system
-    directory (bound whole); (b) it is in no socket or kernel tree, which the
+    directory (bound whole), by its resolved path or as written (the system
+    loop makes merged-/usr's /bin -> usr/bin itself, and a part of /etc is
+    bound as it is: a second --symlink onto either is refused by an older
+    bwrap); (b) it is in no socket or kernel tree, which the
     run gets fresh; and (c) it ends inside a grant or a system directory, or
     at a directory holding a grant (mise's installs/node/latest ->
     ./26.13.1 when 26.13.1/bin is granted, ~/code -> /data/code above a
@@ -361,12 +364,13 @@ def _links(paths, grants):
     (test_a_link_in_a_grant_is_not_followed's rule)."""
     visible = [*grants, *(os.path.realpath(root) for root in _LINUX_SYSTEM
                           if os.path.isdir(root))]
+    already = [*visible, *_LINUX_SYSTEM, *_LINUX_ETC]
     made = {}
     for path in paths:
         if not path or not os.path.isabs(path):
             continue
         for link, target in _link_chain(path):
-            if link in made or any(_inside(link, root) for root in visible):
+            if link in made or any(_inside(link, root) for root in already):
                 continue
             if any(_inside(link, tree) for tree in (*_SOCKET_TREES, *_KERNEL_TREES)):
                 continue
