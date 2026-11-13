@@ -28,7 +28,8 @@ and body. In order, and each step only if the one before succeeded:
    (no argv can carry it).
 2. **Which repository** (below): `gh_repo` must still be origin's.
    **The PR's base** is then GitHub's answer, never a local guess
-   (pr_base): `gh repo view <gh_repo> --json defaultBranchRef`. WHY:
+   (pr_base): `gh repo view <gh_repo> --json defaultBranchRef` (on the
+   REST path, `gh api repos/OWNER/REPO`'s `default_branch`). WHY:
    detect_default_branch falls back to the local branches when
    `refs/remotes/origin/HEAD` is missing (origin's default `develop`
    would get a PR into `main`), and a stale origin/HEAD names a default
@@ -98,10 +99,15 @@ and body. In order, and each step only if the one before succeeded:
    belong in the argv a GhError shows. gh prints the PR's URL (`gh pr
    create --help`: "Upon success, the URL of the created pull request
    will be printed"); its last line must be a PR URL on `gh_repo`, whose
-   number is the PR's.
+   number is the PR's. On the REST path (below) the same PR is asked for
+   with `gh api -X POST repos/OWNER/REPO/pulls --input -`.
 
 **When the PR does not open.** What `gh pr create` did decides what
-publish does next (_open_pr):
+publish does next (_open_pr), and on the REST path what `gh api -X POST`
+did, by the same rows (GitHub's refusal, a 422, is a non-zero exit: "any
+other GhError", and so is a rate limit, a 403 or 429, with no retry; an
+exit 0 whose JSON is not a PR on `gh_repo` with its `number` is
+CreateOutputUnreadable):
 
 | create                   | lookups            | then                             |
 |--------------------------|--------------------|----------------------------------|
@@ -121,7 +127,9 @@ one. An OSError or ValueError is not gh's (the body file cannot be made or
 written, a lone surrogate in the body, a NUL in an argument): gh never ran
 with it, so there is certainly no PR, and it is still a PrCreateFailed,
 never an exception from outside the family that would leave the branch
-behind. The lookup is `gh pr list --head <branch>`; the PR is the one
+behind. The lookup is `gh pr list --head <branch>` (on the REST path,
+`gh api 'repos/OWNER/REPO/pulls?head=OWNER:<branch>&state=open'`, each
+item mapped by github.rest_pull_fields); the PR is the one
 same-repository PR from the branch whose head is the sweep's commit
 (`headRefOid`) and whose base is the default branch (`baseRefName`). A
 lookup that fails leaves the branch on purpose: deleting the head branch
@@ -154,6 +162,27 @@ URL, or one that names no `HOST/OWNER/REPO`, is refused: a local path,
 a `file://` URL. An SSH host alias (`git@work:owner/repo`) gives a host
 gh does not know; that fails at the first gh call with it, publish's
 own `gh repo view` (pr_base, step 2), before any push.
+
+**The REST path** (cm-2qp.9). `publish(..., github_api=)` is the run's
+config.GithubApi (`run.github_api`; github's "The REST path" says why a
+Claude Code cloud session needs it). With GithubApi.REST, step 2 reads
+`gh api [--hostname HOST] repos/OWNER/REPO` and takes its
+`default_branch`; step 7 is `gh api [--hostname HOST] -X POST
+repos/OWNER/REPO/pulls --input -`, the JSON body `{title, head, base,
+body}` written to gh's stdin from an unnamed temporary file
+(github.run_gh's `stdin_bytes`), never on the command line, and the PR is
+the response's `html_url` and `number`; the lookup is as above. Every
+check, row and outcome is the CLI path's. HOST, OWNER and REPO come from
+`gh_repo` as origin_gh_repo names it (github.rest_target), never from
+gh's `{owner}/{repo}` placeholder: publish refuses unless gh is asked
+about origin's repository, and the placeholder is gh's own pick from the
+remotes. Not established: the form of origin's URL inside a cloud
+session. The cloud-environments page documents the proxy's credential
+swap but not the remote's URL; if it is a local proxy URL that names no
+`HOST/OWNER/REPO`, origin_gh_repo refuses ("not a GitHub repository
+URL"), so the sweep refuses for want of a base (sweep_job,
+Reason.SWEEP_BASE) before anything is cloned or pushed, with the URL on
+the line, and the first Routine run (cm-2qp.6) shows which it is.
 
 **The environment** of the user's git: the inherited one without any
 GIT_* variable (a GIT_DIR, GIT_WORK_TREE or GIT_INDEX_FILE from a hook
@@ -202,6 +231,9 @@ or any branch.
 | Published, into  | failure | as Published      | the PR's head      | the PR's URL, and to   |
 | another base     |         | (no `fixes`)      |                    | check it before merge  |
 
+The table is the same on the REST path: every row is reached the same
+way through `gh api` ("The REST path").
+
 The last row is the runner's, not publish's: GitHub opened the PR into a
 branch other than the default the sweep was built on
 (Published.base_branch differs from sweep_job's SweepBase.default_branch,
@@ -227,6 +259,7 @@ from typing import Optional
 from urllib.parse import urlsplit
 
 from curamoir import git_guard, github
+from curamoir.config import GithubApi
 from curamoir.git_guard import GitGuardError, git, run_in_group, scrubbed_environment
 from curamoir.guards.context import JobContext
 from curamoir.guards.default_branch import DefaultBranchGuard
@@ -370,7 +403,8 @@ class Published:
     url: str
 
 
-def publish(repo, *, base, patch, paths, branch, branch_prefix, gh_repo, message, title, body):
+def publish(repo, *, base, patch, paths, branch, branch_prefix, gh_repo, message, title, body,
+            github_api=GithubApi.CLI):
     """Commit `patch` (exactly `paths`) on `base`, push it to origin as
     `branch`, and open a PR from it into the default branch on `gh_repo`,
     titled `title` with `body`: a Published. The steps, and what each
@@ -386,7 +420,10 @@ def publish(repo, *, base, patch, paths, branch, branch_prefix, gh_repo, message
             configured `guardrails.branch_prefix` it was made from.
         gh_repo: origin_gh_repo(repo), resolved once by the caller.
         message, title, body: str, sweep_pr's commit message, title and
-            final body."""
+            final body.
+        github_api: the run's config.GithubApi, which picks the gh calls
+            of steps 2 and 7 and of the lookup (module docstring, "The REST
+            path")."""
     repo = os.path.abspath(str(repo))
     check_target(repo, branch, branch_prefix)
     origin = origin_gh_repo(repo)
@@ -394,13 +431,14 @@ def publish(repo, *, base, patch, paths, branch, branch_prefix, gh_repo, message
         raise PublishRefused(f"gh would be asked about {gh_repo!r}, but origin, where the "
                              f"branch is pushed, is {origin}: the PR and the open-PR listing "
                              "must name the repository the push goes to")
-    base_branch = pr_base(repo, origin, branch)
+    base_branch = pr_base(repo, origin, branch, github_api=github_api)
     _check_pr_text(title, body)
     identity = user_identity(repo)
     sha = commit_from_patch(repo, base, patch, message, identity, paths)
     _require_new_branch(repo, branch)
     push_branch(repo, sha, branch)
-    return _open_pr(repo, sha, branch, base_branch, origin, title, body)
+    return _open_pr(repo, sha, branch, base_branch, origin, title, body,
+                    github_api=github_api)
 
 
 def check_target(repo, branch, branch_prefix):
@@ -432,13 +470,14 @@ def check_target(repo, branch, branch_prefix):
         raise PublishRefused(f"{branch!r} is not a valid branch name")
 
 
-def pr_base(repo, gh_repo, branch):
+def pr_base(repo, gh_repo, branch, *, github_api=GithubApi.CLI):
     """The PR's base: `gh_repo`'s default branch as GitHub names it, once the
     checkout agrees (module docstring, step 2). PublishRefused when gh cannot
     say, when it is `branch`, when origin/HEAD names another branch, or when
-    the checkout has no remote-tracking ref for it."""
+    the checkout has no remote-tracking ref for it. `github_api` as
+    origin_default_branch's."""
     try:
-        default = origin_default_branch(repo, gh_repo)
+        default = origin_default_branch(repo, gh_repo, github_api=github_api)
     except PublishRefused as refused:
         raise PublishRefused(f"the PR has no base, and nothing was pushed: "
                              f"{refused}") from None
@@ -447,7 +486,7 @@ def pr_base(repo, gh_repo, branch):
     return default
 
 
-def origin_default_branch(repo, gh_repo):
+def origin_default_branch(repo, gh_repo, *, github_api=GithubApi.CLI):
     """`gh_repo`'s default branch as GitHub names it, once the checkout
     agrees: its origin/HEAD, when set, names it, and
     `refs/remotes/origin/<default>` exists (module docstring, step 2).
@@ -458,19 +497,20 @@ def origin_default_branch(repo, gh_repo):
     pr_base's answer without the sweep branch, which is not known before
     the sweep has a base: curamoir.sweep_job pins the sandbox's base at
     `refs/remotes/origin/<this>`, so the commit the sweep builds on and the
-    branch its PR opens into are the same branch by one rule."""
+    branch its PR opens into are the same branch by one rule.
+
+    `github_api` is the run's config.GithubApi: GithubApi.REST asks `gh api
+    [--hostname HOST] repos/OWNER/REPO` and reads the repository object's
+    `default_branch` (module docstring, "The REST path"); the checks after
+    it are the same."""
+    ask = _rest_default_branch if github_api is GithubApi.REST else _cli_default_branch
     try:
-        printed = github.run_gh(["repo", "view", gh_repo, "--json", "defaultBranchRef"],
-                                cwd=repo)
+        default, printed, command = ask(repo, gh_repo)
     except github.GhError as error:
         raise PublishRefused(f"gh could not say which branch is {gh_repo}'s default "
                              f"({error})") from None
-    try:
-        default = json.loads(printed)["defaultBranchRef"]["name"]
-    except (ValueError, KeyError, TypeError):
-        default = None
     if not (isinstance(default, str) and default):
-        raise PublishRefused(f"gh repo view printed {github.quote_output(printed)}, not "
+        raise PublishRefused(f"{command} printed {github.quote_output(printed)}, not "
                              f"{gh_repo}'s default branch")
     _require_branch_name(repo, default, f"GitHub's default branch for {gh_repo}")
     tracking = f"refs/remotes/origin/{default}"
@@ -492,6 +532,30 @@ def origin_default_branch(repo, gh_repo):
                              f"checkout has no {tracking}: run `git fetch origin` (and `git "
                              "remote set-head origin -a`), then sweep again")
     return default
+
+
+def _cli_default_branch(repo, gh_repo):
+    """(default branch or None, what gh printed, the command's name) from
+    `gh repo view <gh_repo> --json defaultBranchRef`."""
+    printed = github.run_gh(["repo", "view", gh_repo, "--json", "defaultBranchRef"], cwd=repo)
+    try:
+        default = json.loads(printed)["defaultBranchRef"]["name"]
+    except (ValueError, KeyError, TypeError):
+        default = None
+    return default, printed, "gh repo view"
+
+
+def _rest_default_branch(repo, gh_repo):
+    """(default branch or None, what gh printed, the command's name) from
+    the repository object's `default_branch`, `gh api [--hostname HOST]
+    repos/OWNER/REPO` (module docstring, "The REST path")."""
+    hostname, path = github.rest_target(gh_repo)
+    printed = github.run_gh(["api", *hostname, path], cwd=repo)
+    try:
+        default = json.loads(printed)["default_branch"]
+    except (ValueError, KeyError, TypeError):
+        default = None
+    return default, printed, f"gh api {path}"
 
 
 def _require_branch_name(repo, name, what):
@@ -657,12 +721,15 @@ def delete_remote_branch(repo, branch, sha):
                          f"{github.quote_output(deleted)}")
 
 
-def create_pr(repo, *, gh_repo, branch, base_branch, title, body):
+def create_pr(repo, *, gh_repo, branch, base_branch, title, body, github_api=GithubApi.CLI):
     """`gh pr create` from `branch` into `base_branch` on `gh_repo`, the body
     read from a temporary file (module docstring, step 7): (number, url).
     GhError if gh fails: GhTimeout when stopped, CreateOutputUnreadable
     when it exits 0 but prints no PR URL on `gh_repo` (both: the outcome
-    is unknown)."""
+    is unknown). With `github_api` GithubApi.REST, the same through `gh api -X
+    POST` (_rest_create_pr), with the same errors."""
+    if github_api is GithubApi.REST:
+        return _rest_create_pr(repo, gh_repo, branch, base_branch, title, body)
     handle, body_file = tempfile.mkstemp(prefix="curamoir-pr-body-", suffix=".md")
     try:
         with os.fdopen(handle, "w", encoding="utf-8", newline="") as written:
@@ -681,21 +748,16 @@ def create_pr(repo, *, gh_repo, branch, base_branch, title, body):
     return number, lines[-1]
 
 
-def find_open_pr(repo, gh_repo, branch, sha, base_branch):
+def find_open_pr(repo, gh_repo, branch, sha, base_branch, *, github_api=GithubApi.CLI):
     """The open same-repository PR from `branch` on `gh_repo` whose head is
     `sha` and whose base is `base_branch`, as (number, url), or None (a PR
     from that branch name of another commit or base is not the sweep's).
-    GhError if gh fails or lists more than one."""
-    printed = github.run_gh(["pr", "list", "--repo", gh_repo, "--state", "open", "--head",
-                             branch, "--limit", str(_LOOKUP_LIMIT), "--json", _LOOKUP_FIELDS],
-                            cwd=repo)
-    try:
-        items = json.loads(printed)
-    except ValueError:
-        items = None
-    if not isinstance(items, list):
-        raise github.GhError(f"gh pr list printed {github.quote_output(printed)}, not a list "
-                             "of pull requests")
+    GhError if gh fails or lists more than one. With `github_api`
+    GithubApi.REST, the same question through `gh api
+    repos/OWNER/REPO/pulls?head=OWNER:<branch>&state=open`, each item read
+    through github.rest_pull_fields (module docstring, "The REST path")."""
+    listed = _rest_branch_prs if github_api is GithubApi.REST else _cli_branch_prs
+    items = listed(repo, gh_repo, branch)
     found = []
     for item in items:
         if not (isinstance(item, dict) and item.get("headRefName") == branch
@@ -714,15 +776,77 @@ def find_open_pr(repo, gh_repo, branch, sha, base_branch):
 
 # --- the steps' parts ----------------------------------------------------------------
 
-def _open_pr(repo, sha, branch, base_branch, gh_repo, title, body):
+def _listed_items(printed, command):
+    """`printed` as a JSON list; GhError, quoting it, when it is not one."""
+    try:
+        items = json.loads(printed)
+    except ValueError:
+        items = None
+    if not isinstance(items, list):
+        raise github.GhError(f"{command} printed {github.quote_output(printed)}, not a list "
+                             "of pull requests")
+    return items
+
+
+def _cli_branch_prs(repo, gh_repo, branch):
+    """find_open_pr's items on the CLI path: `gh pr list --head <branch>`."""
+    printed = github.run_gh(["pr", "list", "--repo", gh_repo, "--state", "open", "--head",
+                             branch, "--limit", str(_LOOKUP_LIMIT), "--json",
+                             _LOOKUP_FIELDS], cwd=repo)
+    return _listed_items(printed, "gh pr list")
+
+
+def _rest_branch_prs(repo, gh_repo, branch):
+    """find_open_pr's items on the REST path: `gh api
+    'repos/OWNER/REPO/pulls?head=OWNER:<branch>&state=open'`, each pull
+    mapped by github.rest_pull_fields to the CLI path's fields."""
+    hostname, owner, name = github.rest_repository(gh_repo)
+    printed = github.run_gh(
+        ["api", *hostname, f"repos/{owner}/{name}/pulls?head="
+                           f"{github.rest_head_query(owner, branch)}"
+                           f"&state=open&per_page={_LOOKUP_LIMIT}"], cwd=repo)
+    return [github.rest_pull_fields(item) if isinstance(item, dict) else item
+            for item in _listed_items(printed, "gh api .../pulls")]
+
+
+def _rest_create_pr(repo, gh_repo, branch, base_branch, title, body):
+    """create_pr on the REST path (module docstring, "The REST path"):
+    `gh api [--hostname HOST] -X POST repos/OWNER/REPO/pulls --input -`,
+    the JSON body {title, head, base, body} on gh's stdin, never in the
+    argv. The PR is the response's `number` and `html_url`, which must be a
+    PR URL on `gh_repo` with that number; anything else exits 0 unread, a
+    CreateOutputUnreadable. A JSON body that cannot be encoded raises
+    ValueError (UnicodeEncodeError) before gh runs, as a body file that
+    cannot be written does on the CLI path."""
+    hostname, path = github.rest_target(gh_repo)
+    payload = json.dumps({"title": title, "head": branch, "base": base_branch, "body": body},
+                         ensure_ascii=False).encode("utf-8")
+    printed = github.run_gh(["api", *hostname, "-X", "POST", f"{path}/pulls", "--input", "-"],
+                            cwd=repo, timeout=CREATE_TIMEOUT, stdin_bytes=payload)
+    try:
+        answer = json.loads(printed)
+    except ValueError:
+        answer = None
+    url = answer.get("html_url") if isinstance(answer, dict) else None
+    number = _pr_number(url, gh_repo)
+    if number is None or number != answer.get("number"):
+        raise CreateOutputUnreadable(f"gh api -X POST .../pulls printed "
+                                     f"{github.quote_output(printed)!s}, not a pull request "
+                                     f"on {gh_repo}")
+    return number, url
+
+
+def _open_pr(repo, sha, branch, base_branch, gh_repo, title, body, *,
+             github_api=GithubApi.CLI):
     """The PR, or the error, as the module docstring's "When the PR does not
-    open" table decides."""
+    open" table decides, on either path (`github_api`)."""
     try:
         number, url = create_pr(repo, gh_repo=gh_repo, branch=branch,
-                                base_branch=base_branch, title=title, body=body)
+                                base_branch=base_branch, title=title, body=body,
+                                github_api=github_api)
     except (github.GhTimeout, CreateOutputUnreadable) as error:
         found = _find_pr_after_create(repo, gh_repo, branch, sha, base_branch, error,
-                                      LOOKUP_ATTEMPTS)
+                                      LOOKUP_ATTEMPTS, github_api=github_api)
         if found is None:
             raise _delete_branch_and_fail(
                 repo, branch, sha, f"{error}, and no PR from it was found",
@@ -730,7 +854,8 @@ def _open_pr(repo, sha, branch, base_branch, gh_repo, title, body):
         number, url = found
     except github.GhError as error:
         # GitHub may have made the PR and then answered with an error.
-        found = _find_pr_after_create(repo, gh_repo, branch, sha, base_branch, error, 1)
+        found = _find_pr_after_create(repo, gh_repo, branch, sha, base_branch, error, 1,
+                                      github_api=github_api)
         if found is None:
             raise _delete_branch_and_fail(repo, branch, sha, str(error),
                                           timed_out=False) from None
@@ -744,7 +869,8 @@ def _open_pr(repo, sha, branch, base_branch, gh_repo, title, body):
     return Published(sha, branch, base_branch, gh_repo, number, url)
 
 
-def _find_pr_after_create(repo, gh_repo, branch, sha, base_branch, create_error, attempts):
+def _find_pr_after_create(repo, gh_repo, branch, sha, base_branch, create_error, attempts, *,
+                          github_api=GithubApi.CLI):
     """find_open_pr up to `attempts` times, LOOKUP_DELAY seconds apart,
     after `create_error` (what gh pr create raised): the PR, or None when no
     attempt found it. PrOutcomeUnknown as soon as a lookup fails."""
@@ -752,7 +878,7 @@ def _find_pr_after_create(repo, gh_repo, branch, sha, base_branch, create_error,
         if attempt:
             time.sleep(LOOKUP_DELAY)
         try:
-            found = find_open_pr(repo, gh_repo, branch, sha, base_branch)
+            found = find_open_pr(repo, gh_repo, branch, sha, base_branch, github_api=github_api)
         except github.GhError as lookup:
             raise PrOutcomeUnknown(branch, str(create_error), str(lookup)) from None
         if found is not None:

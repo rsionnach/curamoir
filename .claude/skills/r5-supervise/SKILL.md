@@ -1,0 +1,300 @@
+---
+name: r5-supervise
+description: >-
+  Supervises the sequential Rule-of-Five review of one curamoir bead before it
+  may close: four blocking passes (correctness → clarity → edge cases →
+  fixture provenance), each a separate lens, one reviewer subagent at a time,
+  then one advisory excellence read. Holds the R5 lock for the whole run,
+  records every step in .claude/r5-state.json (which the parallel-block hook
+  reads), fixes and re-reviews until each pass is clean, and only then closes
+  the bead. Activate when the user invokes /r5-supervise <bead-id>, asks to
+  "R5" or "review" a bead before closing, or whenever a bead's change is ready
+  to close.
+---
+
+# /r5-supervise — curamoir's sequential R5 supervisor
+
+Ported from nthlayer-ecosystem/.claude/skills/r5-supervise (cm-99l) for this
+single repository. The rule it enforces is the user's, and it is not
+negotiable:
+
+- **Every bead, every pass.** Four blocking passes, then the advisory read. No
+  pass is skipped for a "small" or "docs-only" change unless the user approves
+  that skip for that bead, in this conversation.
+- **One lens per reviewer.** Each pass is its own reviewer subagent with its own
+  template. Never two lenses in one reviewer.
+- **One reviewer at a time, in order.** Never two reviewers in flight, never a
+  later pass before an earlier one is clean. The state helper refuses a pass
+  out of order, and the parallel-block hook refuses a second agent; record
+  the state BEFORE every dispatch (`pass` / `request`).
+- **The orchestrator never runs a pass itself.** If a reviewer stalls,
+  `r5-state.sh abandon <pass> <reason>`, then `r5-state.sh request <pass>
+  <iteration>` and dispatch a fresh reviewer (or resume the stalled one after
+  the request); do not substitute your own review or your own mutation
+  harness for its verdict.
+- **Anything changed after a pass is reviewed by that pass again**, including
+  excellence touch-ups and one-line edits made while squashing. If the change
+  comes after that pass was done (a clarity fix that changes behaviour, an
+  applied excellence suggestion), `r5-state.sh reopen <earliest pass the
+  change touches>`: that pass and every later one run again, in order.
+
+Helpers (all in `.claude/hooks/`, all resolve this repository's main
+worktree): `r5-lock.sh` (the run lock), `r5-state.sh` (the only writer of the
+state file), and `r5-parallel-block.sh` (the hook). The window protocol (one
+reviewer, or one fix agent, at a time) and run ownership across sessions are
+documented once, in the header of `r5-state.sh`; read it before a first run.
+In short: never dispatch two subagents in one message while a reviewer has
+been requested (the second is refused), and never remove the lock by hand
+(with no lock, every other session is refused until the run is adopted or
+finished).
+
+The hook is wired per checkout, in the untracked `.claude/settings.local.json`
+(this repository is a plugin, so a project `settings.json` would ship to its
+users). Without it nothing enforces the windows. A session started in a
+sibling worktree (for example under `.claude/worktrees/`) reads that
+worktree's settings, not the main checkout's, so it has no hook unless the
+entry is added there too; run supervised R5 from the main checkout. The
+entry:
+
+```json
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Agent|Task",
+        "hooks": [
+          { "type": "command",
+            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/r5-parallel-block.sh\"" }
+        ]
+      }
+    ]
+  }
+}
+```
+
+## Inputs
+
+```
+/r5-supervise <bead-id> [--base <sha>] [--head <sha>]
+```
+
+Without `--base/--head`: HEAD = the newest commit whose message names the
+bead; BASE = the parent of the oldest such commit (`git log --grep`).
+
+## Pre-flight (abort with the reason if any fails)
+
+1. **Lock:** `bash .claude/hooks/r5-lock.sh acquire r5-supervise <bead-id>`.
+   Exit 2 = held by another session or a nesting attempt: stop, show the
+   message, do not delete the lock without asking the user.
+2. **Bead:** `bd show <bead-id> --json` — open or in_progress (reopen a closed
+   bead being re-reviewed: `bd update <id> --status in_progress`).
+3. **State:** `bash .claude/hooks/r5-state.sh init <bead-id> <base> <head>`.
+   Exit 2 = another run is in flight: stop.
+4. **Clean tree:** `git status --short` shows nothing but untracked noise
+   (`.DS_Store`). Uncommitted work would contaminate the review.
+5. **Baseline:** the full suite passes at HEAD
+   (`uv run pytest -q -p no:cacheprovider`), `uv run ruff check src tests`,
+   `scripts/curamoir-lint --repo .`. A red baseline is the user's to decide on.
+
+On a pre-flight failure after step 3: `r5-state.sh finish aborted`. After
+step 1: release the lock (`r5-lock.sh release r5-supervise`).
+
+## Pass loop
+
+For each pass in `correctness`, `clarity`, `edge-cases`, `provenance`:
+
+1. `bash .claude/hooks/r5-lock.sh refresh r5-supervise`. Exit 4 = the lock
+   is still this session's but past its 24h limit (a run paused overnight on
+   a design question, say): ask the user; with their OK, `r5-lock.sh renew
+   r5-supervise` and `event lock_renewed`, then carry on, or end the run.
+   Exit 1 = the lock is lost: another session reclaimed it after this one's lease lapsed (a
+   step that ran longer than 15 minutes). Stop, touch neither the lock nor
+   the state file (the helper refuses this session anyway, exit 4), and tell
+   the user; the other session may have adopted the run.
+2. `bash .claude/hooks/r5-state.sh pass <pass>` (requests the reviewer).
+3. Read `~/.claude/skills/rule-of-five-review/<pass>-reviewer.md` (edge-cases
+   uses `edge-cases-reviewer.md`).
+4. Dispatch exactly one reviewer subagent, alone in its message
+   (subagent_type `pr-review-toolkit:code-reviewer` or `general-purpose`).
+   The hook records it (reviewer_dispatched) and refuses every other
+   dispatch until step 5. If the dispatch did not launch (a denied
+   permission prompt, another hook), it is still recorded:
+   `abandon <pass> "never started"`, `request`, dispatch again. Its brief:
+   - `PASS <n> (<PASS>) of the sequential R5 review of bead <bead-id>.`
+   - the template body, inlined;
+   - the scope: `git diff <base>..<head>`; no findings outside the diff; the
+     pre-change view via `git show <base>:<file>`;
+   - the bead (`bd show` output) and any user decisions in its notes;
+   - `Focus: <pass> only — do not comment on other dimensions.`;
+   - report: CRITICAL / IMPORTANT / MINOR with file:line, a verdict, and the
+     **findings contract** below as the brief's last paragraph, verbatim.
+   - **provenance only:** it may mutate files for the kill check and must
+     restore every one (`git checkout -- <file>`, never `git stash` or
+     `checkout .`); macOS has no `timeout` binary, so run each mutant through
+     `subprocess.run(..., timeout=...)`; it ends by printing
+     `git status --short` verbatim. A pass whose kill check could not run is
+     NOT clean.
+   While that reviewer runs, dispatch nothing else (the hook refuses).
+5. When it reports, write its report verbatim to
+   `.claude/r5-reports/<bead-id>-<pass>-<iteration>.md` (gitignored) and run
+   `bash .claude/hooks/r5-state.sh findings <pass> <that file> <verdict>
+   ['{"model":"…","tokens_in":…,"tokens_out":…,"duration_s":…}']` with
+   whatever of the optional metadata the dispatch result gives you. The
+   counts come from the report's `R5-FINDINGS:` line, never from you. If
+   that line is missing or malformed the reviewer is recorded UNAVAILABLE
+   (exit 2): `request <pass> <iteration + 1>` and dispatch it again. A
+   blocking finding whose `verification_level` is below the floor (default
+   `script`) is listed in its round's `unproven`; it still blocks, and the
+   fix round's first job on it is to verify or dispute it.
+   After provenance, check `git status --short` yourself; a dirty tree is a
+   failed pass whatever the counts: restore, `r5-state.sh tree-dirty
+   provenance` (from then on `done` is refused), then step 7f.
+6. If `critical + important == 0`, either:
+   - leave the minors (record them as follow-up beads if they matter):
+     `r5-state.sh done <pass> <fix_iterations>` and go to the next pass; or
+   - fix the minors: do NOT run `done`; go to step 7, a fix round like any
+     other, and the pass re-reviews it. (`done` first and a fix after it
+     would need `reopen`.)
+7. Otherwise (or to fix minors), a fix round:
+   a. `bash .claude/hooks/r5-lock.sh refresh r5-supervise`.
+   b. Fix: dispatch ONE fix subagent (the hook records it as fix_dispatched
+      and refuses a second), or fix it yourself if the change is a few lines.
+   c. Once the fix is in place (and any fix agent has finished):
+      `r5-state.sh fixed <pass> '{"files":[...]}'`.
+   d. Run the full suite, ruff and curamoir-lint; `event tests_passed`, or
+      `event tests_failed` and stop the run with `finish failed`.
+   e. Commit (`r5(<pass>): <summary> · <bead-id>`, with the Co-Authored-By
+      trailer); `event commit_made '{"sha":"..."}'`.
+   f. `r5-state.sh request <pass> <iteration + 1>`, then go back to step 1
+      with that `request` in place of step 2: refresh, and re-dispatch the
+      SAME pass.
+   `done` is refused unless that pass's clean findings are the run's last
+   window event, so a fix or a re-request after them always goes back
+   through the reviewer.
+8. Three fix iterations without a clean pass (not counting a round that
+   only fixes minors): stop and ask the user.
+9. A finding that needs a design decision: `event design_question_raised`,
+   ask the user, keep the lock (the run is paused, not over).
+
+## The findings contract (every reviewer, every pass)
+
+The record is in the shape of section 10 of
+`docs/r5-gate-v2-curamoir-spec.md`, the contract shared with NthLayer's
+gate: `rounds[]` (one review or verify round per reviewer, one fix round per
+fix, with the commit from `event commit_made`) and, at `finish`, a verdict
+keyed to `git rev-parse HEAD^{tree}` (completed is CLEAN, failed is
+ESCALATED). Append this paragraph to every reviewer's brief, verbatim, with
+`<lens>` filled in (`correctness`, `clarity`, `edge_cases`, `provenance` or
+`excellence`):
+
+> End your report with exactly one line, the last non-empty line of your
+> output: `R5-FINDINGS:` followed by a JSON array, on that one line, with one
+> object per finding: `{"lens": "<lens>", "severity": "CRITICAL" |
+> "IMPORTANT" | "MINOR", "path": "<repo-relative path>", "start_line": <int>,
+> "end_line": <int>, "claim": "<one sentence: what is wrong>", "evidence":
+> "<the lines or test output that show it>", "fix": "<one sentence: what
+> would resolve it>" or null, "verification_level": "asserted" | "cited" |
+> "walked" | "script" | "reproduced"}` (the ladder: how far you proved it,
+> from asserted, unsupported, to reproduced). On a re-review, account for
+> every prior open finding listed in your brief: either close it with a
+> closure record, `"resolves": "<its fingerprint>"`, whose path, lines and
+> evidence are the resolving lines (the code that now makes it hold), whose
+> claim says why the prior finding no longer holds, and whose severity is
+> the original's; or re-raise it by copying the prior record verbatim (path,
+> claim) with no `resolves`. A finding you do not mention stays open. Mark a
+> finding a fix introduced `"regression": true`. No findings:
+> `R5-FINDINGS: []`. Nothing may follow that line.
+
+`lib/r5_findings.py` validates each finding, computes its fingerprint (the
+first 16 hex of sha256 of lens, path and the normalised claim) and sets its
+status to `open`; a reviewer's own fingerprint or status is ignored. Of
+two findings with one fingerprint in a report, the most severe is kept. A
+`resolves` that is not a 16-hex fingerprint (surrounding space and upper
+case are forgiven), a report that is not UTF-8, and any field that is not
+valid Unicode make the report UNAVAILABLE.
+Closures follow section 10 as settled on 2026-11-07: a record with
+`resolves` is a closure, never counted whatever its severity; it is valid
+only if `resolves` names a fingerprint in the previous round's open set and
+it has evidence; an invalid closure is ignored and logged `closure_rejected`
+(the helper prints each one: read them before `done`), and a second closure
+of the same fingerprint is dropped. The round's open set is the previous one
+minus valid closures plus new and re-raised findings; a prior finding the
+report does not mention is carried forward, `unaccounted`: silence never
+closes. A re-raise keeps the more severe of its own and the prior severity
+(the event lists any it held up in `downgrades_refused`): severity goes down
+only through a valid closure. A report that closes every prior finding with empty evidence is
+UNAVAILABLE. For a re-review's brief, `r5-state.sh open-set <pass>` prints
+the previous round's open findings with their fingerprints; include them.
+
+## Advisory stage — excellence
+
+After all four blocking passes are clean: refresh, `r5-state.sh pass
+excellence`, dispatch the excellence reviewer once
+(`excellence-reviewer.md`, "This pass is ADVISORY", and the findings
+contract above), write its report to `.claude/r5-reports/` as in step 5,
+then `r5-state.sh advisory <that file> <verdict>`. No fix loop. If you choose to apply any of its
+suggestions, that change goes back through every blocking pass it touches
+(`reopen`, the rule above); otherwise record the suggestions as follow-up beads.
+A NEEDS WORK verdict or a CRITICAL: do not close; ask the user.
+
+## Close
+
+In this order: the run's completeness check comes before the bead closes,
+because a refused finish can be acted on and a closed bead cannot be
+un-closed by it.
+
+1. `bash .claude/hooks/r5-state.sh finish completed` (archives the trail as
+   `.claude/r5-state-<bead>-completed-<ts>.json`; refused unless all four
+   passes are done and the advisory read is recorded). Refused: stop, do not
+   close the bead.
+2. `bd close <bead-id> --reason "<per-pass findings counts, fix iterations,
+   commits, provenance mutants run/survived, advisory notes>"` (if it fails,
+   run it again).
+3. `bash .claude/hooks/r5-lock.sh release r5-supervise`.
+
+On failure or abort: `r5-state.sh finish failed|aborted`, then release the
+lock. A crash leaves the lease to expire after 15 minutes; after that, other
+sessions' dispatches go through, and a new session resumes the run (below).
+The helpers' short mutex is a kernel flock(2), dropped when its holder dies,
+so a killed helper never wedges the run.
+
+## Resume
+
+If `.claude/r5-state.json` exists with status in_progress: read it, re-acquire
+the lock (idempotent in the same session; a new session reclaims it once
+the old lease has run out), then `r5-state.sh adopt` if the run's
+session_id is not this session, and log `event session_restarted`. Continue
+from `current_pass`. If its last window event is reviewer_dispatched and
+that reviewer is gone (or never started), `abandon` it and `request` the
+pass again; if it is fix_dispatched, check the fix agent's work, then
+`fixed <pass>`.
+If that pass is provenance, check `git status --short` first and ask the user
+before restoring anything — a leftover mutant looks like real work.
+
+A long reviewer does not lose the lock: while the run has a reviewer or a
+fix agent in flight, `r5-lock.sh acquire` from another session refuses to
+reclaim the lapsed lease (until the 24h TTL), except `acquire r5-supervise
+<that bead>`, which is resuming the run; resume that way only once you are
+sure the original session is gone (ask the user), or it loses its lock
+mid-review. Refresh as soon as the reviewer reports.
+
+The 24h TTL counts from the run's start: the pre-flight acquire restamps the
+lock when no run is in flight. A run that lasts longer than that fails its
+next refresh with exit 4 (step 1).
+
+If a step failed partway (a full disk, a killed helper): `show` the state.
+A `pass` that set current_pass but wrote no pass_started is repaired with
+`request <pass> 1`; a `finish` whose archive move failed is repeated once
+the cause is fixed.
+
+When the helpers themselves cannot run (python3 or flock unavailable, so every
+call exits 3; or the state file is malformed, so every call and every
+dispatch is refused), the escape is manual and the user's call: move
+`.claude/r5-state.json` aside (keep it; it is the audit trail), which ends
+the run and lets dispatches through, then start the run again.
+
+## Several beads
+
+Run beads one after another, never interleaved: finish (close or abort) one
+bead's run before `init` on the next. The lock and the state file both refuse
+a second run while one is in flight.

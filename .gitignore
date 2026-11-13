@@ -22,3 +22,11 @@ docs/r5-gate-v2-curamoir-spec.md
 # additions), likewise untracked until the spec is published.
 docs/curamoir-spec-v0.5-delta.md
 docs/curamoir-spec-v0.1.md
+
+# R5 supervisor runtime files (cm-99l): the lock, the in-flight state and its
+# archived audit trails, and the local hook wiring.
+.claude/r5-supervisor.lock
+.claude/r5-reports/
+.claude/r5-state*.json
+.claude/r5-*.flock
+.claude/settings.local.json

@@ -1,0 +1,13 @@
+# `git ls-remote https://github.com/pypa/pip`, captured 2026-11-01 (cm-2qp.5
+# provenance review), trimmed to these lines and otherwise as git printed
+# them (tab-separated, in git's order). Annotated tags: each tag line is the
+# tag object, its `^{}` line the commit. 20.0 and 20.0.1 are a real prefix
+# pair. Lines starting with `#` are this header; the tests drop them.
+ec43c48b2f2de7bfaac32bee85ee33a9e496db07	HEAD
+483859b240109f9c149d7dbf32f4c7f858821e55	refs/heads/d-drive
+ec43c48b2f2de7bfaac32bee85ee33a9e496db07	refs/heads/main
+2c75f2090816730fa8ef57a8c353a1893c504573	refs/pull/10521/head
+caaba0f5011204597dfd72f3ddea2d77ee1bb5a8	refs/tags/20.0
+8ad871a6bbdccfe152cc75cbb11e3faf0778b9b3	refs/tags/20.0^{}
+c1809b518381a06a2f34df5f6fa96472541460c7	refs/tags/20.0.1
+0b397b42c5159942c73a882ca5f33364502e1c3a	refs/tags/20.0.1^{}

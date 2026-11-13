@@ -44,7 +44,7 @@ def test_a_truncated_ledger_line_does_not_refuse_every_job(tmp_path):
         + '{"kind": "job", "job": "swe',  # crash mid-append
         encoding="utf-8")
 
-    gateway = Gateway(guards=[Budget(prices=PRICES, monthly_ceiling_usd=15.0)])
+    gateway = Gateway(guards=[_october_budget(15.0)])
     outcome = gateway.perform(JobContext(job="sweep", repo=repo), lambda: "ran")
 
     assert outcome == "ran", f"job refused because of a malformed ledger line: {outcome}"
@@ -95,7 +95,7 @@ def test_a_mistyped_price_key_does_not_refuse_every_job(tmp_path):
                     "input_tokens": 1, "output_tokens": 1,
                     "at": "2026-10-07T10:00:00+00:00"}) + "\n", encoding="utf-8")
 
-    guard = Budget(prices=PriceTable({"m": {"input": 1.0}}), monthly_ceiling_usd=15.0)
+    guard = _october_budget(15.0, prices=PriceTable({"m": {"input": 1.0}}))
     ledger = Ledger(repo / ".curamoir" / "state" / "ledger.jsonl")
     gateway = Gateway(guards=[guard], ledger=ledger)
 
@@ -262,9 +262,7 @@ def test_a_lower_bound_already_over_the_ceiling_refuses(tmp_path):
 
     from curamoir.guards import Refusal
 
-    outcome = Budget(prices=PRICES, monthly_ceiling_usd=10.0, on_ceiling="pause")(
-        JobContext(job="sweep", repo=repo)
-    )
+    outcome = _october_budget(10.0, on_ceiling="pause")(JobContext(job="sweep", repo=repo))
 
     assert isinstance(outcome, Refusal), f"unbounded spend bypass: {outcome}"
     assert outcome.reason.value == "budget"
@@ -280,9 +278,7 @@ def test_a_lower_bound_under_the_ceiling_degrades_and_says_it_is_unconfirmed(tmp
 
     from curamoir.guards import Degraded
 
-    outcome = Budget(prices=PRICES, monthly_ceiling_usd=15.0)(
-        JobContext(job="sweep", repo=repo)
-    )
+    outcome = _october_budget(15.0)(JobContext(job="sweep", repo=repo))
 
     assert isinstance(outcome, Degraded)
     assert "could not be confirmed" in outcome.message.lower()
@@ -296,10 +292,12 @@ def _guard_ledger(repo, *lines):
         encoding="utf-8")
 
 
-def _october_budget(ceiling, **kwargs):
+def _october_budget(ceiling, prices=PRICES, **kwargs):
+    """A Budget whose clock reads 2026-10-09, the month every dated ledger line
+    in this file falls in, so month-to-date never depends on the calendar."""
     from datetime import datetime
 
-    return Budget(prices=PRICES, monthly_ceiling_usd=ceiling,
+    return Budget(prices=prices, monthly_ceiling_usd=ceiling,
                   now=lambda: datetime(2026, 10, 9, tzinfo=timezone.utc), **kwargs)
 
 
@@ -425,9 +423,7 @@ def test_token_counts_that_are_not_numbers_degrade_rather_than_crash(tmp_path):
                     "at": "2026-10-08T10:00:00+00:00"}) + "\n",
         encoding="utf-8")
 
-    outcome = Budget(prices=PRICES, monthly_ceiling_usd=15.0)(
-        JobContext(job="sweep", repo=repo)
-    )
+    outcome = _october_budget(15.0)(JobContext(job="sweep", repo=repo))
 
     assert isinstance(outcome, Degraded), outcome
     assert "could not be confirmed" in outcome.message.lower()

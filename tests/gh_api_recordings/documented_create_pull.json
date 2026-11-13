@@ -1,0 +1,22 @@
+{
+  "url": "https://api.github.com/repos/octocat/Hello-World/pulls/1347",
+  "id": 1,
+  "html_url": "https://github.com/octocat/Hello-World/pull/1347",
+  "number": 1347,
+  "state": "open",
+  "title": "Amazing new feature",
+  "body": "Please pull these awesome changes in!",
+  "merged_at": "2011-01-26T19:01:12Z",
+  "head": {
+    "label": "octocat:new-topic",
+    "ref": "new-topic",
+    "sha": "6dcb09b5b57875f334f61aebed695e2e4193db5e",
+    "repo": {"id": 1296269, "full_name": "octocat/Hello-World"}
+  },
+  "base": {
+    "label": "octocat:master",
+    "ref": "master",
+    "sha": "6dcb09b5b57875f334f61aebed695e2e4193db5e",
+    "repo": {"id": 1296269, "full_name": "octocat/Hello-World"}
+  }
+}

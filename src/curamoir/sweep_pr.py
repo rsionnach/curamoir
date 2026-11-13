@@ -13,7 +13,9 @@ in order:
 
 1. The marker (below), alone on the first line.
 2. `## curamoir sweep`, then one sentence: N fixes of M principles, the
-   base, how many files, and that the ledger line records every fix.
+   base, how many files, and that the ledger line records every fix. Then,
+   for a run in a Claude Code cloud session, the transcript link's line
+   (below).
 3. `### Fixes`: only the fixes in the gate's `paths_for_pr` (pr_records;
    fix_scope step 9), each with its principle id. A rule fix is
    `principle` `rule` `path` line N: the line is the base lint's, joined by
@@ -73,6 +75,20 @@ zero-width space, not `&#64;`, because GitHub finds mentions after
 decoding entities). Behind that, final_body checks the body's headings are
 exactly its own (_check_headings), and the grade's, ATX and setext, before
 it is escaped (_check_grade_headings).
+
+**The transcript link** (E14.1, cm-2qp.1). `transcript_url` is the run's
+config.Runner.transcript_url, threaded from job_guard.run_guarded through
+`run.runner` by sweep_job: this module reads no environment. It is
+`https://claude.ai/code/session_<token>`, the token letters, digits, `_`
+and `-` only, which config.session_transcript guarantees and _parts checks
+again (config.TRANSCRIPT_URL_PATTERN; anything else is a ValueError). It
+is this code's own text, so it is not escaped: a plain token cannot start
+Markdown, a line or a comment, and a link redaction would change is never
+made. One case is left out instead: a token naming MARKER_WORD, which
+_compose's neutralising would rewrite into a link to some other session.
+With no link the body is byte for byte the body before E14.1. A session
+id that gives no link is left out of the body; the job line says why
+(config.transcript_fields).
 
 **The cap.** GitHub refuses a body over 65,536 characters. MAX_BODY_SIZE
 is a little under it, measured by github_size: UTF-8 bytes, which are never
@@ -136,6 +152,7 @@ import re
 from datetime import date as Date
 from typing import NamedTuple
 
+from curamoir.config import TRANSCRIPT_URL_PATTERN
 from curamoir.fix_counts import REMEDY, RULE, TIER1
 from curamoir.fix_scope import FILE_ADDED, nfc
 from curamoir.green_gate import REDUCED
@@ -163,6 +180,10 @@ GRADE_PENDING = "not graded yet (Epic 7)"
 #: The promotion candidates section until E4-R1/E4-R2 fill it (E3-R3).
 PROMOTION_PENDING = ("None yet: promotion candidates come from the promotion ladder "
                      "(E4-R1, E4-R2), which has not landed.")
+
+#: How the transcript link's line opens (module docstring, "The transcript
+#: link").
+TRANSCRIPT_LINE = "Transcript of the run that opened this PR: "
 
 #: MARKER_WORD's inert spelling, for every line but the marker (module
 #: docstring, "The marker").
@@ -220,18 +241,20 @@ def commit_message(records, gate, date, base):
 
 
 def render_pr_body(records, work_list, gate, base, skipped_remedies, left_out_paths,
-                   grade_section=None, limit=MAX_BODY_SIZE, scope_dropped=()):
+                   grade_section=None, limit=MAX_BODY_SIZE, scope_dropped=(),
+                   transcript_url=None):
     """final_body's body without its checks (the redaction verification,
     the marker, the headings): the same arguments, the same raises
     otherwise, fitted under `limit`. For inspection and tests, never for
     sending."""
     parts = _parts(records, work_list, gate, base, skipped_remedies, left_out_paths,
-                   grade_section, scope_dropped)
+                   grade_section, scope_dropped, transcript_url)
     return _body(parts, lambda text: github_size(text) <= limit)
 
 
 def final_body(records, work_list, gate, base, skipped_remedies, left_out_paths,
-               grade_section=None, limit=MAX_BODY_SIZE, scope_dropped=()):
+               grade_section=None, limit=MAX_BODY_SIZE, scope_dropped=(),
+               transcript_url=None):
     """The PR body the runner sends: rendered from redacted pieces (E0-R7),
     fitted under `limit`, then checked: redaction would change nothing
     (_check_redacted), its marker reads back, its headings are its own.
@@ -261,6 +284,13 @@ def final_body(records, work_list, gate, base, skipped_remedies, left_out_paths,
             grade with a heading of its own is refused
             (_check_grade_headings, _check_headings).
         limit: the cap, by github_size. A test seam; the runner leaves it.
+        transcript_url: the run's config.Runner.transcript_url (E14.1):
+            the claude.ai link to the cloud session that ran the sweep, or
+            None (not a Claude Code cloud session, or one whose id gave no
+            link).
+            Shown on a line of its own after the header, never cut; left
+            out when it names MARKER_WORD (module docstring, "The
+            transcript link").
 
     Raises:
         ValueError: the gate kept no file (abandoned: there is no PR); no
@@ -268,8 +298,10 @@ def final_body(records, work_list, gate, base, skipped_remedies, left_out_paths,
             is not opened; cm-fkd.14 records a failure with no PR); a
             record is of another base, or two rule records share a
             fingerprint; a rule record's fingerprint is not in
-            `work_list.items`; a path in `left_out_paths` is also in
-            `gate.paths_for_pr`; or `base` is not a full SHA.
+            `work_list.items`; `transcript_url` is not a link
+            config.session_transcript makes (config.TRANSCRIPT_URL_PATTERN); a
+            path in `left_out_paths` is also in `gate.paths_for_pr`; or
+            `base` is not a full SHA.
         SweepBodyError (a ValueError): redacting the body would still
             change it (_check_redacted; module docstring, "Redaction");
             the marker does not read back as `base`, or the body's headings are not exactly
@@ -280,7 +312,7 @@ def final_body(records, work_list, gate, base, skipped_remedies, left_out_paths,
     """
     _check_grade_headings(grade_section)
     parts = _parts(records, work_list, gate, base, skipped_remedies, left_out_paths,
-                   grade_section, scope_dropped)
+                   grade_section, scope_dropped, transcript_url)
     body = _body(parts, lambda text: github_size(text) <= limit)
     _check_redacted(body)
     if parse_sweep_marker(body) != base:
@@ -384,11 +416,17 @@ class _Listed(NamedTuple):
 
 
 def _parts(records, work_list, gate, base, skipped_remedies, left_out_paths, grade_section,
-           scope_dropped=()):
+           scope_dropped=(), transcript_url=None):
     """The body's pieces, a dict _compose assembles: "marker", "header",
-    "gate" and "grade" (text never cut), and "lists", {name: _Listed} (the
-    lists _fitted may cut). Raises as final_body's docstring says."""
+    "transcript" (None for no link), "gate" and "grade" (text never cut),
+    and "lists", {name: _Listed} (the lists _fitted may cut). Raises as
+    final_body's docstring says."""
     marker = sweep_marker(base)  # ValueError unless `base` is a full lowercase SHA
+    if transcript_url is not None and not TRANSCRIPT_URL_PATTERN.fullmatch(transcript_url):
+        # Not echoed: it is not a link this code made, so it is text from
+        # somewhere else, and the message lands on the ledger line.
+        raise ValueError("the transcript link is not a claude.ai session link "
+                         "(config.session_transcript makes those), so the body is not written")
     if not gate.paths_for_pr:
         raise ValueError(f"the test gate kept no file ({gate.render()}), so there is no PR "
                          "and no body")
@@ -439,6 +477,7 @@ def _parts(records, work_list, gate, base, skipped_remedies, left_out_paths, gra
     return {
         "marker": marker,
         "header": header,
+        "transcript": _transcript_line(transcript_url),
         "gate": _gate_line(gate),
         # Redacted whole (a key with no END line must stop at its end), then
         # escaped line by line (plain_lines); _compose neutralises it like
@@ -480,8 +519,9 @@ def _compose(parts, keep):
             return list(lines)
         return [*lines[:keep], f"- ... and {len(lines) - keep} more{more_suffix}"]
 
+    transcript = [] if parts["transcript"] is None else [parts["transcript"], ""]
     content = [
-        f"## {_NAME}", "", parts["header"], "",
+        f"## {_NAME}", "", parts["header"], "", *transcript,
         "### Fixes", *listed("fixes"), "",
         "### Test gate", parts["gate"], *listed("dropped"), "",
         "### Files left for the next run", *listed("left"), "",
@@ -527,6 +567,16 @@ def _gate_line(gate):
                 f"are green, dropping the {len(gate.dropped)} listed below "
                 f"({len(gate.runs)} runs)")
     return plain_text(gate.render())
+
+
+def _transcript_line(transcript_url):
+    """The transcript link's line, or None for no link: none given, or one
+    naming MARKER_WORD, which _compose would make inert on this line as on
+    every line but the marker, turning it into a link to another session
+    (module docstring, "The transcript link")."""
+    if transcript_url is None or MARKER_WORD in transcript_url:
+        return None
+    return f"{TRANSCRIPT_LINE}{transcript_url}"
 
 
 def _carried(records, gate):

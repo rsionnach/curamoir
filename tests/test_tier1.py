@@ -33,7 +33,7 @@ from types import SimpleNamespace
 import pytest
 
 from curamoir import tier1
-from curamoir.config import ConfigError, load_config
+from curamoir.config import LOCAL_RUNNER, ConfigError, Runner, RunnerKind, load_config
 from curamoir.fix_counts import (
     TIER1,
     FixRecord,
@@ -868,6 +868,32 @@ def test_the_scan_is_given_the_lint_paths_and_skips_held_files(tmp_path):
     assert len(scan.candidates) == 3 and HANDLERS not in scan.candidates
     prompt = json.loads(log.read_text())["argv"][1]
     assert f"- {BILLING}\n" in prompt and HANDLERS not in prompt
+
+
+def test_the_scan_takes_the_runner_and_its_argv_is_the_same_on_both_kinds(tmp_path):
+    """cm-2qp.3: run_tier1_scan takes the runner and hands it on, but it
+    changes nothing for the scan today: with SCAN_TOOLS on both kinds the
+    scan's command line is the same on both (no Bash, --restricted and the
+    denylist --settings). It is passed so that a future runner-dependent
+    choice comes from the run's kind, not a default."""
+    repo = tier1_repo(tmp_path)
+    claude, log = fake_claude(tmp_path, "scan", findings_reply())
+    argvs = []
+    for runner in (LOCAL_RUNNER, Runner(RunnerKind.HOSTED)):
+        with prepare_sandbox(repo, "HEAD", parent=tmp_path) as sandbox:
+            lint_sandbox(sandbox)
+            scan = run_tier1_scan(sandbox, plan_scan(sandbox, []), (), [], claude=claude,
+                                  runner=runner)
+            path = str(sandbox.path)
+        assert scan.status == SCANNED
+        # Each sandbox has its own path; the rules name it.
+        argvs.append([arg.replace(path, "<SANDBOX>")
+                      for arg in json.loads(log.read_text())["argv"]])
+    local, hosted = argvs
+    assert hosted == local
+    assert hosted[hosted.index("--tools") + 1] == "Read,Grep,Glob"
+    assert "Bash" not in hosted[hosted.index("--allowedTools") + 1]
+    assert "--restricted" in hosted and "--settings" in hosted
 
 
 def test_parse_findings_takes_exactly_one_document():

@@ -1,0 +1,236 @@
+# cúramóir sweep on GitHub Actions (written by `/curamoir:init`).
+#
+# What it does: on a schedule (or by hand from the Actions tab), checks out
+# the default branch on a fresh GitHub-hosted VM, installs what the sweep
+# needs, and runs `curamoir run sweep` with CURAMOIR_RUNNER=hosted. The sweep
+# opens at most one PR of fixes, or records why it did not (a refusal with a
+# reason). Then, always, the run's ledger lines are committed to a separate
+# state branch (CURAMOIR_STATE_BRANCH, default `curamoir/state`), so the
+# ledger outlives the VM. The default branch is never pushed to.
+#
+# GitHub-hosted runners only. `runs-on` must stay a GitHub-hosted image:
+# cúramóir accepts CURAMOIR_RUNNER=hosted only with GITHUB_ACTIONS=true and
+# RUNNER_ENVIRONMENT=github-hosted, so a self-hosted runner or `act` is
+# refused with reason `runner` (it is not a disposable VM). GitHub Enterprise
+# Server, or a runner too old to set RUNNER_ENVIRONMENT, is refused the same
+# way (fail closed).
+#
+# Secrets and settings:
+# - ANTHROPIC_API_KEY (repository secret, required): the sweep's model calls
+#   (the tier-1 scan and the fix step, both `claude -p`) are billed per token
+#   to this key's account. The ledger records the tokens of every run.
+# - The Claude subscription OAuth token (CLAUDE_CODE_OAUTH_TOKEN) is NOT wired
+#   here. Whether the subscription terms permit unattended, scheduled use of
+#   it is an open question (see "Billing note" in
+#   https://github.com/rsionnach/curamoir/blob/HEAD/docs/direction-platform-first.md);
+#   do not substitute it without checking the current terms yourself.
+# - Settings > Actions > General > "Allow GitHub Actions to create and approve
+#   pull requests" must be on, or the sweep's PR cannot open. A PR opened with
+#   GITHUB_TOKEN does not trigger your other workflows (GitHub's rule).
+# - CURAMOIR_REF (repository variable, required: a tag or commit SHA): which
+#   cúramóir to run. With it unset the job stops at its first step, red,
+#   before anything is installed or spent. It is resolved once, at the
+#   start, to the commit it names, and every step runs that commit. A
+#   branch name is accepted but discouraged: it is resolved once per run,
+#   so each run may get a different cúramóir.
+# - If a ruleset (or branch protection) covers the state branch's name, it
+#   must let github-actions[bot] push to it, or every run's ledger lines
+#   are lost and the job fails at its last step.
+#
+# Exposure on this runner: the run's GITHUB_TOKEN (scoped by `permissions:`
+# below) is in the job's environment, and the repository's own tests and the
+# fix agent run in the same VM, so treat it as readable by them (see
+# "Runner kinds and where the boundary is" in
+# https://github.com/rsionnach/curamoir/blob/HEAD/docs/direction-platform-first.md).
+# Add no other secrets to the sweep step's `env:`: the fix agent's process
+# drops only the run's GitHub and Actions tokens, by name, so a secret under
+# any other name (a personal access token, NPM_TOKEN, cloud credentials)
+# reaches it.
+
+name: curamoir sweep
+
+on:
+  schedule:
+    # Weekly, Monday 04:17 UTC (off the hour, when GitHub's scheduler is
+    # least loaded). Each run spends API money, so run it no more often than
+    # you need. Match it to `cadence.sweep` in .curamoir/curamoir.yaml, which
+    # is this repository's own record of how often the sweep runs. Finer than
+    # hourly is not useful either way: a Claude Code Routine's minimum is one
+    # hour, and the two runners should stay comparable.
+    - cron: "17 4 * * 1"
+  workflow_dispatch:
+
+# Least privilege: the sweep pushes its
+# branch and the state branch (contents) and opens one PR (pull-requests).
+# It files no issues on GitHub, so `issues` is not requested.
+permissions:
+  contents: write
+  pull-requests: write
+
+# Two sweeps never overlap, so they never race for the same PR and the
+# same state branch: a second run waits; a third replaces the waiting one
+# (GitHub keeps at most one run pending per group).
+concurrency:
+  group: curamoir-sweep-${{ github.repository }}
+  cancel-in-progress: false
+
+env:
+  # Which cúramóir runs: pin a tag or commit in the CURAMOIR_REF repository
+  # variable. Required, with no default: a default that does not exist
+  # would fail every run before its ledger line. A branch is accepted but
+  # discouraged: it moves under you (each run resolves it to a commit once).
+  CURAMOIR_REF: ${{ vars.CURAMOIR_REF }}
+  # The claude CLI version, pinned so a run never installs whatever was
+  # released that morning (the tier-1 scan and the fix step depend on its
+  # flags and output). Raise it deliberately; 2.1.308 was the stable channel
+  # on 2026-10-30.
+  CLAUDE_CODE_VERSION: "2.1.308"
+  # The ast-grep version, pinned for the same reason (curamoir-lint's rules
+  # run on it). Raise it deliberately; 0.51.0 was current on 2026-10-31.
+  AST_GREP_VERSION: "0.51.0"
+  # The branch the ledger lines are committed to; never the default branch.
+  CURAMOIR_STATE_BRANCH: ${{ vars.CURAMOIR_STATE_BRANCH || 'curamoir/state' }}
+
+# Every `run:` step names `shell: bash`, which GitHub runs as
+# `bash -eo pipefail`: with no shell named there is no pipefail, and a failed
+# `curl` piped into `bash` would not fail its step.
+jobs:
+  sweep:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require CURAMOIR_REF
+        if: env.CURAMOIR_REF == ''
+        shell: bash
+        run: |
+          echo "::error title=cúramóir not configured::Set the CURAMOIR_REF repository variable to a cúramóir tag or commit (Settings > Secrets and variables > Actions > Variables)."
+          exit 1
+
+      # The ref, resolved once to the commit it names, so the sweep and the
+      # state step below run the same cúramóir even if the tag is moved (or
+      # the branch pushed) in between. A full 40-character SHA is taken as
+      # it is; otherwise a tag (an annotated tag's commit, `^{}`), then a
+      # branch. A ref that names nothing fails the job here, red.
+      - name: Resolve CURAMOIR_REF to a commit
+        env:
+          GIT_TERMINAL_PROMPT: "0"
+        shell: bash
+        run: |
+          ref="${CURAMOIR_REF}"
+          if [[ "$ref" =~ ^[0-9a-f]{40}$ ]]; then
+            sha="$ref"
+          else
+            listed="$(git ls-remote https://github.com/rsionnach/curamoir)"
+            pick() { awk -v name="$1" '$2 == name { print $1; exit }' <<<"$listed"; }
+            sha="$(pick "refs/tags/${ref}^{}")"
+            [[ -n "$sha" ]] || sha="$(pick "refs/tags/${ref}")"
+            [[ -n "$sha" ]] || sha="$(pick "refs/heads/${ref}")"
+          fi
+          if [[ ! "$sha" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error title=cúramóir not found::CURAMOIR_REF '${ref}' is not a tag, branch or full commit SHA of rsionnach/curamoir. Set it to one that exists (an abbreviated SHA is not accepted)."
+            exit 1
+          fi
+          echo "Running cúramóir at ${sha} (${ref})."
+          echo "CURAMOIR_SHA=${sha}" >> "$GITHUB_ENV"
+
+      # Full history (the sweep builds on origin's default branch and checks
+      # its own earlier branches), and no token written to .git/config: the
+      # pushes below get it from gh at push time instead.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      # Every action, GitHub's own included, is pinned to a full commit SHA
+      # (a tag can be moved), with the release it is in a comment.
+      # The cache is off: its default saves the uv cache and restores it on
+      # later runs, so a run's tests or fix agent could plant the cúramóir a
+      # later run executes.
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          enable-cache: false
+
+      # The tools a fresh runner lacks (gh is preinstalled on ubuntu-latest).
+      # - claude: the tier-1 scan and the fix step run `claude -p`. The
+      #   documented native installer (https://code.claude.com/docs/en/setup)
+      #   takes the version to install as its argument and puts it in
+      #   ~/.local/bin.
+      # - ast-grep: curamoir-lint needs it for any ast-grep rule, and without
+      #   it the lint cannot be trusted and the sweep refuses.
+      - name: Install claude and ast-grep
+        shell: bash
+        run: |
+          curl -fsSL https://claude.ai/install.sh | bash -s "${CLAUDE_CODE_VERSION}"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          uv tool install "ast-grep-cli==${AST_GREP_VERSION}"
+
+      # The sweep refuses to commit with no author, so the run commits as the
+      # github-actions[bot] identity. Pushes use gh's credential helper, set
+      # up here: it reads GH_TOKEN from the environment of whichever step
+      # pushes, so the token is never stored on disk.
+      - name: Git identity and credentials
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          gh auth setup-git --hostname github.com
+
+      # The sweep. Its exit code is the runner's: 0 success, 3 refused (a
+      # guard or the sweep declined, with the reason in the printed sentence
+      # and in the ledger line), anything else a failure. A refusal is an
+      # expected outcome (nothing to fix, paused, over budget), so the job
+      # stays green and the refusal is shown as a warning annotation; a
+      # failure fails the job. A refusal with reason `runner` (the runner is
+      # misconfigured: not GitHub-hosted, or the marker missing) also exits 3
+      # and so also shows as a green job with a warning: read the warning.
+      # The timeout is on this step, not the job, so the state step below
+      # still runs when it is hit.
+      - name: curamoir run sweep
+        timeout-minutes: 60
+        env:
+          CURAMOIR_RUNNER: hosted
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set +e
+          uvx --from "git+https://github.com/rsionnach/curamoir@${CURAMOIR_SHA}" curamoir run sweep
+          status=$?
+          set -e
+          case "$status" in
+            0) ;;
+            3) echo "::warning title=cúramóir sweep refused::The sweep was refused; the reason is in the step log and in the ledger line." ;;
+            *) exit "$status" ;;
+          esac
+
+      # Always, even after a refusal or a failure: the run's new ledger lines
+      # go to the state branch, fetched first so the ledger accumulates.
+      # Exit 0 pushed, 5 nothing to push (a notice). Anything else fails the
+      # job, 3 (refused, e.g. the state branch named is the default branch,
+      # or a branch of that name that is not a state branch) included: unlike
+      # the sweep's refusal, it means the ledger line was not kept. Lines in
+      # the ledger that are not ledger lines are never committed; the
+      # command's sentence then says "It skipped N line(s)", which becomes a
+      # warning here, whatever the exit.
+      # Skipped only when CURAMOIR_REF is unset or did not resolve: then
+      # nothing ran, and an earlier step has already failed the job.
+      - name: curamoir state push
+        if: always() && env.CURAMOIR_SHA != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set +e
+          said="$(uvx --from "git+https://github.com/rsionnach/curamoir@${CURAMOIR_SHA}" curamoir state push --branch "${CURAMOIR_STATE_BRANCH}")"
+          status=$?
+          set -e
+          printf '%s\n' "$said"
+          if grep -Eq 'It skipped [0-9]+ line' <<<"$said"; then
+            echo "::warning title=cúramóir state::Some lines in the run's ledger were not ledger lines and were not committed; the step log says how many."
+          fi
+          case "$status" in
+            0) ;;
+            5) echo "::notice title=cúramóir state::No new ledger lines to commit." ;;
+            *) exit "$status" ;;
+          esac

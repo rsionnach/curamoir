@@ -27,11 +27,21 @@ file was written. The key is validated; the value is the user's business.
 PyYAML is needed only by `load_config_text`, and is imported there rather than
 at module scope: a plugin is an unpacked directory with no install step, so
 third-party imports cannot be assumed present. Everything else here is stdlib.
+
+The runner kind (E14.1, cm-2qp.1; docs/direction-platform-first.md §3) is
+at the end: `resolve_runner` reads CURAMOIR_RUNNER and the hosted markers
+from an environment its caller hands in. It is run configuration that is
+not curamoir.yaml's (the section's comment says why).
 """
 
 import math
 import re
 from copy import deepcopy
+from dataclasses import dataclass
+from enum import Enum
+from typing import Optional
+
+from curamoir.redaction import redact
 
 NUMBER = "number"
 #: A whole number of 0 or more. Every key that COUNTS something takes this
@@ -579,3 +589,270 @@ def _type_name(value):
         bool: BOOLEAN, int: NUMBER, float: NUMBER, str: STRING,
         list: "list", dict: MAPPING, type(None): "null",
     }.get(type(value), type(value).__name__)
+
+
+# The runner kind (E14.1, cm-2qp.1).
+#
+# docs/direction-platform-first.md §3 and §5 R2. Not curamoir.yaml: the kind
+# is a property of the machine a run is on, so it is the scheduler's to
+# declare (the workflow template and the Routine prompt set it), never the
+# repository's, whose committed config would make every clone of it "hosted".
+# Here because the modules that will branch on it (green_gate, E14.2;
+# fix_step, E14.3) already import this one, directly or through
+# repo_config, and it needs only the standard library and
+# curamoir.redaction (itself stdlib-only).
+#
+# Resolved ONCE per run, by job_guard.run_guarded, from the environment its
+# caller passes (runner.run_job's `environ`, os.environ by default), and
+# handed down explicitly: the body reads it as `run.runner` (JobRun), and
+# nothing below the entry point reads these variables itself. So a test
+# hands in a dict, and a run's kind cannot change half way through.
+
+#: The variable a scheduler declares the runner kind in.
+RUNNER_VARIABLE = "CURAMOIR_RUNNER"
+
+#: The hosted markers: variables a hosted runner sets itself, each to
+#: exactly "true". CLAUDE_CODE_REMOTE is set in every Claude Code cloud
+#: session, which is where a Routine runs
+#: (https://code.claude.com/docs/en/env-vars), and is enough on its own.
+#: GITHUB_ACTIONS is set on every GitHub Actions runner, and is enough only
+#: with RUNNER_ENVIRONMENT_VARIABLE (below). A marker is a check on the
+#: declaration, never a substitute for it: a laptop that happens to export
+#: one is still local unless it says `hosted`.
+CLAUDE_MARKER = "CLAUDE_CODE_REMOTE"
+GITHUB_MARKER = "GITHUB_ACTIONS"
+
+#: GitHub's own name for where an Actions job runs: `github-hosted` or
+#: `self-hosted` (RUNNER_ENVIRONMENT, GitHub's "Variables reference").
+#: WHY it is required with GITHUB_ACTIONS: §3's hosted boundary is a
+#: disposable VM, discarded after the run. GITHUB_ACTIONS=true is also set
+#: on a self-hosted runner (someone's machine, kept between jobs) and under
+#: nektos/act (a laptop), where nothing is discarded; those must run as
+#: local, behind the OS sandbox. So the GitHub marker counts only on a
+#: GitHub-hosted runner, and a hosted claim anywhere else is refused.
+RUNNER_ENVIRONMENT_VARIABLE = "RUNNER_ENVIRONMENT"
+GITHUB_HOSTED = "github-hosted"
+
+#: The Claude Code cloud session's id, `cse_<token>`, from which the
+#: transcript link is made (session_transcript).
+SESSION_VARIABLE = "CLAUDE_CODE_REMOTE_SESSION_ID"
+
+#: Where a cloud session's transcript is read: this, then `session_<token>`.
+TRANSCRIPT_BASE = "https://claude.ai/code/"
+
+#: The session id's prefix, and the one the link spells it with.
+_SESSION_ID_PREFIX = "cse_"
+_SESSION_LINK_PREFIX = "session_"
+
+#: A session token: letters, digits, `_` and `-`, and no longer than any
+#: session id is. WHY so narrow: the value is the environment's text and is
+#: put into a URL and a PR body, so anything that could end the URL, start
+#: Markdown or a new line (`/`, `?`, `#`, `]`, a space, a line break) makes
+#: it not a token, and then there is no link at all.
+_SESSION_TOKEN = re.compile(r"[A-Za-z0-9_-]{1,128}")
+
+#: A transcript link as session_transcript makes it, for a consumer that is
+#: handed one (sweep_pr checks its argument against this).
+TRANSCRIPT_URL_PATTERN = re.compile(
+    re.escape(TRANSCRIPT_BASE + _SESSION_LINK_PREFIX) + _SESSION_TOKEN.pattern)
+
+#: How the job line's `transcript` reads when a session id is set but gives
+#: no link: this, then the reason in parentheses (never the value).
+TRANSCRIPT_UNAVAILABLE = "unavailable"
+
+
+class RunnerKind(str, Enum):
+    """Where a run is, as its scheduler declared it (§3's two columns).
+
+    LOCAL: cron, launchd, or by hand on a developer's machine; the OS
+    sandbox is the process boundary, and every guard runs as at 3f50a3f.
+    HOSTED: a disposable VM (GitHub Actions, a Claude Code Routine); the VM
+    is the boundary. A str, as guards.Reason is, so its value is what the
+    ledger writes."""
+
+    LOCAL = "local"
+    HOSTED = "hosted"
+
+    def __str__(self):
+        return self.value
+
+
+class GithubApi(str, Enum):
+    """How cúramóir's gh calls reach GitHub (cm-2qp.9), decided once at
+    the entry point by resolve_github_api and handed down explicitly.
+
+    CLI: `gh pr list`, `gh pr create`, `gh label list`, `gh repo view`, as
+    at 3f50a3f: the path for a laptop and for GitHub Actions. Those
+    subcommands use GitHub's GraphQL API.
+    REST: `gh api repos/OWNER/REPO/...` (GitHub's REST API) for the same
+    questions: the path inside a Claude Code cloud session, whose GitHub
+    proxy refuses GraphQL with a 403 ("GitHub GraphQL is not available
+    from Claude Code sessions"), so every CLI call above fails there
+    (https://code.claude.com/docs/en/cloud-environments, "GitHub proxy").
+    A str, as RunnerKind is."""
+
+    CLI = "cli"
+    REST = "rest"
+
+    def __str__(self):
+        return self.value
+
+    def ledger_fields(self):
+        """The job line's field for this path: `github_api: rest` on the
+        REST path, so a cloud run's line says how GitHub was asked;
+        nothing on the CLI path, so a laptop's or an Actions run's line is
+        byte for byte what it was before cm-2qp.9."""
+        return {"github_api": self.value} if self is GithubApi.REST else {}
+
+
+def resolve_github_api(environ):
+    """GithubApi.REST when `environ` (a mapping, os.environ or a test's
+    dict) has CLAUDE_CODE_REMOTE exactly `true`, else GithubApi.CLI.
+
+    WHY that marker and not the runner kind: the proxy sits in front of
+    every Claude Code cloud session, whatever CURAMOIR_RUNNER says, so a
+    cloud session running local (no declaration) is still behind it, and
+    a GitHub Actions run (hosted, no proxy) keeps the CLI. Exact, as the
+    hosted markers are: a laptop never has it `true`
+    (cloud-environments: "it's never `true` locally"). Unlike the runner
+    kind this is never refused: either answer is a way to ask GitHub, and
+    a wrong one fails as a gh error (degraded checks, a refused sweep),
+    never silently. Read by the entry points only (runner.run_job,
+    cli's brief); nothing below them reads the environment for it."""
+    return GithubApi.REST if environ.get(CLAUDE_MARKER) == "true" else GithubApi.CLI
+
+
+@dataclass(frozen=True)
+class Runner:
+    """A run's resolved runner kind: its `kind`, the link to its transcript
+    when it is a cloud session with a well-formed id (session_transcript),
+    else None, and why there is no link when a session id was set but gave
+    none (`transcript_unavailable`). What job_guard.run_guarded resolves
+    once and the body receives as `run.runner`."""
+
+    kind: RunnerKind
+    transcript_url: Optional[str] = None
+    transcript_unavailable: Optional[str] = None
+
+    @property
+    def hosted(self):
+        """True only for RunnerKind.HOSTED: what the steps that differ by
+        runner kind test (`run.runner.hosted`), so anything that is not
+        hosted, now or later, takes the local path."""
+        return self.kind is RunnerKind.HOSTED
+
+    def ledger_fields(self):
+        """The job line's fields for this runner kind: `runner`, and the
+        `transcript` field (transcript_fields)."""
+        return {"runner": self.kind.value,
+                **transcript_fields(self.transcript_url, self.transcript_unavailable)}
+
+
+#: The local runner with no transcript: what a run with no declaration
+#: resolves to, and what a JobRun made outside run_guarded gives its body.
+LOCAL_RUNNER = Runner(RunnerKind.LOCAL)
+
+
+class RunnerDeclarationError(ValueError):
+    """CURAMOIR_RUNNER says something the run cannot honour: `hosted` with
+    no hosted marker, or a value that names no runner kind. The run is
+    refused (job_guard, reason `runner`), never downgraded to local: a
+    workflow that believes it runs hosted and silently runs local guards
+    is a misconfiguration nobody would see, and a laptop claiming hosted
+    would skip the sandbox (E14.2) and get a shell (E14.3)."""
+
+
+def resolve_runner(environ):
+    """The Runner `environ` (a mapping, os.environ or a test's dict)
+    declares, or RunnerDeclarationError (its message is the refusal's).
+
+    - CURAMOIR_RUNNER unset or empty: LOCAL.
+    - `local`: LOCAL.
+    - `hosted`: HOSTED when CLAUDE_CODE_REMOTE is exactly `true`, or when
+      GITHUB_ACTIONS is exactly `true` and RUNNER_ENVIRONMENT is exactly
+      `github-hosted`; otherwise refused (a GitHub runner that is not
+      GitHub-hosted with its own message).
+    - Anything else (`Hosted`, `ci`, `github`, ` hosted`, a value that is
+      not text): refused, naming the accepted values. Exact, as the markers
+      are: a near miss is a declaration the scheduler did not quite make.
+      The value itself is never echoed: the message lands in the committed
+      ledger, and a secret pasted into the variable by mistake would land
+      with it (a clipped one can slip past redaction's patterns).
+
+    Never inferred: a marker with no declaration is LOCAL. The transcript
+    (session_transcript) is attached whatever the kind."""
+    declared = environ.get(RUNNER_VARIABLE)
+    if declared is None:
+        declared = ""
+    link, unavailable = session_transcript(environ)
+    if declared in ("", RunnerKind.LOCAL.value):
+        return Runner(RunnerKind.LOCAL, link, unavailable)
+    if declared == RunnerKind.HOSTED.value:
+        if environ.get(CLAUDE_MARKER) == "true":
+            return Runner(RunnerKind.HOSTED, link, unavailable)
+        if environ.get(GITHUB_MARKER) == "true":
+            if environ.get(RUNNER_ENVIRONMENT_VARIABLE) == GITHUB_HOSTED:
+                return Runner(RunnerKind.HOSTED, link, unavailable)
+            raise RunnerDeclarationError(
+                f"{RUNNER_VARIABLE}=hosted was declared on a GitHub Actions runner, but "
+                f"{RUNNER_ENVIRONMENT_VARIABLE} is not {GITHUB_HOSTED!r}, so this is a "
+                "self-hosted runner (or a local emulation such as act), not a disposable "
+                "VM; the job does not run. A self-hosted runner must run as local: unset "
+                f"{RUNNER_VARIABLE} there, and the OS sandbox holds the run.")
+        raise RunnerDeclarationError(
+            f"{RUNNER_VARIABLE}=hosted was declared, but neither {CLAUDE_MARKER}=true "
+            f"nor {GITHUB_MARKER}=true (on a {RUNNER_ENVIRONMENT_VARIABLE}={GITHUB_HOSTED} "
+            "runner) is set, so this is not a hosted runner; the job does not run. Unset "
+            f"{RUNNER_VARIABLE} to run locally, with the OS sandbox.")
+    what = (f"a value of {len(declared)} characters" if isinstance(declared, str)
+            else "a value that is not text")
+    raise RunnerDeclarationError(
+        f"{RUNNER_VARIABLE} is set to {what} that is neither "
+        f"{RunnerKind.HOSTED.value!r} nor {RunnerKind.LOCAL.value!r} (the value is not "
+        "shown: it is written to the ledger). Set it to exactly one of those, or unset it "
+        "for local. The job does not run.")
+
+
+def session_transcript(environ):
+    """(link, None), (None, why there is no link), or (None, None) when no
+    session id is set.
+
+    CLAUDE_CODE_REMOTE_SESSION_ID is `cse_<token>`; the link is
+    TRANSCRIPT_BASE + `session_<token>`. A value already spelled
+    `session_<token>` is used as it is. Any other value gives no link
+    (decided here, E14.1): an id with no known prefix may be some other
+    kind of id, and a link that looks right but opens the wrong page is
+    worse than none. So does a token that is not plain (_SESSION_TOKEN), or
+    one redaction would change (a PR body redaction would change is not
+    sent, sweep_pr._check_redacted, so the link would cost the PR). The
+    reason never quotes the value: it is the environment's text."""
+    value = environ.get(SESSION_VARIABLE)
+    if value is None or value == "":
+        return None, None
+    if not isinstance(value, str):
+        return None, "the session id is not text"
+    for prefix in (_SESSION_ID_PREFIX, _SESSION_LINK_PREFIX):
+        if value.startswith(prefix):
+            token = value[len(prefix):]
+            break
+    else:
+        return None, (f"the session id starts with neither {_SESSION_ID_PREFIX!r} nor "
+                      f"{_SESSION_LINK_PREFIX!r}")
+    if not _SESSION_TOKEN.fullmatch(token):
+        return None, ("the session id is not a plain token of 1 to 128 letters, digits, "
+                      "'_' or '-'")
+    url = f"{TRANSCRIPT_BASE}{_SESSION_LINK_PREFIX}{token}"
+    if redact(url) != url:
+        return None, "the session id looks like a secret to redaction"
+    return url, None
+
+
+def transcript_fields(link, unavailable):
+    """The job line's `transcript` field: the link; or
+    `unavailable (<why>)` when a session id was set but gave no link, so
+    the line says so rather than dropping it silently; or nothing."""
+    if link is not None:
+        return {"transcript": link}
+    if unavailable is not None:
+        return {"transcript": f"{TRANSCRIPT_UNAVAILABLE} ({unavailable})"}
+    return {}
