@@ -553,6 +553,51 @@ def test_on_linux_a_link_on_the_way_to_a_granted_interpreter_is_recreated(grant_
     assert at < argv.index("--tmpfs")
 
 
+def an_aliased_venv(root):
+    """A venv reached through a link to a directory that holds it, as
+    mise's installs/node/latest -> ./26.13.1 holds the granted
+    26.13.1/bin, or ~/code -> /data/code a venv: root/real/venv (pyvenv.cfg
+    and an executable bin/t) and root/alias -> real. (the venv as the run
+    is given it, through the alias; the venv itself)."""
+    venv = root / "real" / "venv"
+    (venv / "bin").mkdir(parents=True)
+    (venv / "pyvenv.cfg").write_text("")
+    tool = venv / "bin" / "t"
+    tool.write_text("#!/bin/sh\necho aliased-tool-ran\n")
+    tool.chmod(0o755)
+    (root / "alias").symlink_to("real")
+    return root / "alias" / "venv", venv
+
+
+def test_on_linux_a_link_to_a_directory_holding_a_grant_is_recreated(grant_tmp, monkeypatch):
+    """A link whose end HOLDS a grant (not only one inside a grant) is on
+    the way to it too: without it the run's path through the link dangles
+    (cm-4st, R5 correctness). It still grants nothing: the run's root holds
+    only what is bound, so the link names the grant's scaffolding."""
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr(os_sandbox, "_is_executable", lambda path: True)
+    monkeypatch.setattr(os_sandbox, "homes", lambda: [os.path.realpath(grant_tmp / "account")])
+    through, venv = an_aliased_venv(grant_tmp)
+    argv = os_sandbox.wrap(["true"], clone=grant_tmp / "c", run_dir=grant_tmp / "r",
+                           read_only=[str(through)], links=[str(through / "bin" / "t")])
+    triples = list(zip(argv, argv[1:], argv[2:], strict=False))
+    assert ("--symlink", "real", os.path.realpath(grant_tmp) + "/alias") in triples
+
+
+@real_sandbox
+def test_a_tool_reached_through_an_aliased_directory_runs(grant_tmp, monkeypatch):
+    monkeypatch.setattr(os_sandbox, "homes", lambda: [os.path.realpath(grant_tmp / "account")])
+    through, _venv = an_aliased_venv(grant_tmp)
+    clone, run = grant_tmp / "c", grant_tmp / "r"
+    clone.mkdir()
+    run.mkdir()
+    tool = str(through / "bin" / "t")
+    argv = os_sandbox.wrap([tool], clone=clone, run_dir=run, read_only=[str(through)],
+                           links=[tool])
+    done = subprocess.run(argv, cwd=clone, capture_output=True, timeout=30)
+    assert b"aliased-tool-ran" in done.stdout, done.stderr
+
+
 @pytest.mark.parametrize("tree", [".ssh", ".aws", ".gnupg", ".config", ".config/gh",
                                   ".config/mise", ".local/share/keyrings", "Library",
                                   "Library/Python/3.12", ".netrc", ".docker", ".kube",

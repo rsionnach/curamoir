@@ -351,10 +351,14 @@ def _links(paths, grants):
     while resolving each of `paths` (_link_chain), one is recreated only
     where (a) it is not already visible: in no grant and in no system
     directory (bound whole); (b) it is in no socket or kernel tree, which the
-    run gets fresh; and (c) it ends inside a grant or a system directory.
-    So a recreated link only names, by the path the run was given, what the
-    run may read anyway: it grants nothing, and a link to anything else
-    stays missing (test_a_link_in_a_grant_is_not_followed's rule)."""
+    run gets fresh; and (c) it ends inside a grant or a system directory, or
+    at a directory holding a grant (mise's installs/node/latest ->
+    ./26.13.1 when 26.13.1/bin is granted, ~/code -> /data/code above a
+    venv). So a recreated link only names, by the path the run was given,
+    what the run may read anyway (the run's root holds nothing but what is
+    bound and the directories bwrap makes to hold it): it grants nothing,
+    and a link to anything else stays missing
+    (test_a_link_in_a_grant_is_not_followed's rule)."""
     visible = [*grants, *(os.path.realpath(root) for root in _LINUX_SYSTEM
                           if os.path.isdir(root))]
     made = {}
@@ -367,7 +371,8 @@ def _links(paths, grants):
             if any(_inside(link, tree) for tree in (*_SOCKET_TREES, *_KERNEL_TREES)):
                 continue
             end = os.path.realpath(link)
-            if any(_inside(end, root) for root in visible):
+            if any(_inside(end, root) for root in visible) or \
+                    any(_inside(grant, end) for grant in grants):
                 made[link] = target
     return sorted(made.items(), key=lambda item: (item[0].count(os.sep), item[0]))
 
