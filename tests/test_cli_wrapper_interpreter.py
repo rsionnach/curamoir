@@ -14,6 +14,7 @@ Each logs how it was called, so the test can tell which one ran the CLI.
 """
 
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -33,15 +34,27 @@ def stand_in(directory, name, log, bare):
     script.chmod(0o755)
 
 
+#: What the wrapper itself runs from PATH besides an interpreter: bash for
+#: its `#!/usr/bin/env bash`, and dirname.
+SYSTEM_TOOLS = ("bash", "dirname")
+
+
 def run_wrapper(tmp_path, interpreters):
     """Run `scripts/curamoir --help` with only `interpreters` ({name: bare})
-    and the system's own directories on PATH. Returns (result, log lines)."""
+    and SYSTEM_TOOLS on PATH. Returns (result, log lines). Not the system's
+    own directories: their interpreters would answer for every name the
+    test does not stand in for (Arch's /usr/bin/python has PyYAML, so it ran
+    the CLI there, cm-4st)."""
+    system = tmp_path / "system"
+    system.mkdir()
+    for tool in SYSTEM_TOOLS:
+        (system / tool).symlink_to(shutil.which(tool))
     shims = tmp_path / "bin"
     shims.mkdir()
     log = tmp_path / "calls.log"
     for name, bare in interpreters.items():
         stand_in(shims, name, log, bare)
-    environment = {"PATH": os.pathsep.join([str(shims), "/usr/bin", "/bin"]),
+    environment = {"PATH": os.pathsep.join([str(shims), str(system)]),
                    "HOME": str(tmp_path)}
     result = subprocess.run([str(WRAPPER), "--help"], capture_output=True, text=True,
                             env=environment, timeout=60)

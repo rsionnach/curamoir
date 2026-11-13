@@ -33,6 +33,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -1103,8 +1104,8 @@ def installed(home, prefix, name="python3", marker="lib/python3.12"):
 
 
 @pytest.fixture
-def fake_home(tmp_path, monkeypatch):
-    home = tmp_path / "home"
+def fake_home(grant_tmp, monkeypatch):
+    home = grant_tmp / "home"
     home.mkdir()
     monkeypatch.setattr(os_sandbox, "homes", lambda: [os.path.realpath(home)])
     return home
@@ -1114,6 +1115,61 @@ def granted_prefixes(home, on_path):
     """The paths _read_only grants, other than PATH's own directory."""
     return [p for p in green_gate._read_only({"PATH": str(on_path)})
             if p != os.path.realpath(on_path)]
+
+
+def test_every_path_the_gate_asks_for_reaches_wrap_as_it_is_spelt(fake_home, grant_tmp, monkeypatch):
+    """A PATH, NODE_PATH or VIRTUAL_ENV entry can itself go through a link
+    (mise's installs/node/latest/bin, latest -> ./26.13.1): wrap() gets
+    every path _wanted asks for, and each linked interpreter, as `reached`,
+    so on Linux the links on the way are recreated (cm-4st, R5 correctness:
+    without it the run's `node` was /usr/bin/node)."""
+    on_path = installed(fake_home, ".nvm/versions/node/v20.1.0", "node", "lib/node_modules")
+    env = {"PATH": str(on_path), "NODE_PATH": str(grant_tmp / "np"),
+           "VIRTUAL_ENV": str(grant_tmp / "venv")}
+    asked = green_gate._sandbox_reached(env)
+    for path in (str(on_path), str(grant_tmp / "np"), str(grant_tmp / "venv"),
+                 str(on_path / "node")):
+        assert path in asked
+    seen = {}
+
+    class Recording(Unconfined):
+        def wrap(self, argv, **kwargs):
+            seen.update(kwargs)
+            return super().wrap(argv, **kwargs)
+
+    monkeypatch.setattr(green_gate, "OS_SANDBOX", Recording())
+    green_gate._wrapped(["true"], SimpleNamespace(path=grant_tmp), str(grant_tmp), env, False)
+    assert seen["reached"] == asked
+
+
+def test_an_interpreter_that_is_no_link_is_neither_followed_nor_reached(grant_tmp):
+    """Only a LINKED interpreter leads elsewhere: a python3 that is a plain
+    file is not taken for a link, so neither an installation two levels up
+    nor its own path is asked for."""
+    prefix = grant_tmp / "outside" / "py"
+    (prefix / "bin").mkdir(parents=True)
+    (prefix / "bin" / "python3").write_text("")
+    (prefix / "lib" / "python3.12").mkdir(parents=True)
+    env = {"PATH": str(prefix / "bin")}
+    assert green_gate._linked_interpreters(env) == []
+    assert str(prefix / "bin" / "python3") not in green_gate._sandbox_reached(env)
+    assert os.path.realpath(prefix) not in green_gate._wanted(env)
+
+
+def test_the_gates_self_test_gets_the_same_reached_as_its_runs(grant_tmp, monkeypatch):
+    """The gate's self-test proves the sandbox its runs get: it hands
+    self_test() _sandbox_reached(env), as _wrapped hands wrap()."""
+    env = {"PATH": str(grant_tmp / "bin"), "VIRTUAL_ENV": str(grant_tmp / "venv")}
+    seen = {}
+
+    class Recording(Unconfined):
+        def self_test(self, clone, run_dir, **kwargs):
+            seen.update(kwargs)
+
+    monkeypatch.setattr(green_gate, "OS_SANDBOX", Recording())
+    green_gate._sandbox_self_test(SimpleNamespace(path=grant_tmp), env, False)
+    assert seen["reached"] == green_gate._sandbox_reached(env)
+    assert str(grant_tmp / "bin") in seen["reached"]
 
 
 @pytest.mark.parametrize("prefix, name, marker", [
@@ -1146,11 +1202,13 @@ def test_no_other_prefix_is_granted(fake_home, prefix, name, marker, why):
 
 
 @pytest.mark.parametrize("prefix", ["miniconda3", "miniforge3/envs/py", "opt/conda"])
-def test_of_a_conda_installation_only_bin_and_lib_are_granted(fake_home, tmp_path, prefix):
+def test_of_a_conda_installation_only_bin_and_lib_are_granted(fake_home, grant_tmp, prefix):
     """conda's root (or an environment) holds .condarc and conda-meta/state,
     channel tokens and environment variables: _installation names the
     prefix, and only its bin and lib are granted, in the home or not."""
-    where = tmp_path if prefix.startswith("opt") else fake_home
+    # installed() makes PATH's directory beside `where`: inside grant_tmp,
+    # never beside it.
+    where = grant_tmp / "outside" if prefix.startswith("opt") else fake_home
     on_path = installed(where, prefix)
     (where / prefix / "conda-meta").mkdir()
     (where / prefix / ".condarc").write_text("channels: [https://t/TOKEN/conda]\n")
@@ -1158,9 +1216,10 @@ def test_of_a_conda_installation_only_bin_and_lib_are_granted(fake_home, tmp_pat
     assert granted_prefixes(fake_home, on_path) == [f"{root}/bin", f"{root}/lib"]
 
 
-def test_a_prefix_outside_the_home_is_granted_when_it_is_an_installation(fake_home, tmp_path):
-    framework = tmp_path / "Frameworks" / "3.12"
-    on_path = installed(tmp_path, framework.relative_to(tmp_path))
+def test_a_prefix_outside_the_home_is_granted_when_it_is_an_installation(fake_home, grant_tmp):
+    outside = grant_tmp / "outside"
+    framework = outside / "Frameworks" / "3.12"
+    on_path = installed(outside, framework.relative_to(outside))
     assert granted_prefixes(fake_home, on_path) == [os.path.realpath(framework)]
 
 
@@ -1340,7 +1399,7 @@ class _WrapUnavailable(Unconfined):
     """A sandbox whose self-test passes and whose wrap() then finds none:
     the tool gone between the two (cm-2qp.2's excellence review)."""
 
-    def wrap(self, argv, *, clone, run_dir, read_only=(), loopback=False):
+    def wrap(self, argv, *, clone, run_dir, read_only=(), loopback=False, reached=()):
         self.wrapped.append((list(argv), str(clone), str(run_dir)))
         raise os_sandbox.OsSandboxUnavailable("wrap found no OS sandbox (the test's stand-in)")
 

@@ -153,3 +153,56 @@ def sandboxed(tmp_path):
     with prepare_sandbox(committed_sample(tmp_path), "HEAD", parent=tmp_path) as sandbox:
         lint_sandbox(sandbox)
         yield sandbox
+
+
+#: Where grant_tmp makes its directories on Linux: inside the checkout,
+#: ignored by git (.gitignore), and emptied after each test.
+GRANT_TMP_ROOT = Path(__file__).resolve().parents[1] / ".pytest-grant-tmp"
+
+
+@pytest.fixture
+def grant_tmp(tmp_path):
+    """A temporary directory os_sandbox.granted() can grant, for the tests
+    that build a home, a toolchain or a venv and ask whether (or check
+    that) it is granted. On macOS that is tmp_path (under
+    /private/var/folders). On Linux tmp_path is under /tmp, a socket tree
+    granted() refuses whatever is in it (os_sandbox._SOCKET_TREES), so those
+    tests would only ever see a refusal there (cm-4st): there it is a fresh
+    directory under GRANT_TMP_ROOT, removed after the test."""
+    if not sys.platform.startswith("linux"):
+        yield tmp_path
+        return
+    import tempfile
+
+    from curamoir import os_sandbox
+
+    for tree in (*os_sandbox._SOCKET_TREES, *os_sandbox._KERNEL_TREES):
+        assert not os_sandbox._inside(str(GRANT_TMP_ROOT), tree), (
+            f"the checkout is under {tree}, which granted() refuses: grant_tmp cannot "
+            "give a grantable directory here")
+    GRANT_TMP_ROOT.mkdir(exist_ok=True)
+    path = Path(tempfile.mkdtemp(dir=GRANT_TMP_ROOT))
+    try:
+        yield path
+    finally:
+        remove_grant_tmp(path)
+
+
+def remove_grant_tmp(root):
+    """Remove grant_tmp's directory `root` whole, whatever modes a test left
+    in it: every directory is made u+rwx first, top down (a directory must
+    be listable before what is in it can be reached), and only then is the
+    tree removed. A link is never followed: what it names keeps its mode.
+    (An error handler cannot do this for rmtree: on an unlistable directory
+    the call it would retry is os.open's, cm-4st R5 edge cases.)"""
+    import shutil
+    import stat
+
+    pending = [str(root)]
+    while pending:
+        directory = pending.pop()
+        os.chmod(directory, stat.S_IRWXU)  # never a link: only real directories are queued
+        with os.scandir(directory) as listing:
+            pending += [entry.path for entry in listing
+                        if entry.is_dir(follow_symlinks=False)]
+    shutil.rmtree(root)

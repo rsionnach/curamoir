@@ -32,3 +32,6 @@ docs/curamoir-spec-*.md
 .claude/r5-state*.json
 .claude/r5-*.flock
 .claude/settings.local.json
+
+# grant_tmp (tests/conftest.py): Linux tests that need a grantable temp dir.
+.pytest-grant-tmp/
