@@ -591,11 +591,22 @@ def test_on_linux_a_link_to_a_directory_holding_a_grant_is_recreated(grant_tmp, 
     # A dangling link: listed, then the walk stops at what is missing.
     (lambda r: (r / "gone").symlink_to("nowhere"), "gone/x", [("gone", "nowhere")]),
     # `..` after a link is taken from where the link leads, as the kernel
-    # does: alias/.. is real's parent (r), so this is r/x, no further link.
-    (lambda r: ((r / "real" / "in").mkdir(parents=True), (r / "x").mkdir(),
-                (r / "alias").symlink_to("real/in")), "alias/../x", [("alias", "real/in")]),
-], ids=["self-link", "loop", "dangling", "dotdot-after-a-link"])
+    # does: alias is real/in, so alias/.. is real and this is real/x (a
+    # link, listed). Read as text, alias/.. would be r and this r/x: the
+    # link there must not be listed.
+    (lambda r: ((r / "real" / "in").mkdir(parents=True),
+                (r / "real" / "x").symlink_to("physical"), (r / "x").symlink_to("lexical"),
+                (r / "alias").symlink_to("real/in")),
+     "alias/../x", [("alias", "real/in"), ("real/x", "physical")]),
+    # A component that cannot be read (a directory at mode 000 on the
+    # way): the walk stops quietly with what it found.
+    (lambda r: ((r / "locked").mkdir(), (r / "tolocked").symlink_to("locked/l"),
+                (r / "locked").chmod(0)),
+     "tolocked/x", [("tolocked", "locked/l")]),
+], ids=["self-link", "loop", "dangling", "dotdot-after-a-link", "unreadable"])
 def test_link_chain_ends_and_resolves_as_the_kernel_does(grant_tmp, make, asked, expected):
+    if expected and expected[-1][0] == "tolocked" and os.geteuid() == 0:
+        pytest.skip("root reads a directory whatever its mode")
     make(grant_tmp)
     chain = os_sandbox._link_chain(str(grant_tmp / asked))
     if expected is None:
