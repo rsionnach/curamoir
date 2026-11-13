@@ -1117,16 +1117,16 @@ def granted_prefixes(home, on_path):
             if p != os.path.realpath(on_path)]
 
 
-def test_every_path_the_gate_asks_for_reaches_wrap_as_a_link(fake_home, grant_tmp, monkeypatch):
+def test_every_path_the_gate_asks_for_reaches_wrap_as_it_is_spelt(fake_home, grant_tmp, monkeypatch):
     """A PATH, NODE_PATH or VIRTUAL_ENV entry can itself go through a link
     (mise's installs/node/latest/bin, latest -> ./26.13.1): wrap() gets
-    every path _wanted asks for, and each linked interpreter, as `links`,
+    every path _wanted asks for, and each linked interpreter, as `reached`,
     so on Linux the links on the way are recreated (cm-4st, R5 correctness:
     without it the run's `node` was /usr/bin/node)."""
     on_path = installed(fake_home, ".nvm/versions/node/v20.1.0", "node", "lib/node_modules")
     env = {"PATH": str(on_path), "NODE_PATH": str(grant_tmp / "np"),
            "VIRTUAL_ENV": str(grant_tmp / "venv")}
-    asked = green_gate._sandbox_links(env)
+    asked = green_gate._sandbox_reached(env)
     for path in (str(on_path), str(grant_tmp / "np"), str(grant_tmp / "venv"),
                  str(on_path / "node")):
         assert path in asked
@@ -1139,7 +1139,7 @@ def test_every_path_the_gate_asks_for_reaches_wrap_as_a_link(fake_home, grant_tm
 
     monkeypatch.setattr(green_gate, "OS_SANDBOX", Recording())
     green_gate._wrapped(["true"], SimpleNamespace(path=grant_tmp), str(grant_tmp), env, False)
-    assert seen["links"] == asked
+    assert seen["reached"] == asked
 
 
 @pytest.mark.parametrize("prefix, name, marker", [
@@ -1369,7 +1369,7 @@ class _WrapUnavailable(Unconfined):
     """A sandbox whose self-test passes and whose wrap() then finds none:
     the tool gone between the two (cm-2qp.2's excellence review)."""
 
-    def wrap(self, argv, *, clone, run_dir, read_only=(), loopback=False, links=()):
+    def wrap(self, argv, *, clone, run_dir, read_only=(), loopback=False, reached=()):
         self.wrapped.append((list(argv), str(clone), str(run_dir)))
         raise os_sandbox.OsSandboxUnavailable("wrap found no OS sandbox (the test's stand-in)")
 

@@ -770,7 +770,7 @@ def _wrapped(argv, sandbox, scratch, env, loopback):
     try:
         return OS_SANDBOX.wrap(argv, clone=str(sandbox.path), run_dir=scratch,
                                read_only=_read_only(env), loopback=loopback,
-                               links=_sandbox_links(env))
+                               reached=_sandbox_reached(env))
     except (os_sandbox.OsSandboxUnavailable, OSError) as error:
         raise GateError(f"{_NO_SANDBOX}: {error}{_HOSTED_HINT}") from error
 
@@ -819,21 +819,24 @@ def _wanted(env):
     return [path for path in paths if path and os.path.isabs(path)]
 
 
-def _sandbox_links(env):
-    """os_sandbox.wrap's `links`: every path _wanted asks for (PATH's and
-    NODE_PATH's directories, VIRTUAL_ENV, ...) and each linked interpreter.
-    Any of them can go through a link (mise's installs/node/latest/bin,
-    latest -> ./26.13.1; a venv's python into python/3.12 -> ./3.12.16), and
-    on Linux wrap() recreates the links on the way to what it grants, so the
-    run's own spelling of the path still resolves (cm-4st)."""
+def _sandbox_reached(env):
+    """os_sandbox.wrap's `reached`: _wanted's paths, as the run spells them,
+    plus each linked interpreter's own path (_wanted holds only the
+    installation it resolves into). Any of them can go through a link
+    (mise's installs/node/latest/bin, latest -> ./26.13.1; a venv's python
+    into python/3.12 -> ./3.12.16), and on Linux wrap() recreates the links
+    on the way to what it grants, so the run's own spelling of each path
+    still resolves (cm-4st). _wanted is worked out here and again for
+    _read_only: both are cheap, and keeping them apart keeps _read_only the
+    one place the grants are decided."""
     return list(dict.fromkeys([*_wanted(env), *_linked_interpreters(env)]))
 
 
 def _linked_interpreters(env):
     """The interpreters a run may reach by a link: the venv's python3 and
     each of _INTERPRETERS on PATH that is a link. _wanted grants the
-    installation each resolves into; _sandbox_links gives them to wrap()
-    as `links` too, so on Linux a link on the way there (mise's python/3.12
+    installation each resolves into; _sandbox_reached gives them to wrap()
+    as `reached` too, so on Linux a link on the way there (mise's python/3.12
     -> ./3.12.16) is recreated in the run's root rather than left dangling
     (cm-4st)."""
     venv = env.get("VIRTUAL_ENV")
@@ -890,7 +893,7 @@ def _sandbox_self_test(sandbox, env, loopback):
             OS_SANDBOX.self_test(str(sandbox.path), scratch,
                                  env=_scratch_env(sandbox, env, scratch),
                                  read_only=_read_only(env), loopback=loopback,
-                                 links=_sandbox_links(env))
+                                 reached=_sandbox_reached(env))
         except os_sandbox.OsSandboxUnavailable as error:
             raise GateError(f"{_NO_SANDBOX}: {error}{_HOSTED_HINT}") from error
         except OSError as error:

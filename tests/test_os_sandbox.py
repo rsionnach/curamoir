@@ -266,8 +266,7 @@ def test_the_users_home_is_unreadable(tmp_path):
     home = os_sandbox.homes()[0]
     canary = Path(home) / f".curamoir-home-probe-{os.getpid()}"
     canary.write_text("secret\n")
-    listing = f"if ls {home} >/dev/null 2>&1; then exit 1; fi; " \
-        if sys.platform == "darwin" else ""
+    listing = f"if ls {home} >/dev/null 2>&1; then exit 1; fi; " if ON_MACOS else ""
     try:
         result = gate(tmp_path, f"if cat {canary} >/dev/null 2>&1; then exit 2; fi; "
                                 f"{listing}{PY} -c pass")
@@ -532,7 +531,7 @@ def test_on_linux_a_link_on_the_way_to_a_granted_interpreter_is_recreated(grant_
     """bwrap binds a grant at its resolved path, so a link on the way to it
     (mise's installs/python/3.12 -> ./3.12.16) is not in the run's root and
     a venv's python that goes through it dangles: exit 127, "No such file
-    or directory" (cm-4st). Each such link of `links` is recreated, as
+    or directory" (cm-4st). Each such link on the way to one of `reached` is recreated, as
     written, after the grants and before the run's own /tmp; nothing else
     is (no link whose end is not granted, none already visible)."""
     monkeypatch.setattr(sys, "platform", "linux")
@@ -542,7 +541,7 @@ def test_on_linux_a_link_on_the_way_to_a_granted_interpreter_is_recreated(grant_
     monkeypatch.setattr(os_sandbox, "homes", lambda: [os.path.realpath(home)])
     argv = os_sandbox.wrap(["true"], clone=grant_tmp / "c", run_dir=grant_tmp / "r",
                            read_only=[str(venv), str(version)],
-                           links=[str(venv / "bin" / "python"), str(home / "work" / "elsewhere")])
+                           reached=[str(venv / "bin" / "python"), str(home / "work" / "elsewhere")])
     triples = list(zip(argv, argv[1:], argv[2:], strict=False))
     alias = os.path.realpath(version.parent) + "/3.12"
     made = [(target, link) for flag, target, link in triples if flag == "--symlink"
@@ -579,7 +578,7 @@ def test_on_linux_a_link_to_a_directory_holding_a_grant_is_recreated(grant_tmp, 
     monkeypatch.setattr(os_sandbox, "homes", lambda: [os.path.realpath(grant_tmp / "account")])
     through, _venv = an_aliased_venv(grant_tmp)
     argv = os_sandbox.wrap(["true"], clone=grant_tmp / "c", run_dir=grant_tmp / "r",
-                           read_only=[str(through)], links=[str(through / "bin" / "t")])
+                           read_only=[str(through)], reached=[str(through / "bin" / "t")])
     triples = list(zip(argv, argv[1:], argv[2:], strict=False))
     assert ("--symlink", "real", os.path.realpath(grant_tmp) + "/alias") in triples
 
@@ -594,7 +593,7 @@ def test_on_linux_a_link_wrap_already_makes_or_binds_is_not_made_again(grant_tmp
     asked = [*os_sandbox._LINUX_SYSTEM, *(f"{root}/python3" for root in os_sandbox._LINUX_SYSTEM),
              *os_sandbox._LINUX_ETC]
     argv = os_sandbox.wrap(["true"], clone=grant_tmp / "c", run_dir=grant_tmp / "r",
-                           links=asked)
+                           reached=asked)
     made = [link for flag, _target, link in zip(argv, argv[1:], argv[2:], strict=False)
             if flag == "--symlink"]
     assert len(made) == len(set(made)), made
@@ -609,7 +608,7 @@ def test_a_tool_reached_through_an_aliased_directory_runs(grant_tmp, monkeypatch
     run.mkdir()
     tool = str(through / "bin" / "t")
     argv = os_sandbox.wrap([tool], clone=clone, run_dir=run, read_only=[str(through)],
-                           links=[tool])
+                           reached=[tool])
     done = subprocess.run(argv, cwd=clone, capture_output=True, timeout=30)
     assert b"aliased-tool-ran" in done.stdout, done.stderr
 

@@ -23,7 +23,8 @@ socket; no service that acts outside the sandbox.
 - **Linux**: bubblewrap (`bwrap`), deny by default: a fresh root holding
   only the system directories (/usr, /bin, /sbin, /lib*), the parts of /etc
   a runtime reads (_LINUX_ETC), what granted() allows of `read_only`
-  (read-only, each masked file covered by /dev/null), a fresh /dev, /proc
+  (read-only, each masked file covered by /dev/null), the links on the way
+  to a grant that would otherwise be missing (_links), a fresh /dev, /proc
   and /tmp, and the clone and the run's directory writable (wrap() gives
   the order and why); new network, pid and IPC namespaces
   (`--unshare-net`: a private loopback that reaches nothing of the host's,
@@ -31,9 +32,9 @@ socket; no service that acts outside the sandbox.
   host socket (/run, /var/run, the home directory) either. bwrap needs
   unprivileged user namespaces; where they are off (a hardened kernel,
   Ubuntu 24.04's AppArmor restriction without bwrap's profile), it exits
-  non-zero and self_test() says so. This line has NOT been run on this
-  project's development machine (macOS); cm-xy9.7 verifies it on Linux,
-  and its self-test is what proves it wherever it runs.
+  non-zero and self_test() says so. It was first run on Linux on
+  2026-11-13 (cm-4st: Arch, bwrap 0.13; the repository has no CI), and its
+  self-test is what proves it wherever it runs.
 - **Anything else**, or the tool missing: OsSandboxUnavailable. Nothing
   here falls back to running unsandboxed: the gate refuses instead.
 
@@ -255,16 +256,17 @@ def walks_cached():
 
 
 @walks_cached()
-def wrap(argv, *, clone, run_dir, read_only=(), loopback=False, links=()):
+def wrap(argv, *, clone, run_dir, read_only=(), loopback=False, reached=()):
     """`argv` prefixed so it runs confined (module docstring): writes only
     in `clone` and `run_dir` (both resolved to real paths), reads under the
     user's home only of `read_only` and those two, and no network but, on
     macOS with `loopback`, 127.0.0.1/::1 (Linux's private loopback is always
-    there and reaches nothing of the host's). `links` are paths the run
-    reaches by a link (an interpreter on PATH, a venv's python): on Linux
-    each link on the way to one that would be missing from the run's root
-    is recreated, as _links says; macOS reads links where they are. A new
-    list; OsSandboxUnavailable where no sandbox is available."""
+    there and reaches nothing of the host's). `reached` are paths the run
+    uses as they are spelt (PATH's directories, a venv's python, ...), each
+    of which may go through links: on Linux every link on the way to a
+    grant that would be missing from the run's root is recreated, as _links
+    says; macOS reads links where they are. A new list;
+    OsSandboxUnavailable where no sandbox is available."""
     if isinstance(argv, (str, bytes)):
         raise ValueError("wrap takes an argv list, never a command string")
     argv = list(argv)
@@ -298,13 +300,15 @@ def wrap(argv, *, clone, run_dir, read_only=(), loopback=False, links=()):
         # The mounts, in order. bwrap applies them in turn and a later one
         # covers an earlier one at the same or an enclosing path, so the
         # order is the policy: (1) the system directories and (2) the parts
-        # of /etc, read-only; (3) the grants, read-only; (4) each masked
-        # file, /dev/null over it, after the grant holding it; (5) the run's
-        # own /dev, /proc and /tmp, after the grants, so nothing granted can
-        # stand in for them (granted() refuses those trees besides); (6) the
-        # clone and the run's directory, writable, last: mkdtemp makes both
-        # in the system temporary directory, usually /tmp, so they must come
-        # after (5)'s tmpfs or it would hide them.
+        # of /etc, read-only; (3) the grants, read-only; (4) the links on the
+        # way to a grant (_links), after the grants, which may hold a link's
+        # parent; (5) each masked file, /dev/null over it, after the grant
+        # holding it; (6) the run's own /dev, /proc and /tmp, after the
+        # grants, so nothing granted can stand in for them (granted()
+        # refuses those trees besides); (7) the clone and the run's
+        # directory, writable, last: mkdtemp makes both in the system
+        # temporary directory, usually /tmp, so they must come after (6)'s
+        # tmpfs or it would hide them.
         line = [tool]
         for path in _LINUX_SYSTEM:
             try:
@@ -320,9 +324,7 @@ def wrap(argv, *, clone, run_dir, read_only=(), loopback=False, links=()):
         grants = granted(read_only)
         for path in grants:
             line += ["--ro-bind-try", path, path]
-        # After the grants, which may hold the links' parents, and before
-        # (5)'s tmpfs, which would cover one made under /tmp.
-        for link, target in _links(links, grants):
+        for link, target in _links(reached, grants):
             line += ["--symlink", target, link]
         # --ro-bind, not -try: a mask that cannot be made fails the run
         # rather than leaving the file readable.
@@ -343,39 +345,48 @@ _LINK_HOPS = 40
 
 def _links(paths, grants):
     """The links wrap() recreates on Linux, as (link, target as written),
-    parents first. bwrap binds each grant at its resolved path, so a link on
-    the way to it is not in the run's root unless something bound holds it:
-    mise's installs/python/3.12 -> ./3.12.16, through which a venv's python
-    links (cm-4st), is not, and the venv's python then dangles (exec says
-    "No such file or directory", the shell's exit 127). Of the links met
-    while resolving each of `paths` (_link_chain), one is recreated only
-    where (a) it is not already visible: in no grant and in no system
-    directory (bound whole), by its resolved path or as written (the system
-    loop makes merged-/usr's /bin -> usr/bin itself, and a part of /etc is
-    bound as it is: a second --symlink onto either is refused by an older
-    bwrap); (b) it is in no socket or kernel tree, which the
-    run gets fresh; and (c) it ends inside a grant or a system directory, or
-    at a directory holding a grant (mise's installs/node/latest ->
-    ./26.13.1 when 26.13.1/bin is granted, ~/code -> /data/code above a
-    venv). So a recreated link only names, by the path the run was given,
-    what the run may read anyway (the run's root holds nothing but what is
-    bound and the directories bwrap makes to hold it): it grants nothing,
-    and a link to anything else stays missing
+    parents first.
+
+    Why: bwrap binds each grant at its resolved path, so a link on the way
+    to it is not in the run's root unless something bound holds it. mise's
+    installs/python/3.12 -> ./3.12.16, through which a venv's python links,
+    is not, and the venv's python then dangles: exec says "No such file or
+    directory", the shell's exit 127 (cm-4st).
+
+    Of the links met while resolving each of `paths` (_link_chain), one is
+    recreated only where all three hold:
+
+    (a) It is not in the root already: not inside a grant or a system
+        directory, by either's resolved path, nor inside a system directory
+        or a part of /etc as written. The system loop makes merged-/usr's
+        /bin -> usr/bin itself and each part of /etc is bound as it is; an
+        older bwrap refuses a second --symlink onto either.
+    (b) It is in no socket or kernel tree: the run gets those fresh.
+    (c) It ends inside a grant or a system directory, or at a directory
+        holding a grant: mise's installs/node/latest -> ./26.13.1 when
+        26.13.1/bin is granted, or ~/code -> /data/code above a venv.
+
+    So a recreated link only names, by the path the run was given, what the
+    run may read anyway. The run's root holds nothing but what is bound and
+    the directories bwrap makes to hold it, so the link grants nothing, and
+    a link to anything else stays missing
     (test_a_link_in_a_grant_is_not_followed's rule)."""
-    visible = [*grants, *(os.path.realpath(root) for root in _LINUX_SYSTEM
-                          if os.path.isdir(root))]
-    already = [*visible, *_LINUX_SYSTEM, *_LINUX_ETC]
+    # Bound, by resolved path: where a recreated link may end (c).
+    bound = [*grants, *(os.path.realpath(root) for root in _LINUX_SYSTEM
+                        if os.path.isdir(root))]
+    # In the root already, either spelling: where no link is made (a).
+    present = [*bound, *_LINUX_SYSTEM, *_LINUX_ETC]
     made = {}
     for path in paths:
         if not path or not os.path.isabs(path):
             continue
         for link, target in _link_chain(path):
-            if link in made or any(_inside(link, root) for root in already):
+            if link in made or any(_inside(link, root) for root in present):
                 continue
             if any(_inside(link, tree) for tree in (*_SOCKET_TREES, *_KERNEL_TREES)):
                 continue
             end = os.path.realpath(link)
-            if any(_inside(end, root) for root in visible) or \
+            if any(_inside(end, root) for root in bound) or \
                     any(_inside(grant, end) for grant in grants):
                 made[link] = target
     return sorted(made.items(), key=lambda item: (item[0].count(os.sep), item[0]))
@@ -387,7 +398,10 @@ def _link_chain(path):
     Stops quietly at a component that does not exist or cannot be read
     (what is missing is not the sandbox's to recreate), or after _LINK_HOPS
     links (a loop)."""
-    found, pending, resolved, hops = [], path.lstrip(os.sep).split(os.sep), os.sep, 0
+    found = []
+    pending = path.lstrip(os.sep).split(os.sep)
+    resolved = os.sep
+    hops = 0
     while pending:
         part = pending.pop(0)
         if part in ("", "."):
@@ -939,8 +953,8 @@ def _inside(path, root):
 
 
 @walks_cached()
-def self_test(clone, run_dir, env=None, read_only=(), loopback=False, links=()):
-    """Prove, through wrap() with the same `read_only`, `loopback` and `links`, that
+def self_test(clone, run_dir, env=None, read_only=(), loopback=False, reached=()):
+    """Prove, through wrap() with the same `read_only`, `loopback` and `reached`, that
     the sandbox confines here: every check of _CHECKS. `env` is the probe's
     environment (default the current one). OsSandboxUnavailable naming the
     failed check; nothing is left behind either way."""
@@ -981,7 +995,7 @@ def self_test(clone, run_dir, env=None, read_only=(), loopback=False, links=()):
                      in_outside, python, listening, inside_socket, home_target or "/nonexistent",
                      link_to, alias, masked],
                     clone=clone_real, run_dir=run_real, loopback=loopback,
-                    read_only=[*read_only, *interpreter], links=links)
+                    read_only=[*read_only, *interpreter], reached=reached)
         probe_env = dict(os.environ if env is None else env, SOCKET_PROBE=_SOCKET_PROBE)
         try:
             done = subprocess.run(argv, cwd=clone_real, env=probe_env, stdin=subprocess.DEVNULL,
