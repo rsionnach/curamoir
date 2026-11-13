@@ -551,27 +551,33 @@ def test_before_call_runs_only_after_the_snapshot(sandboxed, monkeypatch):
     assert called == []
 
 
-# --- no shell without an OS sandbox (cm-xq9, user decision 2026-10-28) ---------------------
+# --- no shell without an OS sandbox or a hosted runner (cm-xq9, user decision 2026-10-28) --
 
-@pytest.mark.parametrize("tool", ["Bash", "PowerShell", "BashOutput", "KillShell", "REPL",
-                                  "WebFetch", "Task", "Agent", "NotebookEdit", "mcp__x__y",
-                                  "Write", "bash"])
+#: Tools no job's agent is given on either runner kind: another shell, a REPL,
+#: the web, subagents, notebooks, MCP, Write, and a misspelt Bash. The local
+#: refusal test adds Bash itself, which only the hosted runner permits.
+REFUSED_ON_BOTH = ("PowerShell", "BashOutput", "KillShell", "REPL", "WebFetch", "WebSearch",
+                   "Task", "Agent", "NotebookEdit", "mcp__x__y", "Write", "bash")
+
+
+@pytest.mark.parametrize("tool", ["Bash", *REFUSED_ON_BOTH])
 def test_a_job_toolset_with_any_tool_outside_the_shell_free_list_is_refused(tmp_path, tool):
     """The user will not release with known security gaps, and the command
     guard is not a security boundary. So no job's agent gets a tool that can
     run commands or code (or one not known to be unable to): allowlist-first,
     so a tool added later is refused until it is put on the list on purpose,
-    and a shell only once an OS sandbox is verified (cm-4w5)."""
+    and a shell only once an OS sandbox is verified (cm-4w5) or on a hosted
+    runner (the by-runner-kind tests below)."""
     with pytest.raises(ValueError, match="sandbox"):
         fix_step_argv("p", "m", tmp_path, tools=("Read", tool))
 
 
-def test_every_job_toolset_today_is_shell_free(tmp_path):
+def test_every_local_job_toolset_is_shell_free(tmp_path):
     from curamoir.tier1 import SCAN_TOOLS
 
     for tools in (FIX_TOOLS, SCAN_TOOLS):
         fix_step_argv("p", "m", tmp_path, tools=tools)
-        assert set(tools) <= set(SHELL_FREE_TOOLS)
+        assert set(tools) <= SHELL_FREE_TOOLS
 
 
 # --- by runner kind (cm-2qp.3, E14.3; docs/direction-platform-first.md §5 R4) -------------
@@ -714,9 +720,7 @@ def test_the_local_refusal_names_the_hosted_runner_only_for_bash(tmp_path, tools
     assert ("CURAMOIR_RUNNER=hosted" in str(refused.value)) is hinted
 
 
-@pytest.mark.parametrize("tool", ["PowerShell", "BashOutput", "KillShell", "REPL", "WebFetch",
-                                  "WebSearch", "Task", "Agent", "NotebookEdit", "mcp__x__y",
-                                  "Write", "bash"])
+@pytest.mark.parametrize("tool", REFUSED_ON_BOTH)
 def test_the_hosted_runner_permits_bash_and_nothing_else_new(tmp_path, tool):
     """cm-xq9, runner-aware: the VM is the hosted runner's sandbox, so Bash
     is permitted there, and only Bash. Write (a file the review step never
