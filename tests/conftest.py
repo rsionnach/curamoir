@@ -172,8 +172,6 @@ def grant_tmp(tmp_path):
     if not sys.platform.startswith("linux"):
         yield tmp_path
         return
-    import shutil
-    import stat
     import tempfile
 
     from curamoir import os_sandbox
@@ -187,11 +185,24 @@ def grant_tmp(tmp_path):
     try:
         yield path
     finally:
-        def loosen(function, name, _error):
-            # A test may leave a directory unlistable or read-only.
-            os.chmod(os.path.dirname(name), stat.S_IRWXU)
-            if os.path.isdir(name) and not os.path.islink(name):
-                os.chmod(name, stat.S_IRWXU)
-            function(name)
+        remove_grant_tmp(path)
 
-        shutil.rmtree(path, onexc=loosen)
+
+def remove_grant_tmp(root):
+    """Remove grant_tmp's directory `root` whole, whatever modes a test left
+    in it: every directory is made u+rwx first, top down (a directory must
+    be listable before what is in it can be reached), and only then is the
+    tree removed. A link is never followed: what it names keeps its mode.
+    (An error handler cannot do this for rmtree: on an unlistable directory
+    the call it would retry is os.open's, cm-4st R5 edge cases.)"""
+    import shutil
+    import stat
+
+    pending = [str(root)]
+    while pending:
+        directory = pending.pop()
+        os.chmod(directory, stat.S_IRWXU)  # never a link: only real directories are queued
+        with os.scandir(directory) as listing:
+            pending += [entry.path for entry in listing
+                        if entry.is_dir(follow_symlinks=False)]
+    shutil.rmtree(root)

@@ -583,6 +583,47 @@ def test_on_linux_a_link_to_a_directory_holding_a_grant_is_recreated(grant_tmp, 
     assert ("--symlink", "real", os.path.realpath(grant_tmp) + "/alias") in triples
 
 
+@pytest.mark.parametrize("make, asked, expected", [
+    # A link to itself, and two links to each other: the walk ends within
+    # _LINK_HOPS (a loop never hangs wrap()).
+    (lambda r: (r / "self").symlink_to("self"), "self/x", None),
+    (lambda r: ((r / "a").symlink_to("b"), (r / "b").symlink_to("a")), "a/x", None),
+    # A dangling link: listed, then the walk stops at what is missing.
+    (lambda r: (r / "gone").symlink_to("nowhere"), "gone/x", [("gone", "nowhere")]),
+    # `..` after a link is taken from where the link leads, as the kernel
+    # does: alias/.. is real's parent (r), so this is r/x, no further link.
+    (lambda r: ((r / "real" / "in").mkdir(parents=True), (r / "x").mkdir(),
+                (r / "alias").symlink_to("real/in")), "alias/../x", [("alias", "real/in")]),
+], ids=["self-link", "loop", "dangling", "dotdot-after-a-link"])
+def test_link_chain_ends_and_resolves_as_the_kernel_does(grant_tmp, make, asked, expected):
+    make(grant_tmp)
+    chain = os_sandbox._link_chain(str(grant_tmp / asked))
+    if expected is None:
+        assert len(chain) == os_sandbox._LINK_HOPS
+    else:
+        root = os.path.realpath(grant_tmp)
+        assert chain == [(f"{root}/{link}", target) for link, target in expected]
+
+
+def test_a_link_with_no_granted_end_is_not_recreated_and_one_to_the_root_is(grant_tmp,
+                                                                         monkeypatch):
+    """A dangling link or a loop names nothing bound: never recreated. A
+    link to / ends at a directory holding every grant, so it is, and it is
+    harmless: in the run / is the run's own root, holding only what is
+    bound."""
+    venv = grant_tmp / "venv"
+    venv.mkdir()
+    (venv / "pyvenv.cfg").write_text("")
+    (grant_tmp / "gone").symlink_to("nowhere")
+    (grant_tmp / "self").symlink_to("self")
+    (grant_tmp / "toroot").symlink_to("/")
+    monkeypatch.setattr(os_sandbox, "homes", lambda: [os.path.realpath(grant_tmp / "account")])
+    grants = os_sandbox.granted([str(venv)])
+    made = dict(os_sandbox._links([str(grant_tmp / name / "x")
+                                   for name in ("gone", "self", "toroot")], grants))
+    assert made == {os.path.realpath(grant_tmp) + "/toroot": "/"}
+
+
 def test_on_linux_a_link_wrap_already_makes_or_binds_is_not_made_again(grant_tmp, monkeypatch):
     """The system loop already makes merged-/usr's /bin -> usr/bin and binds
     /etc's parts as they are: _links leaves those to it, so no --symlink is
