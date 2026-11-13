@@ -926,7 +926,7 @@ def fix_step_argv(prompt, model, repo, max_turns=DEFAULT_MAX_TURNS, claude="clau
 
     The prompt sits right after `-p`, as in the CLI reference's examples, and
     each list-valued flag takes one comma-separated value, so no flag can
-    swallow the prompt. ValueError also as repo_rules raises it.
+    swallow the prompt. It also raises ValueError where repo_rules does.
 
     `tools` is the whole toolset, and the allow rules follow it: a toolset
     without Edit (the tier-1 scan's, curamoir.tier1.SCAN_TOOLS) approves no
