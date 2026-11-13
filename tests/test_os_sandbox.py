@@ -598,12 +598,16 @@ def test_on_linux_a_link_to_a_directory_holding_a_grant_is_recreated(grant_tmp, 
                 (r / "real" / "x").symlink_to("physical"), (r / "x").symlink_to("lexical"),
                 (r / "alias").symlink_to("real/in")),
      "alias/../x", [("alias", "real/in"), ("real/x", "physical")]),
+    # A component that does not exist: the walk stops there, as the kernel
+    # does (ENOENT), and never reaches the link beyond the `..`.
+    (lambda r: (r / "lnk").symlink_to("elsewhere"), "missing/../lnk/x", []),
     # A component that cannot be read (a directory at mode 000 on the
     # way): the walk stops quietly with what it found.
     (lambda r: ((r / "locked").mkdir(), (r / "tolocked").symlink_to("locked/l"),
                 (r / "locked").chmod(0)),
      "tolocked/x", [("tolocked", "locked/l")]),
-], ids=["self-link", "loop", "dangling", "dotdot-after-a-link", "unreadable"])
+], ids=["self-link", "loop", "dangling", "dotdot-after-a-link", "missing-component",
+        "unreadable"])
 def test_link_chain_ends_and_resolves_as_the_kernel_does(grant_tmp, make, asked, expected):
     if expected and expected[-1][0] == "tolocked" and os.geteuid() == 0:
         pytest.skip("root reads a directory whatever its mode")
@@ -633,6 +637,79 @@ def test_a_link_with_no_granted_end_is_not_recreated_and_one_to_the_root_is(gran
     made = dict(os_sandbox._links([str(grant_tmp / name / "x")
                                    for name in ("gone", "self", "toroot")], grants))
     assert made == {os.path.realpath(grant_tmp) + "/toroot": "/"}
+
+
+def a_granted_venv(root):
+    """root/venv, a venv (pyvenv.cfg), granted with homes() elsewhere."""
+    venv = root / "venv"
+    venv.mkdir()
+    (venv / "pyvenv.cfg").write_text("")
+    return venv
+
+
+def test_a_link_in_a_socket_or_kernel_tree_is_not_recreated(grant_tmp, monkeypatch):
+    """Rule (b): the run gets /tmp, /run, /dev, /proc and /sys fresh, so no
+    link is made there even when it ends in a grant (the control, the
+    same link outside such a tree, is)."""
+    monkeypatch.setattr(os_sandbox, "homes", lambda: [os.path.realpath(grant_tmp / "account")])
+    grants = os_sandbox.granted([str(a_granted_venv(grant_tmp))])
+    for place in ("socket", "plain"):
+        (grant_tmp / place).mkdir()
+        (grant_tmp / place / "lnk").symlink_to(grant_tmp / "venv")
+    socket_tree = os.path.realpath(grant_tmp / "socket")
+    monkeypatch.setattr(os_sandbox, "_SOCKET_TREES", (*os_sandbox._SOCKET_TREES, socket_tree))
+    made = dict(os_sandbox._links([str(grant_tmp / place / "lnk" / "x")
+                                   for place in ("socket", "plain")], grants))
+    assert list(made) == [os.path.realpath(grant_tmp / "plain") + "/lnk"]
+
+
+def test_a_link_into_a_system_directory_is_recreated(grant_tmp):
+    """Rule (c)'s system half: a link that ends in a system directory (bound
+    whole) is recreated though nothing is granted, as mise's shims ->
+    /usr/bin/mise are on PATH."""
+    target = next(os.path.join(root, "env") for root in ("/usr/bin", "/bin")
+                  if os.path.isfile(os.path.join(root, "env")))
+    (grant_tmp / "shim").symlink_to(target)
+    made = os_sandbox._links([str(grant_tmp / "shim")], [])
+    assert made == [(os.path.realpath(grant_tmp) + "/shim", target)]
+
+
+def test_the_self_test_gives_its_own_wrap_the_same_reached(grant_tmp, monkeypatch):
+    """self_test proves the sandbox the run gets, links included: its
+    probe's wrap() gets the `reached` it was given."""
+    seen = {}
+
+    class Stop(Exception):
+        pass
+
+    def recording(argv, **kwargs):
+        seen.update(kwargs)
+        raise Stop
+
+    monkeypatch.setattr(os_sandbox, "wrap", recording)
+    (grant_tmp / "c").mkdir()
+    (grant_tmp / "r").mkdir()
+    with pytest.raises(Stop):
+        os_sandbox.self_test(grant_tmp / "c", grant_tmp / "r", reached=["/the/path"])
+    assert seen["reached"] == ["/the/path"]
+
+
+@real_sandbox
+def test_a_venv_python_through_a_mise_alias_runs(grant_tmp, monkeypatch):
+    """The reproduction end to end, independent of how this checkout's own
+    .venv was made: a venv whose python links through mise's
+    installs/python/3.12 -> ./3.12.16 runs under the real sandbox
+    (before cm-4st: exit 127, "No such file or directory")."""
+    home, venv, version = a_mise_alias_venv(grant_tmp)
+    monkeypatch.setattr(os_sandbox, "homes", lambda: [os.path.realpath(home)])
+    clone, run = grant_tmp / "c", grant_tmp / "r"
+    clone.mkdir()
+    run.mkdir()
+    python = str(venv / "bin" / "python")
+    argv = os_sandbox.wrap([python], clone=clone, run_dir=run,
+                           read_only=[str(venv), str(version)], reached=[python])
+    done = subprocess.run(argv, cwd=clone, capture_output=True, timeout=30)
+    assert b"interpreter-ran" in done.stdout, done.stderr
 
 
 def test_on_linux_a_link_wrap_already_makes_or_binds_is_not_made_again(grant_tmp, monkeypatch):

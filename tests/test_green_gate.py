@@ -1142,6 +1142,36 @@ def test_every_path_the_gate_asks_for_reaches_wrap_as_it_is_spelt(fake_home, gra
     assert seen["reached"] == asked
 
 
+def test_an_interpreter_that_is_no_link_is_neither_followed_nor_reached(grant_tmp):
+    """Only a LINKED interpreter leads elsewhere: a python3 that is a plain
+    file is not taken for a link, so neither an installation two levels up
+    nor its own path is asked for."""
+    prefix = grant_tmp / "outside" / "py"
+    (prefix / "bin").mkdir(parents=True)
+    (prefix / "bin" / "python3").write_text("")
+    (prefix / "lib" / "python3.12").mkdir(parents=True)
+    env = {"PATH": str(prefix / "bin")}
+    assert green_gate._linked_interpreters(env) == []
+    assert str(prefix / "bin" / "python3") not in green_gate._sandbox_reached(env)
+    assert os.path.realpath(prefix) not in green_gate._wanted(env)
+
+
+def test_the_gates_self_test_gets_the_same_reached_as_its_runs(grant_tmp, monkeypatch):
+    """The gate's self-test proves the sandbox its runs get: it hands
+    self_test() _sandbox_reached(env), as _wrapped hands wrap()."""
+    env = {"PATH": str(grant_tmp / "bin"), "VIRTUAL_ENV": str(grant_tmp / "venv")}
+    seen = {}
+
+    class Recording(Unconfined):
+        def self_test(self, clone, run_dir, **kwargs):
+            seen.update(kwargs)
+
+    monkeypatch.setattr(green_gate, "OS_SANDBOX", Recording())
+    green_gate._sandbox_self_test(SimpleNamespace(path=grant_tmp), env, False)
+    assert seen["reached"] == green_gate._sandbox_reached(env)
+    assert str(grant_tmp / "bin") in seen["reached"]
+
+
 @pytest.mark.parametrize("prefix, name, marker", [
     (".pyenv/versions/3.12.1", "python3", "lib/python3.12"),
     (".local/share/uv/python/cpython-3.12", "python3", "lib/python3.12"),
