@@ -25,11 +25,11 @@ class Unconfined:
 
     # The real signatures (os_sandbox.wrap, os_sandbox.self_test), keyword
     # for keyword, so a misspelt keyword fails here as it would there.
-    def wrap(self, argv, *, clone, run_dir, read_only=(), loopback=False):
+    def wrap(self, argv, *, clone, run_dir, read_only=(), loopback=False, links=()):
         self.wrapped.append((list(argv), str(clone), str(run_dir)))
         return [*PREFIX, *argv]
 
-    def self_test(self, clone, run_dir, env=None, read_only=(), loopback=False):
+    def self_test(self, clone, run_dir, env=None, read_only=(), loopback=False, links=()):
         self.self_tests.append((str(clone), str(run_dir)))
 
 
@@ -44,10 +44,10 @@ class Absent:
         self.wrapped = []
         self.self_tests = []
 
-    def wrap(self, argv, *, clone, run_dir, read_only=(), loopback=False):
+    def wrap(self, argv, *, clone, run_dir, read_only=(), loopback=False, links=()):
         self.wrapped.append((list(argv), str(clone), str(run_dir)))
         raise OsSandboxUnavailable("no OS sandbox here (tests/os_sandbox_stand_in.Absent)")
 
-    def self_test(self, clone, run_dir, env=None, read_only=(), loopback=False):
+    def self_test(self, clone, run_dir, env=None, read_only=(), loopback=False, links=()):
         self.self_tests.append((str(clone), str(run_dir)))
         raise OsSandboxUnavailable("no OS sandbox here (tests/os_sandbox_stand_in.Absent)")

@@ -769,7 +769,8 @@ def _wrapped(argv, sandbox, scratch, env, loopback):
     this is called, never a fallback from here."""
     try:
         return OS_SANDBOX.wrap(argv, clone=str(sandbox.path), run_dir=scratch,
-                               read_only=_read_only(env), loopback=loopback)
+                               read_only=_read_only(env), loopback=loopback,
+                               links=_linked_interpreters(env))
     except (os_sandbox.OsSandboxUnavailable, OSError) as error:
         raise GateError(f"{_NO_SANDBOX}: {error}{_HOSTED_HINT}") from error
 
@@ -805,22 +806,31 @@ def _wanted(env):
     # `--user` tool there then works.
     paths += [env.get(name, "") for name in ("VIRTUAL_ENV", "PYTHONUSERBASE",
                                              *_VERSION_MANAGER_ROOTS)]
-    venv = env.get("VIRTUAL_ENV")
-    interpreters = [os.path.join(venv, "bin", "python3")] if venv else []
+    for directory in env.get("PATH", "").split(os.pathsep):
+        # A venv's bin on PATH: its site-packages are next to it.
+        if os.path.isabs(directory) and \
+                os.path.isfile(os.path.join(os.path.dirname(directory), "pyvenv.cfg")):
+            paths.append(os.path.dirname(directory))
     # An interpreter on PATH is often a link into an installation elsewhere
     # (a venv's python3 into uv's or pyenv's, a node into nvm's): the run
     # must read that installation, or exec fails and the shell silently
     # moves on to the next python3 on PATH.
+    paths += [_installation(interpreter) for interpreter in _linked_interpreters(env)]
+    return [path for path in paths if path and os.path.isabs(path)]
+
+
+def _linked_interpreters(env):
+    """The interpreters a run may reach by a link: the venv's python3 and
+    each of _INTERPRETERS on PATH that is a link. _wanted grants the
+    installation each resolves into; wrap()'s `links` gets them too, so on
+    Linux a link on the way there (mise's python/3.12 -> ./3.12.16) is
+    recreated in the run's root rather than left dangling (cm-4st)."""
+    venv = env.get("VIRTUAL_ENV")
+    interpreters = [os.path.join(venv, "bin", "python3")] if venv else []
     for directory in env.get("PATH", "").split(os.pathsep):
         if os.path.isabs(directory):
             interpreters += [os.path.join(directory, name) for name in _INTERPRETERS]
-            # A venv's bin on PATH: its site-packages are next to it.
-            if os.path.isfile(os.path.join(os.path.dirname(directory), "pyvenv.cfg")):
-                paths.append(os.path.dirname(directory))
-    for interpreter in interpreters:
-        if os.path.islink(interpreter):
-            paths.append(_installation(interpreter))
-    return [path for path in paths if path and os.path.isabs(path)]
+    return [interpreter for interpreter in interpreters if os.path.islink(interpreter)]
 
 
 #: The interpreters on PATH whose installation _read_only grants.
@@ -868,7 +878,8 @@ def _sandbox_self_test(sandbox, env, loopback):
             scratch = tempfile.mkdtemp(prefix="curamoir-test-run-")
             OS_SANDBOX.self_test(str(sandbox.path), scratch,
                                  env=_scratch_env(sandbox, env, scratch),
-                                 read_only=_read_only(env), loopback=loopback)
+                                 read_only=_read_only(env), loopback=loopback,
+                                 links=_linked_interpreters(env))
         except os_sandbox.OsSandboxUnavailable as error:
             raise GateError(f"{_NO_SANDBOX}: {error}{_HOSTED_HINT}") from error
         except OSError as error:

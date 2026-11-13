@@ -1103,8 +1103,8 @@ def installed(home, prefix, name="python3", marker="lib/python3.12"):
 
 
 @pytest.fixture
-def fake_home(tmp_path, monkeypatch):
-    home = tmp_path / "home"
+def fake_home(grant_tmp, monkeypatch):
+    home = grant_tmp / "home"
     home.mkdir()
     monkeypatch.setattr(os_sandbox, "homes", lambda: [os.path.realpath(home)])
     return home
@@ -1146,11 +1146,13 @@ def test_no_other_prefix_is_granted(fake_home, prefix, name, marker, why):
 
 
 @pytest.mark.parametrize("prefix", ["miniconda3", "miniforge3/envs/py", "opt/conda"])
-def test_of_a_conda_installation_only_bin_and_lib_are_granted(fake_home, tmp_path, prefix):
+def test_of_a_conda_installation_only_bin_and_lib_are_granted(fake_home, grant_tmp, prefix):
     """conda's root (or an environment) holds .condarc and conda-meta/state,
     channel tokens and environment variables: _installation names the
     prefix, and only its bin and lib are granted, in the home or not."""
-    where = tmp_path if prefix.startswith("opt") else fake_home
+    # installed() makes PATH's directory beside `where`: inside grant_tmp,
+    # never beside it.
+    where = grant_tmp / "outside" if prefix.startswith("opt") else fake_home
     on_path = installed(where, prefix)
     (where / prefix / "conda-meta").mkdir()
     (where / prefix / ".condarc").write_text("channels: [https://t/TOKEN/conda]\n")
@@ -1158,9 +1160,10 @@ def test_of_a_conda_installation_only_bin_and_lib_are_granted(fake_home, tmp_pat
     assert granted_prefixes(fake_home, on_path) == [f"{root}/bin", f"{root}/lib"]
 
 
-def test_a_prefix_outside_the_home_is_granted_when_it_is_an_installation(fake_home, tmp_path):
-    framework = tmp_path / "Frameworks" / "3.12"
-    on_path = installed(tmp_path, framework.relative_to(tmp_path))
+def test_a_prefix_outside_the_home_is_granted_when_it_is_an_installation(fake_home, grant_tmp):
+    outside = grant_tmp / "outside"
+    framework = outside / "Frameworks" / "3.12"
+    on_path = installed(outside, framework.relative_to(outside))
     assert granted_prefixes(fake_home, on_path) == [os.path.realpath(framework)]
 
 
@@ -1340,7 +1343,7 @@ class _WrapUnavailable(Unconfined):
     """A sandbox whose self-test passes and whose wrap() then finds none:
     the tool gone between the two (cm-2qp.2's excellence review)."""
 
-    def wrap(self, argv, *, clone, run_dir, read_only=(), loopback=False):
+    def wrap(self, argv, *, clone, run_dir, read_only=(), loopback=False, links=()):
         self.wrapped.append((list(argv), str(clone), str(run_dir)))
         raise os_sandbox.OsSandboxUnavailable("wrap found no OS sandbox (the test's stand-in)")
 

@@ -255,13 +255,16 @@ def walks_cached():
 
 
 @walks_cached()
-def wrap(argv, *, clone, run_dir, read_only=(), loopback=False):
+def wrap(argv, *, clone, run_dir, read_only=(), loopback=False, links=()):
     """`argv` prefixed so it runs confined (module docstring): writes only
     in `clone` and `run_dir` (both resolved to real paths), reads under the
     user's home only of `read_only` and those two, and no network but, on
     macOS with `loopback`, 127.0.0.1/::1 (Linux's private loopback is always
-    there and reaches nothing of the host's). A new list;
-    OsSandboxUnavailable where no sandbox is available."""
+    there and reaches nothing of the host's). `links` are paths the run
+    reaches by a link (an interpreter on PATH, a venv's python): on Linux
+    each link on the way to one that would be missing from the run's root
+    is recreated, as _links says; macOS reads links where they are. A new
+    list; OsSandboxUnavailable where no sandbox is available."""
     if isinstance(argv, (str, bytes)):
         raise ValueError("wrap takes an argv list, never a command string")
     argv = list(argv)
@@ -317,6 +320,10 @@ def wrap(argv, *, clone, run_dir, read_only=(), loopback=False):
         grants = granted(read_only)
         for path in grants:
             line += ["--ro-bind-try", path, path]
+        # After the grants, which may hold the links' parents, and before
+        # (5)'s tmpfs, which would cover one made under /tmp.
+        for link, target in _links(links, grants):
+            line += ["--symlink", target, link]
         # --ro-bind, not -try: a mask that cannot be made fails the run
         # rather than leaving the file readable.
         for path in _masked(grants):
@@ -327,6 +334,74 @@ def wrap(argv, *, clone, run_dir, read_only=(), loopback=False):
                 "--die-with-parent", "--new-session", "--chdir", clone, "--", *argv]
     raise OsSandboxUnavailable(f"no OS sandbox is supported on {sys.platform!r} (only macOS "
                                "sandbox-exec and Linux bwrap)")
+
+
+#: How many links _link_chain follows for one path before it gives up, as
+#: the kernel's own limit for a lookup (ELOOP).
+_LINK_HOPS = 40
+
+
+def _links(paths, grants):
+    """The links wrap() recreates on Linux, as (link, target as written),
+    parents first. bwrap binds each grant at its resolved path, so a link on
+    the way to it is not in the run's root unless something bound holds it:
+    mise's installs/python/3.12 -> ./3.12.16, through which a venv's python
+    links (cm-4st), is not, and the venv's python then dangles (exec says
+    "No such file or directory", the shell's exit 127). Of the links met
+    while resolving each of `paths` (_link_chain), one is recreated only
+    where (a) it is not already visible: in no grant and in no system
+    directory (bound whole); (b) it is in no socket or kernel tree, which the
+    run gets fresh; and (c) it ends inside a grant or a system directory.
+    So a recreated link only names, by the path the run was given, what the
+    run may read anyway: it grants nothing, and a link to anything else
+    stays missing (test_a_link_in_a_grant_is_not_followed's rule)."""
+    visible = [*grants, *(os.path.realpath(root) for root in _LINUX_SYSTEM
+                          if os.path.isdir(root))]
+    made = {}
+    for path in paths:
+        if not path or not os.path.isabs(path):
+            continue
+        for link, target in _link_chain(path):
+            if link in made or any(_inside(link, root) for root in visible):
+                continue
+            if any(_inside(link, tree) for tree in (*_SOCKET_TREES, *_KERNEL_TREES)):
+                continue
+            end = os.path.realpath(link)
+            if any(_inside(end, root) for root in visible):
+                made[link] = target
+    return sorted(made.items(), key=lambda item: (item[0].count(os.sep), item[0]))
+
+
+def _link_chain(path):
+    """Every link met while resolving the absolute `path` one component at
+    a time, as realpath does: (the link's path, its target as written).
+    Stops quietly at a component that does not exist or cannot be read
+    (what is missing is not the sandbox's to recreate), or after _LINK_HOPS
+    links (a loop)."""
+    found, pending, resolved, hops = [], path.lstrip(os.sep).split(os.sep), os.sep, 0
+    while pending:
+        part = pending.pop(0)
+        if part in ("", "."):
+            continue
+        if part == "..":
+            resolved = os.path.dirname(resolved)
+            continue
+        here = os.path.join(resolved, part)
+        try:
+            target = os.readlink(here)
+        except OSError:
+            if not os.path.lexists(here):
+                return found
+            resolved = here
+            continue
+        hops += 1
+        if hops > _LINK_HOPS:
+            return found
+        found.append((here, target))
+        if os.path.isabs(target):
+            resolved = os.sep
+        pending[:0] = target.lstrip(os.sep).split(os.sep)
+    return found
 
 
 def _require_home():
@@ -855,8 +930,8 @@ def _inside(path, root):
 
 
 @walks_cached()
-def self_test(clone, run_dir, env=None, read_only=(), loopback=False):
-    """Prove, through wrap() with the same `read_only` and `loopback`, that
+def self_test(clone, run_dir, env=None, read_only=(), loopback=False, links=()):
+    """Prove, through wrap() with the same `read_only`, `loopback` and `links`, that
     the sandbox confines here: every check of _CHECKS. `env` is the probe's
     environment (default the current one). OsSandboxUnavailable naming the
     failed check; nothing is left behind either way."""
@@ -897,7 +972,7 @@ def self_test(clone, run_dir, env=None, read_only=(), loopback=False):
                      in_outside, python, listening, inside_socket, home_target or "/nonexistent",
                      link_to, alias, masked],
                     clone=clone_real, run_dir=run_real, loopback=loopback,
-                    read_only=[*read_only, *interpreter])
+                    read_only=[*read_only, *interpreter], links=links)
         probe_env = dict(os.environ if env is None else env, SOCKET_PROBE=_SOCKET_PROBE)
         try:
             done = subprocess.run(argv, cwd=clone_real, env=probe_env, stdin=subprocess.DEVNULL,
