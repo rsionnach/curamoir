@@ -378,7 +378,10 @@ _READ_ONLY_TOOLS = frozenset({"Read", "Grep", "Glob"})
 #: confines it: on hosted, HOSTED_SHELL_TOOLS; locally, none until an OS
 #: sandbox is verified (cm-4w5). Write is left off too:
 #: no job needs it, and it could create a file the review step never
-#: expected.
+#: expected. So this is the allowlist, not every tool that happens to be
+#: shell-free. It equals FIX_TOOLS today but is kept apart on purpose:
+#: FIX_TOOLS is what the fix step asks for, this is what any job may ask
+#: for, and widening a job's toolset must not widen the allowlist with it.
 SHELL_FREE_TOOLS = frozenset({"Read", "Grep", "Glob", "Edit"})
 
 #: Permitted on hosted beyond SHELL_FREE_TOOLS (cm-xq9 as rescoped
@@ -386,7 +389,10 @@ SHELL_FREE_TOOLS = frozenset({"Read", "Grep", "Glob", "Edit"})
 #: nothing else. The VM is the boundary there, so the shell the docs
 #: and the denylist know is allowed; PowerShell, a REPL, Write, the web and
 #: any tool not named are refused on hosted as on local, until one is put
-#: here on purpose.
+#: here on purpose. HOSTED_FIX_TOOLS (above) and fix_step_argv's
+#: `"Bash" in tools` branch (bash_rules, HOSTED_BASH_DENY_RULES) name Bash
+#: directly, because those rules are Bash's own: a tool added here needs
+#: its own rules there, not just a place in this set.
 HOSTED_SHELL_TOOLS = frozenset({"Bash"})
 
 #: Added to the fix step's environment on the hosted runner only (cm-2qp.3;
@@ -909,27 +915,34 @@ def _installed_hook_command(rest, python):
 
 def fix_step_argv(prompt, model, repo, max_turns=DEFAULT_MAX_TURNS, claude="claude",
                   tools=FIX_TOOLS, *, runner=LOCAL_RUNNER, test_command=None):
-    """The `claude -p` command line for the fix step in `repo`. The prompt
-    sits right after `-p`, as in the CLI reference's examples, and each
-    list-valued flag takes one comma-separated value, so no flag can swallow
-    the prompt. Raises ValueError as repo_rules does, and for a toolset with
-    any tool outside SHELL_FREE_TOOLS: no job's agent gets a shell, or a tool
-    that could run one, without an OS sandbox or a hosted runner (cm-xq9).
-    On `runner.hosted` Bash (HOSTED_SHELL_TOOLS) is permitted besides, and
-    nothing else is.
+    """The `claude -p` command line for the fix step in `repo`.
 
-    `tools` is the whole toolset; the allow rules follow it, so a toolset
+    The refusal comes first (cm-xq9): ValueError for a toolset with any tool
+    outside SHELL_FREE_TOOLS, so no job's agent gets a shell, or a tool that
+    could run one, without an OS sandbox or a hosted runner. On
+    `runner.hosted`, Bash (HOSTED_SHELL_TOOLS) is permitted besides, and
+    nothing else is. Every job's `claude -p` is built here, so this is the
+    one place the rule is enforced.
+
+    The prompt sits right after `-p`, as in the CLI reference's examples, and
+    each list-valued flag takes one comma-separated value, so no flag can
+    swallow the prompt. It also raises ValueError where repo_rules does.
+
+    `tools` is the whole toolset, and the allow rules follow it: a toolset
     without Edit (the tier-1 scan's, curamoir.tier1.SCAN_TOOLS) approves no
-    edit either, and one with Bash gets bash_rules(`test_command`), the
-    base's test command and its extensions (cm-2qp.12): ValueError when
-    there is none, or none a rule can name, rather than Bash with no rule or
-    a bare one (fix_tools gives no Bash then); with Bash, --disallowedTools
-    also carries HOSTED_BASH_DENY_RULES (git). `test_command` is ignored for
-    a toolset without Bash. `runner`
-    is the run's config.Runner (cm-2qp.3): it decides only which tools are
-    permitted (module docstring, "On the hosted runner"). Every flag,
-    `--restricted` and the denylist `--settings` included, is the same for
-    every call on both kinds, so a toolset without Bash gets the local
+    edit either.
+
+    `test_command` matters only for a toolset with Bash. Such a toolset gets
+    bash_rules(`test_command`), the base's test command and its extensions
+    (cm-2qp.12), and ValueError when there is none, or none a rule can name,
+    rather than Bash with no rule or a bare one (fix_tools gives no Bash
+    then). With Bash, --disallowedTools also carries HOSTED_BASH_DENY_RULES
+    (git).
+
+    `runner` is the run's config.Runner (cm-2qp.3). It decides only which
+    tools are permitted (module docstring, "On the hosted runner"). Every
+    flag, `--restricted` and the denylist `--settings` included, is the same
+    for every call on both kinds, so a toolset without Bash gets the local
     runner's argv, unchanged since 3f50a3f, whatever the runner."""
     hosted = runner.hosted
     permitted = (SHELL_FREE_TOOLS | HOSTED_SHELL_TOOLS) if hosted else SHELL_FREE_TOOLS
@@ -947,7 +960,7 @@ def fix_step_argv(prompt, model, repo, max_turns=DEFAULT_MAX_TURNS, claude="clau
         raise ValueError(
             f"a job's agent may not be given {', '.join(unsafe)}: only "
             f"{', '.join(sorted(SHELL_FREE_TOOLS))} run without an OS sandbox, and "
-            f"none is verified yet (cm-xq9, cm-4w5){hint}")
+            f"no OS sandbox for the agent is verified yet (cm-xq9, cm-4w5){hint}")
     allowed = tuple(tool for tool in _RULE_TOOLS if tool in tools)
     rules = repo_rules(repo, allowed)
     if "Bash" in tools:

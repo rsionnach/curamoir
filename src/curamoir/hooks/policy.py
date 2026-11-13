@@ -30,11 +30,16 @@ still exits silently).
 It is not the security boundary against a hostile agent. A shell and its
 tools offer more routes than any list of rules can close (nine hardening
 rounds kept finding new ones), so the boundary is elsewhere and enforced in
-code: no job's agent has a shell (fix_step.SHELL_FREE_TOOLS, cm-xq9), it
-works in a throwaway clone whose git is hardened and from which only the
-reviewed patch leaves (git_guard, fix_scope, cm-3b2), and the tests the
-sweep runs on its edits run under an OS sandbox (os_sandbox, cm-p2f). The
-hardening below is kept because it was built and tested, and because it
+code, in three parts:
+- no job's agent has a shell (fix_step.SHELL_FREE_TOOLS, cm-xq9), except
+  Bash on a hosted runner, whose VM is the boundary there
+  (fix_step.HOSTED_SHELL_TOOLS, cm-2qp.3);
+- it works in a throwaway clone whose git is hardened and from which only
+  the reviewed patch leaves (git_guard, fix_scope, cm-3b2);
+- the tests the sweep runs on its edits run under an OS sandbox
+  (os_sandbox, cm-p2f).
+
+The hardening below is kept because it was built and tested, and because it
 also catches mistakes; a hostile-only channel found in it is recorded for
 the boundary (bead cm-d71), not answered with another rule here.
 

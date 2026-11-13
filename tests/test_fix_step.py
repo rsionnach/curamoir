@@ -44,6 +44,7 @@ from curamoir.fix_step import (
     FIX_TOOLS,
     HOSTED_FIX_TOOLS,
     HOSTED_RUN_TOKEN_VARIABLES,
+    HOSTED_SHELL_TOOLS,
     HOSTED_TEST_ENVIRONMENT,
     SCOPE_LIMITS,
     SHELL_FREE_TOOLS,
@@ -551,27 +552,110 @@ def test_before_call_runs_only_after_the_snapshot(sandboxed, monkeypatch):
     assert called == []
 
 
-# --- no shell without an OS sandbox (cm-xq9, user decision 2026-10-28) ---------------------
+# --- no shell without an OS sandbox or a hosted runner (cm-xq9, user decision 2026-10-28) --
 
-@pytest.mark.parametrize("tool", ["Bash", "PowerShell", "BashOutput", "KillShell", "REPL",
-                                  "WebFetch", "Task", "Agent", "NotebookEdit", "mcp__x__y",
-                                  "Write", "bash"])
+#: Tools no job's agent is given on either runner kind: another shell, a REPL,
+#: the web, subagents, notebooks, MCP, Write, and a misspelt Bash. The local
+#: refusal test adds Bash itself, which only the hosted runner permits.
+REFUSED_ON_BOTH = ("PowerShell", "BashOutput", "KillShell", "REPL", "WebFetch", "WebSearch",
+                   "Task", "Agent", "NotebookEdit", "mcp__x__y", "Write", "bash")
+
+
+@pytest.mark.parametrize("tool", ["Bash", *REFUSED_ON_BOTH])
 def test_a_job_toolset_with_any_tool_outside_the_shell_free_list_is_refused(tmp_path, tool):
     """The user will not release with known security gaps, and the command
     guard is not a security boundary. So no job's agent gets a tool that can
     run commands or code (or one not known to be unable to): allowlist-first,
     so a tool added later is refused until it is put on the list on purpose,
-    and a shell only once an OS sandbox is verified (cm-4w5)."""
+    and a shell only once an OS sandbox is verified (cm-4w5) or on a hosted
+    runner (the by-runner-kind tests below)."""
     with pytest.raises(ValueError, match="sandbox"):
         fix_step_argv("p", "m", tmp_path, tools=("Read", tool))
 
 
-def test_every_job_toolset_today_is_shell_free(tmp_path):
+def test_every_local_job_toolset_is_shell_free(tmp_path):
     from curamoir.tier1 import SCAN_TOOLS
 
     for tools in (FIX_TOOLS, SCAN_TOOLS):
         fix_step_argv("p", "m", tmp_path, tools=tools)
-        assert set(tools) <= set(SHELL_FREE_TOOLS)
+        assert set(tools) <= SHELL_FREE_TOOLS
+
+
+# The refusal holds only for a `claude -p` that fix_step_argv builds, so the
+# three tests below pin that structurally, over every module under
+# src/curamoir/: a new job that builds its own argv, or a new toolset with a
+# shell in it, fails here rather than slipping past the refusal.
+
+def _source_trees():
+    import ast
+    import pathlib
+
+    import curamoir
+
+    root = pathlib.Path(curamoir.__file__).parent
+    for path in sorted(root.rglob("*.py")):
+        yield path.relative_to(root).as_posix(), ast.parse(path.read_text(encoding="utf-8"))
+
+
+#: The flags that set what a `claude -p` agent may do. Only fix_step_argv
+#: writes them; a second builder would have to.
+_AGENT_FLAGS = ("--tools", "--allowedTools", "--allowed-tools", "--disallowedTools",
+                "--disallowed-tools", "--permission-mode", "--dangerously-skip-permissions")
+
+
+def test_only_run_fix_step_calls_fix_step_argv():
+    import ast
+
+    callers = []
+    for name, tree in _source_trees():
+        for func in ast.walk(tree):
+            if not isinstance(func, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            for node in ast.walk(func):
+                if isinstance(node, ast.Call):
+                    called = node.func
+                    called = getattr(called, "id", None) or getattr(called, "attr", None)
+                    if called == "fix_step_argv":
+                        callers.append((name, func.name))
+    assert sorted(set(callers)) == [("fix_step.py", "run_fix_step")]
+
+
+def test_no_module_but_fix_step_writes_an_agent_permission_flag():
+    import ast
+
+    writers = set()
+    for name, tree in _source_trees():
+        for node in ast.walk(tree):
+            if (isinstance(node, ast.Constant) and isinstance(node.value, str)
+                    and node.value.split("=", 1)[0] in _AGENT_FLAGS):
+                writers.add(name)
+    assert writers == {"fix_step.py"}
+
+
+def test_every_toolset_constant_is_shell_free_or_hosted():
+    """Every module-level `*_TOOLS` constant under src/curamoir/, found rather
+    than listed: each is within SHELL_FREE_TOOLS, and only a HOSTED_ one may
+    add HOSTED_SHELL_TOOLS. A new job's toolset with a shell in it fails
+    here even before anything calls fix_step_argv with it."""
+    import ast
+    import importlib
+
+    found = {}
+    for name, tree in _source_trees():
+        module = "curamoir." + name[:-3].replace("/", ".").removesuffix(".__init__")
+        for node in tree.body:
+            targets = (node.targets if isinstance(node, ast.Assign)
+                       else [node.target] if isinstance(node, ast.AnnAssign) else [])
+            for target in targets:
+                if isinstance(target, ast.Name) and target.id.endswith("_TOOLS"):
+                    found[f"{module}.{target.id}"] = getattr(
+                        importlib.import_module(module), target.id)
+    assert {"curamoir.fix_step.FIX_TOOLS", "curamoir.tier1.SCAN_TOOLS",
+            "curamoir.fix_step.HOSTED_FIX_TOOLS"} <= set(found)
+    for qualified, tools in found.items():
+        permitted = SHELL_FREE_TOOLS | (
+            HOSTED_SHELL_TOOLS if qualified.rsplit(".", 1)[1].startswith("HOSTED_") else frozenset())
+        assert set(tools) <= permitted, qualified
 
 
 # --- by runner kind (cm-2qp.3, E14.3; docs/direction-platform-first.md §5 R4) -------------
@@ -714,9 +798,7 @@ def test_the_local_refusal_names_the_hosted_runner_only_for_bash(tmp_path, tools
     assert ("CURAMOIR_RUNNER=hosted" in str(refused.value)) is hinted
 
 
-@pytest.mark.parametrize("tool", ["PowerShell", "BashOutput", "KillShell", "REPL", "WebFetch",
-                                  "WebSearch", "Task", "Agent", "NotebookEdit", "mcp__x__y",
-                                  "Write", "bash"])
+@pytest.mark.parametrize("tool", REFUSED_ON_BOTH)
 def test_the_hosted_runner_permits_bash_and_nothing_else_new(tmp_path, tool):
     """cm-xq9, runner-aware: the VM is the hosted runner's sandbox, so Bash
     is permitted there, and only Bash. Write (a file the review step never
