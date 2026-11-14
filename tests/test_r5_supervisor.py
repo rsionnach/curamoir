@@ -1640,30 +1640,90 @@ def test_a_null_fix_is_allowed_on_a_finding_and_on_a_closure():
     assert closed["closures"] == [earlier[0]["fingerprint"]] and closed["findings"][0]["fix"] is None
 
 
-# Real reviewer reports, produced under the section 10 contract during cm-70j's
-# own R5 run and copied verbatim from .claude/r5-reports (gitignored there).
+# Synthetic reviewer reports in the section 10 contract (cm-rzs). Each has the
+# structure and numbers of one real report from cm-70j's R5 run: the record
+# count, severities, verification levels, the share of "fix": null, closures,
+# the regression flag and the prose layout. The project, paths, lines, claims
+# and evidence are invented, and each closure's `resolves` is the fingerprint
+# the parser computes from the report before it. Public fixtures are never
+# real records (spec section 11, publication rule).
 R5_REPORTS = Path(__file__).resolve().parent / "fixtures" / "r5-reports"
+SYNTHETIC_REPORTS = [f"synthetic-{n}.md" for n in ("correctness-1", "correctness-4", "correctness-5",
+                                                   "clarity-1", "clarity-2", "edge-cases-1")]
+
+# The shape of each real report a fixture stands in for, recorded once from the
+# originals (git show 5aff5f1:tests/fixtures/r5-reports/cm-70j-<name>.md):
+# per record, in order, (severity, verification_level, fix is null, is a
+# closure, regression, evidence spans lines). A regenerated fixture that drifts
+# from its original fails test_each_fixture_report_keeps_the_shape_of_its_original.
+_C, _I, _M = "CRITICAL", "IMPORTANT", "MINOR"
+_NEW = (False, False, False, False)            # a new finding: fix, not a closure, one line
+_CLOSURE = (True, True, False, False)          # fix: null, resolves, one line
+REAL_SHAPES = {
+    "synthetic-correctness-1.md": [(_M, "reproduced", *_NEW)] * 3,
+    "synthetic-correctness-4.md": [(_I, "reproduced", False, False, True, False),
+                                   (_M, "reproduced", *_NEW), (_M, "reproduced", *_CLOSURE)],
+    "synthetic-correctness-5.md": [(_I, "reproduced", *_CLOSURE), (_M, "reproduced", *_CLOSURE)],
+    "synthetic-clarity-1.md": [(_M, "cited", *_NEW)] * 4 + [(_M, "cited", False, False, False, True),
+                                                           (_M, "cited", *_NEW),
+                                                           (_M, "cited", False, False, False, True)],
+    "synthetic-clarity-2.md": [(_M, "cited", True, True, False, multi)
+                               for multi in (True, False, False, False, True, False, True)],
+    "synthetic-edge-cases-1.md": [(_I, "reproduced", *_NEW)] + [(_M, "reproduced", *_NEW)] * 4
+                                 + [(_M, "walked", *_NEW)],
+}
 
 
 def _lens_of_report(name):
-    """cm-70j-edge-cases-1.md -> edge_cases."""
-    return name.removeprefix("cm-70j-").rsplit("-", 1)[0].replace("-", "_")
+    """synthetic-edge-cases-1.md -> edge_cases."""
+    return name.removeprefix("synthetic-").rsplit("-", 1)[0].replace("-", "_")
 
 
-@pytest.mark.parametrize("name", ["cm-70j-correctness-1.md", "cm-70j-correctness-4.md",
-                                  "cm-70j-correctness-5.md", "cm-70j-clarity-1.md",
-                                  "cm-70j-clarity-2.md", "cm-70j-edge-cases-1.md"])
-def test_a_real_reviewer_report_parses_for_its_lens(name, capsys):
+@pytest.mark.parametrize("name", SYNTHETIC_REPORTS)
+def test_a_reviewer_report_of_the_real_shape_parses_for_its_lens(name, capsys):
     path = R5_REPORTS / name
     assert r5f.main(["parse", _lens_of_report(name), str(path)]) == 0
     out = json.loads(capsys.readouterr().out)
     assert len(out["findings"]) == len(r5f.parse_report(path.read_text(), _lens_of_report(name))["findings"]) > 0
 
 
+# Where the invented project's files live; every synthetic finding names one.
+INVENTED_PATHS = ("src/tally/", "scripts/tally-", "tests/test_tally_", "docs/usage.md")
+
+
+def test_no_fixture_report_points_at_a_file_of_this_repository():
+    """A real report names this repository's own files; a synthetic one names
+    the invented project's. So a real record copied in fails here, even one
+    whose files have since been renamed or deleted."""
+    reports = sorted(R5_REPORTS.glob("*.md"))
+    assert [p.name for p in reports] == sorted(SYNTHETIC_REPORTS)
+    for path in reports:
+        records = r5f.parse_report(path.read_text(), _lens_of_report(path.name))["findings"]
+        assert records and not [r["path"] for r in records if (ROOT / r["path"]).exists()
+                                or not r["path"].startswith(INVENTED_PATHS)]
+
+
+@pytest.mark.parametrize("name", SYNTHETIC_REPORTS)
+def test_each_fixture_report_keeps_the_shape_of_its_original(name):
+    text = (R5_REPORTS / name).read_text()
+    records = r5f.parse_report(text, _lens_of_report(name))["findings"]
+    assert [(r["severity"], r["verification_level"], r["fix"] is None, r["resolves"] is not None,
+             r["regression"], "\n" in r["evidence"]) for r in records] == REAL_SHAPES[name]
+    assert set(REAL_SHAPES) == set(SYNTHETIC_REPORTS)
+
+def test_the_fixture_reports_are_what_their_generator_writes(tmp_path):
+    done = subprocess.run([sys.executable, str(R5_REPORTS / "make_synthetic_reports.py"),
+                           str(tmp_path)], capture_output=True, text=True, timeout=60)
+    assert done.returncode == 0, done.stderr
+    written = sorted(p.name for p in tmp_path.glob("*.md"))
+    assert written == sorted(p.name for p in R5_REPORTS.glob("*.md"))
+    assert all((tmp_path / n).read_bytes() == (R5_REPORTS / n).read_bytes() for n in written)
+
+
 @pytest.mark.parametrize(("before", "after", "closed"), [
-    ("cm-70j-correctness-4.md", "cm-70j-correctness-5.md", 2),
-    ("cm-70j-clarity-1.md", "cm-70j-clarity-2.md", 7)])
-def test_a_real_verify_report_closes_its_real_prior_open_set(before, after, closed):
+    ("synthetic-correctness-4.md", "synthetic-correctness-5.md", 2),
+    ("synthetic-clarity-1.md", "synthetic-clarity-2.md", 7)])
+def test_a_verify_report_of_the_real_shape_closes_its_prior_open_set(before, after, closed):
     """The later report's closures (each with "fix": null) name fingerprints
     the parser computes from the earlier report's findings."""
     lens = _lens_of_report(before)
