@@ -21,10 +21,19 @@ real publish to a bare origin through the fake gh), and the test holds:
 4. the user's checkout gained no file, changed none, and its `.git/config`
    and hooks are byte for byte as they were.
 
-A positive control (test_the_canaries_are_armed) shows each hostile config
-does fire its canary under a plain, unhardened git, so a canary that stays
-absent in the sweep means the runner's git refused it, not that the trap
-was broken.
+A positive control (test_the_canaries_are_armed) shows the hostile
+config's fsmonitor and filter keys do fire their canaries under a plain,
+unhardened git, so those canaries staying absent in the sweep means the
+runner's git refused them, not that the trap was broken. The other keys
+(pager, editor, sshCommand, askPass, the drivers, gpg, credential) need a
+terminal, a transport or a command the runner never runs to fire at all;
+they are planted so that a change which did run one would show.
+
+Two layers hold the plants: verify_git_state refuses the run before git
+reads them, and the hardened git would ignore them anyway. The main test
+shows the first; test_the_hardening_alone_holds_every_plant turns
+verify_git_state off and shows the second (git_guard's unit tests pin
+each hardening key).
 
 The test command is the repository's own code, run in the clone
 (green_gate). A planted conftest.py is dropped before the gate (asserted
@@ -39,6 +48,7 @@ import sys
 
 import pytest
 
+from curamoir import fix_scope, green_gate, tier1
 from curamoir.fix_scope import FILE_ADDED, GIT_INTERNALS_CHANGED, HIDDEN_CHANGE, WHOLE_RUN_KINDS
 from curamoir.git_guard import scrubbed_environment
 from curamoir.guards.reasons import Reason
@@ -100,7 +110,9 @@ class Canaries:
 
 def hostile_config(canaries, tag, include=None):
     """A git config naming a canary in every key that makes git run a
-    program; `include` a path that `include.path` names."""
+    program; `include` a path that `include.path` names. No `[alias]`: git
+    never lets an alias shadow a builtin, and the runner runs only
+    builtins, so an alias cannot fire under any git."""
     c = lambda key: canaries.script(f"{tag}-{key}")  # noqa: E731
     text = (
         "[core]\n"
@@ -124,11 +136,6 @@ def hostile_config(canaries, tag, include=None):
         f"\texternal = {c('diff-external')}\n"
         "[merge \"canary\"]\n"
         f"\tdriver = {c('merge-driver')}\n"
-        "[alias]\n"
-        f"\tdiff = !{c('alias-diff')}\n"
-        f"\tstatus = !{c('alias-status')}\n"
-        f"\tls-files = !{c('alias-ls-files')}\n"
-        f"\tcat-file = !{c('alias-cat-file')}\n"
         "[gpg]\n"
         f"\tprogram = {c('gpg')}\n"
         "[credential]\n"
@@ -300,6 +307,7 @@ MECHANISMS = (
 #: A gate that runs the repository's own tests, so code in the clone runs.
 PYTEST_GATE = GATE.replace("\"! grep -rq BREAKS src\"",
                            "\"PYTHONPATH=src python3 -m pytest -q -p no:cacheprovider tests\"")
+assert PYTEST_GATE != GATE, "GATE's test command changed: PYTEST_GATE no longer runs pytest"
 
 
 def test_every_mechanism_is_run(tmp_path):
@@ -353,8 +361,9 @@ def test_nothing_planted_in_the_clone_runs_and_only_the_patch_leaves(tmp_path, n
 
 def test_the_canaries_are_armed(tmp_path):
     """The positive control: a plain git, run in a planted nested repository
-    (as a git that descended into it would be), fires the canaries. So a
-    canary absent after a sweep was refused, not disarmed."""
+    (as a git that descended into it would be), fires the fsmonitor and
+    filter canaries. So those canaries absent after a sweep were refused,
+    not disarmed."""
     canaries = Canaries(tmp_path)
     sub = tmp_path / "sub"
     for path, text in repository_skeleton(canaries, "armed", ".git").items():
@@ -376,26 +385,75 @@ def test_the_canaries_are_armed(tmp_path):
         "armed-inc-filter-process" in fired, fired
 
 
+#: A conftest that, if pytest ever imports it, fails the whole test run. A
+#: canary file would not do: the OS sandbox keeps the gate from writing one.
+CONFTEST = "raise RuntimeError('the planted conftest ran')\n"
+CONFTESTS = {"conftest.py": CONFTEST, "tests/conftest.py": CONFTEST}
+
+
 def test_a_planted_conftest_is_dropped_before_the_test_gate_runs_it(tmp_path, no_real_gh):
     """A conftest.py the agent adds is out of scope (file_added), so it is
     put back (deleted) before the gate runs the repository's tests: it never
-    runs, and the PR carries the fix alone."""
+    runs (it would fail the gate), and the PR carries the fix alone."""
     canaries = Canaries(tmp_path)
     repo = checkout(tmp_path, NO_BARE_PRINT, config=PYTEST_GATE)
     before = checkout_state(repo)
-    plants = {"conftest.py": f"import os\nos.system({canaries.script('conftest')!r})\n",
-              "tests/conftest.py":
-                  f"import os\nos.system({canaries.script('tests-conftest')!r})\n"}
+    plants = CONFTESTS
     claude = planting_fixer(tmp_path, canaries, plants)
 
     line = sweep(repo, claude=claude)
 
-    assert canaries.fired() == []
     assert line["outcome"] == SUCCESS, line["message"]
     assert {b["path"] for b in line["scope_dropped"]} == set(plants)
     assert line["pr"]["paths"] == FIX_PATHS
     assert sorted(changed_on(tmp_path, line["pr"]["branch"], line["pr"]["base"])) == FIX_PATHS
     assert checkout_state(repo) == before
+
+
+def test_the_planted_conftest_fails_the_gate_when_it_runs(tmp_path, no_real_gh):
+    """The control for the test above: the same conftests committed at the
+    base commit are run by the gate, which then fails, so the sweep stops
+    at the gate. So the success above means they were dropped, not inert."""
+    repo = checkout(tmp_path, NO_BARE_PRINT, config=PYTEST_GATE)
+    for path, text in CONFTESTS.items():
+        (repo / path).parent.mkdir(parents=True, exist_ok=True)
+        (repo / path).write_text(text, encoding="utf-8")
+    for command in (["add", "-A"], ["commit", "--quiet", "-m", "conftest"],
+                    ["push", "--quiet", "origin", "main"]):
+        git(repo, *command)
+    claude, _ = fixer(tmp_path)
+
+    line = sweep(repo, claude=claude)
+
+    assert line["outcome"] != SUCCESS, line
+    assert "test_gate" in line, line["message"]
+    assert "pr" not in line
+
+
+@pytest.mark.parametrize("name", MECHANISMS)
+def test_the_hardening_alone_holds_every_plant(tmp_path, no_real_gh, monkeypatch, name):
+    """The second layer on its own: with verify_git_state turned off at
+    every caller, the runner's git meets each plant, and its hardening
+    (git_guard._GIT_HARDENING, _GIT_ENVIRONMENT) still runs none of them,
+    the user's checkout is untouched, and a PR, where one opens, carries the
+    fix alone. Without the hardening the clone's own planted hooks and
+    config do fire (`clone-git-hooks`, `clone-git-config`)."""
+    for module in (fix_scope, green_gate, tier1):
+        monkeypatch.setattr(module, "verify_git_state", lambda state: ())
+    canaries = Canaries(tmp_path)
+    plants, git_commands, _ = mechanisms(canaries)[name]
+    repo = checkout(tmp_path, NO_BARE_PRINT, config=GATE)
+    before = checkout_state(repo)
+
+    line = sweep(repo, claude=planting_fixer(tmp_path, canaries, plants, git_commands))
+
+    assert canaries.fired() == [], (name, line)
+    assert checkout_state(repo) == before
+    if line["outcome"] == SUCCESS:
+        assert sorted(changed_on(tmp_path, line["pr"]["branch"], line["pr"]["base"])) == \
+            FIX_PATHS
+    else:
+        assert nothing_pushed(tmp_path, no_real_gh)
 
 
 @pytest.mark.parametrize("target", ["elsewhere", "checkout"])
