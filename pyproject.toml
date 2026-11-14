@@ -23,10 +23,11 @@ curamoir-lint = "curamoir.lint:main"
 
 [project.optional-dependencies]
 dev = [
-    "pytest>=8",
+    "pytest>=9",  # faulthandler_exit_on_timeout (below) is new in pytest 9
     "ruff>=0.6",
     "pyflakes>=3",
     "ast-grep-cli>=0.50",
+    "pytest-timeout>=2.3",
 ]
 
 [build-system]
@@ -52,6 +53,21 @@ packages = ["src/curamoir"]
 testpaths = ["tests"]
 # -W error: a guardrail that warns instead of refusing is a bug, not a note.
 addopts = "-W error --strict-markers"
+# A per-test limit (pytest-timeout, cm-3aj): a hang becomes a failure with
+# every thread's stack, not a run that sleeps until something outside kills
+# it. 120 s is ten times the slowest test (12 s, 2026-11-14): a backstop, not
+# a budget. Why `thread` and not `signal` (curamoir.lint._time_limit), and
+# what a timeout prints: tests/test_suite_timeout.py. faulthandler_timeout is
+# pytest's own watchdog, for a hang that holds the GIL, which the thread
+# method's timer cannot interrupt: it prints the stack and ends the run.
+# It is a hard cap: a timeout marker or --timeout/PYTEST_TIMEOUT set above
+# it, --timeout=0, or an IDE debugger paused that long still ends the run at
+# 150 s (pytest's own pdb cancels the watchdog). For a long session in an IDE
+# debugger, add -o faulthandler_timeout=0.
+timeout = 120
+timeout_method = "thread"
+faulthandler_timeout = 150
+faulthandler_exit_on_timeout = true
 
 # A project whose thesis is the mechanical enforcement of a repository's own
 # standards had no linter, and hand-enforced its house style instead. Every
