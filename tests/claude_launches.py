@@ -41,8 +41,9 @@ from typing import NamedTuple
 SANCTIONED = "fix_step.py"
 
 #: (file under src/curamoir/, qualified name of the enclosing function or
-#: class, or the module-level constant) -> why it may name the binary. Each entry must still match a constant, so a stale one
-#: fails the test rather than silently allowing a later string.
+#: class, or the module-level constant) -> why it may name the binary. Each
+#: entry must still match a constant, so a stale one fails the test rather
+#: than silently allowing a later string.
 ALLOWED = {
     ("sweep_job.py", "CLAUDE"):
         "the default binary, handed to run_fix_step as tools.claude; never launched here",
