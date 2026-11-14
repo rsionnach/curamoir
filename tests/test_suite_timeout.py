@@ -48,14 +48,32 @@ def test_every_test_runs_under_the_thread_method_time_limit(pytestconfig):
     assert pytestconfig.getini("faulthandler_exit_on_timeout") is True
 
 
-# --timeout, not -o timeout=: the option outranks PYTEST_TIMEOUT, which the
-# child inherits, and -o (an ini value) does not.
-# The probe below, in seconds, smallest first: the shortened limit; the
-# bound the run must finish inside, which only a working limit meets; the
-# guard that stops this test if the limit does nothing; and the sleep, longer
-# than all three, so that only the limit can end it.
-SHORT_LIMIT, STOPPED_WITHIN, GUARD, HANG = 2, 30, 50, 60
+# The two probes below, in seconds, smallest first: the shortened limit; the
+# bound a run must finish inside, which only a working limit meets; and the
+# guard that stops a probe if the limit does nothing.
+SHORT_LIMIT, STOPPED_WITHIN, GUARD = 2, 30, 50
 
+
+def _run_repository_pytest(tmp_path, source_lines, *extra):
+    """Write `source_lines` as test_probe.py and run pytest on it with this
+    repository's configuration and the limit shortened to SHORT_LIMIT.
+
+    --timeout, not -o timeout=: the option outranks a PYTEST_TIMEOUT the
+    child inherits, and an -o value (an ini value) does not. Returns the
+    finished process, its combined output and how long it took."""
+    test_file = tmp_path / "test_probe.py"
+    test_file.write_text("\n".join(source_lines) + "\n")
+    started = time.monotonic()
+    done = subprocess.run(
+        [sys.executable, "-m", "pytest", "-c", str(ROOT / "pyproject.toml"),
+         "--rootdir", str(tmp_path), "-p", "no:cacheprovider", "-q",
+         f"--timeout={SHORT_LIMIT}", *extra, str(test_file)],
+        cwd=tmp_path, capture_output=True, text=True, timeout=GUARD)
+    return done, done.stdout + done.stderr, time.monotonic() - started
+
+
+#: Longer than the guard, so that only the limit can end it.
+HANG = 60
 SLEEP = f"time.sleep({HANG})"
 HANGING_TEST = ["import time", "", "", "def test_that_hangs():", "    " + SLEEP]
 
@@ -64,41 +82,30 @@ def test_a_hanging_test_is_named_and_its_stack_printed(tmp_path):
     """The repository's own pytest configuration, with only the limit
     shortened, run on a test that sleeps far longer than that limit. Without
     `-v`, so the test is named by the stack dump alone."""
-    (tmp_path / "test_hangs.py").write_text("\n".join(HANGING_TEST) + "\n")
-    sleep_line = HANGING_TEST.index("    " + SLEEP) + 1
-    started = time.monotonic()
-    done = subprocess.run(
-        [sys.executable, "-m", "pytest", "-c", str(ROOT / "pyproject.toml"),
-         "--rootdir", str(tmp_path), "-p", "no:cacheprovider", "-q",
-         f"--timeout={SHORT_LIMIT}", str(tmp_path / "test_hangs.py")],
-        cwd=tmp_path, capture_output=True, text=True, timeout=GUARD)
-    elapsed = time.monotonic() - started
-    output = done.stdout + done.stderr
+    done, output, elapsed = _run_repository_pytest(tmp_path, HANGING_TEST)
     assert done.returncode != 0
     assert elapsed < STOPPED_WITHIN, f"the limit did not stop the hang ({elapsed:.0f} s)"
     assert "Timeout" in output
-    assert f'test_hangs.py", line {sleep_line}, in test_that_hangs' in output
+    # pytest-timeout prints a Python traceback: 'File "...", line N, in func'.
+    line = HANGING_TEST.index("    " + SLEEP) + 1
+    assert f'test_probe.py", line {line}, in test_that_hangs' in output
     assert SLEEP in output
 
 
 #: A regex that backtracks for 2**40 steps inside C, holding the GIL.
-GIL_HANG = ["import re", "", "", "def test_that_holds_the_gil():",
-            '    re.match(r"(a+)+$", "a" * 40 + "b")']
+BACKTRACK = 're.match(r"(a+)+$", "a" * 40 + "b")'
+GIL_HANG = ["import re", "", "", "def test_that_holds_the_gil():", "    " + BACKTRACK]
 
 
 def test_a_hang_that_holds_the_gil_is_named_and_ends_the_run(tmp_path):
     """The thread method cannot stop this test; the faulthandler watchdog,
-    shortened to the same short limit, names it and ends the run."""
-    (tmp_path / "test_gil.py").write_text("\n".join(GIL_HANG) + "\n")
-    started = time.monotonic()
-    done = subprocess.run(
-        [sys.executable, "-m", "pytest", "-c", str(ROOT / "pyproject.toml"),
-         "--rootdir", str(tmp_path), "-p", "no:cacheprovider", "-q",
-         f"--timeout={SHORT_LIMIT}", "-o", f"faulthandler_timeout={SHORT_LIMIT}",
-         str(tmp_path / "test_gil.py")],
-        cwd=tmp_path, capture_output=True, text=True, timeout=GUARD)
-    elapsed = time.monotonic() - started
+    shortened to the same short limit, names it and ends the run.
+    faulthandler_timeout has no command-line option and no environment
+    variable, so -o is the only way to set it and nothing outranks it."""
+    done, output, elapsed = _run_repository_pytest(
+        tmp_path, GIL_HANG, "-o", f"faulthandler_timeout={SHORT_LIMIT}")
     assert done.returncode != 0
     assert elapsed < STOPPED_WITHIN, f"the watchdog did not end the run ({elapsed:.0f} s)"
-    assert (f'test_gil.py", line {len(GIL_HANG)} in test_that_holds_the_gil'
-            in done.stdout + done.stderr)
+    # faulthandler's own format, with no comma: 'File "...", line N in func'.
+    line = GIL_HANG.index("    " + BACKTRACK) + 1
+    assert f'test_probe.py", line {line} in test_that_holds_the_gil' in output
