@@ -15,12 +15,14 @@ flagged if it is exactly `claude`, ends in `/claude`, or holds `claude` as a
 command word followed by a flag or by the end of the string (`claude -p`,
 `timeout 60 claude -p`, `env X=1 claude`). Words that only contain it
 (`claude_settings`, `.claude/settings.json`, `code.claude.com`,
-`claude-code`) are not.
+`claude-code`) are not. A sentence that ends in the word (`could not reach
+claude`) is flagged too, since it reads as a command word at the end:
+rephrase it, or give it an entry.
 
 **The allow-list.** fix_step.py is allowed whole: it is where the agent is
-started. Anything else needs an entry in ALLOWED: the file, the name of the
-enclosing function (for a parameter default or a string inside a function)
-or of the module-level constant, and a one-line reason. There is no
+started. Anything else needs an entry in ALLOWED: the file, the qualified
+name of the enclosing function or class (for a parameter default or a
+string inside one) or the module-level constant, and a one-line reason. There is no
 data-flow tracking. Adding an entry is the review point: the person or gate
 that adds one judges whether the new caller still starts the agent only
 through fix_step.run_fix_step.
@@ -87,12 +89,15 @@ def _docstrings(tree):
 
 def _owned_constants(tree):
     """(owner, constant) for every constant in `tree`: the owner is the
-    innermost enclosing function or class, or, at module level, the name
-    being assigned (`CLAUDE = "claude"`), else "<module>"."""
+    qualified name of the enclosing functions and classes (`run_tier1_scan`,
+    `Job.go`, `outer.inner`), or, at module level, the name being assigned
+    (`CLAUDE = "claude"`), else "<module>". Qualified, so an entry for one
+    function does not cover a same-named method elsewhere in the file."""
     def visit(node, owner):
         for child in ast.iter_child_nodes(node):
             if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-                yield from visit(child, child.name)
+                qualified = child.name if owner == "<module>" else f"{owner}.{child.name}"
+                yield from visit(child, qualified)
                 continue
             inner = owner
             if owner == "<module>" and isinstance(child, (ast.Assign, ast.AnnAssign)):

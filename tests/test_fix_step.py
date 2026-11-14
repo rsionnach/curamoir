@@ -666,6 +666,7 @@ NAMING_CLAUDE = {
     "an_f_string": "import os\ndef job(p):\n    os.system(f'claude -p {p}')\n",
     "bytes": "import subprocess\ndef job():\n    subprocess.run([b'claude', b'-p'])\n",
     "a_class_attribute": "class Job:\n    BINARY = 'claude'\n",
+    "prose_ending_in_the_word": "MESSAGE = 'could not reach claude'\n",
 }
 
 
@@ -700,6 +701,13 @@ def test_an_allow_list_entry_covers_only_its_own_file_and_owner():
     assert unallowed(planted, {**ALLOWED, ("planted.py", "run_agent"): "why"}) == []
     assert unallowed(planted, {**ALLOWED, ("planted.py", "job"): "why"}) != []
     assert unallowed(planted, {**ALLOWED, ("other.py", "run_agent"): "why"}) != []
+
+
+def test_an_entry_for_a_function_does_not_cover_a_same_named_method():
+    planted = _package_with("def go():\n    return 'claude'\n"
+                            "class Job:\n    def go(self):\n        return 'claude -p x'\n")
+    found = unallowed(planted, {**ALLOWED, ("planted.py", "go"): "why"})
+    assert [(m.owner, m.value) for m in found] == [("Job.go", "'claude -p x'")]
 
 
 def test_a_stale_allow_list_entry_is_reported():
