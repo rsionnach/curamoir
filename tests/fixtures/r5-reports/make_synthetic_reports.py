@@ -42,7 +42,6 @@ def write(out, name, prose, records):
     (out / name).write_text(prose.rstrip("\n") + "\n" + line + "\n")
 
 
-
 def main(out):
     """Write the six reports into the directory `out`."""
     # --- correctness 1: three reproduced minors, in the full template layout ----
