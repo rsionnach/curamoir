@@ -239,7 +239,7 @@ def mechanisms(canaries, case_insensitive):
     return found
 
 
-def case_insensitive(directory):
+def folds_case(directory):
     probe = directory / "CaseProbe"
     probe.write_text("", encoding="utf-8")
     try:
@@ -320,7 +320,7 @@ def test_every_mechanism_is_run(tmp_path):
 def test_nothing_planted_in_the_clone_runs_and_only_the_patch_leaves(tmp_path, no_real_gh,
                                                                      name):
     canaries = Canaries(tmp_path)
-    found = mechanisms(canaries, case_insensitive(tmp_path))
+    found = mechanisms(canaries, folds_case(tmp_path))
     if name not in found:
         pytest.skip("the file system here is case-sensitive: no case variant applies")
     plants, git_commands, expected = found[name]
