@@ -584,26 +584,26 @@ def test_every_local_job_toolset_is_shell_free(tmp_path):
 
 
 # The refusal holds only for a `claude -p` that fix_step_argv builds, so the
-# three tests below pin that structurally, over every module under
+# tests below pin that structurally, over every module under
 # src/curamoir/: a new job that builds its own argv, or a new toolset with a
 # shell in it, fails here rather than slipping past the refusal.
 
-def _source_trees():
-    import ast
+@functools.cache
+def _curamoir_trees():
+    """src/curamoir/ parsed once, {path under it: module}; no test changes
+    a tree."""
     import pathlib
 
     import curamoir
 
-    root = pathlib.Path(curamoir.__file__).parent
-    for path in sorted(root.rglob("*.py")):
-        yield path.relative_to(root).as_posix(), ast.parse(path.read_text(encoding="utf-8"))
+    return package_trees(pathlib.Path(curamoir.__file__).parent)
 
 
 def test_only_run_fix_step_calls_fix_step_argv():
     import ast
 
     callers = []
-    for name, tree in _source_trees():
+    for name, tree in _curamoir_trees().items():
         for func in ast.walk(tree):
             if not isinstance(func, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 continue
@@ -622,20 +622,11 @@ def test_only_run_fix_step_calls_fix_step_argv():
 # which missed a bare `claude -p`, a flag built at run time, and real flags
 # the list did not name.
 
-@functools.cache
-def _curamoir_trees():
-    """src/curamoir/ parsed once; the scan only reads the trees."""
-    import pathlib
-
-    import curamoir
-
-    return package_trees(pathlib.Path(curamoir.__file__).parent)
-
-
 def _package_with(planted, name="planted.py"):
+    """The package with one more module: source text, or a parsed module."""
     import ast
 
-    return {**_curamoir_trees(), name: ast.parse(planted)}
+    return {**_curamoir_trees(), name: ast.parse(planted) if isinstance(planted, str) else planted}
 
 
 def test_no_module_but_fix_step_hands_claude_to_a_process_launcher():
@@ -714,22 +705,18 @@ CLAUDE_LAUNCHES = {
 
 @pytest.mark.parametrize("planted", CLAUDE_LAUNCHES.values(), ids=CLAUDE_LAUNCHES)
 def test_a_claude_launch_is_found(planted):
-    assert [hit[0] for hit in claude_launches(_package_with(planted))] == ["planted.py"]
+    assert [hit.module for hit in claude_launches(_package_with(planted))] == ["planted.py"]
 
 
 def test_fix_steps_own_launch_is_found_anywhere_but_fix_step():
     """run_fix_step itself, moved to another module, is a claude launch, and
     so is each job that hands it `claude=`: outside fix_step.py it is just
     another launcher."""
-    import pathlib
-
-    import curamoir
-
-    source = (pathlib.Path(curamoir.__file__).parent / "fix_step.py").read_text(encoding="utf-8")
-    hits = claude_launches(_package_with(source, name="moved_fix_step.py"))
-    assert {hit[0] for hit in hits} == {"moved_fix_step.py", "sweep_job.py", "tier1.py"}
-    assert ("moved_fix_step.py", "run_in_group") in {(hit[0], hit[2]) for hit in hits}
-    assert "run_fix_step" in {hit[2] for hit in hits if hit[0] != "moved_fix_step.py"}
+    hits = claude_launches(_package_with(_curamoir_trees()["fix_step.py"],
+                                         name="moved_fix_step.py"))
+    assert {hit.module for hit in hits} == {"moved_fix_step.py", "sweep_job.py", "tier1.py"}
+    assert ("moved_fix_step.py", "run_in_group") in {(hit.module, hit.launcher) for hit in hits}
+    assert "run_fix_step" in {hit.launcher for hit in hits if hit.module != "moved_fix_step.py"}
 
 
 #: Not claude launches: another program, the agent started the sanctioned
@@ -773,7 +760,7 @@ def test_every_toolset_constant_is_shell_free_or_hosted():
     import importlib
 
     found = {}
-    for name, tree in _source_trees():
+    for name, tree in _curamoir_trees().items():
         module = "curamoir." + name[:-3].replace("/", ".").removesuffix(".__init__")
         for node in tree.body:
             targets = (node.targets if isinstance(node, ast.Assign)

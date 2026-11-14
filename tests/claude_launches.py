@@ -19,9 +19,11 @@ What counts:
   a wrapper counts too. fix_step.py's own functions never count: calling
   run_fix_step is the sanctioned way to start the agent.
 - **The argv** is each argument that becomes the program or its arguments:
-  for `subprocess`, the first positional argument and the `args` and
-  `executable` keywords; for `os.exec*`, `os.posix_spawn*` and
-  `asyncio.create_subprocess_exec`, every positional argument; for
+  for `subprocess`, the first positional argument and the `args`,
+  `executable` and `cmd` keywords; for `os.exec*` and `os.posix_spawn*`,
+  every positional argument and the `path` and `argv` keywords; for
+  `asyncio.create_subprocess_exec`, every positional argument and `program`;
+  for `os.system` and `os.popen`, the command line; for
   `os.spawn*`, every positional argument after the mode; for a curamoir
   launcher, the arguments bound to the parameters that flow into its own
   launcher's argv (by position, `self` aside, and by keyword). Each is
@@ -33,11 +35,13 @@ What counts:
   (`claude`, `CLAUDE`, `tools.claude`, `sweep_job.CLAUDE`), a string that
   is `claude`, a path ending in `/claude`, or a command line starting with
   `claude ` (for `os.system`), or the result of a call to a function that
-  returns a value built from one of its own (as fix_step_argv does). A
+  returns a value built from a `claude` value of its own (as fix_step_argv
+  does). A
   call's result is made of its arguments only as far as the function's
   return is: all of them for a call that reshapes its argument
   (`shutil.which`, `os.path.*`, `str`, `list`, `shlex.split`, a `join`,
-  `Path`); the ones bound to the parameters a curamoir function's return is
+  `Path`, matched by the called name, so a method of that name counts too);
+  the ones bound to the parameters a curamoir function's return is
   built from (`build(binary, p)` returning `[binary, "-p", p]`), found by
   fixpoint; and none for any other call, since what a function returns is
   not what it was given (`record_fixes(..., claude=...)` returns records,
@@ -58,6 +62,7 @@ import ast
 import functools
 import pathlib
 import re
+from typing import NamedTuple
 
 #: The one module allowed to start `claude`.
 SANCTIONED = "fix_step.py"
@@ -65,12 +70,21 @@ SANCTIONED = "fix_step.py"
 _SUBPROCESS = {"run", "Popen", "call", "check_call", "check_output", "getoutput",
                "getstatusoutput"}
 _CLAUDE_STRING = re.compile(r"(?:.*/)?claude(?:\.exe)?(?:\s.*)?", re.DOTALL)
-_SCOPES = (ast.FunctionDef, ast.AsyncFunctionDef)
+_FUNCTIONS = (ast.FunctionDef, ast.AsyncFunctionDef)
 
-# A slot names where a call's argv is: ("pos", i) the i-th positional
-# argument, ("from", i) every positional argument from the i-th on,
-# ("kw", name) a keyword argument, and ("kwrest", names) every keyword not in
-# `names` (a **kwargs parameter).
+#: Calls whose result is their argument, reshaped: a `claude` value passed to
+#: one is still the binary. Matched by the called name, so `x.join(...)` and
+#: `os.path.join(...)` alike.
+_PASS_THROUGH = {"which", "join", "abspath", "realpath", "expanduser", "normpath", "fspath",
+                 "str", "list", "tuple", "Path", "PurePath", "split", "format", "resolve"}
+
+# A set of slots picks out some of a call's arguments: ("pos", i) the i-th
+# positional argument, ("from", i) every positional argument from the i-th
+# on, ("kw", name) a keyword argument, and ("kwrest", names) every keyword
+# not in `names` (what a **kwargs parameter takes). Two tables map a
+# function's name to slots, and the slots mean a different thing in each: in
+# a launcher table, the arguments that become the process's argv; in the
+# returner table, the arguments the function's result is built from.
 
 
 def _stdlib_slots(func):
@@ -108,7 +122,7 @@ def _slots(call, launchers):
     return slots if slots is not None else launchers.get(_called_name(call.func))
 
 
-def _argv_parts(call, slots):
+def _arguments_in(call, slots):
     """The call's arguments that sit in `slots`. A starred positional
     argument, or a **mapping, could fill any slot, so it always counts."""
     parts = [a.value for a in call.args if isinstance(a, ast.Starred)]
@@ -135,7 +149,7 @@ def _scope_nodes(scope):
     while todo:
         node = todo.pop()
         found.append(node)
-        if not isinstance(node, _SCOPES):
+        if not isinstance(node, _FUNCTIONS):
             todo.extend(ast.iter_child_nodes(node))
     return tuple(found)
 
@@ -168,14 +182,6 @@ def _local_sources(scope):
     return sources
 
 
-#: Calls whose result is their argument, reshaped: a `claude` value passed to
-#: one is still the binary. Any other call's result is opaque, since what a
-#: function returns is not what it was given (`record_fixes(claude=...)`
-#: returns records, not the binary).
-_PASS_THROUGH = {"which", "join", "abspath", "realpath", "expanduser", "normpath", "fspath",
-                 "str", "list", "tuple", "Path", "PurePath", "split", "format", "resolve"}
-
-
 def _value_nodes(expression, returners):
     """The nodes the value of `expression` is made of. Into a call it goes
     only as far as the call's result is made of its arguments: all of them
@@ -190,8 +196,8 @@ def _value_nodes(expression, returners):
             name = _called_name(node.func)
             if name not in _PASS_THROUGH:
                 todo.append(node.func)
-                if name in returners:
-                    todo.extend(_argv_parts(node, returners[name]))
+                if name in returners:  # the arguments its result is built from
+                    todo.extend(_arguments_in(node, returners[name]))
                 continue
         todo.extend(ast.iter_child_nodes(node))
 
@@ -228,17 +234,17 @@ def _scopes(trees):
     for module, tree in trees.items():
         yield module, tree
         for node in ast.walk(tree):
-            if isinstance(node, _SCOPES):
+            if isinstance(node, _FUNCTIONS):
                 yield module, node
 
 
 def _launch_calls(scope, launchers):
-    """(call, its argv parts) for each launcher call in `scope`."""
+    """(call, the arguments that become its argv) for each launcher call in `scope`."""
     for node in _scope_nodes(scope):
         if isinstance(node, ast.Call):
             slots = _slots(node, launchers)
             if slots:
-                parts = _argv_parts(node, slots)
+                parts = _arguments_in(node, slots)
                 if parts:
                     yield node, parts
 
@@ -262,7 +268,7 @@ def _parameter_slots(function):
 
 def _functions_outside_fix_step(trees):
     for module, scope in _scopes(trees):
-        if module != SANCTIONED and isinstance(scope, _SCOPES):
+        if module != SANCTIONED and isinstance(scope, _FUNCTIONS):
             yield scope
 
 
@@ -290,19 +296,26 @@ def _grow(found, name, slots):
     return False
 
 
-def value_returners(trees):
-    """{name: slots} for the curamoir functions, outside fix_step.py, whose
-    return value is built from one of their parameters: a call to one is
-    made of the arguments in those slots (`build(binary, p)` returning
-    `[binary, "-p", p]`), and of nothing else it was given."""
+def _fixpoint(trees, step):
+    """Run step(function, found) over every function outside fix_step.py
+    until no step adds to `found`, a {name: slots} table it grows; a function
+    found late can make an earlier one a match, hence the repeat."""
     found = {}
     changed = True
     while changed:
         changed = False
         for function in _functions_outside_fix_step(trees):
-            slots = _parameters_reached(function, _returns(function), found)
-            changed |= _grow(found, function.name, slots)
+            changed |= step(function, found)
     return found
+
+
+def value_returners(trees):
+    """{name: slots} for the curamoir functions, outside fix_step.py, whose
+    return value is built from one of their parameters: a call to one is
+    made of the arguments in those slots (`build(binary, p)` returning
+    `[binary, "-p", p]`), and of nothing else it was given."""
+    return _fixpoint(trees, lambda function, found: _grow(
+        found, function.name, _parameters_reached(function, _returns(function), found)))
 
 
 def argv_launchers(trees, returners=None):
@@ -310,16 +323,12 @@ def argv_launchers(trees, returners=None):
     that pass one of their parameters into a launcher's argv. Functions that
     share a name share their slots."""
     returners = value_returners(trees) if returners is None else returners
-    found = {}
-    changed = True
-    while changed:
-        changed = False
-        for function in _functions_outside_fix_step(trees):
-            parts = [part for _call, call_parts in _launch_calls(function, found)
-                     for part in call_parts]
-            changed |= _grow(found, function.name,
-                             _parameters_reached(function, parts, returners))
-    return found
+
+    def step(function, found):
+        argv = [part for _call, parts in _launch_calls(function, found) for part in parts]
+        return _grow(found, function.name, _parameters_reached(function, argv, returners))
+
+    return _fixpoint(trees, step)
 
 
 def claude_builders(trees, returners=None):
@@ -328,24 +337,28 @@ def claude_builders(trees, returners=None):
     fix_step_argv if it lived anywhere else): a call to one is a `claude`
     value too."""
     returners = value_returners(trees) if returners is None else returners
-    found = set()
-    changed = True
-    while changed:
-        changed = False
-        for function in _functions_outside_fix_step(trees):
-            if function.name in found:
-                continue
-            sources = _local_sources(function)
-            if any(_claude_value(built, returners, found) for value in _returns(function)
-                   for built in _built_from(value, sources, returners)):
-                found.add(function.name)
-                changed = True
-    return found
+
+    def step(function, found):
+        sources = _local_sources(function)
+        builds = any(_claude_value(built, returners, found) for value in _returns(function)
+                     for built in _built_from(value, sources, returners))
+        return builds and _grow(found, function.name, {"returns claude"})
+
+    return set(_fixpoint(trees, step))
+
+
+class Hit(NamedTuple):
+    """A call outside fix_step.py whose argv is built from a `claude` value."""
+
+    module: str
+    line: int
+    launcher: str
+    value: str
 
 
 def claude_launches(trees):
-    """(module, line, launcher, the claude value) for each call outside
-    fix_step.py whose argv is built from a `claude` value."""
+    """A Hit for each call outside fix_step.py whose argv is built from a
+    `claude` value, in module and line order."""
     returners = value_returners(trees)
     launchers = argv_launchers(trees, returners)
     builders = claude_builders(trees, returners)
@@ -354,11 +367,11 @@ def claude_launches(trees):
         if module == SANCTIONED:
             continue
         sources = _local_sources(scope)
-        for call, parts in _launch_calls(scope, launchers):
-            for built in (b for part in parts for b in _built_from(part, sources, returners)):
+        for call, argv in _launch_calls(scope, launchers):
+            for built in (b for part in argv for b in _built_from(part, sources, returners)):
                 value = _claude_value(built, returners, builders)
                 if value:
-                    hits.add((module, call.lineno, _called_name(call.func), value))
+                    hits.add(Hit(module, call.lineno, _called_name(call.func), value))
                     break
     return sorted(hits)
 
