@@ -618,6 +618,34 @@ def test_a_gitattributes_anywhere_in_the_tree_is_held_to_the_snapshot(sandbox):
     assert "filter" in found[0].reason
 
 
+@pytest.mark.parametrize("label", [
+    "sub/.GIT/HEAD", "sub/.Git", "sub/.g\u200cit/HEAD", "sub/.\ufeffgit",
+    "src/.GitAttributes", "src/.gitattribute\u200cs", "src/.GITATTRIBUTES\u206a"])
+def test_a_git_name_in_any_spelling_a_file_system_may_match_is_refused(sandbox, label):
+    """`.GIT` is `.git` on a case-insensitive file system, and HFS+ also
+    ignores some code points (`.g\u200cit`). verify_git_state refuses every
+    such spelling on any file system, so these run, and must hold, here."""
+    state = snapshot_git_state(sandbox)
+    target = sandbox.path / label
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("* filter=x\n", encoding="utf-8")
+
+    found = verify_git_state(state)
+
+    assert [(c.label, c.change) for c in found] == [(label, "added")]
+
+
+@pytest.mark.parametrize("label", ["sub/a.git/HEAD", "sub/.gitx", "src/x.gitattributes",
+                                   "src/.gitattributes.bak", "sub/\u200c.gi"])
+def test_a_name_that_only_resembles_a_git_name_is_not_refused(sandbox, label):
+    state = snapshot_git_state(sandbox)
+    target = sandbox.path / label
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("x\n", encoding="utf-8")
+
+    assert verify_git_state(state) == ()
+
+
 def test_an_unchanged_sandbox_reports_nothing(sandbox):
     state = snapshot_git_state(sandbox)
     git(sandbox.path, "diff", "HEAD")

@@ -174,7 +174,7 @@ REFUSED_INTERNALS = (REFUSED_RUN, GIT_INTERNALS_CHANGED)
 DROPPED_ADDED = (DROPPED, FILE_ADDED)
 
 
-def mechanisms(canaries, case_insensitive):
+def mechanisms(canaries):
     """{name: (plants, git_commands, expected outcome)}. A plant's value is
     file text, or None for a directory. `git_commands` are run by the stand-in
     agent itself, in the clone, after planting (the agent's own act, which
@@ -225,27 +225,17 @@ def mechanisms(canaries, case_insensitive):
         "envrc": ({".envrc": f"{canaries.script('envrc')}\n",
                    ".mailmap": "A <a@example.invalid> <b@example.invalid>\n"}, [], DROPPED_ADDED),
     }
-    if case_insensitive:
-        # On a case-insensitive file system `sub/.GIT` IS `sub/.git` to
-        # git, and `.GitAttributes` is read as `.gitattributes`.
-        # verify_git_state compares those names case-insensitively (found by
-        # this module, cm-3b2), so both are refused before any git command
-        # runs, as their lower-case spellings are.
-        found["nested-git-dir-case"] = (
-            {**repository_skeleton(canaries, "nestedcase", "sub/.GIT"),
-             "sub/module.py": "x = 1\n"}, [], REFUSED_INTERNALS)
-        found["gitattributes-case"] = ({"src/.GitAttributes": attributes()}, [],
-                                       REFUSED_INTERNALS)
+    # Case variants: on a case-insensitive file system `sub/.GIT` IS
+    # `sub/.git` to git, and `.GitAttributes` is read as `.gitattributes`.
+    # verify_git_state matches those names as such a file system would (found
+    # by this module, cm-3b2) on every file system, so both are refused before
+    # any git command runs, as their lower-case spellings are, here too.
+    found["nested-git-dir-case"] = (
+        {**repository_skeleton(canaries, "nestedcase", "sub/.GIT"),
+         "sub/module.py": "x = 1\n"}, [], REFUSED_INTERNALS)
+    found["gitattributes-case"] = ({"src/.GitAttributes": attributes()}, [],
+                                   REFUSED_INTERNALS)
     return found
-
-
-def folds_case(directory):
-    probe = directory / "CaseProbe"
-    probe.write_text("", encoding="utf-8")
-    try:
-        return (directory / "caseprobe").exists()
-    finally:
-        probe.unlink()
 
 
 def planting_fixer(tmp_path, canaries, plants, git_commands=()):
@@ -313,17 +303,14 @@ PYTEST_GATE = GATE.replace("\"! grep -rq BREAKS src\"",
 
 
 def test_every_mechanism_is_run(tmp_path):
-    assert set(MECHANISMS) == set(mechanisms(Canaries(tmp_path), case_insensitive=True))
+    assert set(MECHANISMS) == set(mechanisms(Canaries(tmp_path)))
 
 
 @pytest.mark.parametrize("name", MECHANISMS)
 def test_nothing_planted_in_the_clone_runs_and_only_the_patch_leaves(tmp_path, no_real_gh,
                                                                      name):
     canaries = Canaries(tmp_path)
-    found = mechanisms(canaries, folds_case(tmp_path))
-    if name not in found:
-        pytest.skip("the file system here is case-sensitive: no case variant applies")
-    plants, git_commands, expected = found[name]
+    plants, git_commands, expected = mechanisms(canaries)[name]
     repo = checkout(tmp_path, NO_BARE_PRINT, config=GATE)
     before = checkout_state(repo)
     claude = planting_fixer(tmp_path, canaries, plants, git_commands)

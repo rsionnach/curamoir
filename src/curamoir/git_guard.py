@@ -647,6 +647,8 @@ def verify_git_state(state):
     """A StateChange per git file or `.gitattributes` added, removed or
     changed since `state` was taken, and per work-tree entry inside or named
     a nested `.git` (present now or changed), in label order; () if none.
+    Both names are matched in every spelling git may read as them
+    (_as_git_reads): `.GIT`, `.GitAttributes`, `.g\u200cit`.
 
     WHY the nested `.git`: a directory holding one is a repository of its
     own to git, and a git command that opens it (a submodule status, a
@@ -665,9 +667,7 @@ def verify_git_state(state):
         "a `.gitattributes` can point a filter or diff driver at a file, which the "
         "next `git diff` would apply"))
     for label in sorted(set(before) | set(after)):
-        # Case-insensitively: on a case-insensitive file system (macOS's
-        # default) `sub/.GIT` is a nested repository to git (cm-3b2).
-        if ".git" not in (part.lower() for part in label.split("/")):
+        if ".git" not in (_as_git_reads(part) for part in label.split("/")):
             continue
         change = ("added" if label not in before else "removed" if label not in after
                   else "changed" if before[label] != after[label] else "present")
@@ -732,10 +732,25 @@ def _tree_digests(root):
     return tuple(sorted(found.items()))
 
 
+#: The code points HFS+ leaves out when it compares names, so `.g\u200cit` is
+#: `.git` there: git's own list (is_hfs_dotgit, CVE-2014-9390).
+_HFS_IGNORABLE = frozenset([*range(0x200C, 0x2010), *range(0x202A, 0x202F),
+                            *range(0x206A, 0x2070), 0xFEFF])
+
+
+def _as_git_reads(name):
+    """`name` as a file system that folds case, and HFS+'s ignorable code
+    points, would match it: so `.GIT`, `.GitAttributes` and `.g\u200cit`
+    compare equal to `.git` and `.gitattributes` (cm-3b2). Applied on every
+    file system, so a case-sensitive one refuses them too: the check never
+    depends on which file system the sandbox happens to be on."""
+    return "".join(c for c in name if ord(c) not in _HFS_IGNORABLE).lower()
+
+
 def _is_attributes(label):
-    """Whether `label` names a `.gitattributes`, in any case: git reads
-    `.GitAttributes` as one on a case-insensitive file system (cm-3b2)."""
-    return label.rsplit("/", 1)[-1].lower() == ".gitattributes"
+    """Whether `label` names a `.gitattributes` as git may read it
+    (_as_git_reads)."""
+    return _as_git_reads(label.rsplit("/", 1)[-1]) == ".gitattributes"
 
 
 def _label(root, path):
