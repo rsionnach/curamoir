@@ -1640,30 +1640,58 @@ def test_a_null_fix_is_allowed_on_a_finding_and_on_a_closure():
     assert closed["closures"] == [earlier[0]["fingerprint"]] and closed["findings"][0]["fix"] is None
 
 
-# Real reviewer reports, produced under the section 10 contract during cm-70j's
-# own R5 run and copied verbatim from .claude/r5-reports (gitignored there).
+# Synthetic reviewer reports in the section 10 contract (cm-rzs). Each has the
+# structure and numbers of one real report from cm-70j's R5 run: the record
+# count, severities, verification levels, the share of "fix": null, closures,
+# the regression flag and the prose layout. The project, paths, lines, claims
+# and evidence are invented, and each closure's `resolves` is the fingerprint
+# the parser computes from the report before it. Public fixtures are never
+# real records (spec section 11, publication rule).
 R5_REPORTS = Path(__file__).resolve().parent / "fixtures" / "r5-reports"
 
 
 def _lens_of_report(name):
-    """cm-70j-edge-cases-1.md -> edge_cases."""
-    return name.removeprefix("cm-70j-").rsplit("-", 1)[0].replace("-", "_")
+    """synthetic-edge-cases-1.md -> edge_cases."""
+    return name.removeprefix("synthetic-").rsplit("-", 1)[0].replace("-", "_")
 
 
-@pytest.mark.parametrize("name", ["cm-70j-correctness-1.md", "cm-70j-correctness-4.md",
-                                  "cm-70j-correctness-5.md", "cm-70j-clarity-1.md",
-                                  "cm-70j-clarity-2.md", "cm-70j-edge-cases-1.md"])
-def test_a_real_reviewer_report_parses_for_its_lens(name, capsys):
+@pytest.mark.parametrize("name", ["synthetic-correctness-1.md", "synthetic-correctness-4.md",
+                                  "synthetic-correctness-5.md", "synthetic-clarity-1.md",
+                                  "synthetic-clarity-2.md", "synthetic-edge-cases-1.md"])
+def test_a_reviewer_report_of_the_real_shape_parses_for_its_lens(name, capsys):
     path = R5_REPORTS / name
     assert r5f.main(["parse", _lens_of_report(name), str(path)]) == 0
     out = json.loads(capsys.readouterr().out)
     assert len(out["findings"]) == len(r5f.parse_report(path.read_text(), _lens_of_report(name))["findings"]) > 0
 
 
+
+def test_no_fixture_report_points_at_a_file_of_this_repository():
+    """A real report names this repository's own files; a synthetic one names
+    the invented project's. So a real record copied in fails here."""
+    repo = Path(__file__).resolve().parent.parent
+    reports = sorted(R5_REPORTS.glob("*.md"))
+    assert [p.name for p in reports] == sorted(
+        f"synthetic-{n}.md" for n in ("correctness-1", "correctness-4", "correctness-5",
+                                      "clarity-1", "clarity-2", "edge-cases-1"))
+    for path in reports:
+        records = r5f.parse_report(path.read_text(), _lens_of_report(path.name))["findings"]
+        assert records and not [r["path"] for r in records if (repo / r["path"]).exists()]
+
+
+def test_the_fixture_reports_are_what_their_generator_writes(tmp_path):
+    repo = Path(__file__).resolve().parent.parent
+    done = subprocess.run([sys.executable, str(R5_REPORTS / "make_synthetic_reports.py"),
+                           str(repo), str(tmp_path)], capture_output=True, text=True, timeout=60)
+    assert done.returncode == 0, done.stderr
+    written = sorted(p.name for p in tmp_path.glob("*.md"))
+    assert written == sorted(p.name for p in R5_REPORTS.glob("*.md"))
+    assert all((tmp_path / n).read_bytes() == (R5_REPORTS / n).read_bytes() for n in written)
+
 @pytest.mark.parametrize(("before", "after", "closed"), [
-    ("cm-70j-correctness-4.md", "cm-70j-correctness-5.md", 2),
-    ("cm-70j-clarity-1.md", "cm-70j-clarity-2.md", 7)])
-def test_a_real_verify_report_closes_its_real_prior_open_set(before, after, closed):
+    ("synthetic-correctness-4.md", "synthetic-correctness-5.md", 2),
+    ("synthetic-clarity-1.md", "synthetic-clarity-2.md", 7)])
+def test_a_verify_report_of_the_real_shape_closes_its_prior_open_set(before, after, closed):
     """The later report's closures (each with "fix": null) name fingerprints
     the parser computes from the earlier report's findings."""
     lens = _lens_of_report(before)
