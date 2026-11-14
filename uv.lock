@@ -47,7 +47,7 @@ dev = [
 requires-dist = [
     { name = "ast-grep-cli", marker = "extra == 'dev'", specifier = ">=0.50" },
     { name = "pyflakes", marker = "extra == 'dev'", specifier = ">=3" },
-    { name = "pytest", marker = "extra == 'dev'", specifier = ">=8" },
+    { name = "pytest", marker = "extra == 'dev'", specifier = ">=9" },
     { name = "pytest-timeout", marker = "extra == 'dev'", specifier = ">=2.3" },
     { name = "pyyaml", specifier = ">=6" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.6" },

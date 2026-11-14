@@ -19,15 +19,15 @@ line before the stack.
 The thread method's timer is Python code, so it cannot fire while a test
 holds the GIL, as a regex that backtracks for ever does. For that,
 `faulthandler_timeout` (pytest's own, a C watchdog) is set a little above the
-limit: it prints every thread's stack while the GIL is held, but it neither
-fails the test nor ends the run, so the run still hangs until something
-outside kills it, now with the test named.
+limit: it prints every thread's stack while the GIL is held and, with
+`faulthandler_exit_on_timeout`, ends the run as the thread method does.
 """
-import os
 import subprocess
 import sys
 import time
 from pathlib import Path
+
+import pytest_timeout
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -39,13 +39,13 @@ WATCHDOG = 150.0
 
 def test_every_test_runs_under_the_thread_method_time_limit(pytestconfig):
     assert pytestconfig.pluginmanager.hasplugin("timeout")
-    assert float(pytestconfig.getini("timeout")) == LIMIT
-    assert pytestconfig.getini("timeout_method") == "thread"
+    # What is in force, not just what is configured: pytest-timeout's own
+    # resolver, which puts --timeout, PYTEST_TIMEOUT and --timeout-method
+    # ahead of the ini values.
+    settings = pytest_timeout.get_env_settings(pytestconfig)
+    assert (settings.timeout, settings.method) == (LIMIT, "thread")
     assert float(pytestconfig.getini("faulthandler_timeout")) == WATCHDOG
-    # The limit in force, not just the configured one: pytest-timeout takes
-    # --timeout first, then PYTEST_TIMEOUT, then the ini value.
-    assert pytestconfig.getoption("timeout") is None, "--timeout overrides the limit"
-    assert "PYTEST_TIMEOUT" not in os.environ, "PYTEST_TIMEOUT overrides the limit"
+    assert pytestconfig.getini("faulthandler_exit_on_timeout") is True
 
 
 # The probe below, in seconds, smallest first: the shortened limit; the
@@ -84,20 +84,19 @@ GIL_HANG = ["import re", "", "", "def test_that_holds_the_gil():",
             '    re.match(r"(a+)+$", "a" * 40 + "b")']
 
 
-def test_a_hang_that_holds_the_gil_still_prints_its_stack(tmp_path):
+def test_a_hang_that_holds_the_gil_is_named_and_ends_the_run(tmp_path):
     """The thread method cannot stop this test; the faulthandler watchdog,
-    shortened to 2 s, still names it. The run itself only ends when the
-    guard here kills it."""
+    shortened to the same short limit, names it and ends the run."""
     (tmp_path / "test_gil.py").write_text("\n".join(GIL_HANG) + "\n")
-    try:
-        done = subprocess.run(
-            [sys.executable, "-m", "pytest", "-c", str(ROOT / "pyproject.toml"),
-             "--rootdir", str(tmp_path), "-p", "no:cacheprovider", "-q",
-             "-o", f"timeout={SHORT_LIMIT}", "-o", f"faulthandler_timeout={SHORT_LIMIT}",
-             str(tmp_path / "test_gil.py")],
-            cwd=tmp_path, capture_output=True, text=True, timeout=SHORT_LIMIT + 8)
-        output = done.stdout + done.stderr
-    except subprocess.TimeoutExpired as hung:
-        output = "".join(part.decode() if isinstance(part, bytes) else part or ""
-                         for part in (hung.stdout, hung.stderr))
-    assert f'test_gil.py", line {len(GIL_HANG)} in test_that_holds_the_gil' in output
+    started = time.monotonic()
+    done = subprocess.run(
+        [sys.executable, "-m", "pytest", "-c", str(ROOT / "pyproject.toml"),
+         "--rootdir", str(tmp_path), "-p", "no:cacheprovider", "-q",
+         "-o", f"timeout={SHORT_LIMIT}", "-o", f"faulthandler_timeout={SHORT_LIMIT}",
+         str(tmp_path / "test_gil.py")],
+        cwd=tmp_path, capture_output=True, text=True, timeout=GUARD)
+    elapsed = time.monotonic() - started
+    assert done.returncode != 0
+    assert elapsed < STOPPED_WITHIN, f"the watchdog did not end the run ({elapsed:.0f} s)"
+    assert (f'test_gil.py", line {len(GIL_HANG)} in test_that_holds_the_gil'
+            in done.stdout + done.stderr)

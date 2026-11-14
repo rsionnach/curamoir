@@ -23,7 +23,7 @@ curamoir-lint = "curamoir.lint:main"
 
 [project.optional-dependencies]
 dev = [
-    "pytest>=8",
+    "pytest>=9",  # faulthandler_exit_on_timeout (below) is new in pytest 9
     "ruff>=0.6",
     "pyflakes>=3",
     "ast-grep-cli>=0.50",
@@ -59,10 +59,11 @@ addopts = "-W error --strict-markers"
 # a budget. Why `thread` and not `signal` (curamoir.lint._time_limit), and
 # what a timeout prints: tests/test_suite_timeout.py. faulthandler_timeout is
 # pytest's own watchdog, for a hang that holds the GIL, which the thread
-# method's timer cannot interrupt: it prints the stack and lets the run go on.
+# method's timer cannot interrupt: it prints the stack and ends the run.
 timeout = 120
 timeout_method = "thread"
 faulthandler_timeout = 150
+faulthandler_exit_on_timeout = true
 
 # A project whose thesis is the mechanical enforcement of a repository's own
 # standards had no linter, and hand-enforced its house style instead. Every
