@@ -130,6 +130,34 @@ def test_git_never_descends_into_a_submodule(tmp_path):
     assert listing == "all"
 
 
+def test_git_never_runs_an_ext_transport(tmp_path):
+    """An `ext::` URL is a command git runs as its transport. A repository's
+    config can name one as a remote and allow it (`protocol.allow`,
+    `protocol.ext.allow`): the shape a planted clone config would take. The
+    hardening's `protocol.ext.allow=never` outranks that, so it never runs.
+    The control: the same repository's own git does run it. (No runner git
+    call in the clone uses a transport after the fix step, so this is
+    defence in depth.)"""
+    repo = git_repo(tmp_path, {"m.py": "x = 1\n"})
+    # Not planted(): its `cat` would wait on the transport's open stdin.
+    marker = tmp_path / "ran"
+    program = tmp_path / "transport.sh"
+    program.write_text(f"#!/bin/sh\ntouch {marker}\nexit 1\n", encoding="utf-8")
+    program.chmod(0o755)
+    run(repo, "config", "protocol.allow", "always")
+    run(repo, "config", "protocol.ext.allow", "always")
+    run(repo, "remote", "add", "planted", f"ext::{program}")
+    subprocess.run(["git", "ls-remote", "planted"], cwd=repo, env=git_guard.scrubbed_environment(),
+                   capture_output=True, stdin=subprocess.DEVNULL, timeout=60)
+    assert marker.exists(), "the control: an allowed ext:: transport runs"
+    marker.unlink()
+
+    with pytest.raises(GitGuardError, match="git ls-remote"):
+        git(repo, "ls-remote", "planted")
+
+    assert not marker.exists()
+
+
 def test_git_names_a_failure(tmp_path):
     repo = git_repo(tmp_path, {"m.py": "x = 1\n"})
 
@@ -591,6 +619,71 @@ def test_a_gitattributes_anywhere_in_the_tree_is_held_to_the_snapshot(sandbox):
 
     assert [(c.label, c.change) for c in found] == [("sub/.gitattributes", "added")]
     assert "filter" in found[0].reason
+
+
+@pytest.mark.parametrize("label", [
+    "sub/.GIT/HEAD", "sub/.Git", "sub/.g\u200cit/HEAD", "sub/.\ufeffgit",
+    "src/.GitAttributes", "src/.gitattribute\u200cs", "src/.GITATTRIBUTES\u206a"])
+def test_a_git_name_in_any_spelling_a_file_system_may_match_is_refused(sandbox, label):
+    """`.GIT` is `.git` on a case-insensitive file system, and HFS+ also
+    ignores some code points (`.g\u200cit`). verify_git_state refuses every
+    such spelling on any file system, so these run, and must hold, here."""
+    state = snapshot_git_state(sandbox)
+    target = sandbox.path / label
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("* filter=x\n", encoding="utf-8")
+
+    found = verify_git_state(state)
+
+    assert [(c.label, c.change) for c in found] == [(label, "added")]
+
+
+@pytest.mark.parametrize("label", ["sub/a.git/HEAD", "sub/.gitx", "src/x.gitattributes",
+                                   "src/.gitattributes.bak", "sub/\u200c.gi"])
+def test_a_name_that_only_resembles_a_git_name_is_not_refused(sandbox, label):
+    state = snapshot_git_state(sandbox)
+    target = sandbox.path / label
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("x\n", encoding="utf-8")
+
+    assert verify_git_state(state) == ()
+
+
+#: git's own list of the code points HFS+ ignores in names (utf8.c,
+#: next_hfs_char), written out here rather than read from git_guard, and
+#: its neighbours, which HFS+ does not ignore.
+HFS_IGNORED = (0x200C, 0x200D, 0x200E, 0x200F, 0x202A, 0x202B, 0x202C, 0x202D, 0x202E,
+               0x206A, 0x206B, 0x206C, 0x206D, 0x206E, 0x206F, 0xFEFF)
+HFS_KEPT = (0x200B, 0x2010, 0x2029, 0x202F, 0x2069, 0x2070, 0xFEFE)
+
+
+def git_refuses_as_dotgit(repo, name):
+    """Whether git itself (core.protectHFS) refuses `sub/<name>/x` as a `.git`."""
+    blob = subprocess.run(["git", "hash-object", "-w", "--stdin"], cwd=repo, input=b"x\n",
+                          capture_output=True, check=True, timeout=60).stdout.decode().strip()
+    added = subprocess.run(
+        ["git", "-c", "core.protectHFS=true", "update-index", "--add", "--cacheinfo",
+         f"100644,{blob},sub/{name}/x"], cwd=repo, capture_output=True, timeout=60)
+    return added.returncode != 0
+
+
+@pytest.mark.parametrize("point", HFS_IGNORED + HFS_KEPT, ids=lambda point: f"U+{point:04X}")
+def test_an_hfs_ignored_code_point_is_refused_exactly_where_git_refuses_it(sandbox, point):
+    """`.g<point>it` is `.git` on HFS+ when HFS+ ignores `point`. git's own
+    core.protectHFS is the oracle: verify_git_state refuses the name exactly
+    when git does, so the list cannot drift from git's."""
+    name = f".g{chr(point)}it"
+    oracle = git_refuses_as_dotgit(sandbox.path, name)
+    assert oracle == (point in HFS_IGNORED), "the list above is git's"
+    run(sandbox.path, "rm", "--cached", "--quiet", "--ignore-unmatch", "-r", "sub")
+    state = snapshot_git_state(sandbox)
+    target = sandbox.path / "sub" / name / "HEAD"
+    target.parent.mkdir(parents=True)
+    target.write_text("ref: refs/heads/main\n", encoding="utf-8")
+
+    refused = [c.label for c in verify_git_state(state)]
+
+    assert refused == ([f"sub/{name}/HEAD"] if oracle else [])
 
 
 def test_an_unchanged_sandbox_reports_nothing(sandbox):
