@@ -629,24 +629,27 @@ def test_only_run_fix_step_calls_fix_step_argv():
 # time, and real flags it did not name; a scan of every way an argv reaches
 # a process kept finding new shapes, so the rule is on the name.
 
-def _package_with(planted, name="planted.py"):
-    """The package with one more module: source text, or a parsed module."""
+def _package_with(source, name="planted.py"):
+    """The package with one more module, parsed from `source`."""
     import ast
 
-    return {**_curamoir_trees(), name: ast.parse(planted) if isinstance(planted, str) else planted}
+    return {**_curamoir_trees(), name: ast.parse(source)}
 
 
 def test_no_module_but_fix_step_names_the_claude_binary_unless_allowed():
     trees = _curamoir_trees()
-    assert unallowed(trees) == [], failure_message(unallowed(trees))
-    assert stale(trees) == [], f"ALLOWED entries that match nothing now: {stale(trees)}"
+    missing, left_over = unallowed(trees), stale(trees)
+    assert missing == [], failure_message(missing)
+    assert left_over == [], f"ALLOWED entries that match nothing now: {left_over}"
     # Not vacuous: the allowed mentions are found, so the rule reads them.
     assert {(m.module, m.owner) for m in claude_mentions(trees)} == set(ALLOWED)
 
 
 #: Each names the binary outside fix_step.py: the three shapes the flag list
 #: missed (a bare `claude -p`, a flag built at run time, real flags it did
-#: not name), and the shapes the data-flow scan kept finding.
+#: not name), then a launcher imported by name, a parameter default, a module
+#: constant, a path, a wrapped shell line, an env prefix, an f-string, bytes,
+#: a class attribute, and prose that ends in the word.
 NAMING_CLAUDE = {
     "bare": "import subprocess\ndef job(p):\n    subprocess.run(['claude', '-p', p])\n",
     "flags_built_at_run_time": (
@@ -677,7 +680,8 @@ def test_a_constant_naming_claude_is_found(planted):
     assert "fix_step.run_fix_step" in failure_message(found)
 
 
-#: Not the binary: words that only contain it, prose, and a docstring.
+#: Not the binary: words that only contain it, prose that does not end in
+#: the word, and a docstring.
 NOT_NAMING_CLAUDE = {
     "a_settings_path": "PATH = '.claude/settings.json'\n",
     "a_url": "DOCS = 'https://code.claude.com/docs/en/cli-reference'\n",
@@ -707,7 +711,7 @@ def test_an_entry_for_a_function_does_not_cover_a_same_named_method():
     planted = _package_with("def go():\n    return 'claude'\n"
                             "class Job:\n    def go(self):\n        return 'claude -p x'\n")
     found = unallowed(planted, {**ALLOWED, ("planted.py", "go"): "why"})
-    assert [(m.owner, m.value) for m in found] == [("Job.go", "'claude -p x'")]
+    assert [(m.owner, m.shown) for m in found] == [("Job.go", "'claude -p x'")]
 
 
 def test_a_stale_allow_list_entry_is_reported():

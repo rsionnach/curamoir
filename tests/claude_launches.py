@@ -40,8 +40,8 @@ from typing import NamedTuple
 #: The one module that may name the binary anywhere: it starts the agent.
 SANCTIONED = "fix_step.py"
 
-#: (file under src/curamoir/, enclosing function or constant) -> why it may
-#: name the binary. Each entry must still match a constant, so a stale one
+#: (file under src/curamoir/, qualified name of the enclosing function or
+#: class, or the module-level constant) -> why it may name the binary. Each entry must still match a constant, so a stale one
 #: fails the test rather than silently allowing a later string.
 ALLOWED = {
     ("sweep_job.py", "CLAUDE"):
@@ -66,12 +66,13 @@ def names_claude(value):
 
 
 class Mention(NamedTuple):
-    """A constant outside fix_step.py that names the binary."""
+    """A constant outside fix_step.py that names the binary; `shown` is its
+    repr, as a failure message prints it."""
 
     module: str
     line: int
     owner: str
-    value: str
+    shown: str
 
 
 def _docstrings(tree):
@@ -140,7 +141,7 @@ def stale(trees, allowed=None):
 
 
 def failure_message(mentions):
-    lines = [f"  {m.module}:{m.line} in {m.owner}: {m.value}" for m in mentions]
+    lines = [f"  {m.module}:{m.line} in {m.owner}: {m.shown}" for m in mentions]
     return ("These name the claude binary outside fix_step.py:\n" + "\n".join(lines) + "\n"
             "Start the agent through fix_step.run_fix_step, which builds its argv with the "
             "refusals. If this is a new caller's default for a binary it hands to "
