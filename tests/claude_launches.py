@@ -15,14 +15,17 @@ flagged if it is exactly `claude`, ends in `/claude`, or holds `claude` as a
 command word followed by a flag or by the end of the string (`claude -p`,
 `timeout 60 claude -p`, `env X=1 claude`). Words that only contain it
 (`claude_settings`, `.claude/settings.json`, `code.claude.com`,
-`claude-code`) are not. A sentence that ends in the word (`could not reach
-claude`) is flagged too, since it reads as a command word at the end:
-rephrase it, or give it an entry.
+`claude-code`) are not, and nor is a lone dash after it (`claude - the
+agent`). A sentence that ends in the word (`could not reach claude`) is
+flagged too, since it reads as a command word at the end; so is an
+f-string whose literal part ends in it (`f"the claude {kind} binary"`
+checks `"the claude "`): rephrase it, or give it an entry.
 
 **The allow-list.** fix_step.py is allowed whole: it is where the agent is
 started. Anything else needs an entry in ALLOWED: the file, the qualified
 name of the enclosing function or class (for a parameter default or a
-string inside one) or the module-level constant, and a one-line reason. There is no
+string inside one) or the module-level constant, how many mentions it
+covers, and a one-line reason. There is no
 data-flow tracking. Adding an entry is the review point: the person or gate
 that adds one judges whether the new caller still starts the agent only
 through fix_step.run_fix_step.
@@ -41,19 +44,25 @@ from typing import NamedTuple
 SANCTIONED = "fix_step.py"
 
 #: (file under src/curamoir/, qualified name of the enclosing function or
-#: class, or the module-level constant) -> why it may name the binary. Each
-#: entry must still match a constant, so a stale one fails the test rather
-#: than silently allowing a later string.
+#: class, or the module-level constant) -> (how many mentions it covers, why
+#: it may name the binary). The count is exact: a second mention added in an
+#: allowed function (a direct launch beside its default) fails, and so does
+#: an entry that matches fewer mentions than it says (a stale one), so the
+#: list never silently allows a later string.
 ALLOWED = {
-    ("sweep_job.py", "CLAUDE"):
-        "the default binary, handed to run_fix_step as tools.claude; never launched here",
-    ("tier1.py", "_call_scan"):
-        "the claude= default it passes on to run_fix_step",
-    ("tier1.py", "run_tier1_scan"):
-        "the claude= default it passes on to run_fix_step through _call_scan",
+    ("sweep_job.py", "CLAUDE"): (
+        1, "the default binary, handed to run_fix_step as tools.claude; never launched here"),
+    ("tier1.py", "_call_scan"): (
+        1, "the claude= default it passes on to run_fix_step"),
+    ("tier1.py", "run_tier1_scan"): (
+        1, "the claude= default it passes on to run_fix_step through _call_scan"),
 }
 
-_COMMAND_WORD = re.compile(r"(?:^|[\s;&|(`'\"])claude(?:\.exe)?(?=\s+-|\s*$)")
+#: `claude` as a command word: at the start or after a space or a shell
+#: separator, and followed by a flag (a dash and then a letter or digit, so
+#: prose like "claude - the agent" is not one) or by the end.
+_COMMAND_WORD = re.compile(
+    r"(?:^|[\s;&|(`'\"])claude(?:\.exe)?(?=\s+--?[A-Za-z0-9]|\s*$)")
 
 
 def names_claude(value):
@@ -128,17 +137,28 @@ def claude_mentions(trees):
     return sorted(found)
 
 
+def _by_owner(trees):
+    owners = {}
+    for mention in claude_mentions(trees):
+        owners.setdefault((mention.module, mention.owner), []).append(mention)
+    return owners
+
+
 def unallowed(trees, allowed=None):
-    """The mentions ALLOWED (or `allowed`) does not cover."""
+    """The mentions ALLOWED (or `allowed`) does not cover: every mention of
+    an owner with no entry, and every mention of an owner that has more than
+    its entry's count (which one is new cannot be told, so all are shown)."""
     allowed = ALLOWED if allowed is None else allowed
-    return [m for m in claude_mentions(trees) if (m.module, m.owner) not in allowed]
+    return sorted(m for key, mentions in _by_owner(trees).items()
+                  if len(mentions) > allowed.get(key, (0, ""))[0] for m in mentions)
 
 
 def stale(trees, allowed=None):
-    """The allow-list entries no mention matches any more."""
+    """The allow-list entries that match fewer mentions than their count."""
     allowed = ALLOWED if allowed is None else allowed
-    seen = {(m.module, m.owner) for m in claude_mentions(trees)}
-    return sorted(set(allowed) - seen)
+    owners = _by_owner(trees)
+    return sorted(key for key, (count, _reason) in allowed.items()
+                  if len(owners.get(key, [])) < count)
 
 
 def failure_message(mentions):
@@ -146,8 +166,8 @@ def failure_message(mentions):
     return ("These name the claude binary outside fix_step.py:\n" + "\n".join(lines) + "\n"
             "Start the agent through fix_step.run_fix_step, which builds its argv with the "
             "refusals. If this is a new caller's default for a binary it hands to "
-            "run_fix_step, add an entry to ALLOWED in tests/claude_launches.py with a "
-            "one-line reason.")
+            "run_fix_step, add an entry to ALLOWED in tests/claude_launches.py with "
+            "its count and a one-line reason.")
 
 
 def package_trees(root):

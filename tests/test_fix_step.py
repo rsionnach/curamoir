@@ -643,6 +643,7 @@ def test_no_module_but_fix_step_names_the_claude_binary_unless_allowed():
     assert left_over == [], f"ALLOWED entries that match nothing now: {left_over}"
     # Not vacuous: the allowed mentions are found, so the rule reads them.
     assert {(m.module, m.owner) for m in claude_mentions(trees)} == set(ALLOWED)
+    assert all(count >= 1 and reason for count, reason in ALLOWED.values())
 
 
 #: Each names the binary outside fix_step.py: the three shapes the flag list
@@ -670,6 +671,9 @@ NAMING_CLAUDE = {
     "bytes": "import subprocess\ndef job():\n    subprocess.run([b'claude', b'-p'])\n",
     "a_class_attribute": "class Job:\n    BINARY = 'claude'\n",
     "prose_ending_in_the_word": "MESSAGE = 'could not reach claude'\n",
+    "an_f_string_part_ending_in_the_word": "def job(kind):\n    return f'the claude {kind} binary'\n",
+    "a_bare_string_after_the_docstring": "def job():\n    \"\"\"Doc.\"\"\"\n    'claude -p'\n",
+    "a_tuple_target_at_module_level": "BIN, ARG = 'claude', '-p'\n",
 }
 
 
@@ -688,6 +692,10 @@ NOT_NAMING_CLAUDE = {
     "an_identifier_like_word": "NAME = 'claude_settings'\nTOOL = 'claude-code'\n",
     "prose": "MESSAGE = 'the claude binary was not found'\n",
     "a_docstring": "def job():\n    \"\"\"Run claude -p in the sandbox.\"\"\"\n",
+    "a_module_docstring": "\"\"\"Runs claude -p.\"\"\"\n",
+    "a_class_docstring": "class Job:\n    \"\"\"Runs claude -p.\"\"\"\n",
+    "an_async_docstring": "async def job():\n    \"\"\"Runs claude -p.\"\"\"\n",
+    "a_dash_in_prose": "NOTE = 'claude - the agent that curamoir starts'\n",
 }
 
 
@@ -702,20 +710,38 @@ def test_fix_step_names_claude_freely():
 
 def test_an_allow_list_entry_covers_only_its_own_file_and_owner():
     planted = _package_with(NAMING_CLAUDE["a_parameter_default"])
-    assert unallowed(planted, {**ALLOWED, ("planted.py", "run_agent"): "why"}) == []
-    assert unallowed(planted, {**ALLOWED, ("planted.py", "job"): "why"}) != []
-    assert unallowed(planted, {**ALLOWED, ("other.py", "run_agent"): "why"}) != []
+    assert unallowed(planted, {**ALLOWED, ("planted.py", "run_agent"): (1, "why")}) == []
+    assert unallowed(planted, {**ALLOWED, ("planted.py", "job"): (1, "why")}) != []
+    assert unallowed(planted, {**ALLOWED, ("other.py", "run_agent"): (1, "why")}) != []
 
 
 def test_an_entry_for_a_function_does_not_cover_a_same_named_method():
     planted = _package_with("def go():\n    return 'claude'\n"
                             "class Job:\n    def go(self):\n        return 'claude -p x'\n")
-    found = unallowed(planted, {**ALLOWED, ("planted.py", "go"): "why"})
+    found = unallowed(planted, {**ALLOWED, ("planted.py", "go"): (1, "why")})
     assert [(m.owner, m.shown) for m in found] == [("Job.go", "'claude -p x'")]
 
 
+def test_a_second_mention_in_an_allowed_function_is_not_covered():
+    """A direct launch added beside an allowed default fails."""
+    planted = _package_with("def run_agent(prompt, binary='claude'):\n"
+                            "    import subprocess\n    subprocess.run(['claude', '-p', prompt])\n")
+    found = unallowed(planted, {**ALLOWED, ("planted.py", "run_agent"): (1, "why")})
+    assert [m.owner for m in found] == ["run_agent", "run_agent"]
+    assert unallowed(planted, {**ALLOWED, ("planted.py", "run_agent"): (2, "why")}) == []
+
+
+def test_a_module_level_owner_names_the_assignment_or_is_the_module():
+    found = unallowed(_package_with(NAMING_CLAUDE["a_tuple_target_at_module_level"]
+                                    + NAMING_CLAUDE["a_module_constant"]))
+    assert sorted(m.owner for m in found) == ["<module>", "AGENT"]
+
+
 def test_a_stale_allow_list_entry_is_reported():
-    assert stale(_curamoir_trees(), {**ALLOWED, ("tier1.py", "gone"): "why"}) == [("tier1.py", "gone")]
+    assert stale(_curamoir_trees(), {**ALLOWED, ("tier1.py", "gone"): (1, "why")}) == [("tier1.py", "gone")]
+    # An entry covering more mentions than the owner still has is stale too.
+    assert stale(_curamoir_trees(), {**ALLOWED, ("tier1.py", "_call_scan"): (2, "why")}) == [
+        ("tier1.py", "_call_scan")]
 
 
 def test_every_toolset_constant_is_shell_free_or_hosted():
