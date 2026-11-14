@@ -57,9 +57,12 @@ addopts = "-W error --strict-markers"
 # every thread's stack, not a run that sleeps until something outside kills
 # it. 120 s is ten times the slowest test (12 s, 2026-11-14): a backstop, not
 # a budget. Why `thread` and not `signal` (curamoir.lint._time_limit), and
-# what a timeout prints: tests/test_suite_timeout.py.
+# what a timeout prints: tests/test_suite_timeout.py. faulthandler_timeout is
+# pytest's own watchdog, for a hang that holds the GIL, which the thread
+# method's timer cannot interrupt: it prints the stack and lets the run go on.
 timeout = 120
 timeout_method = "thread"
+faulthandler_timeout = 150
 
 # A project whose thesis is the mechanical enforcement of a repository's own
 # standards had no linter, and hand-enforced its house style instead. Every

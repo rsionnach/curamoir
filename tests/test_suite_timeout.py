@@ -15,7 +15,15 @@ stack and ends the whole run. The stack names the hanging test's file,
 function and line, but not a parametrized test's id; under the usual `-q`
 run that id is not shown anywhere, and under `-v` it is the last progress
 line before the stack.
+
+The thread method's timer is Python code, so it cannot fire while a test
+holds the GIL, as a regex that backtracks for ever does. For that,
+`faulthandler_timeout` (pytest's own, a C watchdog) is set a little above the
+limit: it prints every thread's stack while the GIL is held, but it neither
+fails the test nor ends the run, so the run still hangs until something
+outside kills it, now with the test named.
 """
+import os
 import subprocess
 import sys
 import time
@@ -23,14 +31,21 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 
-#: Mirrors `timeout` in pyproject.toml, whose comment gives the reasoning.
+#: Mirror `timeout` and `faulthandler_timeout` in pyproject.toml, whose
+#: comment gives the reasoning.
 LIMIT = 120.0
+WATCHDOG = 150.0
 
 
 def test_every_test_runs_under_the_thread_method_time_limit(pytestconfig):
     assert pytestconfig.pluginmanager.hasplugin("timeout")
     assert float(pytestconfig.getini("timeout")) == LIMIT
     assert pytestconfig.getini("timeout_method") == "thread"
+    assert float(pytestconfig.getini("faulthandler_timeout")) == WATCHDOG
+    # The limit in force, not just the configured one: pytest-timeout takes
+    # --timeout first, then PYTEST_TIMEOUT, then the ini value.
+    assert pytestconfig.getoption("timeout") is None, "--timeout overrides the limit"
+    assert "PYTEST_TIMEOUT" not in os.environ, "PYTEST_TIMEOUT overrides the limit"
 
 
 # The probe below, in seconds, smallest first: the shortened limit; the
@@ -62,3 +77,27 @@ def test_a_hanging_test_is_named_and_its_stack_printed(tmp_path):
     assert "Timeout" in output
     assert f'test_hangs.py", line {sleep_line}, in test_that_hangs' in output
     assert SLEEP in output
+
+
+#: A regex that backtracks for 2**40 steps inside C, holding the GIL.
+GIL_HANG = ["import re", "", "", "def test_that_holds_the_gil():",
+            '    re.match(r"(a+)+$", "a" * 40 + "b")']
+
+
+def test_a_hang_that_holds_the_gil_still_prints_its_stack(tmp_path):
+    """The thread method cannot stop this test; the faulthandler watchdog,
+    shortened to 2 s, still names it. The run itself only ends when the
+    guard here kills it."""
+    (tmp_path / "test_gil.py").write_text("\n".join(GIL_HANG) + "\n")
+    try:
+        done = subprocess.run(
+            [sys.executable, "-m", "pytest", "-c", str(ROOT / "pyproject.toml"),
+             "--rootdir", str(tmp_path), "-p", "no:cacheprovider", "-q",
+             "-o", f"timeout={SHORT_LIMIT}", "-o", f"faulthandler_timeout={SHORT_LIMIT}",
+             str(tmp_path / "test_gil.py")],
+            cwd=tmp_path, capture_output=True, text=True, timeout=SHORT_LIMIT + 8)
+        output = done.stdout + done.stderr
+    except subprocess.TimeoutExpired as hung:
+        output = "".join(part.decode() if isinstance(part, bytes) else part or ""
+                         for part in (hung.stdout, hung.stderr))
+    assert f'test_gil.py", line {len(GIL_HANG)} in test_that_holds_the_gil' in output
