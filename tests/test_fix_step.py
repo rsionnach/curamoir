@@ -666,6 +666,10 @@ NAMING_CLAUDE = {
     "a_module_constant": "AGENT = 'claude'\n",
     "an_absolute_path": "import os\ndef job():\n    os.execv('/opt/bin/claude', ['agent', '-p'])\n",
     "a_wrapped_shell_line": "import os\ndef job():\n    os.system('timeout 60 claude -p hello')\n",
+    "after_a_quote": "import subprocess\ndef job():\n    subprocess.run(['/bin/sh', '-c', \"sh -c 'claude -p x'\"])\n",
+    "after_a_paren": "import os\ndef job():\n    os.system('echo $(claude -p hi)')\n",
+    "after_a_semicolon": "import os\ndef job():\n    os.system('cd x;claude -p y')\n",
+    "a_windows_exe_name": "import subprocess\ndef job(p):\n    subprocess.run(['claude.exe', '-p', p])\n",
     "an_env_prefix": "import os\ndef job():\n    os.system('env FOO=1 claude')\n",
     "an_f_string": "import os\ndef job(p):\n    os.system(f'claude -p {p}')\n",
     "bytes": "import subprocess\ndef job():\n    subprocess.run([b'claude', b'-p'])\n",
@@ -681,7 +685,11 @@ NAMING_CLAUDE = {
 def test_a_constant_naming_claude_is_found(planted):
     found = unallowed(_package_with(planted))
     assert found and {m.module for m in found} == {"planted.py"}
-    assert "fix_step.run_fix_step" in failure_message(found)
+    message = failure_message(found)
+    # It says where each one is, and the two ways out.
+    assert all(f"{m.module}:{m.line} in {m.owner}: {m.shown}" in message for m in found)
+    assert "fix_step.run_fix_step" in message
+    assert "add an entry to ALLOWED in tests/claude_launches.py" in message
 
 
 #: Not the binary: words that only contain it, prose that does not end in
@@ -743,8 +751,9 @@ def test_a_launch_that_replaces_an_allowed_default_is_not_told_apart():
 
 def test_a_module_level_owner_names_the_assignment_or_is_the_module():
     found = unallowed(_package_with(NAMING_CLAUDE["a_tuple_target_at_module_level"]
-                                    + NAMING_CLAUDE["a_module_constant"]))
-    assert sorted(m.owner for m in found) == ["<module>", "AGENT"]
+                                    + NAMING_CLAUDE["a_module_constant"]
+                                    + "BINARY: str = 'claude'\n"))
+    assert sorted(m.owner for m in found) == ["<module>", "AGENT", "BINARY"]
 
 
 def test_a_stale_allow_list_entry_is_reported():
