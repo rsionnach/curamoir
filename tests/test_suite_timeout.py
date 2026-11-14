@@ -39,7 +39,8 @@ def test_every_test_runs_under_the_thread_method_time_limit(pytestconfig):
 # than all three, so that only the limit can end it.
 SHORT_LIMIT, STOPPED_WITHIN, GUARD, HANG = 2, 30, 50, 60
 
-HANGING_TEST = ["import time", "", "", "def test_that_hangs():", f"    time.sleep({HANG})"]
+SLEEP = f"time.sleep({HANG})"
+HANGING_TEST = ["import time", "", "", "def test_that_hangs():", "    " + SLEEP]
 
 
 def test_a_hanging_test_is_named_and_its_stack_printed(tmp_path):
@@ -47,7 +48,7 @@ def test_a_hanging_test_is_named_and_its_stack_printed(tmp_path):
     shortened, run on a test that sleeps far longer than that limit. Without
     `-v`, so the test is named by the stack dump alone."""
     (tmp_path / "test_hangs.py").write_text("\n".join(HANGING_TEST) + "\n")
-    sleep_line = HANGING_TEST.index(f"    time.sleep({HANG})") + 1
+    sleep_line = HANGING_TEST.index("    " + SLEEP) + 1
     started = time.monotonic()
     done = subprocess.run(
         [sys.executable, "-m", "pytest", "-c", str(ROOT / "pyproject.toml"),
@@ -60,4 +61,4 @@ def test_a_hanging_test_is_named_and_its_stack_printed(tmp_path):
     assert elapsed < STOPPED_WITHIN, f"the limit did not stop the hang ({elapsed:.0f} s)"
     assert "Timeout" in output
     assert f'test_hangs.py", line {sleep_line}, in test_that_hangs' in output
-    assert f"time.sleep({HANG})" in output
+    assert SLEEP in output
