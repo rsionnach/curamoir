@@ -12,10 +12,10 @@ real publish to a bare origin through the fake gh), and the test holds:
 1. no canary exists afterwards: the runner's git never ran a plant;
 2. the outcome is the one recorded here for it: the run is refused
    (`.git`, `.gitattributes`, a nested repository: git_guard's
-   verify_git_state, before any git command), or the planted files are
-   dropped as out of scope (cm-9ab) and the PR carries the fix (a
-   case-variant `.GIT` or `.GitAttributes` is refused like its lower-case
-   spelling: see `mechanisms`);
+   verify_git_state, before any git command; a case-variant `.GIT` or
+   `.GitAttributes` is refused like its lower-case spelling: see
+   `mechanisms`), or the planted files are dropped as out of scope
+   (cm-9ab) and the PR carries the fix;
 3. when a PR opens, the commit on origin changes ONLY the in-scope fix
    paths: none of the plants left the clone;
 4. the user's checkout gained no file, changed none, and its `.git/config`
@@ -29,17 +29,18 @@ was broken.
 The test command is the repository's own code, run in the clone
 (green_gate). A planted conftest.py is dropped before the gate (asserted
 below). Code inside an in-scope edit IS run by the gate; the OS sandbox
-(cm-p2f, os_sandbox) is what keeps it in: it can write neither outside the
-clone nor the user's checkout (the last test).
+(cm-p2f, os_sandbox) is what keeps it in: it can write neither elsewhere
+on the machine nor the user's checkout
+(test_code_the_test_gate_runs_cannot_reach_outside_the_clone).
 """
 
-import os
 import subprocess
 import sys
 
 import pytest
 
 from curamoir.fix_scope import FILE_ADDED, GIT_INTERNALS_CHANGED, HIDDEN_CHANGE, WHOLE_RUN_KINDS
+from curamoir.git_guard import scrubbed_environment
 from curamoir.guards.reasons import Reason
 from curamoir.job_run import REFUSED, SUCCESS
 from tests.test_lint import NO_BARE_PRINT
@@ -165,7 +166,7 @@ def repository_skeleton(canaries, tag, root):
 
 # --- the mechanisms -----------------------------------------------------------------
 
-#: Outcomes, (what happened, the breach kind it happened by): the whole run
+#: Outcomes: (what happened, the breach kind it happened by): the whole run
 #: refused before anything is pushed, or the plants dropped (cm-9ab) and a
 #: PR opened with the fix alone.
 REFUSED_RUN, DROPPED = "refused", "dropped"
@@ -297,11 +298,25 @@ def checkout_state(repo):
 
 # --- the tests ----------------------------------------------------------------------
 
-@pytest.mark.parametrize("name", [
+#: Every key of mechanisms(), the case variants included. Written out because
+#: mechanisms() needs a test's tmp_path (its canaries) and so cannot run at
+#: collection; test_every_mechanism_is_run holds the two equal.
+MECHANISMS = (
     "gitattributes-drivers", "gitattributes-nested", "gitattributes-eol-ident",
     "nested-git-dir", "gitfile", "gitmodules", "gitmodules-gitlink", "githooks-dir",
     "clone-git-hooks", "clone-git-config", "envrc", "nested-git-dir-case",
-    "gitattributes-case"])
+    "gitattributes-case")
+
+#: A gate that runs the repository's own tests, so code in the clone runs.
+PYTEST_GATE = GATE.replace("\"! grep -rq BREAKS src\"",
+                           "\"PYTHONPATH=src python3 -m pytest -q -p no:cacheprovider tests\"")
+
+
+def test_every_mechanism_is_run(tmp_path):
+    assert set(MECHANISMS) == set(mechanisms(Canaries(tmp_path), case_insensitive=True))
+
+
+@pytest.mark.parametrize("name", MECHANISMS)
 def test_nothing_planted_in_the_clone_runs_and_only_the_patch_leaves(tmp_path, no_real_gh,
                                                                      name):
     canaries = Canaries(tmp_path)
@@ -364,7 +379,7 @@ def test_the_canaries_are_armed(tmp_path):
         target.write_text(text, encoding="utf-8")
     (sub / ".gitattributes").write_text(attributes(), encoding="utf-8")
     (sub / "module.py").write_text("x = 1\n", encoding="utf-8")
-    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    env = scrubbed_environment()
     for command in (["add", "module.py"], ["status"]):
         subprocess.run(["git", *command], cwd=sub, env=env, capture_output=True,
                        stdin=subprocess.DEVNULL, timeout=60)
@@ -379,9 +394,7 @@ def test_a_planted_conftest_is_dropped_before_the_test_gate_runs_it(tmp_path, no
     put back (deleted) before the gate runs the repository's tests: it never
     runs, and the PR carries the fix alone."""
     canaries = Canaries(tmp_path)
-    gate = GATE.replace("\"! grep -rq BREAKS src\"",
-                        "\"PYTHONPATH=src python3 -m pytest -q -p no:cacheprovider tests\"")
-    repo = checkout(tmp_path, NO_BARE_PRINT, config=gate)
+    repo = checkout(tmp_path, NO_BARE_PRINT, config=PYTEST_GATE)
     before = checkout_state(repo)
     plants = {"conftest.py": f"import os\nos.system({canaries.script('conftest')!r})\n",
               "tests/conftest.py":
@@ -398,18 +411,16 @@ def test_a_planted_conftest_is_dropped_before_the_test_gate_runs_it(tmp_path, no
     assert checkout_state(repo) == before
 
 
-@pytest.mark.parametrize("target", ["outside", "checkout"])
+@pytest.mark.parametrize("target", ["elsewhere", "checkout"])
 def test_code_the_test_gate_runs_cannot_reach_outside_the_clone(tmp_path, no_real_gh, target):
     """The test command is the repository's code, run in the clone, and an
     in-scope edit is code it runs. Under the OS sandbox it can write
-    neither a file outside the clone (`outside`, a canary) nor the user's
+    neither a file elsewhere on the machine (`elsewhere`, a canary) nor the user's
     checkout (`checkout`): the write fails, and the checkout is as it was."""
     canaries = Canaries(tmp_path)
-    gate = GATE.replace("\"! grep -rq BREAKS src\"",
-                        "\"PYTHONPATH=src python3 -m pytest -q -p no:cacheprovider tests\"")
-    repo = checkout(tmp_path, NO_BARE_PRINT, config=gate)
+    repo = checkout(tmp_path, NO_BARE_PRINT, config=PYTEST_GATE)
     before = checkout_state(repo)
-    written = canaries.dir / "gate" if target == "outside" else repo / "gate-wrote-this"
+    written = canaries.dir / "gate" if target == "elsewhere" else repo / "gate-wrote-this"
     old, new = PRINT_FIXES[0][1:]
     reach = f"{new}; open({str(written)!r}, 'w').close()"
     claude, _ = fixer(tmp_path, edits=[(BILLING, old, reach), PRINT_FIXES[1]])

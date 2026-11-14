@@ -144,9 +144,8 @@ def test_git_never_runs_an_ext_transport(tmp_path):
     run(repo, "config", "protocol.allow", "always")
     run(repo, "config", "protocol.ext.allow", "always")
     url = f"ext::{program}"
-    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
-    subprocess.run(["git", "ls-remote", url], cwd=repo, env=env, capture_output=True,
-                   stdin=subprocess.DEVNULL, timeout=60)
+    subprocess.run(["git", "ls-remote", url], cwd=repo, env=git_guard.scrubbed_environment(),
+                   capture_output=True, stdin=subprocess.DEVNULL, timeout=60)
     assert marker.exists(), "the control: an allowed ext:: transport runs"
     marker.unlink()
 
