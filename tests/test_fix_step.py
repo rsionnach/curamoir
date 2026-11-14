@@ -677,6 +677,26 @@ CLAUDE_LAUNCHES = {
     "a_local_wrapper": (
         "import subprocess\ndef _go(argv):\n    return subprocess.run(argv)\n"
         "def job(claude, p):\n    _go([claude, '-p', p])\n"),
+    "a_wrapper_taking_its_argv_second": (
+        "import subprocess\ndef _go(cwd, argv):\n    return subprocess.run(argv, cwd=cwd)\n"
+        "def job(p):\n    _go('.', ['claude', '-p', p])\n"),
+    "green_gates_run_command": (
+        "from curamoir.green_gate import _run_command\ndef job(sandbox, env, p):\n"
+        "    return _run_command(sandbox, ['claude', '-p', p], env, 9)\n"),
+    "an_argv_builder_elsewhere": (
+        "import subprocess\ndef build(claude, p):\n    return [claude, '-p', p]\n"
+        "def job(tools, p):\n    subprocess.run(build(tools.claude, p))\n"),
+    "a_builder_of_a_builder": (
+        "import subprocess\ndef binary():\n    return 'claude'\n"
+        "def build(p):\n    return [binary(), '-p', p]\n"
+        "def job(p):\n    argv = build(p)\n    subprocess.run(argv)\n"),
+    "a_method_wrapper": (
+        "import subprocess\nclass Job:\n    def _go(self, argv):\n        return subprocess.run(argv)\n"
+        "    def go(self, p):\n        return self._go([self.tools.claude, '-p', p])\n"),
+    "spawnv": "import os\ndef job(p):\n    os.spawnv(os.P_WAIT, '/usr/bin/claude', ['claude', '-p', p])\n",
+    "spawnlp": "import os\ndef job(p):\n    os.spawnlp(os.P_WAIT, 'claude', 'claude', '-p', p)\n",
+    "module_level": "import subprocess\nsubprocess.run(['claude', '-p', 'x'])\n",
+    "class_body": "import subprocess\nclass Job:\n    done = subprocess.run(['claude', '-p', 'x'])\n",
 }
 
 
@@ -704,6 +724,15 @@ NOT_CLAUDE_LAUNCHES = {
     "through_run_fix_step": (
         "from curamoir.fix_step import run_fix_step\ndef job(s, p, claude):\n"
         "    return run_fix_step(s, p, model='m', claude=claude)\n"),
+    "claude_through_a_helper_that_also_runs_git": (
+        "from curamoir.fix_step import run_fix_step\nfrom curamoir.git_guard import git\n"
+        "def fix_one(claude, repo, s, p):\n    git(repo, 'status')\n"
+        "    return run_fix_step(s, p, model='m', claude=claude)\n"
+        "def job(tools, repo, s, p):\n    return fix_one(tools.claude, repo, s, p)\n"),
+    "what_a_call_given_claude_returns": (
+        "import subprocess\nfrom curamoir.fix_step import run_fix_step\n"
+        "def job(s, p, claude, path):\n    run = run_fix_step(s, p, model='m', claude=claude)\n"
+        "    subprocess.run(['git', '-C', path, 'commit', '-m', run.summary])\n"),
     "a_claude_config_path": (
         "import subprocess\ndef job(path):\n"
         "    subprocess.run(['git', '-C', path, 'ls-files', '.claude/settings.json'])\n"),
