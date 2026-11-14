@@ -48,6 +48,8 @@ def test_every_test_runs_under_the_thread_method_time_limit(pytestconfig):
     assert pytestconfig.getini("faulthandler_exit_on_timeout") is True
 
 
+# --timeout, not -o timeout=: the option outranks PYTEST_TIMEOUT, which the
+# child inherits, and -o (an ini value) does not.
 # The probe below, in seconds, smallest first: the shortened limit; the
 # bound the run must finish inside, which only a working limit meets; the
 # guard that stops this test if the limit does nothing; and the sleep, longer
@@ -68,7 +70,7 @@ def test_a_hanging_test_is_named_and_its_stack_printed(tmp_path):
     done = subprocess.run(
         [sys.executable, "-m", "pytest", "-c", str(ROOT / "pyproject.toml"),
          "--rootdir", str(tmp_path), "-p", "no:cacheprovider", "-q",
-         "-o", f"timeout={SHORT_LIMIT}", str(tmp_path / "test_hangs.py")],
+         f"--timeout={SHORT_LIMIT}", str(tmp_path / "test_hangs.py")],
         cwd=tmp_path, capture_output=True, text=True, timeout=GUARD)
     elapsed = time.monotonic() - started
     output = done.stdout + done.stderr
@@ -92,7 +94,7 @@ def test_a_hang_that_holds_the_gil_is_named_and_ends_the_run(tmp_path):
     done = subprocess.run(
         [sys.executable, "-m", "pytest", "-c", str(ROOT / "pyproject.toml"),
          "--rootdir", str(tmp_path), "-p", "no:cacheprovider", "-q",
-         "-o", f"timeout={SHORT_LIMIT}", "-o", f"faulthandler_timeout={SHORT_LIMIT}",
+         f"--timeout={SHORT_LIMIT}", "-o", f"faulthandler_timeout={SHORT_LIMIT}",
          str(tmp_path / "test_gil.py")],
         cwd=tmp_path, capture_output=True, text=True, timeout=GUARD)
     elapsed = time.monotonic() - started
