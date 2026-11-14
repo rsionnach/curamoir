@@ -130,11 +130,11 @@ None.
             "Say 'on or after' if it is inclusive, and pin it in a test.", "cited"),
         rec("clarity", "MINOR", "src/tally/ledger.py", 95, 101,
             "The comment on the fallback in load_entries describes the old CSV dialect, not the one the code now reads.",
-            "# older files use semicolons; fall back to them\nreader = csv.reader(f, dialect='excel-tab')",
+            "# older files use semicolons; fall back to them  /  reader = csv.reader(f, dialect='excel-tab')",
             "Rewrite the comment to name the tab dialect and why it is the fallback.", "cited"),
         rec("clarity", "MINOR", "docs/usage.md", 44, 45,
             "The usage guide says 'see the example below' but the example is above the sentence.",
-            "docs/usage.md:44: 'See the example below for an import with categories.' The example is at lines 30-38.",
+            "docs/usage.md:44: 'See the example below for an import with categories.'\nThe example is at lines 30-38.",
             "Say 'above', or move the example under the sentence.", "cited"),
         rec("clarity", "MINOR", "scripts/tally-backup.sh", 12, 13,
             "The error message on a failed copy does not say which file failed or that the backup was skipped.",
@@ -142,7 +142,7 @@ None.
             "Name the source and destination, and say the backup was not written.", "cited"),
         rec("clarity", "MINOR", "tests/test_tally_ledger.py", 18, 21,
             "A test comment refers to a fixture that was renamed, and the module docstring still describes the old file layout.",
-            "# uses the sample_rows fixture (now ledger_rows); docstring: 'Tests for ledger.csv in the home directory'",
+            "# uses the sample_rows fixture (now ledger_rows)\ndocstring: 'Tests for ledger.csv in the home directory'",
             "Update the comment to ledger_rows and the docstring to the current layout.", "cited"),
     ]
     write(out, "synthetic-clarity-1.md",
@@ -153,7 +153,7 @@ None.
     k2_lines = [(212, 214), (160, 192), (305, 307), (95, 99), (44, 44), (10, 16), (1, 24)]
     k2_claims_and_evidence = [
         ("'pending' now has one meaning; the import case is import_awaiting_confirmation.",
-         "unsaved_rows = []; ... if import_awaiting_confirmation: print('import awaiting confirmation, run tally confirm')"),
+         "unsaved_rows = []\n... if import_awaiting_confirmation: print('import awaiting confirmation, run tally confirm')"),
         ("summarise's locals are named after the keys it returns.",
          "sum_ = ...; count = ...; return {'sum': sum_, 'count': count, 'mean': sum_ / count}"),
         ("The --since help says the date is inclusive.",
@@ -161,11 +161,11 @@ None.
         ("The fallback comment now names the tab dialect and why it is tried second.",
          "# exports from the old spreadsheet are tab-separated; try that second"),
         ("The usage guide now says 'above'.",
-         "docs/usage.md:44: 'See the example above for an import with categories.'"),
+         "docs/usage.md:44:\n'See the example above for an import with categories.'"),
         ("The backup error names both files and says no backup was written.",
          "echo \"tally-backup: could not copy $src to $dest; no backup written\" >&2"),
         ("The test comment names ledger_rows and the docstring describes the current layout.",
-         "# uses the ledger_rows fixture; docstring: 'Tests for the ledger in the data directory.'"),
+         "# uses the ledger_rows fixture\ndocstring: 'Tests for the ledger in the data directory.'"),
     ]
     k2 = [closes(prior, prior["path"], s, e, claim, ev, "cited")
           for prior, (s, e), (claim, ev) in zip(k1, k2_lines, k2_claims_and_evidence, strict=True)]

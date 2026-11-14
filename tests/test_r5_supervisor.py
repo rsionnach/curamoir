@@ -1651,6 +1651,28 @@ R5_REPORTS = Path(__file__).resolve().parent / "fixtures" / "r5-reports"
 SYNTHETIC_REPORTS = [f"synthetic-{n}.md" for n in ("correctness-1", "correctness-4", "correctness-5",
                                                    "clarity-1", "clarity-2", "edge-cases-1")]
 
+# The shape of each real report a fixture stands in for, recorded once from the
+# originals (git show 5aff5f1:tests/fixtures/r5-reports/cm-70j-<name>.md):
+# per record, in order, (severity, verification_level, fix is null, is a
+# closure, regression, evidence spans lines). A regenerated fixture that drifts
+# from its original fails test_each_fixture_report_keeps_the_shape_of_its_original.
+_C, _I, _M = "CRITICAL", "IMPORTANT", "MINOR"
+_NEW = (False, False, False, False)            # a new finding: fix, not a closure, one line
+_CLOSURE = (True, True, False, False)          # fix: null, resolves, one line
+REAL_SHAPES = {
+    "synthetic-correctness-1.md": [(_M, "reproduced", *_NEW)] * 3,
+    "synthetic-correctness-4.md": [(_I, "reproduced", False, False, True, False),
+                                   (_M, "reproduced", *_NEW), (_M, "reproduced", *_CLOSURE)],
+    "synthetic-correctness-5.md": [(_I, "reproduced", *_CLOSURE), (_M, "reproduced", *_CLOSURE)],
+    "synthetic-clarity-1.md": [(_M, "cited", *_NEW)] * 4 + [(_M, "cited", False, False, False, True),
+                                                           (_M, "cited", *_NEW),
+                                                           (_M, "cited", False, False, False, True)],
+    "synthetic-clarity-2.md": [(_M, "cited", True, True, False, multi)
+                               for multi in (True, False, False, False, True, False, True)],
+    "synthetic-edge-cases-1.md": [(_I, "reproduced", *_NEW)] + [(_M, "reproduced", *_NEW)] * 4
+                                 + [(_M, "walked", *_NEW)],
+}
+
 
 def _lens_of_report(name):
     """synthetic-edge-cases-1.md -> edge_cases."""
@@ -1680,6 +1702,14 @@ def test_no_fixture_report_points_at_a_file_of_this_repository():
         assert records and not [r["path"] for r in records if (ROOT / r["path"]).exists()
                                 or not r["path"].startswith(INVENTED_PATHS)]
 
+
+@pytest.mark.parametrize("name", SYNTHETIC_REPORTS)
+def test_each_fixture_report_keeps_the_shape_of_its_original(name):
+    text = (R5_REPORTS / name).read_text()
+    records = r5f.parse_report(text, _lens_of_report(name))["findings"]
+    assert [(r["severity"], r["verification_level"], r["fix"] is None, r["resolves"] is not None,
+             r["regression"], "\n" in r["evidence"]) for r in records] == REAL_SHAPES[name]
+    assert set(REAL_SHAPES) == set(SYNTHETIC_REPORTS)
 
 def test_the_fixture_reports_are_what_their_generator_writes(tmp_path):
     done = subprocess.run([sys.executable, str(R5_REPORTS / "make_synthetic_reports.py"),
