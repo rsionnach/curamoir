@@ -17,6 +17,7 @@ gives it.
 list from the real lint over it.
 """
 
+import functools
 import json
 import os
 import re
@@ -63,6 +64,7 @@ from curamoir.git_guard import GitGuardError, git, prepare_sandbox, tree_changes
 from curamoir.principles import load_principles, parse_principles
 from curamoir.sweep import work_list, work_list_document
 from tests import claude_payloads
+from tests.claude_launches import argv_launchers, claude_launches, package_trees
 from tests.conftest import committed_sample
 from tests.hooks.test_pretooluse_entrypoint import REPO_ROOT
 from tests.test_fix_scope import BILLING, PRINCIPLES, V, git_repo
@@ -597,12 +599,6 @@ def _source_trees():
         yield path.relative_to(root).as_posix(), ast.parse(path.read_text(encoding="utf-8"))
 
 
-#: The flags that set what a `claude -p` agent may do. Only fix_step_argv
-#: writes them; a second builder would have to.
-_AGENT_FLAGS = ("--tools", "--allowedTools", "--allowed-tools", "--disallowedTools",
-                "--disallowed-tools", "--permission-mode", "--dangerously-skip-permissions")
-
-
 def test_only_run_fix_step_calls_fix_step_argv():
     import ast
 
@@ -620,16 +616,108 @@ def test_only_run_fix_step_calls_fix_step_argv():
     assert sorted(set(callers)) == [("fix_step.py", "run_fix_step")]
 
 
-def test_no_module_but_fix_step_writes_an_agent_permission_flag():
+# No module but fix_step.py starts `claude`, whatever its flags (cm-c60, user
+# decision 2026-11-14): the scan in tests/claude_launches.py keys on the
+# binary reaching a process launcher, not on a list of permission flags,
+# which missed a bare `claude -p`, a flag built at run time, and real flags
+# the list did not name.
+
+@functools.cache
+def _curamoir_trees():
+    """src/curamoir/ parsed once; the scan only reads the trees."""
+    import pathlib
+
+    import curamoir
+
+    return package_trees(pathlib.Path(curamoir.__file__).parent)
+
+
+def _package_with(planted, name="planted.py"):
     import ast
 
-    writers = set()
-    for name, tree in _source_trees():
-        for node in ast.walk(tree):
-            if (isinstance(node, ast.Constant) and isinstance(node.value, str)
-                    and node.value.split("=", 1)[0] in _AGENT_FLAGS):
-                writers.add(name)
-    assert writers == {"fix_step.py"}
+    return {**_curamoir_trees(), name: ast.parse(planted)}
+
+
+def test_no_module_but_fix_step_hands_claude_to_a_process_launcher():
+    trees = _curamoir_trees()
+    assert claude_launches(trees) == []
+    # Not vacuous: the scan sees curamoir's own launcher, the one
+    # run_fix_step starts the agent through, so a job that called it
+    # directly would be caught (test_a_claude_launch_is_found below).
+    assert "run_in_group" in argv_launchers(trees)
+
+
+#: Each starts `claude` without fix_step: the three shapes the flag list
+#: missed (a bare `claude -p`, flags added at run time, and real flags it did
+#: not name), then the other ways a binary reaches a process.
+CLAUDE_LAUNCHES = {
+    "bare": "import subprocess\ndef job(p):\n    subprocess.run(['claude', '-p', p])\n",
+    "flags_built_at_run_time": (
+        "import subprocess\ndef job(p, claude, name):\n    argv = [claude, '-p', p]\n"
+        "    argv.append(f'--{name}')\n    subprocess.Popen(argv)\n"),
+    "binary_appended": (
+        "import subprocess\ndef job(p, claude):\n    argv = []\n    argv.append(claude)\n"
+        "    argv.extend(['-p', p])\n    subprocess.run(argv)\n"),
+    "flags_the_list_did_not_name": (
+        "import subprocess\ndef job(p):\n    subprocess.run(['claude', '-p', p,"
+        " '--allow-dangerously-skip-permissions', '--settings', '{}'])\n"),
+    "curamoirs_own_launcher": (
+        "from curamoir import sweep_job\nfrom curamoir.git_guard import run_in_group\n"
+        "def job(p, path):\n    run_in_group([sweep_job.CLAUDE, '-p', p], cwd=path, timeout=9)\n"),
+    "the_job_tools_claude": (
+        "import subprocess\nclass Job:\n    def go(self, p):\n"
+        "        return subprocess.run([self.tools.claude, '-p', p])\n"),
+    "argv_keyword": "import subprocess\nCLAUDE = 'claude'\ndef job():\n    subprocess.run(args=[CLAUDE, '-p'])\n",
+    "found_on_path": (
+        "import shutil, subprocess\ndef job(p):\n    exe = shutil.which('claude')\n"
+        "    subprocess.run([exe, '-p', p])\n"),
+    "absolute_path": "import subprocess\ndef job():\n    subprocess.run(['/opt/bin/claude', '-p'])\n",
+    "exec": "import os\ndef job(p):\n    os.execvp('claude', ['claude', '-p', p])\n",
+    "shell": "import os\ndef job():\n    os.system('claude -p hello')\n",
+    "a_local_wrapper": (
+        "import subprocess\ndef _go(argv):\n    return subprocess.run(argv)\n"
+        "def job(claude, p):\n    _go([claude, '-p', p])\n"),
+}
+
+
+@pytest.mark.parametrize("planted", CLAUDE_LAUNCHES.values(), ids=CLAUDE_LAUNCHES)
+def test_a_claude_launch_is_found(planted):
+    assert [hit[0] for hit in claude_launches(_package_with(planted))] == ["planted.py"]
+
+
+def test_fix_steps_own_launch_is_found_anywhere_but_fix_step():
+    """run_fix_step itself, moved to another module, is a claude launch."""
+    import pathlib
+
+    import curamoir
+
+    source = (pathlib.Path(curamoir.__file__).parent / "fix_step.py").read_text(encoding="utf-8")
+    hits = claude_launches(_package_with(source, name="moved_fix_step.py"))
+    assert {hit[0] for hit in hits} == {"moved_fix_step.py"}
+    assert any(hit[2] == "run_in_group" for hit in hits)
+
+
+#: Not claude launches: another program, the agent started the sanctioned
+#: way, and a launch inside fix_step.py.
+NOT_CLAUDE_LAUNCHES = {
+    "git": "import subprocess\ndef job(path):\n    subprocess.run(['git', '-C', path, 'status'])\n",
+    "through_run_fix_step": (
+        "from curamoir.fix_step import run_fix_step\ndef job(s, p, claude):\n"
+        "    return run_fix_step(s, p, model='m', claude=claude)\n"),
+    "a_claude_config_path": (
+        "import subprocess\ndef job(path):\n"
+        "    subprocess.run(['git', '-C', path, 'ls-files', '.claude/settings.json'])\n"),
+}
+
+
+@pytest.mark.parametrize("planted", NOT_CLAUDE_LAUNCHES.values(), ids=NOT_CLAUDE_LAUNCHES)
+def test_what_is_not_a_claude_launch_is_not_found(planted):
+    assert claude_launches(_package_with(planted)) == []
+
+
+def test_a_launch_inside_fix_step_is_the_sanctioned_one():
+    planted = CLAUDE_LAUNCHES["bare"]
+    assert claude_launches(_package_with(planted, name="fix_step.py")) == []
 
 
 def test_every_toolset_constant_is_shell_free_or_hosted():
