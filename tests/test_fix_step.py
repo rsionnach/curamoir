@@ -731,6 +731,16 @@ def test_a_second_mention_in_an_allowed_function_is_not_covered():
     assert unallowed(planted, {**ALLOWED, ("planted.py", "run_agent"): (2, "why")}) == []
 
 
+def test_a_launch_that_replaces_an_allowed_default_is_not_told_apart():
+    """The stated limit of a counted entry: the same owner, the same count."""
+    default = _package_with("def run_agent(prompt, binary='claude'):\n    return binary\n")
+    swapped = _package_with("def run_agent(prompt, binary=None):\n    import subprocess\n"
+                            "    subprocess.run(['claude', '-p', prompt])\n")
+    entry = {**ALLOWED, ("planted.py", "run_agent"): (1, "why")}
+    assert unallowed(default, entry) == [] and unallowed(swapped, entry) == []
+    assert stale(swapped, entry) == []
+
+
 def test_a_module_level_owner_names_the_assignment_or_is_the_module():
     found = unallowed(_package_with(NAMING_CLAUDE["a_tuple_target_at_module_level"]
                                     + NAMING_CLAUDE["a_module_constant"]))

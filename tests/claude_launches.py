@@ -47,8 +47,10 @@ SANCTIONED = "fix_step.py"
 #: class, or the module-level constant) -> (how many mentions it covers, why
 #: it may name the binary). The count is exact: a second mention added in an
 #: allowed function (a direct launch beside its default) fails, and so does
-#: an entry that matches fewer mentions than it says (a stale one), so the
-#: list never silently allows a later string.
+#: an entry that matches fewer mentions than it says (a stale one). What it
+#: cannot tell apart is a mention that replaces the allowed one in the same
+#: owner (the default dropped and a launch written in the body): the count
+#: is unchanged, so that change is for its reviewer to read, like any other.
 ALLOWED = {
     ("sweep_job.py", "CLAUDE"): (
         1, "the default binary, handed to run_fix_step as tools.claude; never launched here"),
