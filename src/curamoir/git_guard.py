@@ -123,11 +123,15 @@ _REAP_TIMEOUT = 5
 #: (`diff.ignoreSubmodules=all`, `submodule.recurse=false`): to look inside
 #: one, git runs a git in it, and that repository's config — which a fix
 #: agent could have written as `<path>/.git/config` — would decide what that
-#: git runs. `core.quotepath=off` keeps non-ASCII paths unquoted in the few
-#: outputs not read with -z.
+#: git runs. `protocol.ext.allow=never`: an `ext::` URL is a shell command
+#: git runs as its transport. git refuses it by default, but a repository's
+#: own `protocol.allow` or `protocol.ext.allow` can turn it back on, and a
+#: `-c` here outranks both. `core.quotepath=off` keeps non-ASCII paths
+#: unquoted in the few outputs not read with -z.
 _GIT_HARDENING = ("-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null",
                   "-c", "diff.ignoreSubmodules=all", "-c", "submodule.recurse=false",
-                  "-c", "status.submoduleSummary=false", "-c", "core.quotepath=off")
+                  "-c", "status.submoduleSummary=false", "-c", "protocol.ext.allow=never",
+                  "-c", "core.quotepath=off")
 
 #: Environment git runs with, on top of the inherited one minus every GIT_*.
 _GIT_ENVIRONMENT = {

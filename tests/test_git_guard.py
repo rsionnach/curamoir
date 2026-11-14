@@ -130,6 +130,32 @@ def test_git_never_descends_into_a_submodule(tmp_path):
     assert listing == "all"
 
 
+def test_git_never_runs_an_ext_transport(tmp_path):
+    """An `ext::` URL is a command git runs as its transport. A repository's
+    config can allow it (`protocol.allow`, `protocol.ext.allow`); the
+    hardening's `protocol.ext.allow=never` outranks that, so it never runs.
+    The control: the same repository's own git does run it."""
+    repo = git_repo(tmp_path, {"m.py": "x = 1\n"})
+    # Not planted(): its `cat` would wait on the transport's open stdin.
+    marker = tmp_path / "ran"
+    program = tmp_path / "transport.sh"
+    program.write_text(f"#!/bin/sh\ntouch {marker}\nexit 1\n", encoding="utf-8")
+    program.chmod(0o755)
+    run(repo, "config", "protocol.allow", "always")
+    run(repo, "config", "protocol.ext.allow", "always")
+    url = f"ext::{program}"
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    subprocess.run(["git", "ls-remote", url], cwd=repo, env=env, capture_output=True,
+                   stdin=subprocess.DEVNULL, timeout=60)
+    assert marker.exists(), "the control: an allowed ext:: transport runs"
+    marker.unlink()
+
+    with pytest.raises(GitGuardError, match="git ls-remote"):
+        git(repo, "ls-remote", url)
+
+    assert not marker.exists()
+
+
 def test_git_names_a_failure(tmp_path):
     repo = git_repo(tmp_path, {"m.py": "x = 1\n"})
 

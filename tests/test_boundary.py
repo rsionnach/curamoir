@@ -26,11 +26,11 @@ does fire its canary under a plain, unhardened git, so a canary that stays
 absent in the sweep means the runner's git refused it, not that the trap
 was broken.
 
-Out of scope here, by design: the test command is the repository's own
-code, run in the clone (green_gate). A planted conftest.py is dropped
-before the gate (asserted below); code inside an in-scope edit is run by
-the gate and DOES reach outside the clone until cm-p2f sandboxes the test
-gate (the strict xfail below, which flips when it lands).
+The test command is the repository's own code, run in the clone
+(green_gate). A planted conftest.py is dropped before the gate (asserted
+below). Code inside an in-scope edit IS run by the gate; the OS sandbox
+(cm-p2f, os_sandbox) is what keeps it in: it can write neither outside the
+clone nor the user's checkout (the last test).
 """
 
 import os
@@ -39,7 +39,6 @@ import sys
 
 import pytest
 
-from curamoir import green_gate
 from curamoir.fix_scope import FILE_ADDED, GIT_INTERNALS_CHANGED, HIDDEN_CHANGE, WHOLE_RUN_KINDS
 from curamoir.guards.reasons import Reason
 from curamoir.job_run import REFUSED, SUCCESS
@@ -399,27 +398,26 @@ def test_a_planted_conftest_is_dropped_before_the_test_gate_runs_it(tmp_path, no
     assert checkout_state(repo) == before
 
 
-@pytest.mark.xfail(not hasattr(green_gate, "OS_SANDBOX"),
-                   reason="cm-p2f: the test gate is not OS-sandboxed yet", strict=True,
-                   raises=AssertionError)
-def test_code_the_test_gate_runs_cannot_reach_outside_the_clone(tmp_path, no_real_gh):
+@pytest.mark.parametrize("target", ["outside", "checkout"])
+def test_code_the_test_gate_runs_cannot_reach_outside_the_clone(tmp_path, no_real_gh, target):
     """The test command is the repository's code, run in the clone, and an
-    in-scope edit is code it runs: today it can write outside the clone (a
-    canary fires). Strict: once cm-p2f's OS sandbox is in green_gate
-    (`green_gate.OS_SANDBOX`) the xfail no longer applies and this must
-    pass; before it, a pass would fail the suite as XPASS."""
+    in-scope edit is code it runs. Under the OS sandbox it can write
+    neither a file outside the clone (`outside`, a canary) nor the user's
+    checkout (`checkout`): the write fails, and the checkout is as it was."""
     canaries = Canaries(tmp_path)
     gate = GATE.replace("\"! grep -rq BREAKS src\"",
                         "\"PYTHONPATH=src python3 -m pytest -q -p no:cacheprovider tests\"")
     repo = checkout(tmp_path, NO_BARE_PRINT, config=gate)
+    before = checkout_state(repo)
+    written = canaries.dir / "gate" if target == "outside" else repo / "gate-wrote-this"
     old, new = PRINT_FIXES[0][1:]
-    reach = f"{new}; open({str(canaries.dir / 'gate')!r}, 'w').close()"
+    reach = f"{new}; open({str(written)!r}, 'w').close()"
     claude, _ = fixer(tmp_path, edits=[(BILLING, old, reach), PRINT_FIXES[1]])
 
     line = sweep(repo, claude=claude)
 
-    # The edit reached the gate (not a RuntimeError the xfail would hide:
-    # it expects only the AssertionError below).
-    if "test_gate" not in line:
-        raise RuntimeError(f"the run stopped before the test gate: {line['message']}")
+    # The edit reached the gate: a run that stopped earlier proves nothing.
+    assert "test_gate" in line, f"the run stopped before the test gate: {line['message']}"
+    assert not written.exists()
     assert canaries.fired() == []
+    assert checkout_state(repo) == before
