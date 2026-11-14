@@ -27,6 +27,7 @@ dev = [
     "ruff>=0.6",
     "pyflakes>=3",
     "ast-grep-cli>=0.50",
+    "pytest-timeout>=2.3",
 ]
 
 [build-system]
@@ -52,6 +53,13 @@ packages = ["src/curamoir"]
 testpaths = ["tests"]
 # -W error: a guardrail that warns instead of refusing is a bug, not a note.
 addopts = "-W error --strict-markers"
+# A per-test limit (pytest-timeout, cm-3aj): a hang becomes a named failure
+# with every thread's stack, not a run that sleeps until something outside
+# kills it. 120 s is ten times the slowest test (12 s, 2026-11-14). `thread`,
+# not `signal`: curamoir.lint's SIGALRM rule bound would cancel a signal
+# timeout. See tests/test_suite_timeout.py.
+timeout = 120
+timeout_method = "thread"
 
 # A project whose thesis is the mechanical enforcement of a repository's own
 # standards had no linter, and hand-enforced its house style instead. Every
