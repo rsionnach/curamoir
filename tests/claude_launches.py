@@ -22,9 +22,11 @@ What counts:
   for `subprocess`, the first positional argument and the `args`,
   `executable` and `cmd` keywords; for `os.exec*` and `os.posix_spawn*`,
   every positional argument and the `path` and `argv` keywords; for
-  `asyncio.create_subprocess_exec`, every positional argument and `program`;
-  for `os.system` and `os.popen`, the command line; for
-  `os.spawn*`, every positional argument after the mode; for a curamoir
+  `os.spawn*`, every positional argument after the mode; for `os.system`,
+  `os.popen` and `asyncio.create_subprocess_shell`, the command line (the
+  first argument, or `command` / `cmd`); for
+  `asyncio.create_subprocess_exec`, every positional argument and
+  `program`; for `pty.spawn`, the first argument (`argv`); for a curamoir
   launcher, the arguments bound to the parameters that flow into its own
   launcher's argv (by position, `self` aside, and by keyword). Each is
   followed back through the enclosing scope's assignments, and through
@@ -36,13 +38,12 @@ What counts:
   is `claude`, a path ending in `/claude`, or a command line starting with
   `claude ` (for `os.system`), or the result of a call to a function that
   returns a value built from a `claude` value of its own (as fix_step_argv
-  does). A
-  call's result is made of its arguments only as far as the function's
-  return is: all of them for a call that reshapes its argument
+  does). A call's result is made of its arguments only as far as the
+  function's return is: all of them for a call that reshapes its argument
   (`shutil.which`, `os.path.*`, `str`, `list`, `shlex.split`, a `join`,
   `Path`, matched by the called name, so a method of that name counts too);
-  the ones bound to the parameters a curamoir function's return is
-  built from (`build(binary, p)` returning `[binary, "-p", p]`), found by
+  the ones bound to the parameters a curamoir function's return is built
+  from (`build(binary, p)` returning `[binary, "-p", p]`), found by
   fixpoint; and none for any other call, since what a function returns is
   not what it was given (`record_fixes(..., claude=...)` returns records,
   not the binary).
@@ -298,8 +299,9 @@ def _grow(found, name, slots):
 
 def _fixpoint(trees, step):
     """Run step(function, found) over every function outside fix_step.py
-    until no step adds to `found`, a {name: slots} table it grows; a function
-    found late can make an earlier one a match, hence the repeat."""
+    until no step adds to `found`, a {name: set} table the step grows (with
+    slots, or, for claude_builders, a marker); a function found late can make
+    an earlier one a match, hence the repeat."""
     found = {}
     changed = True
     while changed:
@@ -342,6 +344,8 @@ def claude_builders(trees, returners=None):
         sources = _local_sources(function)
         builds = any(_claude_value(built, returners, found) for value in _returns(function)
                      for built in _built_from(value, sources, returners))
+        # Only the names matter here; the marker keeps the {name: set} shape
+        # _fixpoint grows, and the set of names is returned.
         return builds and _grow(found, function.name, {"returns claude"})
 
     return set(_fixpoint(trees, step))
