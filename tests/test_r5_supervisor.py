@@ -1665,14 +1665,20 @@ def test_a_reviewer_report_of_the_real_shape_parses_for_its_lens(name, capsys):
     assert len(out["findings"]) == len(r5f.parse_report(path.read_text(), _lens_of_report(name))["findings"]) > 0
 
 
+# Where the invented project's files live; every synthetic finding names one.
+INVENTED_PATHS = ("src/tally/", "scripts/tally-", "tests/test_tally_", "docs/usage.md")
+
+
 def test_no_fixture_report_points_at_a_file_of_this_repository():
     """A real report names this repository's own files; a synthetic one names
-    the invented project's. So a real record copied in fails here."""
+    the invented project's. So a real record copied in fails here, even one
+    whose files have since been renamed or deleted."""
     reports = sorted(R5_REPORTS.glob("*.md"))
     assert [p.name for p in reports] == sorted(SYNTHETIC_REPORTS)
     for path in reports:
         records = r5f.parse_report(path.read_text(), _lens_of_report(path.name))["findings"]
-        assert records and not [r["path"] for r in records if (ROOT / r["path"]).exists()]
+        assert records and not [r["path"] for r in records if (ROOT / r["path"]).exists()
+                                or not r["path"].startswith(INVENTED_PATHS)]
 
 
 def test_the_fixture_reports_are_what_their_generator_writes(tmp_path):
