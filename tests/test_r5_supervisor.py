@@ -1648,6 +1648,8 @@ def test_a_null_fix_is_allowed_on_a_finding_and_on_a_closure():
 # the parser computes from the report before it. Public fixtures are never
 # real records (spec section 11, publication rule).
 R5_REPORTS = Path(__file__).resolve().parent / "fixtures" / "r5-reports"
+SYNTHETIC_REPORTS = [f"synthetic-{n}.md" for n in ("correctness-1", "correctness-4", "correctness-5",
+                                                   "clarity-1", "clarity-2", "edge-cases-1")]
 
 
 def _lens_of_report(name):
@@ -1655,9 +1657,7 @@ def _lens_of_report(name):
     return name.removeprefix("synthetic-").rsplit("-", 1)[0].replace("-", "_")
 
 
-@pytest.mark.parametrize("name", ["synthetic-correctness-1.md", "synthetic-correctness-4.md",
-                                  "synthetic-correctness-5.md", "synthetic-clarity-1.md",
-                                  "synthetic-clarity-2.md", "synthetic-edge-cases-1.md"])
+@pytest.mark.parametrize("name", SYNTHETIC_REPORTS)
 def test_a_reviewer_report_of_the_real_shape_parses_for_its_lens(name, capsys):
     path = R5_REPORTS / name
     assert r5f.main(["parse", _lens_of_report(name), str(path)]) == 0
@@ -1665,28 +1665,24 @@ def test_a_reviewer_report_of_the_real_shape_parses_for_its_lens(name, capsys):
     assert len(out["findings"]) == len(r5f.parse_report(path.read_text(), _lens_of_report(name))["findings"]) > 0
 
 
-
 def test_no_fixture_report_points_at_a_file_of_this_repository():
     """A real report names this repository's own files; a synthetic one names
     the invented project's. So a real record copied in fails here."""
-    repo = Path(__file__).resolve().parent.parent
     reports = sorted(R5_REPORTS.glob("*.md"))
-    assert [p.name for p in reports] == sorted(
-        f"synthetic-{n}.md" for n in ("correctness-1", "correctness-4", "correctness-5",
-                                      "clarity-1", "clarity-2", "edge-cases-1"))
+    assert [p.name for p in reports] == sorted(SYNTHETIC_REPORTS)
     for path in reports:
         records = r5f.parse_report(path.read_text(), _lens_of_report(path.name))["findings"]
-        assert records and not [r["path"] for r in records if (repo / r["path"]).exists()]
+        assert records and not [r["path"] for r in records if (ROOT / r["path"]).exists()]
 
 
 def test_the_fixture_reports_are_what_their_generator_writes(tmp_path):
-    repo = Path(__file__).resolve().parent.parent
     done = subprocess.run([sys.executable, str(R5_REPORTS / "make_synthetic_reports.py"),
-                           str(repo), str(tmp_path)], capture_output=True, text=True, timeout=60)
+                           str(tmp_path)], capture_output=True, text=True, timeout=60)
     assert done.returncode == 0, done.stderr
     written = sorted(p.name for p in tmp_path.glob("*.md"))
     assert written == sorted(p.name for p in R5_REPORTS.glob("*.md"))
     assert all((tmp_path / n).read_bytes() == (R5_REPORTS / n).read_bytes() for n in written)
+
 
 @pytest.mark.parametrize(("before", "after", "closed"), [
     ("synthetic-correctness-4.md", "synthetic-correctness-5.md", 2),
