@@ -693,6 +693,18 @@ CLAUDE_LAUNCHES = {
     "a_method_wrapper": (
         "import subprocess\nclass Job:\n    def _go(self, argv):\n        return subprocess.run(argv)\n"
         "    def go(self, p):\n        return self._go([self.tools.claude, '-p', p])\n"),
+    "a_builder_whose_parameter_is_not_named_claude": (
+        "import subprocess\nfrom curamoir import sweep_job\ndef build(binary, p):\n"
+        "    return [binary, '-p', p]\ndef job(p):\n    subprocess.run(build(sweep_job.CLAUDE, p))\n"),
+    "a_kwargs_wrapper": (
+        "import subprocess\ndef go(**kw):\n    return subprocess.run(**kw)\n"
+        "def job(p):\n    go(args=['claude', '-p', p])\n"),
+    "tuple_unpacking": (
+        "import subprocess\ndef job(p):\n    cmd, cwd = ['claude', '-p', p], '.'\n"
+        "    subprocess.run(cmd, cwd=cwd)\n"),
+    "a_for_loop": (
+        "import subprocess\ndef job(p):\n    for exe in ['claude']:\n"
+        "        subprocess.run([exe, '-p', p])\n"),
     "spawnv": "import os\ndef job(p):\n    os.spawnv(os.P_WAIT, '/usr/bin/claude', ['claude', '-p', p])\n",
     "spawnlp": "import os\ndef job(p):\n    os.spawnlp(os.P_WAIT, 'claude', 'claude', '-p', p)\n",
     "module_level": "import subprocess\nsubprocess.run(['claude', '-p', 'x'])\n",
@@ -706,15 +718,18 @@ def test_a_claude_launch_is_found(planted):
 
 
 def test_fix_steps_own_launch_is_found_anywhere_but_fix_step():
-    """run_fix_step itself, moved to another module, is a claude launch."""
+    """run_fix_step itself, moved to another module, is a claude launch, and
+    so is each job that hands it `claude=`: outside fix_step.py it is just
+    another launcher."""
     import pathlib
 
     import curamoir
 
     source = (pathlib.Path(curamoir.__file__).parent / "fix_step.py").read_text(encoding="utf-8")
     hits = claude_launches(_package_with(source, name="moved_fix_step.py"))
-    assert {hit[0] for hit in hits} == {"moved_fix_step.py"}
-    assert any(hit[2] == "run_in_group" for hit in hits)
+    assert {hit[0] for hit in hits} == {"moved_fix_step.py", "sweep_job.py", "tier1.py"}
+    assert ("moved_fix_step.py", "run_in_group") in {(hit[0], hit[2]) for hit in hits}
+    assert "run_fix_step" in {hit[2] for hit in hits if hit[0] != "moved_fix_step.py"}
 
 
 #: Not claude launches: another program, the agent started the sanctioned
