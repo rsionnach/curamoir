@@ -179,6 +179,24 @@ def test_a_closure_does_not_file_a_prose_issue():
     assert [u["heading"] for u in out["prose_unfiled"]] == ["IMPORTANT"]
 
 
+def test_a_tab_indented_sub_bullet_is_not_an_issue():
+    prose = "#### Important\n1. **The parser crashes on an empty list**\n\t- File: a.py:1\n\t- Scenario: x\n"
+    assert parse([], prose=prose)["prose_unfiled"] == [
+        {"heading": "IMPORTANT", "text": "The parser crashes on an empty list"}]
+
+
+@pytest.mark.parametrize("line", ["- foo is fine \u2014 out_of_scope (outside the diff)",
+                                  "- bar \u2014 `pre_existing` (there before this change).",
+                                  "- baz: not_an_issue (looked at, and fine);"])
+def test_a_not_filed_reason_may_carry_one_gloss(line):
+    assert parse([], prose=f"#### Not filed\n{line}\n")["prose_unfiled"] == []
+
+
+def test_a_gloss_is_not_a_reason():
+    out = parse([], prose="#### Not filed\n- qux is noted (out_of_scope is not said here)\n")
+    assert out["prose_unfiled"] == [{"heading": "Not filed", "text": "qux is noted (out_of_scope is not said here)"}]
+
+
 def test_none_and_sub_bullets_are_not_issues():
     prose = "#### Critical\nNone.\n\n#### Important\nNone.\n   - **indented, a sub-bullet**\n"
     assert parse([], prose=prose)["prose_unfiled"] == []
@@ -432,6 +450,45 @@ def test_a_corpus_finding_with_no_location_is_never_deduped():
     b = {**_corpus_record(lens="edge_cases", severity="IMPORTANT", claim="same words")}
     m = gf.merge_round({"correctness": [a], "edge-cases": [b]})
     assert len(m["fix_list"]) == 2 and m["deduped"] == [] and m["grouped"] == []
+
+
+@pytest.mark.parametrize("second", [
+    {},                                                     # a null-path corpus pair
+    {"start_line": 50, "end_line": 60, "severity": "MINOR"},  # one claim, apart
+], ids=["no-location", "apart"])
+def test_two_findings_with_one_key_in_an_open_set_are_refused(second):
+    if second:
+        a = finding(start=1, end=2)
+        b = {**a, **second}
+    else:
+        a = _corpus_record(lens="correctness", severity="IMPORTANT")
+        b = dict(a)
+    with pytest.raises(ValueError, match="share the key"):
+        gf.merge_round({"correctness": [a, b]})
+
+
+def test_a_corpus_finding_with_a_null_level_or_no_location_keys_merges():
+    bare = {k: v for k, v in _corpus_record(lens="correctness", severity="IMPORTANT",
+                                            claim="no location keys").items()
+            if k not in ("path", "start_line", "end_line")}
+    null_level = _corpus_record(lens="correctness", severity="IMPORTANT", verification_level=None)
+    assert gf.corpus_finding(bare) == bare and gf.corpus_finding(null_level) == null_level
+    m = gf.merge_round({"correctness": [bare, null_level]})
+    assert len(m["fix_list"]) == 2 and m["deduped"] == []
+    # A null level ranks as asserted, below cited.
+    assert gf._rank(null_level) == gf._rank({**null_level, "verification_level": "asserted"})
+    assert gf._rank({**null_level, "verification_level": "cited"}) < gf._rank(null_level)
+
+
+@pytest.mark.parametrize("call", ["merge_round", "merge_from_raw"])
+def test_two_spellings_of_one_lens_are_refused(call):
+    e = finding(lens="edge_cases")
+    if call == "merge_round":
+        args = {"edge-cases": prior(e, lens="edge_cases"), "edge_cases": []}
+    else:
+        args = {"edge-cases": report([e]), "edge_cases": report([])}
+    with pytest.raises(ValueError, match="name one lens"):
+        getattr(gf, call)(args)
 
 
 def test_the_merge_does_not_depend_on_the_order_of_lenses_or_findings():

@@ -310,10 +310,10 @@ def load_recorded(recorded: Any) -> dict:
 
 
 def _rank(finding: dict) -> tuple:
-    """Lower is kept: the more severe, then the better proven (no level is
-    "asserted", the bottom of the ladder)."""
+    """Lower is kept: the more severe, then the better proven (no level, or
+    a corpus finding's null one, is "asserted", the bottom of the ladder)."""
     return (SEVERITIES.index(finding["severity"]),
-            -LEVELS.index(finding.get("verification_level", "asserted")))
+            -LEVELS.index(finding.get("verification_level") or "asserted"))
 
 
 def _keep_most_severe(by_key: dict, key: str, finding: dict) -> None:
@@ -381,7 +381,7 @@ def _prose_items(text: str) -> dict:
             current = _heading(line)
             continue
         # A sub-bullet (``   - File: ...``) is indented two or more spaces.
-        if current is None or not line or raw[:2].isspace():
+        if current is None or not line or raw.startswith("\t") or raw[:2].isspace():
             continue
         head, _, rest = line.partition(" ")
         if head in ("-", "*") or (head[:-1].isdigit() and head.endswith(".")):
@@ -400,11 +400,20 @@ def _words(text: str) -> set:
     return set(normalise_claim(text).replace("`", " ").replace("*", " ").split())
 
 
-def _has_reason(line: str) -> bool:
+_GLOSS = re.compile(r"\s*\([^()]*\)[\s.;,]*$")
+
+
+def _ends_in_reason(line: str) -> bool:
     # Trailing punctuation first, so "(not_an_issue)." ends in its reason.
     words = (line.rstrip(" .;,").replace("`", " ").replace("(", " ").replace(")", " ")
              .split())
     return bool(words) and words[-1].rstrip(".;,") in NOT_FILED_REASONS
+
+
+def _has_reason(line: str) -> bool:
+    """The line ends in its reason, or in its reason and one parenthetical
+    gloss ("out_of_scope (outside the diff)", as the templates word it)."""
+    return _ends_in_reason(line) or _ends_in_reason(_GLOSS.sub("", line))
 
 
 def prose_unfiled(text: str, records: list) -> list:
@@ -555,12 +564,13 @@ def _sort_key(entry: dict) -> tuple:
     severity is that record's too); then location and key, so the order
     never depends on the order the lenses reported in."""
     return (SEVERITIES.index(entry["severity"]), _lens_rank(entry["lens"]),
-            entry["path"] or "", entry["start_line"] or 0, entry["fingerprint"])
+            entry.get("path") or "", entry.get("start_line") or 0, entry["fingerprint"])
 
 
 def _overlap(a: dict, b: dict) -> bool:
-    return (a["path"] is not None and a["path"] == b["path"]
-            and a["start_line"] is not None and b["start_line"] is not None
+    # .get: a corpus finding may carry no path or range keys at all.
+    return (a.get("path") is not None and a.get("path") == b.get("path")
+            and a.get("start_line") is not None and b.get("start_line") is not None
             and a["start_line"] <= b["end_line"] and b["start_line"] <= a["end_line"])
 
 
@@ -583,6 +593,20 @@ def _clusters(items: list, joined) -> list:
     for i in range(len(items)):
         groups.setdefault(root(i), []).append(items[i])
     return list(groups.values())
+
+
+def _one_key_per_lens(by_lens: dict) -> list:
+    """The keys of a per-lens mapping, refusing two that name one lens
+    (``edge-cases`` and ``edge_cases``) or a lens that is not one."""
+    seen = {}
+    for name in by_lens:
+        lens = schema_lens(name)
+        if lens not in LENSES:
+            raise ValueError(f"unknown lens {name!r}")
+        if lens in seen:
+            raise ValueError(f"{seen[lens]!r} and {name!r} name one lens")
+        seen[lens] = name
+    return list(by_lens)
 
 
 def merge_round(open_sets: dict) -> dict:
@@ -618,17 +642,22 @@ def merge_round(open_sets: dict) -> dict:
     representative to its merged record (with ``lenses``, ``standing``:
     blocking, clarity or deferred, and ``blocking``). The same open sets
     always give the same result (R5-R16)."""
-    findings = []
-    for lens_name, open_set in open_sets.items():
-        lens = schema_lens(lens_name)
-        if lens not in LENSES:
-            raise ValueError(f"unknown lens {lens_name!r}")
+    findings, keys = [], set()
+    for name in _one_key_per_lens(open_sets):
+        lens = schema_lens(name)
+        open_set = open_sets[name]
         for f in open_set:
             if f.get("resolves") is not None:
                 raise ValueError("an open set holds no closures")
             if schema_lens(f["lens"]) != lens:
-                raise ValueError(f"a {f['lens']} finding in {lens_name}'s open set")
-            findings.append({**f, "lens": lens, "fingerprint": comparison_key(f)})
+                raise ValueError(f"a {f['lens']} finding in {lens}'s open set")
+            entry = {**f, "lens": lens, "fingerprint": comparison_key(f)}
+            # An open set holds one finding per key (parse_report keeps one);
+            # two would collapse into one entry and lose a severity.
+            if entry["fingerprint"] in keys:
+                raise ValueError(f"two findings in {lens}'s open set share the key {entry['fingerprint']}")
+            keys.add(entry["fingerprint"])
+            findings.append(entry)
     # One fixed input order: the result must not depend on dict or report order.
     findings.sort(key=lambda f: (_lens_rank(f["lens"]), f["fingerprint"],
                                  f.get("path") or "", f.get("start_line") or 0))
@@ -678,7 +707,8 @@ def merge_from_raw(reports: dict, priors: Any = None, floor: str = DEFAULT_FLOOR
     raw output alone, so a recorded round can be merged again and compared."""
     priors = priors or {}
     parsed = {}
-    for lens_name, text in reports.items():
+    for lens_name in _one_key_per_lens(reports):
+        text = reports[lens_name]
         lens = schema_lens(lens_name)
         parsed[lens] = parse_report(text, lens, floor, priors.get(lens_name, priors.get(lens, ())))
     merge = merge_round({lens: p["open_set"] for lens, p in parsed.items()})
