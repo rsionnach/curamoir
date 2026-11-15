@@ -22,6 +22,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -1513,6 +1514,52 @@ def test_of_same_fingerprint_findings_equally_severe_the_better_proven_is_kept(o
     assert out["unproven"] == []
 
 
+def _normaliser_shipped_at_55b618f(claim):
+    """The normaliser as cm-70j shipped it (55b618f, 2026-11-07), before
+    26fe784 narrowed it to line references: it removed every number."""
+    text = re.sub(r"\b[0-9a-f]{7,40}\b", " ", claim.lower())
+    text = re.sub(r"\b\d+\b", " ", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def test_a_prior_fingerprinted_by_the_normaliser_shipped_at_55b618f_meets_today_s_rules(monkeypatch):
+    # A real change of normaliser: "exits 2" lost its number then, and keeps it now.
+    claim = "the hook exits 2 on a stale lock"
+    with monkeypatch.context() as m:
+        m.setattr(r5f, "normalise_claim", _normaliser_shipped_at_55b618f)
+        earlier = prior(finding("correctness", "IMPORTANT", 1, claim=claim))
+    now = r5f.fingerprint("correctness", "src/m1.py", claim)
+    assert earlier[0]["fingerprint"] != now
+    again = finding("correctness", "MINOR", 1, claim=claim)
+    out = reparse([again], earlier)
+    assert [f["fingerprint"] for f in out["open_set"]] == [now] and out["unaccounted"] == []
+    assert out["open_set"][0]["severity"] == "IMPORTANT"
+    closure = {**finding("correctness", "IMPORTANT", 40), "resolves": earlier[0]["fingerprint"]}
+    assert reparse([closure], earlier)["closures"] == [now]
+
+
+@pytest.mark.parametrize("order", ["absent first", "cited first"])
+def test_a_finding_with_no_level_ranks_as_asserted_below_a_cited_one(monkeypatch, order):
+    # Same report: one claim twice, equally severe.
+    cited = finding("correctness", "IMPORTANT", 1, level="cited")
+    absent = {k: v for k, v in finding("correctness", "IMPORTANT", 1).items()
+              if k != "verification_level"}
+    pair = [absent, cited] if order == "absent first" else [cited, absent]
+    assert [f.get("verification_level") for f in parse(pair)["open_set"]] == ["cited"]
+    # Prior: two findings today's normaliser merges.
+    a = {**at_line("IMPORTANT", 1, 4), "verification_level": "cited"}
+    b = {k: v for k, v in at_line("IMPORTANT", 1, 9).items() if k != "verification_level"}
+    b["claim"] = a["claim"].replace("line 4", "line 9")
+    merged = reparse([], stored_earlier(monkeypatch, *((b, a) if order == "absent first" else (a, b))))
+    assert [f.get("verification_level") for f in merged["open_set"]] == ["cited"]
+
+
+def test_of_two_equally_ranked_findings_the_first_is_kept():
+    first = finding("correctness", "IMPORTANT", 1)
+    second = {**first, "start_line": 30, "end_line": 31}
+    assert [f["start_line"] for f in parse([first, second])["open_set"]] == [1]
+
+
 def test_a_stale_stored_fingerprint_equal_to_another_s_key_closes_that_other():
     # A's stale cache happens to hold B's key today: a closure naming that
     # value closes B, whose recomputed key it is, and A stays open.
@@ -1887,6 +1934,11 @@ def test_a_carried_blocking_finding_below_the_floor_stays_unproven():
     # The fingerprint is recomputed from lens, path and claim (cm-5ao).
     (["--prior", "PRIOR"], '[{"fingerprint": "0123456789abcdef", "lens": "correctness",'
                            ' "path": "a.py", "severity": "MINOR"}]', "must be a list of findings"),
+    *[(["--prior", "PRIOR"], json.dumps([{k: v for k, v in {
+        "fingerprint": "0123456789abcdef", "lens": "correctness", "path": "a.py",
+        "claim": "c", "severity": "MINOR", **change}.items() if v is not None}]),
+       "must be a list of findings")
+      for change in ({"lens": None}, {"path": None}, {"lens": 1})],
     (["--prior", "PRIOR"], '[{"fingerprint": "0123456789abcdef", "lens": "correctness",'
                            ' "path": "a.py", "claim": "c", "severity": "LOW"}]',
      "must be a list of findings"),
@@ -1901,7 +1953,8 @@ def test_a_carried_blocking_finding_below_the_floor_stays_unproven():
     (["--floor", "proven"], None, "unknown verification floor"),
 ], ids=["floor-without-value", "prior-without-value", "prior-unreadable",
         "prior-of-non-objects", "prior-without-fingerprints", "prior-not-a-list",
-        "prior-without-claim", "prior-with-unknown-severity", "prior-claim-not-unicode",
+        "prior-without-claim", "prior-without-lens", "prior-without-path",
+        "prior-with-a-lens-not-a-string", "prior-with-unknown-severity", "prior-claim-not-unicode",
         "prior-with-unknown-level", "prior-with-null-level", "unknown-floor"])
 def test_each_cli_usage_mistake_exits_1(tmp_path, capsys, args, prior_text, fragment):
     good = tmp_path / "r.md"
