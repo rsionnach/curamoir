@@ -79,7 +79,8 @@
 # Findings and rounds (cm-70j). The contract is section 10 of
 # docs/r5-gate-v2-curamoir-spec.md, shared with NthLayer's gate: a reviewer's
 # last non-empty line is `R5-FINDINGS:` and a JSON array of findings, which
-# lib/r5_findings.py validates, fingerprints and counts (the orchestrator
+# lib/r5_findings.py (the bridge to src/curamoir/gate/findings.py) validates,
+# fingerprints and counts (the orchestrator
 # never types counts). The file records them in rounds[] (one review or
 # verify round per reviewer dispatch, one fix round per fix) and, at `finish`,
 # a verdict keyed to `git rev-parse HEAD^{tree}`. Each findings event carries
@@ -341,7 +342,9 @@ _close_round() {
             + (if $s == "abandoned" then {abandoned: true} else {} end)
             + {findings: $p.findings, unproven: $p.unproven,
                closures: ($p.closures // []),
-               unaccounted_count: (($p.unaccounted // []) | length)}))' \
+               unaccounted_count: (($p.unaccounted // []) | length),
+               # Section 11 telemetry: prose items with no entry (cm-8ap.13).
+               prose_unfiled: ($p.prose_unfiled // [])}))' \
     --arg l "$1" --arg s "$2" --slurpfile pf "$parsed" --argjson m "$meta" --arg t "$(_now)"
   [[ -z "$empty" ]] || rm -f "$empty"
 }

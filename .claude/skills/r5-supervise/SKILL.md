@@ -205,7 +205,8 @@ ESCALATED). Append this paragraph to every reviewer's brief, verbatim, with
 > finding a fix introduced `"regression": true`. No findings:
 > `R5-FINDINGS: []`. Nothing may follow that line.
 
-`lib/r5_findings.py` validates each finding, computes its fingerprint (the
+`lib/r5_findings.py` (the bridge to `src/curamoir/gate/findings.py`, the
+shared contract's reference parser) validates each finding, computes its fingerprint (the
 first 16 hex of sha256 of lens, path and the normalised claim) and sets its
 status to `open`; a reviewer's own fingerprint or status is ignored. Of
 two findings with one fingerprint in a report, the most severe is kept. A

@@ -1245,6 +1245,18 @@ def test_a_first_review_s_closure_is_rejected_ignored_and_logged(r5root):
     assert received["counts"]["critical"] == 0 and received["open_set"] == []
 
 
+def test_the_round_record_keeps_each_lens_s_prose_unfiled(r5root):
+    # Section 11's round record: lenses.<lens>.prose_unfiled (cm-8ap.13).
+    start(r5root)
+    run(STATE, "pass", "correctness", root=r5root)
+    hook(r5root)
+    prose = "#### Important\n1. **A defect named only in the prose**\n\n#### Not filed\n- no reason given\n"
+    run(STATE, "findings", "correctness", report("correctness", prose=prose), root=r5root)
+    entry = state(r5root)["rounds"][-1]["lenses"]["correctness"]
+    assert entry["prose_unfiled"] == [{"heading": "IMPORTANT", "text": "A defect named only in the prose"},
+                                      {"heading": "Not filed", "text": "no reason given"}]
+
+
 def test_a_re_review_closes_what_the_last_round_left_open_and_carries_the_rest(r5root):
     start(r5root)
     run(STATE, "pass", "correctness", root=r5root)
@@ -1424,7 +1436,7 @@ def _earlier_normaliser(claim):
 def stored_earlier(monkeypatch, *findings_):
     """A prior open set fingerprinted by an earlier normaliser, then today's restored."""
     with monkeypatch.context() as m:
-        m.setattr(r5f, "normalise_claim", _earlier_normaliser)
+        m.setattr(r5f._impl, "normalise_claim", _earlier_normaliser)
         return prior(*findings_)
 
 
@@ -1526,7 +1538,7 @@ def test_a_prior_fingerprinted_by_the_normaliser_shipped_at_55b618f_meets_today_
     # A real change of normaliser: "exits 2" lost its number then, and keeps it now.
     claim = "the hook exits 2 on a stale lock"
     with monkeypatch.context() as m:
-        m.setattr(r5f, "normalise_claim", _normaliser_shipped_at_55b618f)
+        m.setattr(r5f._impl, "normalise_claim", _normaliser_shipped_at_55b618f)
         earlier = prior(finding("correctness", "IMPORTANT", 1, claim=claim))
     now = r5f.fingerprint("correctness", "src/m1.py", claim)
     assert earlier[0]["fingerprint"] != now
