@@ -258,7 +258,7 @@ def test_every_recorded_json_round_trips_losslessly(path):
 
 
 def test_a_corpus_fingerprint_is_kept_as_stored_and_compared_recomputed():
-    stale = [f for f in _corpus_findings() if gf.key(f) != f["fingerprint"]]
+    stale = [f for f in _corpus_findings() if gf.comparison_key(f) != f["fingerprint"]]
     assert stale, "corpus-v1 holds a finding fingerprinted by an older normaliser"
     assert gf.corpus_finding(stale[0])["fingerprint"] == stale[0]["fingerprint"]
 
@@ -267,10 +267,10 @@ def test_a_corpus_finding_with_no_path_is_keyed_with_an_empty_one():
     # As NthLayer's corpus writer computed it: every null-path finding's
     # stored fingerprint is sha256(lens||normalised claim).
     no_path = [f for f in _corpus_findings() if f["path"] is None]
-    assert no_path and all(gf.key(f) == f["fingerprint"] for f in no_path)
+    assert no_path and all(gf.comparison_key(f) == f["fingerprint"] for f in no_path)
     f = no_path[0]
     expect = hashlib.sha256(f"{f['lens']}||{gf.normalise_claim(f['claim'])}".encode()).hexdigest()[:16]
-    assert gf.key(f) == expect
+    assert gf.comparison_key(f) == expect
 
 
 def _corpus_record(**change):

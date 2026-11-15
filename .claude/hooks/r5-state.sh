@@ -76,16 +76,16 @@
 #                                  report left, for a re-review's brief
 #   show                           print the state file
 #
-# Findings and rounds (cm-70j). The contract is section 10 of
+# Findings and rounds (cm-70j). The contract is section 11 of
 # docs/r5-gate-v2-curamoir-spec.md, shared with NthLayer's gate: a reviewer's
 # last non-empty line is `R5-FINDINGS:` and a JSON array of findings, which
 # lib/r5_findings.py (the bridge to src/curamoir/gate/findings.py) validates,
-# fingerprints and counts (the orchestrator
-# never types counts). The file records them in rounds[] (one review or
-# verify round per reviewer dispatch, one fix round per fix) and, at `finish`,
-# a verdict keyed to `git rev-parse HEAD^{tree}`. Each findings event carries
+# fingerprints and counts (the orchestrator never types counts). The file
+# records them in rounds[] (one review or verify round per reviewer
+# dispatch, one fix round per fix) and, at `finish`, a verdict keyed to
+# `git rev-parse HEAD^{tree}`. Each findings event carries
 # the round's open set; a re-review's closures (`resolves`) are accounted
-# against the previous one as section 10 settles it: never counted, valid
+# against the previous one as section 11 settles it: never counted, valid
 # only for a fingerprint left open and with evidence, an invalid one ignored
 # and logged closure_rejected, and silence never closes (an unmentioned
 # prior finding is carried forward, unaccounted). A blocking finding whose

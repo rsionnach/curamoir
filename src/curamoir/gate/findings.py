@@ -12,7 +12,9 @@ array of findings. Lines end at LF, with a CR before it tolerated; U+2028,
 U+2029 and every other Unicode separator are content, so one inside a claim
 does not split the line.
 
-    findings.py parse <lens> <report-file> [--floor <level>] [--prior <file>]
+    .claude/hooks/lib/r5_findings.py parse <lens> <report-file> [--floor <level>] [--prior <file>]
+
+(the bridge runs ``main``; its usage line and error prefix name the bridge)
 
 ``--prior`` is a JSON file holding the previous round's open set for this lens
 (a list of findings; none on a first review). It prints one JSON object:
@@ -141,7 +143,7 @@ def fingerprint(lens: str, path: str, claim: str) -> str:
     return hashlib.sha256(data).hexdigest()[:16]
 
 
-def key(finding: dict) -> str:
+def comparison_key(finding: dict) -> str:
     """A finding's comparison key, recomputed (a stored fingerprint is a
     cache). A corpus finding with no path is keyed with an empty one."""
     return fingerprint(finding["lens"], finding.get("path") or "", finding["claim"])
@@ -259,7 +261,7 @@ def corpus_finding(raw: Any, n: int = 1) -> dict:
     reviewer's report gave one. Every other key (``derived_from``,
     ``fix_commit`` and the rest) is kept, nulls stay null, and the stored
     fingerprint is not rewritten, so the corpus stays frozen when the
-    normaliser changes; compare with ``key``."""
+    normaliser changes; compare with ``comparison_key``."""
     _common(raw, n)
     if raw.get("lens") not in LENSES:
         raise ReportError(f"finding {n}: lens must be one of {', '.join(LENSES)}")
@@ -549,9 +551,10 @@ def _lens_rank(lens: str) -> int:
 
 
 def _sort_key(entry: dict) -> tuple:
-    """R5-R14: severity, then lens priority; then location and key, so the
-    order never depends on the order the lenses reported in."""
-    return (SEVERITIES.index(entry["severity"]), _lens_rank(entry["lenses"][0]),
+    """R5-R14: severity, then the representing record's lens priority (the
+    severity is that record's too); then location and key, so the order
+    never depends on the order the lenses reported in."""
+    return (SEVERITIES.index(entry["severity"]), _lens_rank(entry["lens"]),
             entry["path"] or "", entry["start_line"] or 0, entry["fingerprint"])
 
 
@@ -593,28 +596,28 @@ def merge_round(open_sets: dict) -> dict:
     - Dedupe (R5-R13): findings on one path with overlapping line ranges and
       the same normalised claim are one entry, attributed to every lens that
       raised it; the most severe record of the kind that sets its standing
-      (below) represents it. ``deduped`` lists each
-      such set of fingerprints, the representative first. Overlapping ranges
+      (below) represents it. ``deduped`` lists each such set of
+      fingerprints, the representative first. Overlapping ranges
       with different claims stay separate entries, listed together under
       ``grouped``. A finding with no path or range (a corpus finding) is
       never deduped or grouped.
-    - Severity policy (R5-R12): an entry is blocking if it is CRITICAL or
-      IMPORTANT and a blocking lens raised it. Clarity's CRITICAL and
-      IMPORTANT entries join the fix list only when a blocking entry has made
-      a fix round necessary, sorted last; otherwise they are deferred.
+    - Severity policy (R5-R12), decided record by record: an entry is
+      blocking if one of its records is CRITICAL or IMPORTANT from a blocking
+      lens (a blocking lens's MINOR merged with an advisory lens's CRITICAL
+      does not block). Clarity's CRITICAL and IMPORTANT entries join the fix
+      list only when a blocking entry has made a fix round necessary, sorted
+      last; otherwise they are deferred.
     - Deferred (R5-R15): every MINOR, every excellence entry and every
       advisory entry not in the fix list.
-    - Order (R5-R14): severity, then lens priority (correctness, edge cases,
-      provenance, clarity); clarity's entries in the fix list come after
-      every blocking one.
+    - Order (R5-R14): severity, then the representing record's lens, by
+      priority (correctness, edge cases, provenance, clarity); clarity's
+      entries in the fix list come after every blocking one.
 
     Returns ``{"fix_list", "deferred", "deduped", "grouped", "entries"}``:
     the lists hold representatives' fingerprints, and ``entries`` maps each
     representative to its merged record (with ``lenses``, ``standing``:
-    blocking, clarity or deferred, and ``blocking``). Standing is decided
-    record by record: a blocking lens's MINOR merged with an advisory lens's
-    CRITICAL does not block.
-    The same open sets always give the same result (R5-R16)."""
+    blocking, clarity or deferred, and ``blocking``). The same open sets
+    always give the same result (R5-R16)."""
     findings = []
     for lens_name, open_set in open_sets.items():
         lens = schema_lens(lens_name)
@@ -625,7 +628,7 @@ def merge_round(open_sets: dict) -> dict:
                 raise ValueError("an open set holds no closures")
             if schema_lens(f["lens"]) != lens:
                 raise ValueError(f"a {f['lens']} finding in {lens_name}'s open set")
-            findings.append({**f, "lens": lens, "fingerprint": key(f)})
+            findings.append({**f, "lens": lens, "fingerprint": comparison_key(f)})
     # One fixed input order: the result must not depend on dict or report order.
     findings.sort(key=lambda f: (_lens_rank(f["lens"]), f["fingerprint"],
                                  f.get("path") or "", f.get("start_line") or 0))
