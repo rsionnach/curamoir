@@ -230,12 +230,11 @@ def parse_report(text: str, lens: str, floor: str = DEFAULT_FLOOR,
         stored_to_key.setdefault(f["fingerprint"], key)
         _keep_most_severe(prior, key, {**f, "fingerprint": key})
     key_for_resolves = {**stored_to_key, **{key: key for key in prior}}
-    # The prior key each closure names (None if it names none).
-    targets = {id(r): key_for_resolves.get(r["resolves"]) for r in records
-               if r["resolves"] is not None}
+    # Each closure with the prior key it names (None if it names none).
+    closure_targets = [(r, key_for_resolves.get(r["resolves"])) for r in records
+                       if r["resolves"] is not None]
     claimed, rejected = [], []
-    for record in (r for r in records if r["resolves"] is not None):
-        target = targets[id(record)]
+    for record, target in closure_targets:
         if target is None:
             reason = "resolves names no fingerprint in the previous round's open set"
         elif not record["evidence"].strip():
@@ -249,7 +248,7 @@ def parse_report(text: str, lens: str, floor: str = DEFAULT_FLOOR,
                          "reason": reason})
     # R5-R25: closing everything without citing the resolving lines.
     if prior and not claimed and all(
-            any(targets.get(id(r)) == fp and not r["evidence"].strip() for r in records)
+            any(target == fp and not r["evidence"].strip() for r, target in closure_targets)
             for fp in prior):
         raise ReportError("every prior finding is closed with empty evidence")
 
