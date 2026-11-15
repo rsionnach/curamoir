@@ -189,6 +189,13 @@ def _finding(raw: Any, lens: str, n: int) -> dict:
     return finding
 
 
+def _keep_most_severe(by_key: dict, key: str, finding: dict) -> None:
+    """Store finding under key unless a finding at least as severe is there."""
+    kept = by_key.get(key)
+    if kept is None or SEVERITIES.index(finding["severity"]) < SEVERITIES.index(kept["severity"]):
+        by_key[key] = finding
+
+
 def parse_report(text: str, lens: str, floor: str = DEFAULT_FLOOR,
                  prior_open: list = ()) -> dict:
     """The report's records, the open set after it, and its accounting."""
@@ -212,23 +219,24 @@ def parse_report(text: str, lens: str, floor: str = DEFAULT_FLOOR,
     # path and claim with today's normaliser, so a finding stored under an
     # earlier normaliser still meets its re-raise. Two prior findings that
     # the current normaliser makes one are one entry, the most severe kept.
-    prior = {}
+    # A closure's resolves names the fingerprint the brief published, which
+    # may be the stored one, so key_for_resolves maps a stored fingerprint
+    # and a recomputed key alike to the recomputed key. The recomputed keys
+    # are written last, so where one finding's stale cache equals another's
+    # recomputed key, the recomputed key wins.
+    prior, stored_to_key = {}, {}
     for f in prior_open:
         key = fingerprint(f["lens"], f["path"], f["claim"])
-        kept = prior.get(key)
-        if kept is None or SEVERITIES.index(f["severity"]) < SEVERITIES.index(kept["severity"]):
-            prior[key] = {**f, "fingerprint": key}
-    # A closure's resolves names the fingerprint the brief published, which
-    # may be the stored one: it matches the recomputed key first, then any
-    # stored fingerprint of a prior finding.
-    published = {}
-    for f in prior_open:
-        published.setdefault(f["fingerprint"], fingerprint(f["lens"], f["path"], f["claim"]))
-    published.update({key: key for key in prior})
+        stored_to_key.setdefault(f["fingerprint"], key)
+        _keep_most_severe(prior, key, {**f, "fingerprint": key})
+    key_for_resolves = {**stored_to_key, **{key: key for key in prior}}
+    # The prior key each closure names (None if it names none).
+    targets = {id(r): key_for_resolves.get(r["resolves"]) for r in records
+               if r["resolves"] is not None}
     claimed, rejected = [], []
     for record in (r for r in records if r["resolves"] is not None):
-        target = published.get(record["resolves"], record["resolves"])
-        if target not in prior:
+        target = targets[id(record)]
+        if target is None:
             reason = "resolves names no fingerprint in the previous round's open set"
         elif not record["evidence"].strip():
             reason = "a closure needs evidence (the resolving lines)"
@@ -241,8 +249,7 @@ def parse_report(text: str, lens: str, floor: str = DEFAULT_FLOOR,
                          "reason": reason})
     # R5-R25: closing everything without citing the resolving lines.
     if prior and not claimed and all(
-            any(r["resolves"] is not None and published.get(r["resolves"]) == fp
-                and not r["evidence"].strip() for r in records)
+            any(targets.get(id(r)) == fp and not r["evidence"].strip() for r in records)
             for fp in prior):
         raise ReportError("every prior finding is closed with empty evidence")
 
@@ -250,9 +257,7 @@ def parse_report(text: str, lens: str, floor: str = DEFAULT_FLOOR,
     # differing only in a line reference) share one; the most severe wins.
     by_fp = {}
     for record in (r for r in records if r["resolves"] is None):
-        kept = by_fp.get(record["fingerprint"])
-        if kept is None or SEVERITIES.index(record["severity"]) < SEVERITIES.index(kept["severity"]):
-            by_fp[record["fingerprint"]] = record
+        _keep_most_severe(by_fp, record["fingerprint"], record)
     seen = set(by_fp)
     current, downgrades_refused = [], []
     for fp, record in by_fp.items():
