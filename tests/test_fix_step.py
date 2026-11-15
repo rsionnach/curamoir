@@ -17,6 +17,7 @@ gives it.
 list from the real lint over it.
 """
 
+import functools
 import json
 import os
 import re
@@ -63,6 +64,14 @@ from curamoir.git_guard import GitGuardError, git, prepare_sandbox, tree_changes
 from curamoir.principles import load_principles, parse_principles
 from curamoir.sweep import work_list, work_list_document
 from tests import claude_payloads
+from tests.claude_launches import (
+    ALLOWED,
+    claude_mentions,
+    failure_message,
+    package_trees,
+    stale,
+    unallowed,
+)
 from tests.conftest import committed_sample
 from tests.hooks.test_pretooluse_entrypoint import REPO_ROOT
 from tests.test_fix_scope import BILLING, PRINCIPLES, V, git_repo
@@ -582,32 +591,26 @@ def test_every_local_job_toolset_is_shell_free(tmp_path):
 
 
 # The refusal holds only for a `claude -p` that fix_step_argv builds, so the
-# three tests below pin that structurally, over every module under
+# tests below pin that structurally, over every module under
 # src/curamoir/: a new job that builds its own argv, or a new toolset with a
 # shell in it, fails here rather than slipping past the refusal.
 
-def _source_trees():
-    import ast
+@functools.cache
+def _curamoir_trees():
+    """src/curamoir/ parsed once, {path under it: module}; no test changes
+    a tree."""
     import pathlib
 
     import curamoir
 
-    root = pathlib.Path(curamoir.__file__).parent
-    for path in sorted(root.rglob("*.py")):
-        yield path.relative_to(root).as_posix(), ast.parse(path.read_text(encoding="utf-8"))
-
-
-#: The flags that set what a `claude -p` agent may do. Only fix_step_argv
-#: writes them; a second builder would have to.
-_AGENT_FLAGS = ("--tools", "--allowedTools", "--allowed-tools", "--disallowedTools",
-                "--disallowed-tools", "--permission-mode", "--dangerously-skip-permissions")
+    return package_trees(pathlib.Path(curamoir.__file__).parent)
 
 
 def test_only_run_fix_step_calls_fix_step_argv():
     import ast
 
     callers = []
-    for name, tree in _source_trees():
+    for name, tree in _curamoir_trees().items():
         for func in ast.walk(tree):
             if not isinstance(func, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 continue
@@ -620,16 +623,148 @@ def test_only_run_fix_step_calls_fix_step_argv():
     assert sorted(set(callers)) == [("fix_step.py", "run_fix_step")]
 
 
-def test_no_module_but_fix_step_writes_an_agent_permission_flag():
+# No module but fix_step.py names the `claude` binary, unless ALLOWED in
+# tests/claude_launches.py says why (cm-c60, user decision 2026-11-14). The
+# flag list this replaced missed a bare `claude -p`, a flag built at run
+# time, and real flags it did not name; a scan of every way an argv reaches
+# a process kept finding new shapes, so the rule is on the name.
+
+def _package_with(source, name="planted.py"):
+    """The package with one more module, parsed from `source`."""
     import ast
 
-    writers = set()
-    for name, tree in _source_trees():
-        for node in ast.walk(tree):
-            if (isinstance(node, ast.Constant) and isinstance(node.value, str)
-                    and node.value.split("=", 1)[0] in _AGENT_FLAGS):
-                writers.add(name)
-    assert writers == {"fix_step.py"}
+    return {**_curamoir_trees(), name: ast.parse(source)}
+
+
+def test_no_module_but_fix_step_names_the_claude_binary_unless_allowed():
+    trees = _curamoir_trees()
+    missing, left_over = unallowed(trees), stale(trees)
+    assert missing == [], failure_message(missing)
+    assert left_over == [], f"ALLOWED entries that match nothing now: {left_over}"
+    # Not vacuous: the allowed mentions are found, so the rule reads them.
+    assert {(m.module, m.owner) for m in claude_mentions(trees)} == set(ALLOWED)
+    assert all(count >= 1 and reason for count, reason in ALLOWED.values())
+
+
+#: Each names the binary outside fix_step.py: the three shapes the flag list
+#: missed (a bare `claude -p`, a flag built at run time, real flags it did
+#: not name), then a launcher imported by name, a parameter default, a module
+#: constant, a path, a wrapped shell line, an env prefix, an f-string, bytes,
+#: a class attribute, and prose that ends in the word.
+NAMING_CLAUDE = {
+    "bare": "import subprocess\ndef job(p):\n    subprocess.run(['claude', '-p', p])\n",
+    "flags_built_at_run_time": (
+        "import subprocess\ndef job(p, name):\n    argv = ['claude', '-p', p]\n"
+        "    argv.append(f'--{name}')\n    subprocess.Popen(argv)\n"),
+    "flags_the_list_did_not_name": (
+        "import subprocess\ndef job(p):\n    subprocess.run(['claude', '-p', p,"
+        " '--allow-dangerously-skip-permissions', '--settings', '{}'])\n"),
+    "imported_by_name": "from subprocess import run\ndef job(p):\n    run(['claude', '-p', p])\n",
+    "a_parameter_default": (
+        "import subprocess\ndef run_agent(prompt, binary='claude'):\n"
+        "    subprocess.run([binary, '-p', prompt])\n"),
+    "a_module_constant": "AGENT = 'claude'\n",
+    "an_absolute_path": "import os\ndef job():\n    os.execv('/opt/bin/claude', ['agent', '-p'])\n",
+    "a_wrapped_shell_line": "import os\ndef job():\n    os.system('timeout 60 claude -p hello')\n",
+    "after_a_quote": "import subprocess\ndef job():\n    subprocess.run(['/bin/sh', '-c', \"sh -c 'claude -p x'\"])\n",
+    "after_a_paren": "import os\ndef job():\n    os.system('echo $(claude -p hi)')\n",
+    "after_a_semicolon": "import os\ndef job():\n    os.system('cd x;claude -p y')\n",
+    "after_an_ampersand": "import os\ndef job():\n    os.system('make x&&claude -p y')\n",
+    "after_a_pipe": "import os\ndef job():\n    os.system('cat prompt.txt|claude -p')\n",
+    "after_a_backtick": "import os\ndef job():\n    os.system('echo `claude -p hi`')\n",
+    "after_a_double_quote": "import os\ndef job():\n    os.system('sh -c \"claude -p x\"')\n",
+    "a_windows_exe_name": "import subprocess\ndef job(p):\n    subprocess.run(['claude.exe', '-p', p])\n",
+    "an_env_prefix": "import os\ndef job():\n    os.system('env FOO=1 claude')\n",
+    "an_f_string": "import os\ndef job(p):\n    os.system(f'claude -p {p}')\n",
+    "bytes": "import subprocess\ndef job():\n    subprocess.run([b'claude', b'-p'])\n",
+    "a_class_attribute": "class Job:\n    BINARY = 'claude'\n",
+    "prose_ending_in_the_word": "MESSAGE = 'could not reach claude'\n",
+    "an_f_string_part_ending_in_the_word": "def job(kind):\n    return f'the claude {kind} binary'\n",
+    "a_bare_string_after_the_docstring": "def job():\n    \"\"\"Doc.\"\"\"\n    'claude -p'\n",
+    "a_tuple_target_at_module_level": "BIN, ARG = 'claude', '-p'\n",
+}
+
+
+@pytest.mark.parametrize("planted", NAMING_CLAUDE.values(), ids=NAMING_CLAUDE)
+def test_a_constant_naming_claude_is_found(planted):
+    found = unallowed(_package_with(planted))
+    assert found and {m.module for m in found} == {"planted.py"}
+    message = failure_message(found)
+    # It says where each one is, and the two ways out.
+    assert all(f"{m.module}:{m.line} in {m.owner}: {m.shown}" in message for m in found)
+    assert "fix_step.run_fix_step" in message
+    assert "add an entry to ALLOWED in tests/claude_launches.py" in message
+
+
+#: Not the binary: words that only contain it, prose that does not end in
+#: the word, and a docstring.
+NOT_NAMING_CLAUDE = {
+    "a_settings_path": "PATH = '.claude/settings.json'\n",
+    "a_url": "DOCS = 'https://code.claude.com/docs/en/cli-reference'\n",
+    "an_identifier_like_word": "NAME = 'claude_settings'\nTOOL = 'claude-code'\n",
+    "prose": "MESSAGE = 'the claude binary was not found'\n",
+    "a_docstring": "def job():\n    \"\"\"Run claude -p in the sandbox.\"\"\"\n",
+    "a_module_docstring": "\"\"\"Runs claude -p.\"\"\"\n",
+    "a_class_docstring": "class Job:\n    \"\"\"Runs claude -p.\"\"\"\n",
+    "an_async_docstring": "async def job():\n    \"\"\"Runs claude -p.\"\"\"\n",
+    "a_dash_in_prose": "NOTE = 'claude - the agent that curamoir starts'\n",
+}
+
+
+@pytest.mark.parametrize("planted", NOT_NAMING_CLAUDE.values(), ids=NOT_NAMING_CLAUDE)
+def test_what_does_not_name_claude_is_not_found(planted):
+    assert unallowed(_package_with(planted)) == []
+
+
+def test_fix_step_names_claude_freely():
+    assert unallowed(_package_with(NAMING_CLAUDE["bare"], name="fix_step.py")) == []
+
+
+def test_an_allow_list_entry_covers_only_its_own_file_and_owner():
+    planted = _package_with(NAMING_CLAUDE["a_parameter_default"])
+    assert unallowed(planted, {**ALLOWED, ("planted.py", "run_agent"): (1, "why")}) == []
+    assert unallowed(planted, {**ALLOWED, ("planted.py", "job"): (1, "why")}) != []
+    assert unallowed(planted, {**ALLOWED, ("other.py", "run_agent"): (1, "why")}) != []
+
+
+def test_an_entry_for_a_function_does_not_cover_a_same_named_method():
+    planted = _package_with("def go():\n    return 'claude'\n"
+                            "class Job:\n    def go(self):\n        return 'claude -p x'\n")
+    found = unallowed(planted, {**ALLOWED, ("planted.py", "go"): (1, "why")})
+    assert [(m.owner, m.shown) for m in found] == [("Job.go", "'claude -p x'")]
+
+
+def test_a_second_mention_in_an_allowed_function_is_not_covered():
+    """A direct launch added beside an allowed default fails."""
+    planted = _package_with("def run_agent(prompt, binary='claude'):\n"
+                            "    import subprocess\n    subprocess.run(['claude', '-p', prompt])\n")
+    found = unallowed(planted, {**ALLOWED, ("planted.py", "run_agent"): (1, "why")})
+    assert [m.owner for m in found] == ["run_agent", "run_agent"]
+    assert unallowed(planted, {**ALLOWED, ("planted.py", "run_agent"): (2, "why")}) == []
+
+
+def test_a_launch_that_replaces_an_allowed_default_is_not_told_apart():
+    """The stated limit of a counted entry: the same owner, the same count."""
+    default = _package_with("def run_agent(prompt, binary='claude'):\n    return binary\n")
+    swapped = _package_with("def run_agent(prompt, binary=None):\n    import subprocess\n"
+                            "    subprocess.run(['claude', '-p', prompt])\n")
+    entry = {**ALLOWED, ("planted.py", "run_agent"): (1, "why")}
+    assert unallowed(default, entry) == [] and unallowed(swapped, entry) == []
+    assert stale(swapped, entry) == []
+
+
+def test_a_module_level_owner_names_the_assignment_or_is_the_module():
+    found = unallowed(_package_with(NAMING_CLAUDE["a_tuple_target_at_module_level"]
+                                    + NAMING_CLAUDE["a_module_constant"]
+                                    + "BINARY: str = 'claude'\n"))
+    assert sorted(m.owner for m in found) == ["<module>", "AGENT", "BINARY"]
+
+
+def test_a_stale_allow_list_entry_is_reported():
+    assert stale(_curamoir_trees(), {**ALLOWED, ("tier1.py", "gone"): (1, "why")}) == [("tier1.py", "gone")]
+    # An entry covering more mentions than the owner still has is stale too.
+    assert stale(_curamoir_trees(), {**ALLOWED, ("tier1.py", "_call_scan"): (2, "why")}) == [
+        ("tier1.py", "_call_scan")]
 
 
 def test_every_toolset_constant_is_shell_free_or_hosted():
@@ -641,7 +776,7 @@ def test_every_toolset_constant_is_shell_free_or_hosted():
     import importlib
 
     found = {}
-    for name, tree in _source_trees():
+    for name, tree in _curamoir_trees().items():
         module = "curamoir." + name[:-3].replace("/", ".").removesuffix(".__init__")
         for node in tree.body:
             targets = (node.targets if isinstance(node, ast.Assign)
