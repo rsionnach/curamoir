@@ -704,13 +704,17 @@ def merge_from_raw(reports: dict, priors: Any = None, floor: str = DEFAULT_FLOOR
     ``reports`` maps a lens to its reviewer's raw output; ``priors`` maps a
     lens to its previous open set (verify mode). Returns ``{"lenses": {lens:
     parsed report}, "merge": merge_round(...)}``. Everything comes from the
-    raw output alone, so a recorded round can be merged again and compared."""
-    priors = priors or {}
+    raw output alone, so a recorded round can be merged again and compared.
+    Both maps take either spelling of a lens, but not both for one lens, and
+    a prior for a lens with no report is refused rather than ignored."""
+    reports_by = {schema_lens(n): reports[n] for n in _one_key_per_lens(reports)}
+    priors_by = {schema_lens(n): (priors or {})[n] for n in _one_key_per_lens(priors or {})}
+    orphans = sorted(set(priors_by) - set(reports_by))
+    if orphans:
+        raise ValueError(f"a prior open set for {', '.join(orphans)}, which has no report")
     parsed = {}
-    for lens_name in _one_key_per_lens(reports):
-        text = reports[lens_name]
-        lens = schema_lens(lens_name)
-        parsed[lens] = parse_report(text, lens, floor, priors.get(lens_name, priors.get(lens, ())))
+    for lens, text in reports_by.items():
+        parsed[lens] = parse_report(text, lens, floor, priors_by.get(lens, ()))
     merge = merge_round({lens: p["open_set"] for lens, p in parsed.items()})
     return {"lenses": parsed, "merge": merge}
 

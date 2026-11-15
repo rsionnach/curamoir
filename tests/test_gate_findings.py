@@ -531,6 +531,23 @@ def test_the_merge_is_reproducible_from_the_raw_output_alone():
     assert done["merge"] == gf.merge_round({k: v["open_set"] for k, v in done["lenses"].items()})
 
 
+@pytest.mark.parametrize(("priors", "reason"), [
+    ({"edge-cases": [], "edge_cases": []}, "name one lens"),
+    ({"provenance": []}, "provenance, which has no report"),
+    ({"bogus": []}, "unknown lens"),
+], ids=["both-spellings", "no-report", "unknown"])
+def test_merge_from_raw_refuses_a_prior_it_would_drop(priors, reason):
+    with pytest.raises(ValueError, match=reason):
+        gf.merge_from_raw({"edge-cases": report([])}, priors=priors)
+
+
+def test_a_prior_spelled_either_way_reaches_its_lens():
+    earlier = prior(finding(lens="edge_cases"), lens="edge_cases")
+    for spelling in ("edge-cases", "edge_cases"):
+        done = gf.merge_from_raw({"edge-cases": report([])}, priors={spelling: earlier})
+        assert done["lenses"]["edge_cases"]["unaccounted"] == [earlier[0]["fingerprint"]]
+
+
 def test_merge_from_raw_hands_each_lens_its_prior_open_set():
     earlier = prior(finding(lens="correctness"))
     raw = {"correctness": report([closure(earlier[0]["fingerprint"])])}
