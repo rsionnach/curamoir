@@ -332,6 +332,7 @@ def main(argv: list) -> int:
                         and all(isinstance(f.get(k), str)
                                 for k in ("fingerprint", "lens", "path", "claim"))
                         and f.get("severity") in SEVERITIES
+                        and f.get("verification_level", "asserted") in LEVELS
                         for f in prior_open)):
             print("r5_findings: the prior open set must be a list of findings", file=sys.stderr)
             return 1

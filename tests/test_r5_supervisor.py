@@ -1893,11 +1893,16 @@ def test_a_carried_blocking_finding_below_the_floor_stays_unproven():
     (["--prior", "PRIOR"], '[{"fingerprint": "0123456789abcdef", "lens": "correctness",'
                            ' "path": "a.py", "claim": "bad \\ud800", "severity": "MINOR"}]',
      "the prior open set: a path or claim is not valid Unicode"),
+    # A prior's level ranks it when two merge (cm-5ao); absent is "asserted".
+    *[(["--prior", "PRIOR"], '[{"fingerprint": "0123456789abcdef", "lens": "correctness",'
+                             f' "path": "a.py", "claim": "c", "severity": "MINOR",'
+                             f' "verification_level": {level}}}]', "must be a list of findings")
+      for level in ('"proven"', "null")],
     (["--floor", "proven"], None, "unknown verification floor"),
 ], ids=["floor-without-value", "prior-without-value", "prior-unreadable",
         "prior-of-non-objects", "prior-without-fingerprints", "prior-not-a-list",
         "prior-without-claim", "prior-with-unknown-severity", "prior-claim-not-unicode",
-        "unknown-floor"])
+        "prior-with-unknown-level", "prior-with-null-level", "unknown-floor"])
 def test_each_cli_usage_mistake_exits_1(tmp_path, capsys, args, prior_text, fragment):
     good = tmp_path / "r.md"
     good.write_text("R5-FINDINGS: []\n")
