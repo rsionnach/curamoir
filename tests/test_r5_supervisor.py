@@ -1475,6 +1475,44 @@ def test_prior_findings_today_s_normaliser_makes_one_are_one_the_most_severe_kep
         assert reparse([closure], earlier)["open_set"] == []
 
 
+def test_both_published_fingerprints_of_a_merged_finding_close_it_in_one_report(monkeypatch):
+    a = at_line("MINOR", 1, 4)
+    b = at_line("CRITICAL", 1, 9)
+    b["claim"] = a["claim"].replace("line 4", "line 9")
+    earlier = stored_earlier(monkeypatch, a, b)
+    both = [{**finding("correctness", "MINOR", 40 + i), "resolves": f["fingerprint"]}
+            for i, f in enumerate(earlier)]
+    out = reparse(both, earlier)
+    key = r5f.fingerprint("correctness", "src/m1.py", a["claim"])
+    # Each names a fingerprint the brief published: one closure, nothing rejected.
+    assert out["closures"] == [key] and out["closure_rejected"] == [] and out["open_set"] == []
+    # The same published fingerprint twice is still a second closure.
+    twice = [both[0], {**both[0], "start_line": 50, "end_line": 50}]
+    assert [r["reason"] for r in reparse(twice, earlier)["closure_rejected"]] == [
+        "a second closure of the same fingerprint is dropped"]
+
+
+@pytest.mark.parametrize("order", ["cited first", "script first"])
+def test_of_merged_prior_findings_equally_severe_the_better_proven_is_kept(monkeypatch, order):
+    a = at_line("IMPORTANT", 1, 4)
+    b = {**a, "claim": a["claim"].replace("line 4", "line 9")}
+    a["verification_level"], b["verification_level"] = "cited", "script"
+    pair = (a, b) if order == "cited first" else (b, a)
+    out = reparse([], stored_earlier(monkeypatch, *pair))
+    assert [f["verification_level"] for f in out["open_set"]] == ["script"]
+    assert out["unproven"] == []
+
+
+@pytest.mark.parametrize("order", ["cited first", "script first"])
+def test_of_same_fingerprint_findings_equally_severe_the_better_proven_is_kept(order):
+    weak = finding("correctness", "IMPORTANT", 1, level="cited")
+    strong = finding("correctness", "IMPORTANT", 1, level="script")
+    pair = [weak, strong] if order == "cited first" else [strong, weak]
+    out = parse(pair)
+    assert [f["verification_level"] for f in out["open_set"]] == ["script"]
+    assert out["unproven"] == []
+
+
 def test_a_stale_stored_fingerprint_equal_to_another_s_key_closes_that_other():
     # A's stale cache happens to hold B's key today: a closure naming that
     # value closes B, whose recomputed key it is, and A stays open.
@@ -1852,10 +1890,14 @@ def test_a_carried_blocking_finding_below_the_floor_stays_unproven():
     (["--prior", "PRIOR"], '[{"fingerprint": "0123456789abcdef", "lens": "correctness",'
                            ' "path": "a.py", "claim": "c", "severity": "LOW"}]',
      "must be a list of findings"),
+    (["--prior", "PRIOR"], '[{"fingerprint": "0123456789abcdef", "lens": "correctness",'
+                           ' "path": "a.py", "claim": "bad \\ud800", "severity": "MINOR"}]',
+     "the prior open set: a path or claim is not valid Unicode"),
     (["--floor", "proven"], None, "unknown verification floor"),
 ], ids=["floor-without-value", "prior-without-value", "prior-unreadable",
         "prior-of-non-objects", "prior-without-fingerprints", "prior-not-a-list",
-        "prior-without-claim", "prior-with-unknown-severity", "unknown-floor"])
+        "prior-without-claim", "prior-with-unknown-severity", "prior-claim-not-unicode",
+        "unknown-floor"])
 def test_each_cli_usage_mistake_exits_1(tmp_path, capsys, args, prior_text, fragment):
     good = tmp_path / "r.md"
     good.write_text("R5-FINDINGS: []\n")

@@ -189,10 +189,18 @@ def _finding(raw: Any, lens: str, n: int) -> dict:
     return finding
 
 
+def _rank(finding: dict) -> tuple:
+    """Lower is kept: the more severe, then the better proven (no level is
+    "asserted", the bottom of the ladder)."""
+    return (SEVERITIES.index(finding["severity"]),
+            -LEVELS.index(finding.get("verification_level", "asserted")))
+
+
 def _keep_most_severe(by_key: dict, key: str, finding: dict) -> None:
-    """Store finding under key unless a finding at least as severe is there."""
+    """Store finding under key unless one more severe, or as severe and at
+    least as well proven, is there."""
     kept = by_key.get(key)
-    if kept is None or SEVERITIES.index(finding["severity"]) < SEVERITIES.index(kept["severity"]):
+    if kept is None or _rank(finding) < _rank(kept):
         by_key[key] = finding
 
 
@@ -218,7 +226,8 @@ def parse_report(text: str, lens: str, floor: str = DEFAULT_FLOOR,
     # The prior open set is keyed by the fingerprint recomputed from lens,
     # path and claim with today's normaliser, so a finding stored under an
     # earlier normaliser still meets its re-raise. Two prior findings that
-    # the current normaliser makes one are one entry, the most severe kept.
+    # the current normaliser makes one are one entry, the most severe (then
+    # the better proven) kept.
     # A closure's resolves names the fingerprint the brief published, which
     # may be the stored one, so key_for_resolves maps a stored fingerprint
     # and a recomputed key alike to the recomputed key. The recomputed keys
@@ -233,16 +242,21 @@ def parse_report(text: str, lens: str, floor: str = DEFAULT_FLOOR,
     # Each closure with the prior key it names (None if it names none).
     closure_targets = [(r, key_for_resolves.get(r["resolves"])) for r in records
                        if r["resolves"] is not None]
-    claimed, rejected = [], []
+    # named: the resolves values already used by a valid closure. A closure
+    # naming another stored fingerprint of a finding already closed (two the
+    # current normaliser merged) is part of that closure, not a second one.
+    claimed, rejected, named = [], [], set()
     for record, target in closure_targets:
         if target is None:
             reason = "resolves names no fingerprint in the previous round's open set"
         elif not record["evidence"].strip():
             reason = "a closure needs evidence (the resolving lines)"
-        elif target in claimed:
+        elif record["resolves"] in named:
             reason = "a second closure of the same fingerprint is dropped"
         else:
-            claimed.append(target)
+            named.add(record["resolves"])
+            if target not in claimed:
+                claimed.append(target)
             continue
         rejected.append({"resolves": record["resolves"], "fingerprint": record["fingerprint"],
                          "reason": reason})
@@ -253,7 +267,8 @@ def parse_report(text: str, lens: str, floor: str = DEFAULT_FLOOR,
         raise ReportError("every prior finding is closed with empty evidence")
 
     # One entry per fingerprint: the same claim at two sites (or two claims
-    # differing only in a line reference) share one; the most severe wins.
+    # differing only in a line reference) share one; the most severe wins,
+    # then the better proven.
     by_fp = {}
     for record in (r for r in records if r["resolves"] is None):
         _keep_most_severe(by_fp, record["fingerprint"], record)
@@ -319,6 +334,12 @@ def main(argv: list) -> int:
                         and f.get("severity") in SEVERITIES
                         for f in prior_open)):
             print("r5_findings: the prior open set must be a list of findings", file=sys.stderr)
+            return 1
+        try:  # each is recomputed: a claim or path that is not valid Unicode
+            for f in prior_open:
+                fingerprint(f["lens"], f["path"], f["claim"])
+        except ReportError as exc:  # the prior file's fault, not the report's
+            print(f"r5_findings: the prior open set: {exc}", file=sys.stderr)
             return 1
     _, lens, path = args
     try:
