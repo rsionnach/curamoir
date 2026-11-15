@@ -399,7 +399,9 @@ def _words(text: str) -> set:
 
 
 def _has_reason(line: str) -> bool:
-    words = line.replace("`", " ").replace("(", " ").replace(")", " ").split()
+    # Trailing punctuation first, so "(not_an_issue)." ends in its reason.
+    words = (line.rstrip(" .;,").replace("`", " ").replace("(", " ").replace(")", " ")
+             .split())
     return bool(words) and words[-1].rstrip(".;,") in NOT_FILED_REASONS
 
 
@@ -590,7 +592,8 @@ def merge_round(open_sets: dict) -> dict:
 
     - Dedupe (R5-R13): findings on one path with overlapping line ranges and
       the same normalised claim are one entry, attributed to every lens that
-      raised it; the most severe record represents it. ``deduped`` lists each
+      raised it; the most severe record of the kind that sets its standing
+      (below) represents it. ``deduped`` lists each
       such set of fingerprints, the representative first. Overlapping ranges
       with different claims stay separate entries, listed together under
       ``grouped``. A finding with no path or range (a corpus finding) is
@@ -607,7 +610,10 @@ def merge_round(open_sets: dict) -> dict:
 
     Returns ``{"fix_list", "deferred", "deduped", "grouped", "entries"}``:
     the lists hold representatives' fingerprints, and ``entries`` maps each
-    representative to its merged record (with ``lenses`` and ``blocking``).
+    representative to its merged record (with ``lenses``, ``standing``:
+    blocking, clarity or deferred, and ``blocking``). Standing is decided
+    record by record: a blocking lens's MINOR merged with an advisory lens's
+    CRITICAL does not block.
     The same open sets always give the same result (R5-R16)."""
     findings = []
     for lens_name, open_set in open_sets.items():
@@ -627,23 +633,31 @@ def merge_round(open_sets: dict) -> dict:
     def same_finding(a: dict, b: dict) -> bool:
         return _overlap(a, b) and normalise_claim(a["claim"]) == normalise_claim(b["claim"])
 
+    # Each group's standing comes from its own records, one at a time: a
+    # record blocks only if a blocking lens raised it CRITICAL or IMPORTANT,
+    # and clarity's serious records are the only advisory ones that can join
+    # a fix list (R5-R12); excellence's never do (R5-R27). The representative
+    # is the most severe record of the kind that gave the group its standing,
+    # so an entry's severity and lens always come from one record.
     entries, deduped = [], []
     for group in _clusters(findings, same_finding):
         group.sort(key=lambda f: (_rank(f), _lens_rank(f["lens"]), f["fingerprint"]))
+        blockers = [f for f in group if f["severity"] in BLOCKING and f["lens"] in BLOCKING_LENSES]
+        clarity = [f for f in group if f["severity"] in BLOCKING and f["lens"] == "clarity"]
+        standing = "blocking" if blockers else "clarity" if clarity else "deferred"
+        head = (blockers or clarity or group)[0]
         lenses = sorted({f["lens"] for f in group}, key=_lens_rank)
-        head = {**group[0], "lenses": lenses,
-                "blocking": group[0]["severity"] in BLOCKING
-                and any(lens in BLOCKING_LENSES for lens in lenses)}
-        entries.append(head)
+        entries.append({**head, "lenses": lenses, "standing": standing,
+                        "blocking": standing == "blocking"})
         if len(group) > 1:
-            deduped.append([f["fingerprint"] for f in group])
+            deduped.append([head["fingerprint"]]
+                           + [f["fingerprint"] for f in group if f is not head])
     entries.sort(key=_sort_key)
     grouped = [[e["fingerprint"] for e in g] for g in _clusters(entries, _overlap) if len(g) > 1]
 
-    blocking = [e for e in entries if e["blocking"]]
-    advisory_serious = [e for e in entries if not e["blocking"] and e["severity"] in BLOCKING
-                        and "clarity" in e["lenses"]]
-    fix_list = blocking + (advisory_serious if blocking else [])
+    blocking = [e for e in entries if e["standing"] == "blocking"]
+    clarity_serious = [e for e in entries if e["standing"] == "clarity"]
+    fix_list = blocking + (clarity_serious if blocking else [])
     in_fix = {e["fingerprint"] for e in fix_list}
     deferred = [e for e in entries if e["fingerprint"] not in in_fix]
     return {"fix_list": [e["fingerprint"] for e in fix_list],

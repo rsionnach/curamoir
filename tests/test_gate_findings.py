@@ -208,6 +208,8 @@ def test_a_not_filed_line_needs_its_reason():
              "- The old cells sort too; pre_existing\n"
              "- `id` masking in dashboards is documented \u2014 not_an_issue\n"
              "- Panel ids are masked globally (out_of_scope)\n"
+             "- foo is fine (not_an_issue).\n"
+             "- bar is outside the diff (`out_of_scope`).\n"
              "- The loader walks up from the cwd\n")
     out = parse([], prose=prose)
     assert out["prose_unfiled"] == [{"heading": "Not filed", "text": "The loader walks up from the cwd"}]
@@ -387,8 +389,42 @@ def test_a_clarity_claim_a_blocking_lens_also_raised_blocks():
     clarity = finding(lens="clarity", severity="CRITICAL")
     correctness = finding(lens="correctness", severity="IMPORTANT")
     m = gf.merge_round(opened(clarity, correctness))
-    assert m["fix_list"] == [fp(clarity)] and m["entries"][fp(clarity)]["blocking"]
-    assert m["entries"][fp(clarity)]["lenses"] == ["correctness", "clarity"]
+    # Correctness's record makes it block, so correctness's record stands for it.
+    assert m["fix_list"] == [fp(correctness)] and m["entries"][fp(correctness)]["blocking"]
+    assert m["entries"][fp(correctness)]["lenses"] == ["correctness", "clarity"]
+
+
+@pytest.mark.parametrize("advisory", ["excellence", "clarity"])
+def test_an_advisory_critical_merged_with_a_blocking_lens_s_minor_does_not_block(advisory):
+    # Standing is decided record by record: the CRITICAL is advisory, the
+    # blocking lens's record is a MINOR (R5-R12, R5-R27).
+    minor = finding(lens="correctness", severity="MINOR")
+    serious = finding(lens=advisory, severity="CRITICAL")
+    m = gf.merge_round(opened(minor, serious))
+    assert m["fix_list"] == [] and len(m["deferred"]) == 1
+    entry = m["entries"][m["deferred"][0]]
+    assert entry["blocking"] is False and entry["lenses"] == ["correctness", advisory]
+
+
+def test_an_excellence_important_never_joins_the_fix_list_even_merged_with_clarity():
+    blocking = finding(lens="provenance", severity="IMPORTANT", path="src/p.py")
+    clarity = finding(lens="clarity", severity="MINOR")
+    excellence = finding(lens="excellence", severity="IMPORTANT")
+    m = gf.merge_round(opened(blocking, clarity, excellence))
+    assert m["fix_list"] == [fp(blocking)]
+    assert m["entries"][m["deferred"][0]]["standing"] == "deferred"
+
+
+def test_a_blocking_entry_is_represented_by_its_blocking_record():
+    # An excellence CRITICAL beside a correctness IMPORTANT: the entry blocks
+    # through correctness, and its severity and lens are correctness's.
+    correctness = finding(lens="correctness", severity="IMPORTANT")
+    excellence = finding(lens="excellence", severity="CRITICAL")
+    m = gf.merge_round(opened(correctness, excellence))
+    assert m["fix_list"] == [fp(correctness)]
+    entry = m["entries"][fp(correctness)]
+    assert (entry["lens"], entry["severity"], entry["standing"]) == ("correctness", "IMPORTANT", "blocking")
+    assert m["deduped"] == [[fp(correctness), fp(excellence)]]
 
 
 def test_a_corpus_finding_with_no_location_is_never_deduped():
