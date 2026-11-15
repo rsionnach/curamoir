@@ -1413,6 +1413,87 @@ def test_a_bad_prior_open_set_file_is_a_usage_error(tmp_path):
     assert r5f.main(["parse", "correctness", str(good), "--prior", str(bad)]) == 1
 
 
+# ---- section 11: a stored fingerprint is a cache, never a comparison key (cm-5ao)
+
+def _earlier_normaliser(claim):
+    """A normaliser as it might have been: it kept line references."""
+    return " ".join(claim.lower().split())
+
+
+def stored_earlier(monkeypatch, *findings_):
+    """A prior open set fingerprinted by an earlier normaliser, then today's restored."""
+    with monkeypatch.context() as m:
+        m.setattr(r5f, "normalise_claim", _earlier_normaliser)
+        return prior(*findings_)
+
+
+def at_line(severity, n, line):
+    return finding("correctness", severity, n, claim=f"{severity.lower()} defect {n} at line {line}")
+
+
+def test_a_stale_stored_fingerprint_still_meets_its_re_raise(monkeypatch):
+    earlier = stored_earlier(monkeypatch, at_line("IMPORTANT", 1, 4))
+    now = r5f.fingerprint("correctness", "src/m1.py", earlier[0]["claim"])
+    assert earlier[0]["fingerprint"] != now  # the cache is stale
+    again = {**finding("correctness", "MINOR", 1), "claim": earlier[0]["claim"]}
+    out = reparse([again], earlier)
+    # One finding, not a new one beside an unaccounted copy; the severity held.
+    assert [f["fingerprint"] for f in out["open_set"]] == [now]
+    assert out["unaccounted"] == [] and out["downgrades_refused"] == [now]
+    assert out["counts"] == {"critical": 0, "important": 1, "minor": 0}
+
+
+@pytest.mark.parametrize("named", ["stored", "recomputed"])
+def test_a_closure_may_name_the_stored_or_the_recomputed_fingerprint(monkeypatch, named):
+    earlier = stored_earlier(monkeypatch, at_line("IMPORTANT", 1, 4))
+    now = r5f.fingerprint("correctness", "src/m1.py", earlier[0]["claim"])
+    target = earlier[0]["fingerprint"] if named == "stored" else now
+    out = reparse([{**finding("correctness", "IMPORTANT", 40), "resolves": target}], earlier)
+    assert out["closures"] == [now] and out["open_set"] == [] and out["closure_rejected"] == []
+
+
+def test_a_finding_carried_unaccounted_has_its_fingerprint_recomputed(monkeypatch):
+    earlier = stored_earlier(monkeypatch, at_line("IMPORTANT", 1, 4))
+    now = r5f.fingerprint("correctness", "src/m1.py", earlier[0]["claim"])
+    out = reparse([], earlier)
+    assert out["unaccounted"] == [now] and out["unproven"] == []
+    assert out["open_set"][0]["fingerprint"] == now
+
+
+def test_prior_findings_today_s_normaliser_makes_one_are_one_the_most_severe_kept(monkeypatch):
+    # Under the earlier normaliser "at line 4" and "at line 9" were two findings.
+    a = at_line("MINOR", 1, 4)
+    b = at_line("CRITICAL", 1, 9)
+    b["claim"] = a["claim"].replace("line 4", "line 9")
+    earlier = stored_earlier(monkeypatch, a, b)
+    assert len({f["fingerprint"] for f in earlier}) == 2
+    out = reparse([], earlier)
+    assert len(out["open_set"]) == 1 and out["open_set"][0]["severity"] == "CRITICAL"
+    # Either published fingerprint closes the one finding.
+    for published in (f["fingerprint"] for f in earlier):
+        closure = {**finding("correctness", "MINOR", 40), "resolves": published}
+        assert reparse([closure], earlier)["open_set"] == []
+
+
+def test_a_stale_stored_fingerprint_equal_to_another_s_key_closes_that_other():
+    # A's stale cache happens to hold B's key today: a closure naming that
+    # value closes B, whose recomputed key it is, and A stays open.
+    a, b = prior(finding("correctness", "IMPORTANT", 1), finding("correctness", "MINOR", 2))
+    earlier = [{**a, "fingerprint": b["fingerprint"]}, b]
+    closure = {**finding("correctness", "MINOR", 40), "resolves": b["fingerprint"]}
+    out = reparse([closure], earlier)
+    assert out["closures"] == [b["fingerprint"]]
+    assert [f["fingerprint"] for f in out["open_set"]] == [a["fingerprint"]]
+
+
+def test_closing_every_stale_prior_with_empty_evidence_is_still_a_contract_failure(monkeypatch):
+    earlier = stored_earlier(monkeypatch, at_line("IMPORTANT", 1, 4), at_line("MINOR", 2, 7))
+    empties = [{**finding("correctness", "IMPORTANT", 40 + i), "resolves": f["fingerprint"],
+                "evidence": ""} for i, f in enumerate(earlier)]
+    with pytest.raises(r5f.ReportError, match="every prior finding is closed with empty evidence"):
+        reparse(empties, earlier)
+
+
 def test_a_re_review_whose_closures_carry_their_old_severity_can_be_done(r5root):
     start(r5root)
     run(STATE, "pass", "correctness", root=r5root)
@@ -1765,10 +1846,16 @@ def test_a_carried_blocking_finding_below_the_floor_stays_unproven():
     (["--prior", "PRIOR"], "[1]", "must be a list of findings"),
     (["--prior", "PRIOR"], '[{"severity": "MINOR"}]', "must be a list of findings"),
     (["--prior", "PRIOR"], "{}", "must be a list of findings"),
+    # The fingerprint is recomputed from lens, path and claim (cm-5ao).
+    (["--prior", "PRIOR"], '[{"fingerprint": "0123456789abcdef", "lens": "correctness",'
+                           ' "path": "a.py", "severity": "MINOR"}]', "must be a list of findings"),
+    (["--prior", "PRIOR"], '[{"fingerprint": "0123456789abcdef", "lens": "correctness",'
+                           ' "path": "a.py", "claim": "c", "severity": "LOW"}]',
+     "must be a list of findings"),
     (["--floor", "proven"], None, "unknown verification floor"),
 ], ids=["floor-without-value", "prior-without-value", "prior-unreadable",
         "prior-of-non-objects", "prior-without-fingerprints", "prior-not-a-list",
-        "unknown-floor"])
+        "prior-without-claim", "prior-with-unknown-severity", "unknown-floor"])
 def test_each_cli_usage_mistake_exits_1(tmp_path, capsys, args, prior_text, fragment):
     good = tmp_path / "r.md"
     good.write_text("R5-FINDINGS: []\n")

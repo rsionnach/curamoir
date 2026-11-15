@@ -39,6 +39,13 @@ it held up): severity goes down only through a valid closure. A report that
 closes every prior finding with empty evidence is a contract failure
 (R5-R25).
 
+Fingerprints, per section 11: a stored fingerprint is a cache, never a
+comparison key. Every comparison with the prior open set recomputes the key
+from lens, path and claim with the current normaliser; a closure's
+``resolves`` may name either that key or the prior finding's stored
+fingerprint (what the brief published). The open set carries the recomputed
+fingerprint (cm-5ao).
+
 Exit 0; 2 if the report does not meet the contract (the reason on stderr:
 the caller records the reviewer UNAVAILABLE, R5-R9); 1 on a usage error.
 
@@ -200,10 +207,27 @@ def parse_report(text: str, lens: str, floor: str = DEFAULT_FLOOR,
         raise ReportError(f"the {PREFIX} line is not a JSON array")
     records = [_finding(item, lens, n) for n, item in enumerate(raw, 1)]
 
-    prior = {f["fingerprint"]: f for f in prior_open}
+    # Section 11: a stored fingerprint is a cache, never a comparison key.
+    # The prior open set is keyed by the fingerprint recomputed from lens,
+    # path and claim with today's normaliser, so a finding stored under an
+    # earlier normaliser still meets its re-raise. Two prior findings that
+    # the current normaliser makes one are one entry, the most severe kept.
+    prior = {}
+    for f in prior_open:
+        key = fingerprint(f["lens"], f["path"], f["claim"])
+        kept = prior.get(key)
+        if kept is None or SEVERITIES.index(f["severity"]) < SEVERITIES.index(kept["severity"]):
+            prior[key] = {**f, "fingerprint": key}
+    # A closure's resolves names the fingerprint the brief published, which
+    # may be the stored one: it matches the recomputed key first, then any
+    # stored fingerprint of a prior finding.
+    published = {}
+    for f in prior_open:
+        published.setdefault(f["fingerprint"], fingerprint(f["lens"], f["path"], f["claim"]))
+    published.update({key: key for key in prior})
     claimed, rejected = [], []
     for record in (r for r in records if r["resolves"] is not None):
-        target = record["resolves"]
+        target = published.get(record["resolves"], record["resolves"])
         if target not in prior:
             reason = "resolves names no fingerprint in the previous round's open set"
         elif not record["evidence"].strip():
@@ -213,11 +237,12 @@ def parse_report(text: str, lens: str, floor: str = DEFAULT_FLOOR,
         else:
             claimed.append(target)
             continue
-        rejected.append({"resolves": target, "fingerprint": record["fingerprint"],
+        rejected.append({"resolves": record["resolves"], "fingerprint": record["fingerprint"],
                          "reason": reason})
     # R5-R25: closing everything without citing the resolving lines.
     if prior and not claimed and all(
-            any(r["resolves"] == fp and not r["evidence"].strip() for r in records)
+            any(r["resolves"] is not None and published.get(r["resolves"]) == fp
+                and not r["evidence"].strip() for r in records)
             for fp in prior):
         raise ReportError("every prior finding is closed with empty evidence")
 
@@ -284,7 +309,10 @@ def main(argv: list) -> int:
             print(f"r5_findings: cannot read the prior open set: {exc}", file=sys.stderr)
             return 1
         if not (isinstance(prior_open, list)
-                and all(isinstance(f, dict) and isinstance(f.get("fingerprint"), str)
+                and all(isinstance(f, dict)
+                        and all(isinstance(f.get(k), str)
+                                for k in ("fingerprint", "lens", "path", "claim"))
+                        and f.get("severity") in SEVERITIES
                         for f in prior_open)):
             print("r5_findings: the prior open set must be a list of findings", file=sys.stderr)
             return 1
