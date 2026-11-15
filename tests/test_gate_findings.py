@@ -59,6 +59,11 @@ def closure(target, evidence="tests/test_m.py:4 now asserts it", lens="correctne
 
 
 # ---- spec v1.10 fix 2: "~" in a line reference
+#
+# The v1.10 inputs (a "line ~N" claim, a Unicode separator, a CR) are taken
+# from the spec's own section 11 text: no real report, corpus claim or run
+# record in this repository or NthLayer's holds one (checked 2026-11-15), so
+# the real artefacts here exercise only the "false" side.
 
 @pytest.mark.parametrize("claim", ["off by one at line ~42", "off by one at lines ~4-~9",
                                    "off by one at line ~4 \u2013 ~9", "off by one at line 42"])
@@ -185,9 +190,14 @@ def test_a_tab_indented_sub_bullet_is_not_an_issue():
         {"heading": "IMPORTANT", "text": "The parser crashes on an empty list"}]
 
 
+# The shapes of this repository's own reviewers' Not-filed lines (the reports
+# themselves are private): a parenthetical before the reason, then one gloss.
 @pytest.mark.parametrize("line", ["- foo is fine \u2014 out_of_scope (outside the diff)",
                                   "- bar \u2014 `pre_existing` (there before this change).",
-                                  "- baz: not_an_issue (looked at, and fine);"])
+                                  "- baz: not_an_issue (looked at, and fine);",
+                                  "- The probe passes `--timeout` against the variable (b0a1999): not_an_issue "
+                                  "(the option outranks the variable).",
+                                  "- None turned up (the freeze): out_of_scope (limits list: follow-up bead)."])
 def test_a_not_filed_reason_may_carry_one_gloss(line):
     assert parse([], prose=f"#### Not filed\n{line}\n")["prose_unfiled"] == []
 
@@ -195,6 +205,13 @@ def test_a_not_filed_reason_may_carry_one_gloss(line):
 def test_a_gloss_is_not_a_reason():
     out = parse([], prose="#### Not filed\n- qux is noted (out_of_scope is not said here)\n")
     assert out["prose_unfiled"] == [{"heading": "Not filed", "text": "qux is noted (out_of_scope is not said here)"}]
+
+
+def test_a_heading_may_end_in_a_colon():
+    prose = "#### Important:\n1. **A defect under a colon heading**\n\n### Not filed:\n- no reason here\n"
+    assert parse([], prose=prose)["prose_unfiled"] == [
+        {"heading": "IMPORTANT", "text": "A defect under a colon heading"},
+        {"heading": "Not filed", "text": "no reason here"}]
 
 
 def test_none_and_sub_bullets_are_not_issues():
@@ -312,6 +329,7 @@ def test_a_null_path_and_range_parse_in_corpus_mode_but_not_from_a_reviewer():
     ({"lens": "edge-cases"}, "lens must be one of"),
     ({"severity": "HIGH"}, "severity"),
     ({"start_line": 3}, "both be null"),
+    ({"end_line": 3}, "both be null"),
     ({"start_line": 9, "end_line": 3}, "both be null"),
     ({"path": ""}, "path must be a non-empty string"),
     ({"claim": None}, "claim"),
@@ -321,7 +339,7 @@ def test_a_null_path_and_range_parse_in_corpus_mode_but_not_from_a_reviewer():
     ({"verification_level": "proven"}, "verification_level"),
     ({"resolves": "nope"}, "resolves"),
     ({"regression": "no"}, "regression"),
-], ids=["pass-name-lens", "severity", "half-range", "inverted-range", "empty-path", "no-claim",
+], ids=["pass-name-lens", "severity", "half-range", "half-range-end", "inverted-range", "empty-path", "no-claim",
         "evidence-type", "fingerprint", "status", "level", "resolves", "regression"])
 def test_a_corpus_finding_is_still_checked_against_the_schema(change, reason):
     with pytest.raises(gf.ReportError, match=reason):
@@ -331,7 +349,9 @@ def test_a_corpus_finding_is_still_checked_against_the_schema(change, reason):
 def test_a_malformed_recorded_json_is_refused():
     for bad, reason in [([], "JSON object"), ({"rounds": {}}, "rounds must be a list"),
                         ({"rounds": [1]}, "each round"), ({"rounds": [{"findings": {}}]}, "list or null"),
-                        ({"rounds": [], "cross_repo_findings": [_corpus_record(severity="LOW")]}, "severity")]:
+                        ({"rounds": [], "cross_repo_findings": [_corpus_record(severity="LOW")]}, "severity"),
+                        ({"rounds": [{"findings": [_corpus_record()]},
+                                     {"findings": [_corpus_record(severity="LOW")]}]}, "finding 2: severity")]:
         with pytest.raises(gf.ReportError, match=reason):
             gf.load_recorded(bad)
 
@@ -350,6 +370,10 @@ def fp(record):
     return gf.fingerprint(record["lens"], record["path"], record["claim"])
 
 
+# R5-R13's dedupe has no real "true" artefact yet: the bridge runs lenses one
+# at a time on trees that change between them, so no recorded round holds two
+# lenses naming one defect on one tree (0 deduped over the archived runs and
+# the corpus, 2026-11-15). These fixtures follow the rule's text.
 def test_one_claim_on_overlapping_lines_from_two_lenses_is_one_entry_attributed_to_both():
     c = finding(lens="correctness", severity="IMPORTANT", start=10, end=14)
     e = finding(lens="edge_cases", severity="CRITICAL", start=13, end=20, claim="The  GUARD never fires ")
@@ -491,6 +515,50 @@ def test_two_spellings_of_one_lens_are_refused(call):
         getattr(gf, call)(args)
 
 
+@pytest.mark.parametrize("shape", [
+    {"path": None, "start_line": 10, "end_line": 20},     # the corpus has one such finding
+    {"path": "src/m.py", "start_line": None, "end_line": None},  # and nine of these
+], ids=["no-path-with-range", "path-without-range"])
+def test_corpus_findings_without_a_full_location_are_never_deduped_or_grouped(shape):
+    a = _corpus_record(lens="correctness", severity="IMPORTANT", claim="one claim", **shape)
+    b = _corpus_record(lens="edge_cases", severity="IMPORTANT", claim="one claim", **shape)
+    c = _corpus_record(lens="provenance", severity="IMPORTANT", claim="another claim", **shape)
+    m = gf.merge_round({"correctness": [a], "edge_cases": [b], "provenance": [c]})
+    assert len(m["fix_list"]) == 3 and m["deduped"] == [] and m["grouped"] == []
+
+
+def test_every_corpus_entry_s_first_review_merges():
+    # The delivered corpus's real location shapes, merged as one round per
+    # entry: nothing crashes, and every finding lands in exactly one list.
+    merged = 0
+    for path in _recorded():
+        by_lens = {}
+        for review in json.loads(path.read_text())["rounds"]:
+            if review["iteration"] == 1:
+                for f in review["findings"] or ():
+                    by_lens.setdefault(gf.schema_lens(review["lens"]), []).append(f)
+        if not by_lens:
+            continue
+        m = gf.merge_round(by_lens)
+        listed = m["fix_list"] + m["deferred"]
+        assert len(listed) == len(set(listed))
+        assert len(listed) + sum(len(d) - 1 for d in m["deduped"]) == sum(map(len, by_lens.values()))
+        merged += 1
+    assert merged >= 19
+
+
+def test_equal_severity_and_lens_sort_by_location():
+    # Fingerprints that order the other way from their paths.
+    a = finding(path="src/a.py", claim="alpha")
+    b = finding(path="src/b.py", claim="beta")
+    if fp(a) < fp(b):
+        a, b = finding(path="src/a.py", claim="gamma"), finding(path="src/b.py", claim="alpha")
+    assert fp(a) > fp(b)
+    later_line = finding(path="src/a.py", start=40, end=41, claim="delta")
+    m = gf.merge_round(opened(b, later_line, a))
+    assert m["fix_list"] == [fp(a), fp(later_line), fp(b)]
+
+
 def test_the_merge_does_not_depend_on_the_order_of_lenses_or_findings():
     records = [finding(lens="correctness", start=10, end=14),
                finding(lens="edge_cases", start=12, end=13, severity="CRITICAL"),
@@ -587,6 +655,23 @@ def test_the_bridge_s_command_line_runs(tmp_path, python):
     assert out["findings"][0]["fingerprint"] == gf.fingerprint("correctness", "src/m.py",
                                                               "line ~3 is off by one\u2028here")
     assert out["prose_unfiled"] == [{"heading": "MINOR", "text": "Docstring names one stub only"}]
+
+
+def test_the_bridge_prefers_its_checkout_s_module_to_one_earlier_on_the_path(tmp_path):
+    # A decoy curamoir ahead of everything on PYTHONPATH: the bridge puts its
+    # own src/ in front, so the checkout's parser runs, not the decoy.
+    decoy = tmp_path / "curamoir" / "gate"
+    decoy.mkdir(parents=True)
+    (tmp_path / "curamoir" / "__init__.py").write_text("")
+    (decoy / "__init__.py").write_text("")
+    (decoy / "findings.py").write_text("def main(argv):\n    print('DECOY')\n    return 0\n")
+    path = tmp_path / "r.md"
+    path.write_text(report([]), encoding="utf-8")
+    run = subprocess.run([sys.executable, str(BRIDGE), "parse", "correctness", str(path)],
+                         capture_output=True, text=True, timeout=60,
+                         env={"PYTHONPATH": str(tmp_path), "PATH": "/usr/bin:/bin"})
+    assert run.returncode == 0, run.stderr
+    assert "DECOY" not in run.stdout and json.loads(run.stdout)["findings"] == []
 
 
 def test_a_bridge_with_no_module_beside_it_says_so_and_exits_1(tmp_path):
