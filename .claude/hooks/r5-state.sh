@@ -188,20 +188,34 @@ _open_fix() {  # a fix agent dispatched and not yet closed by fixes_applied
     "$STATE")" || exit 3
   [[ "$open" == true ]]
 }
+# jq definitions shared by the helpers below.
+# adv: the run's advisory passes; a state file with none listed (written
+# before the list existed, or emptied by hand) reads as excellence alone.
+# reads($p): the pass's earlier reports (findings_received or
+# advisory_pass_completed). For an advisory pass only those since the last
+# reopen count: a reopen drops the advisory reads, so the next read is a
+# first review of the new tree, not a verify round of the old one.
+_JQ_DEFS='def adv: (.advisory_passes // []) | if length == 0 then ["excellence"] else . end;
+  def reads($p): ([range(0; .audit_trail | length) as $k
+      | select(.audit_trail[$k].event == "pass_reopened") | $k] | last // -1) as $r
+    | (adv | index($p)) as $a
+    | [.audit_trail | to_entries[]
+      | select((.value.event == "findings_received" or .value.event == "advisory_pass_completed")
+        and .value.pass == $p and ($a == null or .key > $r)) | .value];'
 # The next pass: the first blocking pass not done, then the first advisory
 # pass with no result; once every one has run, the last advisory pass again
 # (a second excellence read after a touch-up). A run keeps the roster it was
 # started with (init writes it): one started before cm-ig5 has clarity among
 # its blocking passes and excellence as its only advisory one.
 _next_pass() {
-  jq -r '([.completed_passes[].name]) as $done | ([.advisory_results[].pass]) as $read
-    | (.advisory_passes // ["excellence"]) as $adv
+  jq -r "$_JQ_DEFS"'([.completed_passes[].name]) as $done | ([.advisory_results[].pass]) as $read
+    | adv as $adv
     | ([.passes[] | select(. as $p | $done | index($p) | not)]
        + [$adv[] | select(. as $p | $read | index($p) | not)])
     | first // ($adv | last)' "$STATE"
 }
 _advisory_pass() {  # _advisory_pass <name>: true if <name> is one of the run's advisory passes
-  jq -e --arg p "$1" '(.advisory_passes // ["excellence"]) | index($p)' "$STATE" >/dev/null
+  jq -e --arg p "$1" "$_JQ_DEFS"'adv | index($p)' "$STATE" >/dev/null
 }
 # The run owner's lock has lapsed: it exists, is the owner's, and its lease
 # has run out (a crashed run).
@@ -283,11 +297,9 @@ _git() {
   if out="$(git -C "$R5_ROOT" "$@" 2>/dev/null)"; then printf '%s' "$out"; fi
 }
 # The open set this pass's previous report left (section 10): the open_set
-# of its last findings event; [] on a first review.
+# of its last report (reads, above); [] on a first review.
 _prior_open() {  # _prior_open <pass>
-  jq -c --arg p "$1" '[.audit_trail[]
-      | select((.event == "findings_received" or .event == "advisory_pass_completed") and .pass == $p)]
-    | last | if . == null then [] else (.open_set // []) end' "$STATE"
+  jq -c --arg p "$1" "$_JQ_DEFS"'reads($p) | last | if . == null then [] else (.open_set // []) end' "$STATE"
 }
 # _parse <lens> <report-file> <pass>: writes the parsed report (JSON) to the
 # file PARSED_FILE and returns 0, or returns 2 with the reason in PARSE_ERROR
@@ -468,9 +480,7 @@ case "$CMD" in
         # A later reviewer of the same pass re-reads the tree after a fix (or
         # an earlier advisory read): a verify round, on the events
         # _prior_open reads the prior open set from.
-        _apply '([.audit_trail[] | select((.event == "findings_received"
-                   or .event == "advisory_pass_completed") and .pass == $p)]
-                 | length > 0) as $again
+        _apply "$_JQ_DEFS"'(reads($p) | length > 0) as $again
           | .rounds = ((.rounds // []) + [{n: $n,
               kind: (if $again then "verify" else "review" end),
               head: (if $h == "" then null else $h end), started: $t, ended: null,
@@ -642,8 +652,8 @@ case "$CMD" in
     _need_owned_run; _arg status status "${2:-}"
     case "$status" in completed|failed|aborted) ;; *) _bad_arg "bad status $status";; esac
     if [[ "$status" == completed ]]; then
-      missing="$(jq -r '[.passes[] as $p | select([.completed_passes[].name] | index($p) | not) | $p]
-        + [(.advisory_passes // ["excellence"])[] as $p
+      missing="$(jq -r "$_JQ_DEFS"'[.passes[] as $p | select([.completed_passes[].name] | index($p) | not) | $p]
+        + [adv[] as $p
            | select([.advisory_results[].pass] | index($p) | not) | $p]
         + (if .current_pass != null then ["(" + .current_pass + " is still current)"] else [] end)
         | join(", ")' "$STATE")"
@@ -683,8 +693,8 @@ case "$CMD" in
     # The findings this pass's previous report left open (with fingerprints),
     # for a re-review's brief. Read-only.
     _need_run; _arg pass pass "${2:-}"
-    jq -e --arg p "$pass" '(.passes + .advisory_passes) | index($p)' "$STATE" >/dev/null \
-      || _bad_arg "open-set: <pass> must be one of $(jq -r '(.passes + .advisory_passes) | join(", ")' "$STATE")"
+    jq -e --arg p "$pass" "$_JQ_DEFS"'(.passes + adv) | index($p)' "$STATE" >/dev/null \
+      || _bad_arg "open-set: <pass> must be one of $(jq -r "$_JQ_DEFS"'(.passes + adv) | join(", ")' "$STATE")"
     _prior_open "$pass"
     ;;
   show) _need_run; cat "$STATE" ;;

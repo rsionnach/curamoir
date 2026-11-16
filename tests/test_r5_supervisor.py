@@ -803,15 +803,66 @@ def test_a_run_started_on_the_old_roster_finishes_on_it(r5root):
     assert run(STATE, "finish", "completed", root=r5root).returncode == 0
 
 
-def test_an_old_state_file_with_no_advisory_passes_reads_as_excellence_only(r5root):
+def test_after_a_reopen_clarity_reads_the_new_tree_as_a_first_review(r5root):
+    # A reopen drops the advisory reads, so clarity's next read is a review
+    # round with no prior: the old read's findings are not carried as
+    # unaccounted, and open-set has nothing for its brief.
+    start(r5root)
+    for name in BLOCKING_PASSES:
+        clear_pass(r5root, name)
+    run(STATE, "pass", "clarity", root=r5root)
+    hook(r5root)
+    run(STATE, "advisory", report("clarity", 0, 1, 0), "FAIL", root=r5root)
+    advisory_read(r5root)
+    assert run(STATE, "reopen", "provenance", root=r5root).returncode == 0
+    clear_pass(r5root, "provenance")
+    assert json.loads(run(STATE, "open-set", "clarity", root=r5root).stdout) == []
+    run(STATE, "pass", "clarity", root=r5root)
+    hook(r5root)
+    assert state(r5root)["rounds"][-1]["kind"] == "review"
+    run(STATE, "advisory", report("clarity", 0, 0, 0), "PASS", root=r5root)
+    read = state(r5root)["advisory_results"][-1]
+    assert (read["pass"], read["unaccounted"], read["open_set"]) == ("clarity", [], [])
+    # Without a reopen, a second excellence read still verifies the first.
+    advisory_read(r5root)
+    run(STATE, "pass", "excellence", root=r5root)
+    hook(r5root)
+    assert state(r5root)["rounds"][-1]["kind"] == "verify"
+
+
+def test_a_clarity_report_that_does_not_parse_is_unavailable_and_requested_again(r5root):
+    start(r5root)
+    for name in BLOCKING_PASSES:
+        clear_pass(r5root, name)
+    run(STATE, "pass", "clarity", root=r5root)
+    hook(r5root)
+    bad = _REPORTS["dir"] / "clarity-prose.md"
+    bad.write_text("Reads well.\n")
+    refused = run(STATE, "advisory", str(bad), "PASS", root=r5root)
+    assert refused.returncode == 2 and "recorded UNAVAILABLE" in refused.stderr
+    assert state(r5root)["advisory_results"] == []
+    assert run(STATE, "request", "clarity", "2", root=r5root).returncode == 0
+    assert hook(r5root).returncode == 0
+    assert run(STATE, "advisory", report("clarity"), "PASS", root=r5root).returncode == 0
+    assert state(r5root)["advisory_results"][-1]["pass"] == "clarity"
+
+
+@pytest.mark.parametrize("listed", ["absent", "empty"])
+def test_a_state_with_no_advisory_passes_listed_reads_as_excellence_alone(r5root, listed):
     start(r5root)
     old_roster(r5root)
     record = state(r5root)
-    del record["advisory_passes"]
+    if listed == "absent":
+        del record["advisory_passes"]
+    else:
+        record["advisory_passes"] = []
     state_file(r5root).write_text(json.dumps(record))
     for name in ("correctness", "clarity", "edge-cases", "provenance"):
         clear_pass(r5root, name)
+    unread = run(STATE, "finish", "completed", root=r5root)
+    assert unread.returncode == 2 and "the run is not complete: excellence" in unread.stderr
     advisory_read(r5root)
+    assert run(STATE, "open-set", "excellence", root=r5root).returncode == 0
     assert run(STATE, "finish", "completed", root=r5root).returncode == 0
 
 
