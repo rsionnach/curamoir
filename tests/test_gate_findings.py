@@ -840,24 +840,48 @@ def test_the_bridge_s_command_line_runs(tmp_path, python):
     assert out["prose_unfiled"] == [{"heading": "MINOR", "text": "Docstring names one stub only"}]
 
 
-def test_the_bridge_passes_its_four_lens_set_so_clarity_keeps_its_label(tmp_path):
-    # Spec v1.11, R5-R12: until clarity moves to advisory in a bead of its
-    # own (cm-ig5), the bridge passes its four-lens set and labels clarity.
-    # The module's own command line, under the contract's default, does not.
-    bridge = _load_bridge()
-    assert gf.blocking_set(bridge.BRIDGE_BLOCKING) == {"correctness", "clarity", "edge_cases", "provenance"}
+@pytest.mark.parametrize(("blocking", "unproven"), [
+    (None, 0),                                  # the contract default: clarity is advisory
+    ("correctness,clarity,edge-cases,provenance", 1),  # a run started on the old roster
+    ("correctness,edge_cases,provenance", 0),
+    ("", 0),                                    # no lens blocks
+], ids=["default", "old-roster", "new-roster", "empty"])
+def test_the_command_line_takes_the_caller_s_blocking_set(tmp_path, blocking, unproven):
+    # R5-R12, §11: the caller passes the set (r5-state.sh passes the run's own
+    # blocking passes); the bridge runs the module's command line unchanged.
     path = tmp_path / "r.md"
     path.write_text(report([finding(lens="clarity", level="cited")]), encoding="utf-8")
-    run = subprocess.run([sys.executable, str(BRIDGE), "parse", "clarity", str(path)],
-                         capture_output=True, text=True, timeout=60)
+    argv = [sys.executable, str(BRIDGE), "parse", "clarity", str(path)]
+    if blocking is not None:
+        argv += ["--blocking", blocking]
+    run = subprocess.run(argv, capture_output=True, text=True, timeout=60)
     assert run.returncode == 0, run.stderr
-    assert len(json.loads(run.stdout)["unproven"]) == 1
-    module = subprocess.run([sys.executable, "-c",
-                             "import sys; from curamoir.gate import findings; "
-                             "sys.exit(findings.main(sys.argv[1:]))", "parse", "clarity", str(path)],
-                            capture_output=True, text=True, timeout=60)
-    assert module.returncode == 0, module.stderr
-    assert json.loads(module.stdout)["unproven"] == []
+    assert len(json.loads(run.stdout)["unproven"]) == unproven
+
+
+def test_an_empty_blocking_option_means_no_lens_blocks(tmp_path):
+    # Not the default: under the default a weak correctness finding is unproven.
+    path = tmp_path / "r.md"
+    path.write_text(report([finding(lens="correctness", level="cited")]), encoding="utf-8")
+    base = [sys.executable, str(BRIDGE), "parse", "correctness", str(path)]
+    for extra, unproven in (([], 1), (["--blocking", ""], 0)):
+        run = subprocess.run(base + extra, capture_output=True, text=True, timeout=60)
+        assert run.returncode == 0, run.stderr
+        assert len(json.loads(run.stdout)["unproven"]) == unproven, extra
+
+
+@pytest.mark.parametrize(("value", "reason"), [("bogus", "unknown lens 'bogus'"),
+                                               ("correctness,excellence", "excellence is advisory")])
+def test_a_bad_blocking_option_is_a_usage_error(tmp_path, capsys, value, reason):
+    path = tmp_path / "r.md"
+    path.write_text(report([]), encoding="utf-8")
+    assert gf.main(["parse", "correctness", str(path), "--blocking", value]) == 1
+    assert reason in capsys.readouterr().err
+
+
+def test_a_blocking_option_with_no_value_is_a_usage_error(capsys):
+    assert gf.main(["parse", "correctness", "r.md", "--blocking"]) == 1
+    assert "--blocking needs a value" in capsys.readouterr().err
 
 
 def test_the_bridge_prefers_its_checkout_s_module_to_one_earlier_on_the_path(tmp_path):

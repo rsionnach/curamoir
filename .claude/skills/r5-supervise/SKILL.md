@@ -2,9 +2,9 @@
 name: r5-supervise
 description: >-
   Supervises the sequential Rule-of-Five review of one curamoir bead before it
-  may close: four blocking passes (correctness → clarity → edge cases →
-  fixture provenance), each a separate lens, one reviewer subagent at a time,
-  then one advisory excellence read. Holds the R5 lock for the whole run,
+  may close: three blocking passes (correctness → edge cases → fixture
+  provenance), each a separate lens, one reviewer subagent at a time, then
+  two advisory reads (clarity, then excellence). Holds the R5 lock for the whole run,
   records every step in .claude/r5-state.json (which the parallel-block hook
   reads), fixes and re-reviews until each pass is clean, and only then closes
   the bead. Activate when the user invokes /r5-supervise <bead-id>, asks to
@@ -18,7 +18,8 @@ Ported from nthlayer-ecosystem/.claude/skills/r5-supervise (cm-99l) for this
 single repository. The rule it enforces is the user's, and it is not
 negotiable:
 
-- **Every bead, every pass.** Four blocking passes, then the advisory read. No
+- **Every bead, every pass.** Three blocking passes, then the two advisory
+  reads. No
   pass is skipped for a "small" or "docs-only" change unless the user approves
   that skip for that bead, in this conversation.
 - **One lens per reviewer.** Each pass is its own reviewer subagent with its own
@@ -34,9 +35,18 @@ negotiable:
   harness for its verdict.
 - **Anything changed after a pass is reviewed by that pass again**, including
   excellence touch-ups and one-line edits made while squashing. If the change
-  comes after that pass was done (a clarity fix that changes behaviour, an
-  applied excellence suggestion), `r5-state.sh reopen <earliest pass the
+  comes after that pass was done (an edge-case fix that changes behaviour, an
+  applied clarity or excellence suggestion), `r5-state.sh reopen <earliest pass the
   change touches>`: that pass and every later one run again, in order.
+
+**The roster (cm-ig5, 2026-11-16).** Blocking: correctness, edge cases,
+provenance. Advisory: clarity, then excellence, once each on the final tree,
+no fix loop, never blocking (spec R5-R12, as NthLayer's gate has run since
+2026-11-12). Clarity was blocking until cm-ig5; a run keeps the roster it
+was started with (`passes` and `advisory_passes` in its state file), so a
+run started before then finishes with clarity as a blocking pass. The
+parser takes each run's blocking passes as its blocking set: a finding of
+an advisory lens is never `unproven`.
 
 Helpers (all in `.claude/hooks/`, all resolve this repository's main
 worktree): `r5-lock.sh` (the run lock), `r5-state.sh` (the only writer of the
@@ -101,7 +111,8 @@ step 1: release the lock (`r5-lock.sh release r5-supervise`).
 
 ## Pass loop
 
-For each pass in `correctness`, `clarity`, `edge-cases`, `provenance`:
+For each pass in the run's `passes` (`correctness`, `edge-cases`,
+`provenance`; a run started before cm-ig5 also has `clarity`, second):
 
 1. `bash .claude/hooks/r5-lock.sh refresh r5-supervise`. Exit 4 = the lock
    is still this session's but past its 24h limit (a run paused overnight on
@@ -232,16 +243,22 @@ only through a valid closure. A report that closes every prior finding with empt
 UNAVAILABLE. For a re-review's brief, `r5-state.sh open-set <pass>` prints
 the previous round's open findings with their fingerprints; include them.
 
-## Advisory stage — excellence
+## Advisory stage — clarity, then excellence
 
-After all four blocking passes are clean: refresh, `r5-state.sh pass
-excellence`, dispatch the excellence reviewer once
-(`excellence-reviewer.md`, "This pass is ADVISORY", and the findings
-contract above), write its report to `.claude/r5-reports/` as in step 5,
-then `r5-state.sh advisory <that file> <verdict>`. No fix loop. If you choose to apply any of its
+After every blocking pass is clean, for each of the run's `advisory_passes`
+in order (`clarity`, then `excellence`; `excellence` alone for a run started
+before cm-ig5): refresh, `r5-state.sh pass <pass>`, dispatch its reviewer
+once (`<pass>-reviewer.md`, "This pass is ADVISORY: report findings; they
+are not auto-fixed and do not block close", and the findings contract
+above), write its report to `.claude/r5-reports/` as in step 5, then
+`r5-state.sh advisory <that file> <verdict>` (it records the current
+advisory pass). A report that does not parse is UNAVAILABLE as in step 5:
+`request` it again. No fix loop. If you choose to apply any of its
 suggestions, that change goes back through every blocking pass it touches
-(`reopen`, the rule above); otherwise record the suggestions as follow-up beads.
-A NEEDS WORK verdict or a CRITICAL: do not close; ask the user.
+(`reopen`, the rule above, which also drops the advisory reads); otherwise
+record the suggestions as follow-up beads. A FAIL (clarity) or NEEDS WORK
+(excellence) verdict, or a CRITICAL from either: do not close; ask the user,
+and say which blocking lens should have caught it.
 
 ## Close
 
@@ -250,8 +267,8 @@ because a refused finish can be acted on and a closed bead cannot be
 un-closed by it.
 
 1. `bash .claude/hooks/r5-state.sh finish completed` (archives the trail as
-   `.claude/r5-state-<bead>-completed-<ts>.json`; refused unless all four
-   passes are done and the advisory read is recorded). Refused: stop, do not
+   `.claude/r5-state-<bead>-completed-<ts>.json`; refused unless every
+   blocking pass is done and every advisory read is recorded). Refused: stop, do not
    close the bead.
 2. `bd close <bead-id> --reason "<per-pass findings counts, fix iterations,
    commits, provenance mutants run/survived, advisory notes>"` (if it fails,
