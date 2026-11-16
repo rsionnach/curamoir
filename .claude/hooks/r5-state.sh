@@ -506,6 +506,9 @@ case "$CMD" in
     # Checked before anything is written: the fix round merges statuses.
     jq -en --argjson x "$extra" '($x.statuses // {}) | type == "object"' >/dev/null \
       || _bad_arg "fixed: statuses must be an object of fingerprint: status"
+    jq -en --argjson x "$extra" '($x.superseded_by // {}) | type == "object"
+        and all(.[]; type == "string")' >/dev/null \
+      || _bad_arg "fixed: superseded_by must be an object of fingerprint: superseding fingerprint"
     _need_current "$pass"
     # A fix may follow the findings, a fix agent, an earlier fix (a round
     # in several steps), or a dirty tree (provenance's restore).
@@ -513,14 +516,35 @@ case "$CMD" in
     _event fixes_applied --argjson x "$extra" --arg p "$pass" '$x + {pass:$p}'
     # One fix round per fix, however many `fixed` steps it takes: a step
     # after a fix round whose commit is not yet recorded joins that round.
+    # Section 11 (R5-R17): superseded_by maps a finding marked superseded to
+    # the finding whose fix rewrote its lines. The fix object is computed
+    # from every step of the round together (each step's fixes_applied event
+    # is tagged with the round's n), as gate/findings.py's fix_outcome does:
+    # later steps override earlier ones per fingerprint; a superseded status
+    # with no entry, or one naming a fingerprint not on the round's fix list,
+    # is recorded as could_not_fix; an entry whose finding is not recorded
+    # superseded is dropped. The fix list is the open set of this pass's last
+    # findings, the findings this fix round answers.
     _apply '(.rounds // []) as $r | ($r | length) as $n
-      | if $n > 0 and $r[$n - 1].kind == "fix" and $r[$n - 1].fix.commit == null
+      | ($n > 0 and $r[$n - 1].kind == "fix" and $r[$n - 1].fix.commit == null) as $join
+      | (if $join then $r[$n - 1].n else $n + 1 end) as $round
+      | .audit_trail[-1].round = $round
+      | [.audit_trail[] | select(.event == "fixes_applied" and .round == $round)] as $steps
+      | ([.audit_trail[] | select(.event == "findings_received" and .pass == $p)] | last
+          | [(.open_set // [])[].fingerprint]) as $fl
+      | (reduce $steps[] as $s ({}; . + ($s.superseded_by // {}))) as $links
+      | (reduce $steps[] as $s ({}; . + ($s.statuses // {}))
+          | with_entries(if .value == "superseded"
+              and (($links[.key] as $v | $v != null and ($fl | any(. == $v))) | not)
+              then .value = "could_not_fix" else . end)) as $all
+      | ($links | with_entries(select($all[.key] == "superseded"))) as $kept
+      | if $join
         then .rounds[$n - 1] |= (.ended = $t | .head = $h
-          | .fix.statuses += ($x.statuses // {}))
-        else .rounds = $r + [{n: ($r | length) + 1, kind: "fix",
+          | .fix.statuses = $all | .fix.superseded_by = $kept)
+        else .rounds = $r + [{n: $round, kind: "fix",
           head: $h, started: $t, ended: $t, lenses: {},
-          fix: {commit: null, statuses: ($x.statuses // {}), scope_breaches: []}}]
-        end' --argjson x "$extra" --arg t "$(_now)" \
+          fix: {commit: null, statuses: $all, superseded_by: $kept, scope_breaches: []}}]
+        end' --argjson x "$extra" --arg p "$pass" --arg t "$(_now)" \
       --argjson h "$(jq -n --arg h "$(_git rev-parse --verify -q HEAD)" 'if $h == "" then null else $h end')"
     ;;
   tree-dirty)

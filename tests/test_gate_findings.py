@@ -8,12 +8,20 @@ which now runs on this module. This file tests what bead 1 adds
 - the three parser fixes of spec v1.10 (line ends at LF only, ``~`` in a line
   reference, a re-raise beside an empty closure);
 - ``prose_unfiled`` and the ``Not filed`` heading;
-- clarity advisory (R5-R12);
+- the blocking set the caller passes (R5-R12, §11), clarity advisory under
+  the contract's default;
 - the corpus path: a replay entry's ``recorded.json`` round-trips losslessly,
   with a null path or range allowed there and nowhere else;
 - the merge: dedupe, grouping, the severity policy, priority order, the
   deferred list, and its reproducibility from raw output;
-- the bridge: the same objects, and its command line under Python 3.9.
+- the fix object's ``superseded_by`` (R5-R17, §11);
+- the bridge: the same objects, its own blocking set, and its command line
+  under Python 3.9.
+
+Fixtures are traced to the spec, which R5-R35 accepts (§10 bead 1, v1.11):
+each test cites the spec rule it pins, and none is a trimmed real report,
+which the publication rule forbids. The real artefacts used are the
+delivered corpus's own entries.
 """
 
 from __future__ import annotations
@@ -60,10 +68,11 @@ def closure(target, evidence="tests/test_m.py:4 now asserts it", lens="correctne
 
 # ---- spec v1.10 fix 2: "~" in a line reference
 #
-# The v1.10 inputs (a "line ~N" claim, a Unicode separator, a CR) are taken
-# from the spec's own section 11 text: no real report, corpus claim or run
-# record in this repository or NthLayer's holds one (checked 2026-11-15), so
-# the real artefacts here exercise only the "false" side.
+# Pins §11's normalised-claim rule: a line reference may carry "~", and
+# "line ~42" normalises as "line 42" does. The v1.10 inputs (a "line ~N" claim, a Unicode separator, a CR) are
+# spec-traced (R5-R35): no real report, corpus claim or run record in this
+# repository or NthLayer's holds one (checked 2026-11-15), so the real
+# artefacts here exercise only the "false" side.
 
 @pytest.mark.parametrize("claim", ["off by one at line ~42", "off by one at lines ~4-~9",
                                    "off by one at line ~4 \u2013 ~9", "off by one at line 42"])
@@ -76,6 +85,9 @@ def test_a_tilde_elsewhere_stays():
 
 
 # ---- spec v1.10 fix 1: an output line ends at LF only
+#
+# Pins §11's Finding rule on line ends: LF ends a line, a CR before it is
+# tolerated, and every Unicode separator (U+2028, U+2029, ...) is content.
 
 @pytest.mark.parametrize("separator", ["\u2028", "\u2029", "\x85"])
 def test_a_unicode_separator_in_a_claim_is_content(separator):
@@ -106,6 +118,10 @@ def test_the_command_line_reads_a_lone_cr_as_content(tmp_path, capsys):
 
 
 # ---- spec v1.10 fix 3: a re-raise beside an empty closure
+#
+# Pins §11's closure rule (a re-raise beside a closure of the same finding
+# keeps the re-raise and rejects the closure) and R5-R25 (closing every prior
+# finding with empty evidence is UNAVAILABLE).
 
 def test_a_re_raise_beside_an_empty_closure_keeps_the_re_raise_and_is_not_unavailable():
     earlier = prior(finding())
@@ -134,13 +150,54 @@ def test_a_re_raise_beside_a_closure_with_evidence_rejects_the_closure():
                                         "reason": "the same report re-raises the finding it closes"}]
 
 
-# ---- R5-R12: clarity and excellence are advisory, with nothing to prove
+# ---- R5-R12 and §11: the caller's blocking set
+#
+# Pins §11's advisory rule and R5-R12: the blocking set is the caller's
+# configuration (default correctness, edge cases, provenance), not a constant
+# in the parser; a lens outside it is advisory with nothing to prove, and a
+# gate that still blocks on clarity still labels clarity's findings.
 
 @pytest.mark.parametrize(("lens", "unproven"), [("correctness", 1), ("edge_cases", 1),
                                                 ("provenance", 1), ("clarity", 0), ("excellence", 0)])
-def test_only_a_blocking_lens_has_unproven_findings(lens, unproven):
+def test_under_the_default_set_only_a_blocking_lens_has_unproven_findings(lens, unproven):
     out = parse([finding(lens=lens, level="cited")], lens=lens)
     assert len(out["unproven"]) == unproven
+
+
+def test_the_default_set_is_the_contract_s_three_lenses():
+    assert gf.blocking_set(gf.BLOCKING_LENSES) == {"correctness", "edge_cases", "provenance"}
+
+
+@pytest.mark.parametrize(("lens", "unproven"), [("clarity", 1), ("correctness", 0), ("excellence", 0)])
+def test_a_caller_s_set_decides_which_lens_is_labelled(lens, unproven):
+    out = parse([finding(lens=lens, level="cited")], lens=lens, blocking=("clarity",))
+    assert len(out["unproven"]) == unproven
+
+
+def test_a_blocking_set_takes_either_spelling_of_a_lens():
+    assert gf.blocking_set(["edge-cases"]) == {"edge_cases"}
+    out = parse([finding(lens="edge_cases", level="cited")], lens="edge_cases", blocking=["edge-cases"])
+    assert len(out["unproven"]) == 1
+
+
+@pytest.mark.parametrize(("blocking", "reason"), [
+    ("correctness", "a collection of lens names"),       # a string is not a set of names
+    ([1], "a collection of lens names"),
+    (["bogus"], "unknown lens 'bogus'"),
+    (["correctness", "excellence"], "excellence is advisory"),
+], ids=["string", "not-a-name", "unknown", "excellence"])
+def test_a_bad_blocking_set_is_refused(blocking, reason):
+    with pytest.raises(ValueError, match=reason):
+        parse([], blocking=blocking)
+    with pytest.raises(ValueError, match=reason):
+        gf.merge_round({}, blocking=blocking)
+
+
+def test_an_empty_blocking_set_blocks_nothing():
+    out = parse([finding(level="cited")], blocking=())
+    assert out["unproven"] == []
+    m = gf.merge_round(opened(finding(severity="CRITICAL")), blocking=())
+    assert m["fix_list"] == [] and len(m["deferred"]) == 1
 
 
 # ---- prose_unfiled (§11 "Prose and entries"); the prose shape is the lens
@@ -370,11 +427,14 @@ def fp(record):
     return gf.fingerprint(record["lens"], record["path"], record["claim"])
 
 
-# R5-R13's dedupe has no real "true" artefact yet: the bridge runs lenses one
-# at a time on trees that change between them, so no recorded round holds two
-# lenses naming one defect on one tree (0 deduped over the archived runs and
-# the corpus, 2026-11-15). These fixtures follow the rule's text.
 def test_one_claim_on_overlapping_lines_from_two_lenses_is_one_entry_attributed_to_both():
+    """Pins R5-R13's dedupe (overlapping ranges on one path, one normalised
+    claim: one finding for both lenses), recorded as merge.deduped (§11).
+
+    Synthetic, traced to that rule (R5-R35): the corpus holds no cross-lens
+    duplicate (checked 2026-11-16, as a sequential gate would predict; the
+    bridge runs lenses one at a time on trees that change between them).
+    test_the_corpus_holds_no_cross_lens_duplicate keeps that claim checked."""
     c = finding(lens="correctness", severity="IMPORTANT", start=10, end=14)
     e = finding(lens="edge_cases", severity="CRITICAL", start=13, end=20, claim="The  GUARD never fires ")
     m = gf.merge_round(opened(c, e))
@@ -389,6 +449,47 @@ def test_one_claim_on_separate_lines_is_two_entries():
     e = finding(lens="edge_cases", start=30, end=31)
     m = gf.merge_round(opened(c, e))
     assert m["fix_list"] == [fp(c), fp(e)] and m["deduped"] == [] and m["grouped"] == []
+
+
+def test_the_corpus_holds_no_cross_lens_duplicate():
+    # Why the dedupe fixture above is synthetic. If a delivered entry ever
+    # holds one, this fails, and that entry becomes the dedupe fixture.
+    for by_lens in _first_reviews():
+        assert gf.merge_round(by_lens)["deduped"] == []
+
+
+def test_the_corpus_s_real_grouped_case_is_grouped_and_not_deduped():
+    """Pins R5-R13's grouping (overlapping ranges, different claims: separate
+    entries, grouped), recorded as merge.grouped (§11), on the real case §10
+    bead 1 names: corpus entry opensrm-wo62-4-3, where clarity and edge-cases
+    overlap in manifest_builder.py with different claims."""
+    rounds = json.loads((CORPUS / "opensrm-wo62-4-3" / "recorded.json").read_text())["rounds"]
+    pick = {}
+    for review in rounds:
+        for f in review["findings"] or ():
+            if f["path"] == "src/nthlayer_generate/dashboards/manifest_builder.py":
+                pick[gf.schema_lens(review["lens"])] = f
+    clarity, edge = pick["clarity"], pick["edge_cases"]
+    assert gf.normalise_claim(clarity["claim"]) != gf.normalise_claim(edge["claim"])
+    assert clarity["start_line"] <= edge["end_line"] and edge["start_line"] <= clarity["end_line"]
+    m = gf.merge_round({"clarity": [clarity], "edge_cases": [edge]})
+    c, e = gf.comparison_key(clarity), gf.comparison_key(edge)
+    assert m["grouped"] == [[e, c]] and m["deduped"] == []
+    # Two entries: edge cases blocks, so advisory clarity's IMPORTANT joins
+    # the fix list after it (R5-R12, R5-R14).
+    assert m["fix_list"] == [e, c]
+
+
+def test_each_fingerprint_is_in_at_most_one_group():
+    # §11: a fingerprint is in at most one group. A chain of overlaps
+    # (a with b, b with c, a not with c) is one group, not two.
+    a = finding(lens="correctness", start=10, end=12, claim="first")
+    b = finding(lens="edge_cases", start=12, end=20, claim="second")
+    c = finding(lens="provenance", start=20, end=22, claim="third")
+    m = gf.merge_round(opened(a, b, c))
+    assert len(m["grouped"]) == 1 and sorted(m["grouped"][0]) == sorted([fp(a), fp(b), fp(c)])
+    flat = [x for g in m["grouped"] for x in g]
+    assert len(flat) == len(set(flat))
 
 
 def test_different_claims_on_overlapping_lines_stay_separate_but_grouped():
@@ -425,6 +526,20 @@ def test_clarity_joins_the_fix_list_last_only_when_a_blocking_lens_needs_a_fix_r
     assert with_fix["fix_list"] == [fp(blocking), fp(clarity)] and with_fix["deferred"] == []
     alone = gf.merge_round(opened(clarity, finding(lens="correctness", severity="MINOR")))
     assert alone["fix_list"] == [] and fp(clarity) in alone["deferred"]
+
+
+def test_a_caller_that_blocks_on_clarity_has_clarity_block_alone():
+    # R5-R12: the set is the caller's. With clarity in it, a clarity CRITICAL
+    # makes a fix round of its own and sorts as a blocking entry.
+    clarity = finding(lens="clarity", severity="CRITICAL", path="src/c.py", claim="unreadable")
+    minor = finding(lens="correctness", severity="MINOR")
+    m = gf.merge_round(opened(clarity, minor), blocking=("correctness", "clarity"))
+    assert m["fix_list"] == [fp(clarity)] and m["entries"][fp(clarity)]["standing"] == "blocking"
+    four = ("correctness", "clarity", "edge_cases", "provenance")
+    raw = {"clarity": report([finding(lens="clarity", level="cited")])}
+    done = gf.merge_from_raw(raw, blocking=four)
+    assert done["lenses"]["clarity"]["unproven"] and done["merge"]["fix_list"]
+    assert gf.merge_from_raw(raw)["merge"]["fix_list"] == []
 
 
 def test_a_clarity_claim_a_blocking_lens_also_raised_blocks():
@@ -527,18 +642,24 @@ def test_corpus_findings_without_a_full_location_are_never_deduped_or_grouped(sh
     assert len(m["fix_list"]) == 3 and m["deduped"] == [] and m["grouped"] == []
 
 
-def test_every_corpus_entry_s_first_review_merges():
-    # The delivered corpus's real location shapes, merged as one round per
-    # entry: nothing crashes, and every finding lands in exactly one list.
-    merged = 0
+def _first_reviews():
+    """Each corpus entry's first-review findings by lens, one round per entry
+    (entries with none skipped)."""
     for path in _recorded():
         by_lens = {}
         for review in json.loads(path.read_text())["rounds"]:
             if review["iteration"] == 1:
                 for f in review["findings"] or ():
                     by_lens.setdefault(gf.schema_lens(review["lens"]), []).append(f)
-        if not by_lens:
-            continue
+        if by_lens:
+            yield by_lens
+
+
+def test_every_corpus_entry_s_first_review_merges():
+    # The delivered corpus's real location shapes, merged as one round per
+    # entry: nothing crashes, and every finding lands in exactly one list.
+    merged = 0
+    for by_lens in _first_reviews():
         m = gf.merge_round(by_lens)
         listed = m["fix_list"] + m["deferred"]
         assert len(listed) == len(set(listed))
@@ -624,6 +745,43 @@ def test_merge_from_raw_hands_each_lens_its_prior_open_set():
     assert done["merge"]["fix_list"] == []
 
 
+# ---- the fix object's superseded_by (R5-R17, §11)
+#
+# Pins §11's fix.superseded_by and R5-R17: each finding marked superseded
+# names the finding whose fix rewrote its lines; a superseded status with no
+# such entry, or naming a finding off the round's fix list, is recorded as
+# could_not_fix.
+
+def test_a_superseded_status_naming_a_finding_on_the_fix_list_is_kept():
+    out = gf.fix_outcome({"aa": "fixed", "bb": "superseded"}, {"bb": "aa"}, ["aa", "bb"])
+    assert out == {"statuses": {"aa": "fixed", "bb": "superseded"}, "superseded_by": {"bb": "aa"}}
+
+
+@pytest.mark.parametrize("links", [None, {}, {"bb": "zz"}], ids=["none", "no-entry", "off-the-list"])
+def test_a_superseded_status_without_a_valid_entry_is_could_not_fix(links):
+    out = gf.fix_outcome({"aa": "fixed", "bb": "superseded"}, links, ["aa", "bb"])
+    assert out == {"statuses": {"aa": "fixed", "bb": "could_not_fix"}, "superseded_by": {}}
+
+
+def test_an_entry_for_a_finding_not_marked_superseded_is_dropped():
+    statuses = {"aa": "fixed", "bb": "disputed"}
+    links = {"bb": "aa", "cc": "aa"}
+    out = gf.fix_outcome(statuses, links, ["aa", "bb"])
+    assert out == {"statuses": statuses, "superseded_by": {}}
+    assert links == {"bb": "aa", "cc": "aa"}  # the inputs are not changed
+
+
+@pytest.mark.parametrize(("statuses", "links", "reason"), [
+    ({"aa": "done"}, {}, "unknown status 'done'"),
+    (["aa"], {}, "map a fingerprint"),
+    ({"aa": "superseded"}, ["aa"], "map a fingerprint"),
+    ({"aa": "superseded"}, {"aa": ["bb"]}, "by its fingerprint"),
+], ids=["unknown-status", "statuses-list", "links-list", "link-not-a-string"])
+def test_a_malformed_fix_outcome_is_refused(statuses, links, reason):
+    with pytest.raises(ValueError, match=reason):
+        gf.fix_outcome(statuses, links, ["aa", "bb"])
+
+
 # ---- the bridge imports this module
 
 def _load_bridge():
@@ -655,6 +813,26 @@ def test_the_bridge_s_command_line_runs(tmp_path, python):
     assert out["findings"][0]["fingerprint"] == gf.fingerprint("correctness", "src/m.py",
                                                               "line ~3 is off by one\u2028here")
     assert out["prose_unfiled"] == [{"heading": "MINOR", "text": "Docstring names one stub only"}]
+
+
+def test_the_bridge_passes_its_four_lens_set_so_clarity_keeps_its_label(tmp_path):
+    # Spec v1.11, R5-R12: until clarity moves to advisory in a bead of its
+    # own (cm-ig5), the bridge passes its four-lens set and labels clarity.
+    # The module's own command line, under the contract's default, does not.
+    bridge = _load_bridge()
+    assert gf.blocking_set(bridge.BRIDGE_BLOCKING) == {"correctness", "clarity", "edge_cases", "provenance"}
+    path = tmp_path / "r.md"
+    path.write_text(report([finding(lens="clarity", level="cited")]), encoding="utf-8")
+    run = subprocess.run([sys.executable, str(BRIDGE), "parse", "clarity", str(path)],
+                         capture_output=True, text=True, timeout=60)
+    assert run.returncode == 0, run.stderr
+    assert len(json.loads(run.stdout)["unproven"]) == 1
+    module = subprocess.run([sys.executable, "-c",
+                             "import sys; from curamoir.gate import findings; "
+                             "sys.exit(findings.main(sys.argv[1:]))", "parse", "clarity", str(path)],
+                            capture_output=True, text=True, timeout=60)
+    assert module.returncode == 0, module.stderr
+    assert json.loads(module.stdout)["unproven"] == []
 
 
 def test_the_bridge_prefers_its_checkout_s_module_to_one_earlier_on_the_path(tmp_path):

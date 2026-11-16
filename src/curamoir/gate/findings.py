@@ -22,8 +22,9 @@ does not split the line.
 - ``findings``: every record in the report, normalised;
 - ``open_set``: the findings still open after this round, which the caller
   hands back as ``--prior`` next time;
-- ``counts`` (critical, important, minor) and ``unproven`` (blocking findings
-  whose verification_level is below the floor), both over the open set;
+- ``counts`` (critical, important, minor) and ``unproven`` (findings of a
+  blocking lens, CRITICAL or IMPORTANT, whose verification_level is below
+  the floor), both over the open set;
 - ``closures`` (the prior fingerprints validly closed), ``closure_rejected``
   (each rejected closure with its reason), ``unaccounted`` (prior open
   findings the report neither closed nor re-raised) and
@@ -55,6 +56,13 @@ from lens, path and claim with the current normaliser; a closure's
 ``resolves`` may name either that key or the prior finding's stored
 fingerprint (what the brief published). The open set carries the recomputed
 fingerprint (cm-5ao).
+
+The severity policy, per R5-R12 and section 11: which lenses block is the
+caller's configuration (``gate.blocking``), passed in as ``blocking``, never
+a constant this module decides; ``BLOCKING_LENSES`` (correctness, edge cases,
+provenance) is the contract's default. A lens outside the set is advisory and
+has nothing to prove: its findings are never ``unproven``. The bridge passes
+its own four-lens set, clarity included, until its roster moves.
 
 Corpus findings (a replay entry's ``recorded.json``) are read by a second
 code path, ``corpus_finding`` and ``load_recorded``: a null path or line
@@ -89,11 +97,11 @@ BLOCKING = ("CRITICAL", "IMPORTANT")
 # reviewer).
 STATUSES = ("open", "fixed", "superseded", "could_not_fix", "disputed", "fixed_in_passing")
 
-# The severity policy per lens (R5-R12). Blocking is CRITICAL or IMPORTANT
-# from these lenses only. Clarity and excellence are advisory: they never
-# block, and they have nothing to prove.
+# The severity policy per lens (R5-R12): the contract's default blocking
+# set. The caller passes its own (``blocking``); a lens outside it is
+# advisory, never blocks and has nothing to prove. Excellence is never in it
+# (R5-R27: its findings go to the deferred list).
 BLOCKING_LENSES = ("correctness", "edge_cases", "provenance")
-ADVISORY_LENSES = ("clarity", "excellence")
 # The fix list's lens order (R5-R14), after severity. Excellence never joins
 # the fix list (R5-R27); it is last so a merged entry sorts deterministically.
 LENS_PRIORITY = ("correctness", "edge_cases", "provenance", "clarity", "excellence")
@@ -123,6 +131,21 @@ class PriorError(Exception):
 def schema_lens(name: str) -> str:
     """Pass names say ``edge-cases``; the schema says ``edge_cases``."""
     return name.replace("-", "_")
+
+
+def blocking_set(blocking: Any) -> frozenset:
+    """The caller's blocking lenses, in schema spelling, refusing a set that
+    is not lens names, that names a lens that is not one, or that names
+    excellence (R5-R27)."""
+    if isinstance(blocking, str) or not all(isinstance(n, str) for n in blocking):
+        raise ValueError("the blocking set is a collection of lens names")
+    lenses = frozenset(schema_lens(n) for n in blocking)
+    unknown = sorted(lenses - set(LENSES))
+    if unknown:
+        raise ValueError(f"unknown lens {unknown[0]!r} in the blocking set")
+    if "excellence" in lenses:
+        raise ValueError("excellence is advisory and never blocks (R5-R27)")
+    return lenses
 
 
 def normalise_claim(claim: str) -> str:
@@ -450,8 +473,11 @@ def prose_unfiled(text: str, records: list) -> list:
 # ---- one reviewer's report
 
 def parse_report(text: str, lens: str, floor: str = DEFAULT_FLOOR,
-                 prior_open: list = ()) -> dict:
-    """The report's records, the open set after it, and its accounting."""
+                 prior_open: list = (), blocking: Any = BLOCKING_LENSES) -> dict:
+    """The report's records, the open set after it, and its accounting.
+    ``blocking`` is the caller's blocking set: a lens outside it has no
+    ``unproven`` findings."""
+    blocks = lens in blocking_set(blocking)
     if lens not in LENSES:
         raise ValueError(f"unknown lens {lens!r}")
     if floor not in LEVELS:
@@ -543,7 +569,7 @@ def parse_report(text: str, lens: str, floor: str = DEFAULT_FLOOR,
     # A finding with no level is "asserted", the bottom of the ladder.
     unproven = [
         f["fingerprint"] for f in open_set
-        if lens not in ADVISORY_LENSES and f["severity"] in BLOCKING
+        if blocks and f["severity"] in BLOCKING
         and LEVELS.index(f.get("verification_level", "asserted")) < floor_rank
     ]
     return {"findings": records, "open_set": open_set, "counts": counts,
@@ -609,7 +635,7 @@ def _one_key_per_lens(by_lens: dict) -> list:
     return list(by_lens)
 
 
-def merge_round(open_sets: dict) -> dict:
+def merge_round(open_sets: dict, blocking: Any = BLOCKING_LENSES) -> dict:
     """Merge one review round's per-lens open sets into the fix list and the
     deferred list, deterministically (a model never merges findings, R5-R3).
 
@@ -626,11 +652,13 @@ def merge_round(open_sets: dict) -> dict:
       ``grouped``. A finding with no path or range (a corpus finding) is
       never deduped or grouped.
     - Severity policy (R5-R12), decided record by record: an entry is
-      blocking if one of its records is CRITICAL or IMPORTANT from a blocking
-      lens (a blocking lens's MINOR merged with an advisory lens's CRITICAL
-      does not block). Clarity's CRITICAL and IMPORTANT entries join the fix
-      list only when a blocking entry has made a fix round necessary, sorted
-      last; otherwise they are deferred.
+      blocking if one of its records is CRITICAL or IMPORTANT from a lens in
+      ``blocking``, the caller's set (a blocking lens's MINOR merged with an
+      advisory lens's CRITICAL does not block). An advisory clarity's
+      CRITICAL and IMPORTANT entries join the fix list only when a blocking
+      entry has made a fix round necessary, sorted last; otherwise they are
+      deferred. A caller whose set holds clarity has clarity block like any
+      other blocking lens.
     - Deferred (R5-R15): every MINOR, every excellence entry and every
       advisory entry not in the fix list.
     - Order (R5-R14): severity, then the representing record's lens, by
@@ -642,6 +670,7 @@ def merge_round(open_sets: dict) -> dict:
     representative to its merged record (with ``lenses``, ``standing``:
     blocking, clarity or deferred, and ``blocking``). The same open sets
     always give the same result (R5-R16)."""
+    blocks = blocking_set(blocking)
     findings, keys = [], set()
     for name in _one_key_per_lens(open_sets):
         lens = schema_lens(name)
@@ -674,8 +703,9 @@ def merge_round(open_sets: dict) -> dict:
     entries, deduped = [], []
     for group in _clusters(findings, same_finding):
         group.sort(key=lambda f: (_rank(f), _lens_rank(f["lens"]), f["fingerprint"]))
-        blockers = [f for f in group if f["severity"] in BLOCKING and f["lens"] in BLOCKING_LENSES]
-        clarity = [f for f in group if f["severity"] in BLOCKING and f["lens"] == "clarity"]
+        serious = [f for f in group if f["severity"] in BLOCKING]
+        blockers = [f for f in serious if f["lens"] in blocks]
+        clarity = [f for f in serious if f["lens"] == "clarity" and "clarity" not in blocks]
         standing = "blocking" if blockers else "clarity" if clarity else "deferred"
         head = (blockers or clarity or group)[0]
         lenses = sorted({f["lens"] for f in group}, key=_lens_rank)
@@ -698,7 +728,8 @@ def merge_round(open_sets: dict) -> dict:
             "entries": {e["fingerprint"]: e for e in entries}}
 
 
-def merge_from_raw(reports: dict, priors: Any = None, floor: str = DEFAULT_FLOOR) -> dict:
+def merge_from_raw(reports: dict, priors: Any = None, floor: str = DEFAULT_FLOOR,
+                   blocking: Any = BLOCKING_LENSES) -> dict:
     """Parse each lens's raw report and merge the round (R5-R16).
 
     ``reports`` maps a lens to its reviewer's raw output; ``priors`` maps a
@@ -706,7 +737,8 @@ def merge_from_raw(reports: dict, priors: Any = None, floor: str = DEFAULT_FLOOR
     parsed report}, "merge": merge_round(...)}``. Everything comes from the
     raw output alone, so a recorded round can be merged again and compared.
     Both maps take either spelling of a lens, but not both for one lens, and
-    a prior for a lens with no report is refused rather than ignored."""
+    a prior for a lens with no report is refused rather than ignored.
+    ``blocking`` is the caller's blocking set, for the parse and the merge."""
     reports_by = {schema_lens(n): reports[n] for n in _one_key_per_lens(reports)}
     priors_by = {schema_lens(n): (priors or {})[n] for n in _one_key_per_lens(priors or {})}
     orphans = sorted(set(priors_by) - set(reports_by))
@@ -714,14 +746,47 @@ def merge_from_raw(reports: dict, priors: Any = None, floor: str = DEFAULT_FLOOR
         raise ValueError(f"a prior open set for {', '.join(orphans)}, which has no report")
     parsed = {}
     for lens, text in reports_by.items():
-        parsed[lens] = parse_report(text, lens, floor, priors_by.get(lens, ()))
-    merge = merge_round({lens: p["open_set"] for lens, p in parsed.items()})
+        parsed[lens] = parse_report(text, lens, floor, priors_by.get(lens, ()), blocking)
+    merge = merge_round({lens: p["open_set"] for lens, p in parsed.items()}, blocking)
     return {"lenses": parsed, "merge": merge}
+
+
+# ---- the fix round's statuses (R5-R17, section 11's fix object)
+
+def fix_outcome(statuses: dict, superseded_by: Any, fix_list: list) -> dict:
+    """The fix object's ``statuses`` and ``superseded_by`` as recorded.
+
+    Section 11 and R5-R17: ``superseded_by`` names, for each finding the
+    fixer marked ``superseded``, the finding whose fix rewrote its lines.
+    Without such an entry, or with one naming a finding off ``fix_list``
+    (that round's fix list), the status is recorded as ``could_not_fix``. An entry for a finding whose recorded status is not
+    ``superseded`` is dropped, so every kept entry explains one status.
+    Returns ``{"statuses", "superseded_by"}``; the inputs are not changed."""
+    if not isinstance(statuses, dict) or not isinstance(superseded_by or {}, dict):
+        raise ValueError("statuses and superseded_by map a fingerprint to a value")
+    for fp, status in statuses.items():
+        if status not in STATUSES:
+            raise ValueError(f"unknown status {status!r} for {fp}")
+    links = superseded_by or {}
+    if not all(isinstance(v, str) for v in links.values()):
+        raise ValueError("superseded_by names each superseding finding by its fingerprint")
+    on_list = set(fix_list)
+    recorded, kept = {}, {}
+    for fp, status in statuses.items():
+        if status == "superseded":
+            if links.get(fp) in on_list:
+                kept[fp] = links[fp]
+            else:
+                status = "could_not_fix"
+        recorded[fp] = status
+    return {"statuses": recorded, "superseded_by": kept}
 
 
 # ---- the command line
 
-def main(argv: list) -> int:
+def main(argv: list, blocking: Any = BLOCKING_LENSES) -> int:
+    """The command line. ``blocking`` is the caller's blocking set: the
+    bridge passes its own (cúramóir's four-lens roster)."""
     args = list(argv)
     options = {"--floor": DEFAULT_FLOOR, "--prior": ""}
     for flag in options:
@@ -763,7 +828,7 @@ def main(argv: list) -> int:
         print(f"r5_findings: cannot read {path}: {exc}", file=sys.stderr)
         return 1
     try:
-        result = parse_report(text, lens, floor, prior_open)
+        result = parse_report(text, lens, floor, prior_open, blocking)
     except ValueError as exc:  # an unknown lens or floor: the caller's mistake
         print(f"r5_findings: {exc}", file=sys.stderr)
         return 1
