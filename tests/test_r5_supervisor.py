@@ -182,12 +182,25 @@ def start(root, bead="b1"):
     assert run(STATE, "init", bead, "base", "head", root=root).returncode == 0
 
 
+# The roster init writes since cm-ig5: three blocking passes, then clarity
+# and excellence, advisory (spec R5-R12).
+BLOCKING_PASSES = ("correctness", "edge-cases", "provenance")
+
+
 def clear_pass(root, name):
     """Run one pass with a clean review, as the supervisor would."""
     run(STATE, "pass", name, root=root)
     hook(root)
     run(STATE, "findings", name, report(name, 0, 0, 0), root=root)
     assert run(STATE, "done", name, "0", root=root).returncode == 0
+
+
+def clear_to_excellence(root):
+    """Every blocking pass clean and clarity's advisory read recorded, so
+    excellence is next."""
+    for name in BLOCKING_PASSES:
+        clear_pass(root, name)
+    advisory_read(root, "clarity")
 
 
 def age_lock(root, seconds, field="refreshed_at"):
@@ -737,7 +750,9 @@ def test_the_next_pass_cannot_start_while_a_reviewer_is_in_flight(r5root):
 
 def test_passes_run_in_order_and_one_at_a_time(r5root):
     start(r5root)
-    for name in ("clarity", "excellence"):
+    assert state(r5root)["passes"] == list(BLOCKING_PASSES)
+    assert state(r5root)["advisory_passes"] == ["clarity", "excellence"]
+    for name in ("clarity", "excellence", "edge-cases"):
         early = run(STATE, "pass", name, root=r5root)
         assert early.returncode == 2 and f"the next pass is correctness, not {name}" in early.stderr
     assert run(STATE, "pass", "correctness", root=r5root).returncode == 0
@@ -745,12 +760,79 @@ def test_passes_run_in_order_and_one_at_a_time(r5root):
     assert again.returncode == 2 and "correctness is still the current pass" in again.stderr
     hook(r5root)
     run(STATE, "findings", "correctness", report("correctness", 0, 0, 0), "PASS", root=r5root)
-    undone = run(STATE, "pass", "clarity", root=r5root)  # correctness not done
+    undone = run(STATE, "pass", "edge-cases", root=r5root)  # correctness not done
     assert undone.returncode == 2 and "correctness is still the current pass" in undone.stderr
     run(STATE, "done", "correctness", "0", root=r5root)
-    skipped = run(STATE, "pass", "edge-cases", root=r5root)
-    assert skipped.returncode == 2 and "the next pass is clarity, not edge-cases" in skipped.stderr
-    assert run(STATE, "pass", "clarity", root=r5root).returncode == 0
+    skipped = run(STATE, "pass", "clarity", root=r5root)
+    assert skipped.returncode == 2 and "the next pass is edge-cases, not clarity" in skipped.stderr
+    assert run(STATE, "pass", "edge-cases", root=r5root).returncode == 0
+
+
+def old_roster(root):
+    """The run as init wrote it before cm-ig5: clarity among the blocking
+    passes, excellence the only advisory one."""
+    record = state(root)
+    record["passes"] = ["correctness", "clarity", "edge-cases", "provenance"]
+    record["advisory_passes"] = ["excellence"]
+    state_file(root).write_text(json.dumps(record))
+
+
+def test_a_run_started_on_the_old_roster_finishes_on_it(r5root):
+    # NthLayer's rule too: a run keeps the roster it started with.
+    start(r5root)
+    old_roster(r5root)
+    clear_pass(r5root, "correctness")
+    run(STATE, "pass", "clarity", root=r5root)
+    hook(r5root)
+    weak = report("clarity", findings=[finding("clarity", "IMPORTANT", level="cited")])
+    run(STATE, "findings", "clarity", weak, root=r5root)
+    entry = state(r5root)["rounds"][-1]["lenses"]["clarity"]
+    assert entry["unproven"] == [entry["findings"][0]["fingerprint"]]  # clarity still blocks here
+    assert run(STATE, "done", "clarity", "0", root=r5root).returncode == 2
+    run(STATE, "request", "clarity", "2", root=r5root)
+    hook(r5root)
+    fp = entry["findings"][0]["fingerprint"]
+    run(STATE, "findings", "clarity", report("clarity", findings=[
+        {**finding("clarity", "IMPORTANT", 9), "resolves": fp}]), root=r5root)
+    assert run(STATE, "done", "clarity", "1", root=r5root).returncode == 0
+    for name in ("edge-cases", "provenance"):
+        clear_pass(r5root, name)
+    unread = run(STATE, "finish", "completed", root=r5root)
+    assert unread.returncode == 2 and "the run is not complete: excellence" in unread.stderr
+    advisory_read(r5root)
+    assert run(STATE, "finish", "completed", root=r5root).returncode == 0
+
+
+def test_an_old_state_file_with_no_advisory_passes_reads_as_excellence_only(r5root):
+    start(r5root)
+    old_roster(r5root)
+    record = state(r5root)
+    del record["advisory_passes"]
+    state_file(r5root).write_text(json.dumps(record))
+    for name in ("correctness", "clarity", "edge-cases", "provenance"):
+        clear_pass(r5root, name)
+    advisory_read(r5root)
+    assert run(STATE, "finish", "completed", root=r5root).returncode == 0
+
+
+def test_clarity_reads_after_the_blocking_passes_and_before_excellence(r5root):
+    start(r5root)
+    for name in BLOCKING_PASSES:
+        clear_pass(r5root, name)
+    early = run(STATE, "pass", "excellence", root=r5root)
+    assert early.returncode == 2 and "the next pass is clarity, not excellence" in early.stderr
+    run(STATE, "pass", "clarity", root=r5root)
+    hook(r5root)
+    for args in (("findings", "clarity", report("clarity")), ("done", "clarity", "0")):
+        bad = run(STATE, *args, root=r5root)
+        assert bad.returncode == 1 and "clarity is not a blocking pass" in bad.stderr, args
+    # Advisory: a CRITICAL does not block, and nothing below the floor is unproven.
+    weak = report("clarity", findings=[finding("clarity", "CRITICAL", level="asserted")])
+    assert run(STATE, "advisory", weak, "FAIL", root=r5root).returncode == 0
+    read = state(r5root)["advisory_results"][-1]
+    assert (read["pass"], read["counts"]["critical"], read["unproven"]) == ("clarity", 1, [])
+    assert state(r5root)["current_pass"] is None
+    assert run(STATE, "pass", "excellence", root=r5root).returncode == 0
 
 
 def test_a_pass_is_done_only_when_it_is_current_and_its_last_findings_are_clean(r5root):
@@ -762,8 +844,8 @@ def test_a_pass_is_done_only_when_it_is_current_and_its_last_findings_are_clean(
     run(STATE, "findings", "correctness", report("correctness", 0, 1, 0), "FIX", root=r5root)
     dirty = run(STATE, "done", "correctness", "1", root=r5root)
     assert dirty.returncode == 2 and "its findings are not clean" in dirty.stderr
-    other = run(STATE, "done", "clarity", "1", root=r5root)
-    assert other.returncode == 2 and "clarity is not the current pass" in other.stderr
+    other = run(STATE, "done", "edge-cases", "1", root=r5root)
+    assert other.returncode == 2 and "edge-cases is not the current pass" in other.stderr
     run(STATE, "request", "correctness", "2", root=r5root)
     hook(r5root)
     # Silence never closes: the re-review closes the IMPORTANT explicitly.
@@ -811,16 +893,16 @@ def test_findings_need_the_current_pass_and_a_dispatched_reviewer(r5root):
     early = run(STATE, "findings", "correctness", report("correctness", 0, 0, 0), root=r5root)
     assert early.returncode == 2 and "no reviewer is in flight" in early.stderr
     hook(r5root)
-    other = run(STATE, "findings", "clarity", report("clarity", 0, 0, 0), root=r5root)
-    assert other.returncode == 2 and "clarity is not the current pass" in other.stderr
+    other = run(STATE, "findings", "edge-cases", report("edge-cases", 0, 0, 0), root=r5root)
+    assert other.returncode == 2 and "edge-cases is not the current pass" in other.stderr
     advisory = run(STATE, "advisory", report("excellence", 0, 0, 0), "PASS", root=r5root)
-    assert advisory.returncode == 2 and "excellence is not the current pass" in advisory.stderr
+    assert advisory.returncode == 2 and "the current pass is correctness, not an advisory pass" in advisory.stderr
     assert run(STATE, "findings", "correctness", report("correctness", 0, 0, 0), root=r5root).returncode == 0
 
 
 def test_a_dirty_tree_after_provenance_fails_the_pass_until_it_is_re_reviewed(r5root):
     start(r5root)
-    for name in ("correctness", "clarity", "edge-cases"):
+    for name in ("correctness", "edge-cases"):
         clear_pass(r5root, name)
     run(STATE, "pass", "provenance", root=r5root)
     hook(r5root)
@@ -837,13 +919,16 @@ def test_finish_completed_needs_every_pass_and_the_advisory_read(r5root):
     start(r5root)
     run(STATE, "pass", "correctness", root=r5root)
     refused = run(STATE, "finish", "completed", root=r5root)
-    assert refused.returncode == 2 and "clarity" in refused.stderr
+    assert refused.returncode == 2 and "edge-cases" in refused.stderr
     hook(r5root)
     run(STATE, "findings", "correctness", report("correctness", 0, 0, 0), root=r5root)
     run(STATE, "done", "correctness", "0", root=r5root)
-    for name in ("clarity", "edge-cases", "provenance"):
+    for name in ("edge-cases", "provenance"):
         clear_pass(r5root, name)
     unread = run(STATE, "finish", "completed", root=r5root)  # no advisory read
+    assert unread.returncode == 2 and "the run is not complete: clarity, excellence" in unread.stderr
+    advisory_read(r5root, "clarity")
+    unread = run(STATE, "finish", "completed", root=r5root)
     assert unread.returncode == 2 and "the run is not complete: excellence" in unread.stderr
     run(STATE, "pass", "excellence", root=r5root)
     hook(r5root)
@@ -856,8 +941,7 @@ def test_finish_completed_needs_every_pass_and_the_advisory_read(r5root):
 
 def test_finish_completed_is_refused_while_a_second_excellence_read_is_in_flight(r5root):
     start(r5root)
-    for name in ("correctness", "clarity", "edge-cases", "provenance"):
-        clear_pass(r5root, name)
+    clear_to_excellence(r5root)
     advisory_read(r5root)
     run(STATE, "pass", "excellence", root=r5root)  # a second read, after a touch-up
     hook(r5root)
@@ -870,43 +954,43 @@ def test_finish_completed_is_refused_while_a_second_excellence_read_is_in_flight
 def test_reopen_runs_a_done_pass_and_every_later_one_again(r5root):
     start(r5root)
     clear_pass(r5root, "correctness")
-    clear_pass(r5root, "clarity")
-    undone = run(STATE, "reopen", "edge-cases", root=r5root)
+    clear_pass(r5root, "edge-cases")
+    undone = run(STATE, "reopen", "provenance", root=r5root)
     assert undone.returncode == 2 and "nothing to reopen" in undone.stderr
     assert run(STATE, "reopen", "correctness", root=r5root).returncode == 0
     assert state(r5root)["completed_passes"] == []
-    assert state(r5root)["audit_trail"][-1]["dropped"] == ["correctness", "clarity"]
-    assert run(STATE, "pass", "clarity", root=r5root).returncode == 2
+    assert state(r5root)["audit_trail"][-1]["dropped"] == ["correctness", "edge-cases"]
+    assert run(STATE, "pass", "edge-cases", root=r5root).returncode == 2
     clear_pass(r5root, "correctness")
-    run(STATE, "pass", "clarity", root=r5root)
+    run(STATE, "pass", "edge-cases", root=r5root)
     hook(r5root)
     busy = run(STATE, "reopen", "correctness", root=r5root)  # a reviewer in flight
     assert busy.returncode == 2 and "still in flight" in busy.stderr
-    run(STATE, "findings", "clarity", report("clarity", 0, 1, 0), root=r5root)
+    run(STATE, "findings", "edge-cases", report("edge-cases", 0, 1, 0), root=r5root)
     hook(r5root)  # a fix agent
     assert events(r5root)[-1] == "fix_dispatched"
     fixing = run(STATE, "reopen", "correctness", root=r5root)
     assert fixing.returncode == 2 and "a fix agent is still open" in fixing.stderr
 
 
-def advisory_read(root):
-    run(STATE, "pass", "excellence", root=root)
+def advisory_read(root, name="excellence"):
+    run(STATE, "pass", name, root=root)
     hook(root)
-    assert run(STATE, "advisory", report("excellence", 0, 0, 0), "PASS", root=root).returncode == 0
+    assert run(STATE, "advisory", report(name, 0, 0, 0), "PASS", root=root).returncode == 0
 
 
 def test_reopen_drops_the_advisory_read_so_the_run_needs_a_new_one(r5root):
     start(r5root)
-    for name in ("correctness", "clarity", "edge-cases", "provenance"):
-        clear_pass(r5root, name)
+    clear_to_excellence(r5root)
     advisory_read(r5root)
-    assert run(STATE, "reopen", "clarity", root=r5root).returncode == 0
+    assert run(STATE, "reopen", "edge-cases", root=r5root).returncode == 0
     assert state(r5root)["advisory_results"] == []
     assert [p["name"] for p in state(r5root)["completed_passes"]] == ["correctness"]
-    for name in ("clarity", "edge-cases", "provenance"):
+    for name in ("edge-cases", "provenance"):
         clear_pass(r5root, name)
     stale = run(STATE, "finish", "completed", root=r5root)
-    assert stale.returncode == 2 and "the run is not complete: excellence" in stale.stderr
+    assert stale.returncode == 2 and "the run is not complete: clarity, excellence" in stale.stderr
+    advisory_read(r5root, "clarity")
     advisory_read(r5root)
     assert run(STATE, "finish", "completed", root=r5root).returncode == 0
 
@@ -924,8 +1008,7 @@ def test_reopen_while_a_later_pass_is_current_clears_the_current_pass(r5root):
 
 def test_the_excellence_in_flight_refusal_names_advisory(r5root):
     start(r5root)
-    for name in ("correctness", "clarity", "edge-cases", "provenance"):
-        clear_pass(r5root, name)
+    clear_to_excellence(r5root)
     run(STATE, "pass", "excellence", root=r5root)
     hook(r5root)
     refused = hook(r5root)
@@ -1836,8 +1919,7 @@ def test_abandoning_a_reviewer_closes_its_round_entry(r5root):
 
 def test_the_excellence_report_is_parsed_and_a_bad_one_is_unavailable(r5root):
     start(r5root)
-    for name in ("correctness", "clarity", "edge-cases", "provenance"):
-        clear_pass(r5root, name)
+    clear_to_excellence(r5root)
     run(STATE, "pass", "excellence", root=r5root)
     hook(r5root)
     bad = _REPORTS["dir"] / "excellence-prose.md"
@@ -1872,8 +1954,7 @@ def test_finish_writes_a_verdict_keyed_to_the_tree(r5root):
                             capture_output=True, text=True, check=True).stdout.strip()
     assert branch and record["branch"] == branch
     assert record["rounds"] == [] and record["verdict"] is None
-    for name in ("correctness", "clarity", "edge-cases", "provenance"):
-        clear_pass(r5root, name)
+    clear_to_excellence(r5root)
     run(STATE, "pass", "excellence", root=r5root)
     hook(r5root)
     run(STATE, "advisory", report("excellence"), "SHIP IT", root=r5root)
@@ -2146,16 +2227,16 @@ def test_a_second_pass_does_not_inherit_the_first_pass_s_open_set(r5root):
     run(STATE, "findings", "correctness", report("correctness", 0, 0, 1), root=r5root)
     assert state(r5root)["audit_trail"][-1]["open_set"] != []  # a MINOR left open
     assert run(STATE, "done", "correctness", "0", root=r5root).returncode == 0
-    run(STATE, "pass", "clarity", root=r5root)
-    assert json.loads(run(STATE, "open-set", "clarity", root=r5root).stdout) == []
+    run(STATE, "pass", "edge-cases", root=r5root)
+    assert json.loads(run(STATE, "open-set", "edge-cases", root=r5root).stdout) == []
     hook(r5root)
-    run(STATE, "findings", "clarity", report("clarity", 0, 0, 1), root=r5root)
+    run(STATE, "findings", "edge-cases", report("edge-cases", 0, 0, 1), root=r5root)
     received = state(r5root)["audit_trail"][-1]
-    assert received["pass"] == "clarity" and received["unaccounted"] == []
-    assert [f["lens"] for f in received["open_set"]] == ["clarity"]
+    assert received["pass"] == "edge-cases" and received["unaccounted"] == []
+    assert [f["lens"] for f in received["open_set"]] == ["edge_cases"]
     last = state(r5root)["rounds"][-1]
-    assert last["kind"] == "review" and last["lenses"]["clarity"]["mode"] == "review"
-    assert last["lenses"]["clarity"]["unaccounted_count"] == 0
+    assert last["kind"] == "review" and last["lenses"]["edge_cases"]["mode"] == "review"
+    assert last["lenses"]["edge_cases"]["unaccounted_count"] == 0
 
 
 def test_meta_keys_outside_the_telemetry_fields_never_reach_the_round(r5root):
@@ -2190,8 +2271,7 @@ def test_a_fix_round_takes_only_the_first_string_commit_and_a_later_fix_opens_a_
 
 def test_a_second_excellence_read_carries_the_first_read_s_open_set(r5root):
     start(r5root)
-    for name in ("correctness", "clarity", "edge-cases", "provenance"):
-        clear_pass(r5root, name)
+    clear_to_excellence(r5root)
     run(STATE, "pass", "excellence", root=r5root)
     hook(r5root)
     run(STATE, "advisory", report("excellence", 0, 0, 1), "SHIP IT", root=r5root)
@@ -2221,8 +2301,7 @@ def test_findings_retried_onto_an_abandoned_round_drop_the_abandoned_flag(r5root
 
 def test_a_second_excellence_read_is_a_verify_round(r5root):
     start(r5root)
-    for name in ("correctness", "clarity", "edge-cases", "provenance"):
-        clear_pass(r5root, name)
+    clear_to_excellence(r5root)
     run(STATE, "pass", "excellence", root=r5root)
     hook(r5root)
     run(STATE, "advisory", report("excellence", 0, 0, 1), "SHIP IT", root=r5root)
@@ -2235,8 +2314,7 @@ def test_a_second_excellence_read_is_a_verify_round(r5root):
 
 def test_a_rejected_closure_in_an_excellence_report_is_logged(r5root):
     start(r5root)
-    for name in ("correctness", "clarity", "edge-cases", "provenance"):
-        clear_pass(r5root, name)
+    clear_to_excellence(r5root)
     run(STATE, "pass", "excellence", root=r5root)
     hook(r5root)
     forged = finding("excellence", "MINOR", resolves="0123456789abcdef")

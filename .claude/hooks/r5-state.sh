@@ -34,8 +34,9 @@
 #   adopt                          take over the run from a session that is
 #                                  gone (this session must hold the lock:
 #                                  r5-lock.sh acquire first)
-#   pass <pass>                    start the next pass (in order, excellence
-#                                  last) and request its first reviewer
+#   pass <pass>                    start the next pass (the blocking passes
+#                                  in order, then each advisory pass in
+#                                  order) and request its first reviewer
 #   request <pass> <iteration>     request a re-dispatch of the current pass
 #   claim <subagent_type> [session]
 #                                  (the hook) let one dispatch through as
@@ -62,12 +63,13 @@
 #                                  last window event is that pass's findings,
 #                                  with no critical or important finding)
 #   advisory <report-file> <verdict> [meta-json]
-#                                  the excellence reviewer's report, parsed
-#                                  the same way
+#                                  the current advisory pass's report
+#                                  (clarity, then excellence), parsed the
+#                                  same way; never blocks
 #   finish <completed|failed|aborted>
 #                                  end the run (completed only when every
-#                                  pass is done and the advisory read
-#                                  recorded); archive the file as
+#                                  blocking pass is done and every advisory
+#                                  read recorded); archive the file as
 #                                  r5-state-<bead>-<status>-<ts>.json
 #   open-window                    (r5-lock.sh) "<owner> <bead> <reviewer|
 #                                  fix-agent>" while one is in flight;
@@ -186,9 +188,20 @@ _open_fix() {  # a fix agent dispatched and not yet closed by fixes_applied
     "$STATE")" || exit 3
   [[ "$open" == true ]]
 }
+# The next pass: the first blocking pass not done, then the first advisory
+# pass with no result; once every one has run, the last advisory pass again
+# (a second excellence read after a touch-up). A run keeps the roster it was
+# started with (init writes it): one started before cm-ig5 has clarity among
+# its blocking passes and excellence as its only advisory one.
 _next_pass() {
-  jq -r '([.completed_passes[].name]) as $done
-    | ([.passes[] | select(. as $p | $done | index($p) | not)] | first) // "excellence"' "$STATE"
+  jq -r '([.completed_passes[].name]) as $done | ([.advisory_results[].pass]) as $read
+    | (.advisory_passes // ["excellence"]) as $adv
+    | ([.passes[] | select(. as $p | $done | index($p) | not)]
+       + [$adv[] | select(. as $p | $read | index($p) | not)])
+    | first // ($adv | last)' "$STATE"
+}
+_advisory_pass() {  # _advisory_pass <name>: true if <name> is one of the run's advisory passes
+  jq -e --arg p "$1" '(.advisory_passes // ["excellence"]) | index($p)' "$STATE" >/dev/null
 }
 # The run owner's lock has lapsed: it exists, is the owner's, and its lease
 # has run out (a crashed run).
@@ -256,7 +269,7 @@ _object() {  # _object <json>: a JSON object, or exit 1
   jq -en --argjson x "$1" '$x | type == "object"' >/dev/null 2>&1 \
     || _bad_arg "expected a JSON object, got $1"
 }
-_blocking_pass() {  # _blocking_pass <name>: one of the four blocking passes
+_blocking_pass() {  # _blocking_pass <name>: one of the run's blocking passes
   jq -e --arg p "$1" '.passes | index($p)' "$STATE" >/dev/null || _bad_arg "$1 is not a blocking pass"
 }
 
@@ -286,8 +299,11 @@ _parse() {
   PARSED_FILE="$STATE.parsed.$$"
   trap 'rm -f "$STATE.parsed.$$" "$STATE.event.$$" "$STATE.empty.$$"' EXIT
   _prior_open "$3" > "$priorf" || { rm -f "$priorf"; exit 3; }
+  # The run's own blocking passes are the parser's blocking set (R5-R12):
+  # a lens outside them is advisory and never unproven.
+  blocking="$(jq -r '[.passes[] | sub("-"; "_")] | join(",")' "$STATE")" || { rm -f "$priorf"; exit 3; }
   python3 "$_DIR/lib/r5_findings.py" parse "$1" "$2" --floor "$FLOOR" --prior "$priorf" \
-    > "$PARSED_FILE" 2>"$errf" || rc=$?
+    --blocking "$blocking" > "$PARSED_FILE" 2>"$errf" || rc=$?
   PARSE_ERROR="$(sed 's/^r5_findings: //' "$errf" 2>/dev/null || true)"; rm -f "$errf" "$priorf"
   case "$rc" in
     0) return 0 ;;
@@ -380,13 +396,15 @@ case "$CMD" in
       _archive  # a finished run whose archive move failed: keep its trail
     fi
     tmp="$STATE.tmp.$$"
+    # Clarity is advisory since cm-ig5 (spec R5-R12, as in NthLayer's gate
+    # since 2026-11-12): it reads the final tree once, after provenance.
     jq -n --arg b "$bead" --arg base "$base" --arg head "$head" --arg t "$(_now)" --arg s "$(_r5_session)" \
         --arg repo "$(basename "$R5_ROOT")" --arg br "$(_git branch --show-current)" '{
       supervisor: "r5-supervise", target_bead: $b, session_id: $s, started_at: $t,
       bead: $b, repo: $repo, branch: (if $br == "" then null else $br end),
       base: $base, head: $head, rounds: [], verdict: null,
-      passes: ["correctness", "clarity", "edge-cases", "provenance"],
-      advisory_passes: ["excellence"], current_pass: null, completed_passes: [],
+      passes: ["correctness", "edge-cases", "provenance"],
+      advisory_passes: ["clarity", "excellence"], current_pass: null, completed_passes: [],
       advisory_results: [], status: "in_progress",
       diff_range: {base: $base, head: $head},
       audit_trail: [{ts: $t, event: "supervisor_started", session_id: $s}]}' > "$tmp" \
@@ -464,7 +482,7 @@ case "$CMD" in
           --arg t "$(_now)" --argjson n "$round_n"
         exit 0 ;;
       reviewer_dispatched)
-        if [[ "$pass" == excellence ]]; then report="advisory"; else report="findings $pass"; fi
+        if _advisory_pass "$pass"; then report="advisory"; else report="findings $pass"; fi
         _refuse "the $pass reviewer is in flight; record its report (\`$report ...\`), or abandon it if it stalled or never started" ;;
       reviewer_abandoned|reviewer_unavailable)
         _refuse "the $pass reviewer was abandoned or UNAVAILABLE; request it again before dispatching" ;;
@@ -605,25 +623,28 @@ case "$CMD" in
     _arg report report-file "${2:-}"; _arg verdict verdict "${3:-}"
     meta="${4:-}"; [[ -n "$meta" ]] || meta='{}'
     _object "$meta"
-    _need_current excellence
+    pass="$(_current_pass)"
+    [[ -n "$pass" ]] && _advisory_pass "$pass" \
+      || _refuse "advisory: the current pass is ${pass:-none}, not an advisory pass"
     _need_in_flight
-    rc=0; _parse excellence "$report" excellence || rc=$?
-    (( rc == 0 )) || _unavailable excellence
-    _close_round excellence ok "$PARSED_FILE" "$meta"
+    rc=0; _parse "$(_lens_of "$pass")" "$report" "$pass" || rc=$?
+    (( rc == 0 )) || _unavailable "$pass"
+    _close_round "$pass" ok "$PARSED_FILE" "$meta"
     evf="$STATE.event.$$"
-    jq -cn --slurpfile pf "$PARSED_FILE" --arg t "$(_now)" --arg v "$verdict" \
-      '$pf[0] as $r | {ts:$t, event:"advisory_pass_completed", pass:"excellence", counts:$r.counts,
+    jq -cn --slurpfile pf "$PARSED_FILE" --arg t "$(_now)" --arg v "$verdict" --arg p "$pass" \
+      '$pf[0] as $r | {ts:$t, event:"advisory_pass_completed", pass:$p, counts:$r.counts,
         unproven:$r.unproven, findings:$r.findings, open_set:$r.open_set, closures:$r.closures,
         unaccounted:$r.unaccounted, downgrades_refused:$r.downgrades_refused, verdict:$v}' > "$evf"
     _apply '.advisory_results += $r | .current_pass = null | .audit_trail += $r' --slurpfile r "$evf"
-    _log_rejected excellence
+    _log_rejected "$pass"
     ;;
   finish)
     _need_owned_run; _arg status status "${2:-}"
     case "$status" in completed|failed|aborted) ;; *) _bad_arg "bad status $status";; esac
     if [[ "$status" == completed ]]; then
       missing="$(jq -r '[.passes[] as $p | select([.completed_passes[].name] | index($p) | not) | $p]
-        + (if (.advisory_results | length) == 0 then ["excellence"] else [] end)
+        + [(.advisory_passes // ["excellence"])[] as $p
+           | select([.advisory_results[].pass] | index($p) | not) | $p]
         + (if .current_pass != null then ["(" + .current_pass + " is still current)"] else [] end)
         | join(", ")' "$STATE")"
       [[ -z "$missing" ]] || _refuse "the run is not complete: $missing"

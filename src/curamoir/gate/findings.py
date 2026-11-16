@@ -13,8 +13,12 @@ U+2029 and every other Unicode separator are content, so one inside a claim
 does not split the line.
 
     .claude/hooks/lib/r5_findings.py parse <lens> <report-file> [--floor <level>] [--prior <file>]
+                                     [--blocking <lens,lens,...>]
 
 (the bridge runs ``main``; its usage line and error prefix name the bridge)
+
+``--blocking`` is the caller's blocking set, comma-separated, either lens
+spelling (an empty value: no lens blocks); without it, the contract default.
 
 ``--prior`` is a JSON file holding the previous round's open set for this lens
 (a list of findings; none on a first review). It prints one JSON object:
@@ -61,8 +65,8 @@ The severity policy, per R5-R12 and section 11: which lenses block is the
 caller's configuration (``gate.blocking``), passed in as ``blocking``, never
 a constant this module decides; ``BLOCKING_LENSES`` (correctness, edge cases,
 provenance) is the contract's default. A lens outside the set is advisory and
-has nothing to prove: its findings are never ``unproven``. The bridge passes
-its own four-lens set, clarity included, until its roster moves.
+has nothing to prove: its findings are never ``unproven``. The bridge's
+r5-state.sh passes each run's own blocking passes as ``--blocking``.
 
 Corpus findings (a replay entry's ``recorded.json``) are read by a second
 code path, ``corpus_finding`` and ``load_recorded``: a null path or line
@@ -785,10 +789,10 @@ def fix_outcome(statuses: dict, superseded_by: Any, fix_list: list) -> dict:
 # ---- the command line
 
 def main(argv: list, blocking: Any = BLOCKING_LENSES) -> int:
-    """The command line. ``blocking`` is the caller's blocking set: the
-    bridge passes its own (cúramóir's four-lens roster)."""
+    """The command line. ``blocking`` is the caller's blocking set, which a
+    ``--blocking`` option replaces."""
     args = list(argv)
-    options = {"--floor": DEFAULT_FLOOR, "--prior": ""}
+    options = {"--floor": DEFAULT_FLOOR, "--prior": "", "--blocking": None}
     for flag in options:
         if flag in args:
             i = args.index(flag)
@@ -800,8 +804,10 @@ def main(argv: list, blocking: Any = BLOCKING_LENSES) -> int:
     floor = options["--floor"]
     if len(args) != 3 or args[0] != "parse":
         print("usage: r5_findings.py parse <lens> <report-file> [--floor <level>] "
-              "[--prior <file>]", file=sys.stderr)
+              "[--prior <file>] [--blocking <lens,lens,...>]", file=sys.stderr)
         return 1
+    if options["--blocking"] is not None:
+        blocking = [n for n in options["--blocking"].split(",") if n]
     prior_open = []
     if options["--prior"]:
         try:

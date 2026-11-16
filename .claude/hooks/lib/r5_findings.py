@@ -7,9 +7,13 @@ names as its own, and runs its command line. r5-state.sh calls it for
 `findings` and `advisory`:
 
     r5_findings.py parse <lens> <report-file> [--floor <level>] [--prior <file>]
+                         [--blocking <lens,lens,...>]
 
-It passes the module its blocking set, ``BRIDGE_BLOCKING``: clarity blocks
-here, so a clarity finding below the floor is still ``unproven``.
+r5-state.sh passes ``--blocking`` with the run's own blocking passes, so a
+run keeps the roster it started with: since cm-ig5 a new run blocks on
+correctness, edge cases and provenance, and clarity is advisory (never
+``unproven``); a run started with clarity among its blocking passes still
+labels clarity's findings. Without the option the module's default applies.
 
 Exit codes are the module's: 0; 2 if the report does not meet the contract
 (the caller records the reviewer UNAVAILABLE); 1 on a usage error, including
@@ -35,15 +39,10 @@ except ImportError as exc:
     print(f"r5_findings: cannot import curamoir.gate.findings from {_SRC}: {exc}", file=sys.stderr)
     sys.exit(1)
 
-# cúramóir's own roster blocks on four lenses, clarity included, until a bead
-# of its own moves clarity to advisory (spec v1.11, R5-R12): the module takes
-# the blocking set from its caller, and this is the bridge's.
-BRIDGE_BLOCKING = ("correctness", "clarity", "edge_cases", "provenance")
-
 # The module's names, so a caller can use this file as the module itself.
 # They are the same objects: patch _impl, not this module, to change
 # behaviour (fingerprint looks normalise_claim up in _impl).
 globals().update({k: v for k, v in vars(_impl).items() if not k.startswith("__")})
 
 if __name__ == "__main__":
-    sys.exit(_impl.main(sys.argv[1:], BRIDGE_BLOCKING))
+    sys.exit(_impl.main(sys.argv[1:]))
