@@ -1245,6 +1245,18 @@ def test_a_first_review_s_closure_is_rejected_ignored_and_logged(r5root):
     assert received["counts"]["critical"] == 0 and received["open_set"] == []
 
 
+def test_the_round_record_keeps_each_lens_s_prose_unfiled(r5root):
+    # Section 11's round record: lenses.<lens>.prose_unfiled (cm-8ap.13).
+    start(r5root)
+    run(STATE, "pass", "correctness", root=r5root)
+    hook(r5root)
+    prose = "#### Important\n1. **A defect named only in the prose**\n\n#### Not filed\n- no reason given\n"
+    run(STATE, "findings", "correctness", report("correctness", prose=prose), root=r5root)
+    entry = state(r5root)["rounds"][-1]["lenses"]["correctness"]
+    assert entry["prose_unfiled"] == [{"heading": "IMPORTANT", "text": "A defect named only in the prose"},
+                                      {"heading": "Not filed", "text": "no reason given"}]
+
+
 def test_a_re_review_closes_what_the_last_round_left_open_and_carries_the_rest(r5root):
     start(r5root)
     run(STATE, "pass", "correctness", root=r5root)
@@ -1424,7 +1436,7 @@ def _earlier_normaliser(claim):
 def stored_earlier(monkeypatch, *findings_):
     """A prior open set fingerprinted by an earlier normaliser, then today's restored."""
     with monkeypatch.context() as m:
-        m.setattr(r5f, "normalise_claim", _earlier_normaliser)
+        m.setattr(r5f._impl, "normalise_claim", _earlier_normaliser)
         return prior(*findings_)
 
 
@@ -1526,7 +1538,7 @@ def test_a_prior_fingerprinted_by_the_normaliser_shipped_at_55b618f_meets_today_
     # A real change of normaliser: "exits 2" lost its number then, and keeps it now.
     claim = "the hook exits 2 on a stale lock"
     with monkeypatch.context() as m:
-        m.setattr(r5f, "normalise_claim", _normaliser_shipped_at_55b618f)
+        m.setattr(r5f._impl, "normalise_claim", _normaliser_shipped_at_55b618f)
         earlier = prior(finding("correctness", "IMPORTANT", 1, claim=claim))
     now = r5f.fingerprint("correctness", "src/m1.py", claim)
     assert earlier[0]["fingerprint"] != now
@@ -1662,8 +1674,10 @@ def test_rounds_record_review_fix_and_verify_in_the_shared_shape(r5root):
     assert (first["mode"], first["status"], first["model"], first["tier"]) == ("review", "ok", "claude-opus-5-5", "deep")
     assert (first["tokens_in"], first["tokens_out"], first["duration_s"]) == (1200, 300, 41)
     assert len(first["findings"]) == 1 and rounds[0]["ended"] is not None
-    assert rounds[1]["fix"] == {"commit": "0123abc", "statuses": {"abc": "fixed", "def": "superseded"},
-                                "scope_breaches": []}
+    # "def" was marked superseded with no superseded_by entry: could_not_fix
+    # (section 11, R5-R17).
+    assert rounds[1]["fix"] == {"commit": "0123abc", "statuses": {"abc": "fixed", "def": "could_not_fix"},
+                                "superseded_by": {}, "scope_breaches": []}
     assert rounds[2]["lenses"]["correctness"]["mode"] == "verify"
     assert rounds[2]["lenses"]["correctness"]["findings"] == []
 
@@ -1683,6 +1697,105 @@ def test_an_unproven_blocking_finding_is_listed_in_its_round_and_still_blocks(r5
     run(STATE, "findings", "correctness", lowered, root=r5root,
         env_extra={"R5_VERIFICATION_FLOOR": "cited"})
     assert state(r5root)["rounds"][-1]["lenses"]["correctness"]["unproven"] == []
+
+
+def _fix_round_after(r5root, findings):
+    """A correctness review with these findings, then the fix agent; returns
+    the open set's fingerprints."""
+    start(r5root)
+    run(STATE, "pass", "correctness", root=r5root)
+    hook(r5root)
+    run(STATE, "findings", "correctness", report("correctness", findings=findings), root=r5root)
+    hook(r5root)  # the fix agent
+    return [f["fingerprint"] for f in state(r5root)["rounds"][0]["lenses"]["correctness"]["findings"]]
+
+
+def test_a_superseded_finding_records_the_finding_whose_fix_rewrote_it(r5root):
+    # Section 11: fix.superseded_by maps a finding marked superseded to the
+    # superseding finding, which is on the round's fix list (here: the open
+    # set the fix round answers).
+    a, b = _fix_round_after(r5root, [finding("correctness", "IMPORTANT", 1),
+                                     finding("correctness", "IMPORTANT", 2)])
+    extra = json.dumps({"statuses": {a: "fixed", b: "superseded"}, "superseded_by": {b: a}})
+    assert run(STATE, "fixed", "correctness", extra, root=r5root).returncode == 0
+    fix = state(r5root)["rounds"][-1]["fix"]
+    assert fix["statuses"] == {a: "fixed", b: "superseded"} and fix["superseded_by"] == {b: a}
+
+
+@pytest.mark.parametrize("links", ["none", "off-the-list"])
+def test_a_superseded_status_without_a_valid_entry_is_recorded_could_not_fix(r5root, links):
+    a, b = _fix_round_after(r5root, [finding("correctness", "IMPORTANT", 1),
+                                     finding("correctness", "IMPORTANT", 2)])
+    extra = {"statuses": {a: "fixed", b: "superseded"}}
+    if links == "off-the-list":
+        extra["superseded_by"] = {b: "0123456789abcdef"}
+    run(STATE, "fixed", "correctness", json.dumps(extra), root=r5root)
+    fix = state(r5root)["rounds"][-1]["fix"]
+    assert fix["statuses"] == {a: "fixed", b: "could_not_fix"} and fix["superseded_by"] == {}
+
+
+def test_a_later_step_of_the_fix_round_can_name_the_superseding_finding(r5root):
+    # One fix round, two `fixed` steps: an entry given in the first step
+    # serves a superseded status in the second, and a status the second
+    # step re-sets drops the entry it no longer explains.
+    a, b, c = _fix_round_after(r5root, [finding("correctness", "IMPORTANT", n) for n in (1, 2, 3)])
+    run(STATE, "fixed", "correctness", json.dumps({"statuses": {a: "fixed"},
+                                                    "superseded_by": {b: a, c: a}}), root=r5root)
+    run(STATE, "fixed", "correctness", json.dumps({"statuses": {b: "superseded", c: "superseded"}}),
+        root=r5root)
+    assert state(r5root)["rounds"][-1]["fix"]["superseded_by"] == {b: a, c: a}
+    run(STATE, "fixed", "correctness", json.dumps({"statuses": {c: "fixed"}}), root=r5root)
+    fix = state(r5root)["rounds"][-1]["fix"]
+    assert fix["statuses"] == {a: "fixed", b: "superseded", c: "fixed"} and fix["superseded_by"] == {b: a}
+    assert len([r for r in state(r5root)["rounds"] if r["kind"] == "fix"]) == 1
+
+
+def test_a_second_fix_round_holds_only_its_own_steps(r5root):
+    # Each fix round's object comes from its own fixed steps (the round tag):
+    # the first round's statuses and superseded_by do not fold into the second.
+    a, b = _fix_round_after(r5root, [finding("correctness", "IMPORTANT", 1),
+                                     finding("correctness", "IMPORTANT", 2)])
+    run(STATE, "fixed", "correctness", json.dumps({"statuses": {a: "fixed", b: "superseded"},
+                                                    "superseded_by": {b: a}}), root=r5root)
+    run(STATE, "event", "commit_made", '{"sha": "0123abc"}', root=r5root)
+    run(STATE, "request", "correctness", "2", root=r5root)
+    hook(r5root)
+    run(STATE, "findings", "correctness", report("correctness", findings=[finding("correctness", "IMPORTANT", 2)]),
+        root=r5root)
+    hook(r5root)
+    run(STATE, "fixed", "correctness", json.dumps({"statuses": {b: "fixed"}}), root=r5root)
+    fixes = [r["fix"] for r in state(r5root)["rounds"] if r["kind"] == "fix"]
+    assert len(fixes) == 2
+    assert fixes[0]["statuses"] == {a: "fixed", b: "superseded"} and fixes[0]["superseded_by"] == {b: a}
+    assert fixes[1]["statuses"] == {b: "fixed"} and fixes[1]["superseded_by"] == {}
+
+
+def test_superseded_by_is_checked_against_the_pass_s_last_open_set(r5root):
+    # The fix list is the open set of the pass's last findings, not its
+    # first: here the superseding finding is new in the re-review.
+    (a,) = _fix_round_after(r5root, [finding("correctness", "IMPORTANT", 1)])
+    run(STATE, "fixed", "correctness", json.dumps({"statuses": {a: "could_not_fix"}}), root=r5root)
+    run(STATE, "event", "commit_made", '{"sha": "0123abc"}', root=r5root)
+    run(STATE, "request", "correctness", "2", root=r5root)
+    hook(r5root)
+    later = [finding("correctness", "IMPORTANT", 1), finding("correctness", "IMPORTANT", 3)]
+    run(STATE, "findings", "correctness", report("correctness", findings=later), root=r5root)
+    hook(r5root)
+    c = next(f["fingerprint"] for f in state(r5root)["rounds"][-1]["lenses"]["correctness"]["findings"]
+             if f["fingerprint"] != a)
+    run(STATE, "fixed", "correctness", json.dumps({"statuses": {c: "fixed", a: "superseded"},
+                                                    "superseded_by": {a: c}}), root=r5root)
+    fix = state(r5root)["rounds"][-1]["fix"]
+    assert fix["statuses"] == {c: "fixed", a: "superseded"} and fix["superseded_by"] == {a: c}
+
+
+@pytest.mark.parametrize("bad", ['{"superseded_by": ["x"]}', '{"superseded_by": {"x": 1}}'])
+def test_a_fix_with_a_malformed_superseded_by_is_refused_before_anything_is_written(r5root, bad):
+    _fix_round_after(r5root, [finding("correctness", "IMPORTANT")])
+    before = state_file(r5root).read_text()
+    refused = run(STATE, "fixed", "correctness", bad, root=r5root)
+    assert refused.returncode == 1 and "superseded_by must be an object" in refused.stderr
+    assert state_file(r5root).read_text() == before
 
 
 def test_a_fix_with_non_object_statuses_is_refused_before_anything_is_written(r5root):

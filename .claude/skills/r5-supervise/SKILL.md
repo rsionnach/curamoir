@@ -160,7 +160,12 @@ For each pass in `correctness`, `clarity`, `edge-cases`, `provenance`:
    b. Fix: dispatch ONE fix subagent (the hook records it as fix_dispatched
       and refuses a second), or fix it yourself if the change is a few lines.
    c. Once the fix is in place (and any fix agent has finished):
-      `r5-state.sh fixed <pass> '{"files":[...]}'`.
+      `r5-state.sh fixed <pass> '{"files":[...]}'`. Add `"statuses"`
+      (fingerprint: status) for the findings the round answered, and for
+      each one marked `superseded`, `"superseded_by"` (fingerprint: the
+      finding whose fix rewrote its lines); a `superseded` with no such
+      entry, or one naming a finding not in the pass's open set, is
+      recorded `could_not_fix`.
    d. Run the full suite, ruff and curamoir-lint; `event tests_passed`, or
       `event tests_failed` and stop the run with `finish failed`.
    e. Commit (`r5(<pass>): <summary> · <bead-id>`, with the Co-Authored-By
@@ -205,7 +210,8 @@ ESCALATED). Append this paragraph to every reviewer's brief, verbatim, with
 > finding a fix introduced `"regression": true`. No findings:
 > `R5-FINDINGS: []`. Nothing may follow that line.
 
-`lib/r5_findings.py` validates each finding, computes its fingerprint (the
+`lib/r5_findings.py` (the bridge to `src/curamoir/gate/findings.py`, the
+shared contract's reference parser) validates each finding, computes its fingerprint (the
 first 16 hex of sha256 of lens, path and the normalised claim) and sets its
 status to `open`; a reviewer's own fingerprint or status is ignored. Of
 two findings with one fingerprint in a report, the most severe is kept. A
