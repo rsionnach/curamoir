@@ -101,6 +101,15 @@ def test_a_cr_before_lf_is_tolerated():
     assert len(gf.parse_report(text, "correctness")["findings"]) == 1
 
 
+def test_a_crlf_report_ending_in_a_blank_line_finds_its_contract_line():
+    # The CR before each LF goes, so a trailing "\r\n\r\n" leaves a blank
+    # last line that is skipped, not a lone "\r" taken for the last line.
+    # (json.loads forgives a CR after the array, so the case above alone
+    # cannot tell whether the CR was dropped.)
+    text = "Review.\r\n" + gf.PREFIX + " []\r\n\r\n"
+    assert gf.parse_report(text, "correctness")["findings"] == []
+
+
 def test_a_separator_after_the_contract_line_is_not_a_line_end():
     # The array line is the last line even with a separator after it; that
     # separator is content of that line, which is then not valid JSON.
@@ -239,6 +248,22 @@ def test_a_closure_does_not_file_a_prose_issue():
     out = parse([closure(earlier[0]["fingerprint"]), finding(claim="docstring", severity="MINOR")],
                 prose=PROSE, prior_open=earlier)
     assert [u["heading"] for u in out["prose_unfiled"]] == ["IMPORTANT"]
+
+
+def test_a_two_space_sub_bullet_is_not_an_issue():
+    # The shape of several of this repository's real reports (private): a
+    # Not-filed item whose detail is a two-space list, its reason on a
+    # two-space continuation line; and the same indent under a severity.
+    prose = ("#### Important\n1. **The guard never fires**\n  - File: a.py:1\n  - Scenario: x\n\n"
+             "#### Not filed\n- The refusal is an allowlist \u2014 not_an_issue\n"
+             "  - These are refused: a bare string, a glob\n  \u2014 not_an_issue\n")
+    assert parse([], prose=prose)["prose_unfiled"] == [
+        {"heading": "IMPORTANT", "text": "The guard never fires"}]
+
+
+def test_a_quoted_contract_line_mid_section_neither_closes_it_nor_is_an_item():
+    prose = "#### Important\n1. **first**\nR5-FINDINGS: [] (quoted)\n2. **second**\n"
+    assert [u["text"] for u in parse([], prose=prose)["prose_unfiled"]] == ["first", "second"]
 
 
 def test_a_tab_indented_sub_bullet_is_not_an_issue():
