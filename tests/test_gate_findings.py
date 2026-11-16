@@ -859,6 +859,17 @@ def test_the_command_line_takes_the_caller_s_blocking_set(tmp_path, blocking, un
     assert len(json.loads(run.stdout)["unproven"]) == unproven
 
 
+def test_an_empty_blocking_option_means_no_lens_blocks(tmp_path):
+    # Not the default: under the default a weak correctness finding is unproven.
+    path = tmp_path / "r.md"
+    path.write_text(report([finding(lens="correctness", level="cited")]), encoding="utf-8")
+    base = [sys.executable, str(BRIDGE), "parse", "correctness", str(path)]
+    for extra, unproven in (([], 1), (["--blocking", ""], 0)):
+        run = subprocess.run(base + extra, capture_output=True, text=True, timeout=60)
+        assert run.returncode == 0, run.stderr
+        assert len(json.loads(run.stdout)["unproven"]) == unproven, extra
+
+
 @pytest.mark.parametrize(("value", "reason"), [("bogus", "unknown lens 'bogus'"),
                                                ("correctness,excellence", "excellence is advisory")])
 def test_a_bad_blocking_option_is_a_usage_error(tmp_path, capsys, value, reason):

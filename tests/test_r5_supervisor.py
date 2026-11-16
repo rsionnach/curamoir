@@ -1057,13 +1057,35 @@ def test_reopen_while_a_later_pass_is_current_clears_the_current_pass(r5root):
     assert run(STATE, "pass", "correctness", root=r5root).returncode == 0
 
 
-def test_the_excellence_in_flight_refusal_names_advisory(r5root):
+@pytest.mark.parametrize("name", ["clarity", "excellence"])
+def test_an_advisory_in_flight_refusal_names_advisory(r5root, name):
     start(r5root)
-    clear_to_excellence(r5root)
-    run(STATE, "pass", "excellence", root=r5root)
+    if name == "clarity":
+        for blocking in BLOCKING_PASSES:
+            clear_pass(r5root, blocking)
+    else:
+        clear_to_excellence(r5root)
+    run(STATE, "pass", name, root=r5root)
     hook(r5root)
     refused = hook(r5root)
     assert refused.returncode == 2 and "`advisory ...`" in refused.stderr
+
+
+def test_a_reopened_blocking_pass_still_verifies_its_earlier_open_set(r5root):
+    # The reopen cut-off is for advisory reads only: a blocking pass reviewed
+    # again after a reopen is a verify round that carries its open set.
+    start(r5root)
+    run(STATE, "pass", "correctness", root=r5root)
+    hook(r5root)
+    run(STATE, "findings", "correctness", report("correctness", 0, 0, 1), root=r5root)
+    left = state(r5root)["audit_trail"][-1]["open_set"]
+    assert run(STATE, "done", "correctness", "0", root=r5root).returncode == 0
+    assert run(STATE, "reopen", "correctness", root=r5root).returncode == 0
+    shown = json.loads(run(STATE, "open-set", "correctness", root=r5root).stdout)
+    assert [f["fingerprint"] for f in shown] == [f["fingerprint"] for f in left] != []
+    run(STATE, "pass", "correctness", root=r5root)
+    hook(r5root)
+    assert state(r5root)["rounds"][-1]["kind"] == "verify"
 
 
 @pytest.mark.parametrize("content", ["", "[]", '{"status": "in_progress", "audit_trail": "x"}',
