@@ -146,10 +146,17 @@ zero is reported as `n/a (0)`, not as 0.
 ## Thresholds (phase 1)
 
 Confirmed by the user on 2026-11-17 for the trial that starts on the first
-trial bead. Each is applied to the counts above when the trial ends (30
-decisions logged, or three trial beads closed), except misclassification,
-which applies the moment it is found. "Reviewed" means the decision has an
-outcome in effect.
+trial bead. The trial's last bead is the one in which the 30th decision is
+logged, or the third trial bead, whichever comes first; it runs to its close
+under the decision log. The trial ends once the user has reviewed that bead's
+decisions, so every decision the trial logged has had its review. Each threshold is applied to
+the counts above at that point, except misclassification, which applies the
+moment it is found.
+
+"Reviewed" means the decision has an outcome in effect. A decision counts
+under the class of that outcome's `reclassified_to` when it has one, and
+under the class it was logged with otherwise, for the minimums and the rates
+alike.
 
 | Measure | Threshold | Applies when |
 |---|---|---|
@@ -160,6 +167,11 @@ outcome in effect.
 | High-confidence failure rate | Reported only | — |
 | Prompts avoided | Reported only | — |
 
+Every other measure (misclassification between A and B, findings traced to a
+decision) is reported only.
+
 If a class is under its minimum when the trial ends, the trial is extended by
-one bead, once. A class still under its minimum after that is reported with
-its counts and no threshold applied.
+one bead, once, and then ends in the same way at that bead's close. Every
+threshold is then applied at the new end, for both classes. A class still
+under its minimum after that is reported with its counts and no threshold
+applied.
