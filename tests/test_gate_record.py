@@ -395,3 +395,45 @@ def test_two_runs_at_one_tree_with_the_same_inputs_record_the_same_input_digest(
     assert first["input_digest"] == second["input_digest"]
     assert first["inputs"] == second["inputs"]
     assert first["at"] != second["at"]
+
+
+def test_a_verdict_inputs_copy_with_another_digest_cannot_be_made_or_recorded(repo):
+    # A VerdictInputs is not a dataclass, so dataclasses.replace cannot copy
+    # one; and one altered by other means is caught when the record
+    # recomputes input_digest from its inputs and tree_sha.
+    import dataclasses
+    _start(repo)
+    built = digest.verdict_inputs(repo, _tree(repo), files={"brief": "brief.md"})
+    with pytest.raises(TypeError):
+        dataclasses.replace(built, input_digest=PLANTED)
+    with pytest.raises(AttributeError):
+        built.input_digest = PLANTED
+    forged = digest.verdict_inputs(repo, _tree(repo), files={"brief": "brief.md"})
+    object.__setattr__(forged, "input_digest", PLANTED)
+    with pytest.raises(RecordError, match="does not match its inputs"):
+        record.set_verdict(repo, "cm-x.1", "CLEAN", tree_sha=_tree(repo), head_sha=_head(repo),
+                           at="2026-11-17T11:00:00Z", inputs=forged)
+    reshaped = digest.verdict_inputs(repo, _tree(repo), files={"brief": "brief.md"})
+    object.__setattr__(reshaped, "inputs", {"brief": "not a digest"})
+    with pytest.raises(RecordError, match="not a git: or sha256: digest"):
+        record.set_verdict(repo, "cm-x.1", "CLEAN", tree_sha=_tree(repo), head_sha=_head(repo),
+                           at="2026-11-17T11:00:00Z", inputs=reshaped)
+    assert "verdict" not in record.load(repo, "cm-x.1")
+
+
+@pytest.mark.parametrize("n", [1.0, "1", None])
+def test_a_rounds_n_must_be_an_integer(repo, n):
+    _start(repo)
+    with pytest.raises(RecordError, match="must be 1"):
+        record.append_round(repo, "cm-x.1", _round(repo, n))
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), object()])
+def test_a_value_json_cannot_hold_is_a_record_error_and_leaves_the_record(repo, value):
+    _start(repo)
+    record.append_round(repo, "cm-x.1", _round(repo, 1))
+    raw = _round(repo, 2)
+    raw["lenses"]["correctness"]["duration_s"] = value
+    with pytest.raises(RecordError, match="cannot be written as JSON"):
+        record.append_round(repo, "cm-x.1", raw)
+    assert [r["n"] for r in record.load(repo, "cm-x.1")["rounds"]] == [1]

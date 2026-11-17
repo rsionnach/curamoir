@@ -30,7 +30,6 @@ import hashlib
 import json
 import re
 from collections.abc import Mapping
-from dataclasses import dataclass, field
 from pathlib import Path
 from types import MappingProxyType
 
@@ -112,21 +111,43 @@ def canonical(value) -> bytes:
                       ensure_ascii=False, allow_nan=False).encode("utf-8")
 
 
-@dataclass(frozen=True)
 class VerdictInputs:
     """A verdict's ``inputs`` and ``input_digest`` for one ``tree_sha``.
 
-    Built only by :func:`verdict_inputs`; ``gate/record.py`` takes a
-    verdict's inputs in no other form."""
+    Built only by :func:`verdict_inputs` (the constructor refuses without
+    this module's token) and read-only. It is not a dataclass, so
+    ``dataclasses.replace`` cannot copy one with a different digest; and
+    ``gate/record.py`` recomputes ``input_digest`` from ``inputs`` and
+    ``tree_sha`` before writing it, so even an object altered by other means
+    cannot record a digest that is not this module's."""
 
-    tree_sha: str
-    inputs: Mapping[str, str]
-    input_digest: str
-    _token: object = field(default=None, repr=False, compare=False)
+    __slots__ = ("input_digest", "inputs", "tree_sha")
 
-    def __post_init__(self):
-        if self._token is not _BUILT_HERE:
+    def __init__(self, tree_sha: str, inputs: Mapping[str, str], input_digest: str, *,
+                 _token: object = None):
+        if _token is not _BUILT_HERE:
             raise TypeError("VerdictInputs is built by gate.digest.verdict_inputs only")
+        object.__setattr__(self, "tree_sha", tree_sha)
+        object.__setattr__(self, "inputs", inputs)
+        object.__setattr__(self, "input_digest", input_digest)
+
+    def __setattr__(self, name, value):
+        raise AttributeError("VerdictInputs is read-only")
+
+    def __delattr__(self, name):
+        raise AttributeError("VerdictInputs is read-only")
+
+    def __repr__(self) -> str:
+        return f"VerdictInputs(tree_sha={self.tree_sha!r}, input_digest={self.input_digest!r})"
+
+
+def input_digest_of(tree_sha: str, inputs: Mapping[str, str]) -> str:
+    """``sha256:`` over the canonical JSON of ``{"inputs": ..., "tree_sha": ...}``."""
+    return of_bytes(canonical({"inputs": dict(inputs), "tree_sha": tree_sha}))
+
+
+#: The two digest forms §11 allows, as this module writes them.
+DIGEST_FORM = re.compile(r"git:(?:[0-9a-f]{40}|[0-9a-f]{64})|sha256:[0-9a-f]{64}")
 
 
 def verdict_inputs(repo, tree_sha: str, *, files: Mapping[str, object] = MappingProxyType({}),
@@ -154,6 +175,6 @@ def verdict_inputs(repo, tree_sha: str, *, files: Mapping[str, object] = Mapping
     for name, data in contents.items():
         digests[name] = of_bytes(data)
     ordered = dict(sorted(digests.items()))
-    digest = of_bytes(canonical({"inputs": ordered, "tree_sha": tree_sha}))
+    digest = input_digest_of(tree_sha, ordered)
     return VerdictInputs(tree_sha=tree_sha, inputs=MappingProxyType(ordered),
                          input_digest=digest, _token=_BUILT_HERE)

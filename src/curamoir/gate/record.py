@@ -36,7 +36,7 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
-from curamoir.gate.digest import VerdictInputs
+from curamoir.gate.digest import DIGEST_FORM, VerdictInputs, input_digest_of
 from curamoir.git_guard import GitGuardError, git
 
 #: Where a bead's record lives, under the repository's root.
@@ -145,7 +145,15 @@ def set_verdict(repo, bead: str, state: str, *, tree_sha: str, head_sha: str, at
             raise RecordError("a verdict's inputs come from gate.digest.verdict_inputs only")
         if inputs.tree_sha != tree_sha:
             raise RecordError("the verdict inputs were digested for a different tree_sha")
-        verdict["inputs"] = dict(inputs.inputs)
+        recorded = dict(inputs.inputs)
+        if not all(isinstance(k, str) and isinstance(v, str) and DIGEST_FORM.fullmatch(v)
+                   for k, v in recorded.items()):
+            raise RecordError("a verdict input is not a git: or sha256: digest")
+        # Recomputed, not trusted: the digest written is the one these inputs
+        # and this tree give.
+        if inputs.input_digest != input_digest_of(tree_sha, recorded):
+            raise RecordError("the verdict's input_digest does not match its inputs and tree_sha")
+        verdict["inputs"] = recorded
         verdict["input_digest"] = inputs.input_digest
     record["verdict"] = verdict
     _write(record_path(repo, bead), record)
@@ -208,7 +216,7 @@ def _round(raw, *, expected_n: int) -> dict:
     missing = [k for k in _ROUND_REQUIRED if k not in raw]
     if missing:
         raise RecordError(f"round is missing {', '.join(missing)}")
-    if raw["n"] != expected_n or isinstance(raw["n"], bool):
+    if type(raw["n"]) is not int or raw["n"] != expected_n:
         raise RecordError(f"round n must be {expected_n}, the next round")
     if raw["kind"] not in KINDS:
         raise RecordError(f"round kind {raw['kind']!r} is not one of {', '.join(KINDS)}")
@@ -237,8 +245,12 @@ def _lens_entry(name, entry) -> dict:
 def _write(path: Path, record: dict) -> None:
     """The whole record, atomically: a temporary file beside ``path`` (named
     by pid, so two writers never share one), fsynced, renamed over it."""
+    try:
+        text = json.dumps(record, sort_keys=True, indent=2, ensure_ascii=False,
+                          allow_nan=False) + "\n"
+    except (TypeError, ValueError) as error:
+        raise RecordError(f"the record cannot be written as JSON: {error}") from error
     path.parent.mkdir(parents=True, exist_ok=True)
-    text = json.dumps(record, sort_keys=True, indent=2, ensure_ascii=False, allow_nan=False) + "\n"
     scratch = path.with_name(f"{path.name}.{os.getpid()}.tmp")
     try:
         with scratch.open("w", encoding="utf-8") as handle:
