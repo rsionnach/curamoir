@@ -19,6 +19,7 @@ The counting rules (outcome in effect, ties, n/a (0)) are counted by hand in
 phase 1 and have no code to test yet.
 """
 
+import ast
 import collections
 import json
 import os
@@ -127,6 +128,62 @@ def _with(kind, field, value):
     if (kind, field) == ("decision", "class"):
         record["reversible"] = record["autonomous"] = value != "C"
     return record
+
+
+def _snippet_value_sets():
+    """{(kind, field): set} for every `r[field]` (or `r.get(field, ...)`) that
+    problems() compares, by `in` or `==`, with literal values, in the branch
+    for each record kind. Parsed from the snippet's code, so a set widened by
+    any value at all shows up here."""
+    tree = ast.parse(_python_of_snippet())
+    problems = next(node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef) and node.name == "problems")
+
+    def branch_kind(test):
+        if (isinstance(test, ast.Compare) and isinstance(test.ops[0], ast.Eq)
+                and _field(test.left) == "record" and isinstance(test.comparators[0], ast.Constant)):
+            return test.comparators[0].value
+        return None
+
+    branches = {}
+    chain = next(node for node in ast.walk(problems) if isinstance(node, ast.If) and branch_kind(node.test) == "decision")
+    while True:
+        branches[branch_kind(chain.test)] = chain.body
+        rest = chain.orelse
+        if len(rest) == 1 and isinstance(rest[0], ast.If) and branch_kind(rest[0].test):
+            chain = rest[0]
+            continue
+        branches["reversal"] = rest
+        break
+    found = {}
+    for kind, body in branches.items():
+        for node in (n for statement in body for n in ast.walk(statement)):
+            if not isinstance(node, ast.Compare) or len(node.ops) != 1 or not isinstance(node.ops[0], (ast.In, ast.Eq)):
+                continue
+            field, literal = _field(node.left), node.comparators[0]
+            if field is None or field == "record":
+                continue
+            if isinstance(literal, ast.Constant):
+                values = {literal.value}
+            elif isinstance(literal, ast.Tuple) and all(isinstance(e, ast.Constant) for e in literal.elts):
+                values = {e.value for e in literal.elts}
+            else:
+                continue
+            found.setdefault((kind, field), set()).update(values)
+    return found
+
+
+def _field(node):
+    """The field name in `r["name"]` or `r.get("name", ...)`, else None."""
+    if isinstance(node, ast.Subscript) and isinstance(node.slice, ast.Constant):
+        return node.slice.value
+    if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "get"
+            and node.args and isinstance(node.args[0], ast.Constant)):
+        return node.args[0].value
+    return None
+
+
+def test_the_snippets_value_sets_equal_the_tables():
+    assert _snippet_value_sets() == _value_sets()
 
 
 @pytest.mark.parametrize("kind, field", list(_value_sets()), ids="-".join)
@@ -327,10 +384,13 @@ def test_the_skill_description_limits_it_to_the_trial():
     assert front, "SKILL.md starts with frontmatter"
     assert re.search(r"^name: decision-log$", front.group(1), re.M)
     description = " ".join(front.group(1).split("description:", 1)[1].split())
-    assert description.startswith(">- Use ONLY when")
-    assert '"under the decision log"' in description
-    assert "/decision-log" in description
-    assert "never otherwise" in description
+    assert description.startswith(">- ")
+    # The normative sentence is the blockquote in decisions.md.
+    quoted = re.findall(r"^> (Use ONLY when .*)$", SCHEMA.read_text(encoding="utf-8"), re.M)
+    assert len(quoted) == 1, "decisions.md states the trigger sentence once"
+    sentence = quoted[0]
+    assert sentence.endswith("never otherwise.")
+    assert description[len(">- "):].split("never otherwise.", 1)[0] + "never otherwise." == sentence
 
 
 def test_the_skill_is_not_on_the_plugin_surface():

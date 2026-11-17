@@ -7,6 +7,12 @@ creates the file. Three kinds of line, told apart by `record`.
 `tests/test_decision_log.py` checks the skill's append script and the
 examples below against the tables in this file.
 
+The skill activates only on an explicit request, so sessions outside the trial
+are unaffected. This is the normative text: its description opens with exactly
+this sentence.
+
+> Use ONLY when the user or a kickoff brief says a bead is worked "under the decision log", or the user invokes /decision-log; never otherwise.
+
 Lines are written as `src/curamoir/ledger.py` writes its own: one object per
 line, keys sorted, UTF-8, each line ending in a newline; a last line left
 without its newline is closed with one before the next is appended. Every
