@@ -7,12 +7,23 @@ creates the file. Three kinds of line, told apart by `record`.
 
 Lines are written as `src/curamoir/ledger.py` writes its own: one object per
 line, keys sorted, UTF-8, each line ending in a newline; a last line left
-without its newline is closed with one before the next is appended. A line is
-never edited or deleted: a correction is a new line. A decision line itself is
-never corrected or repeated, so each id has exactly one: a wrong pick is
-reversed (a `reversal` line), and a slip in the record is noted in its
-outcome's `note`. Outcome lines are corrected by appending another (see
+without its newline is closed with one before the next is appended. Every
+`ts` is UTC to the whole second, `YYYY-MM-DDTHH:MM:SSZ`, so two `ts` values
+compare correctly as text. A line is never edited or deleted: a correction is
+a new line.
+
+A valid decision line is never corrected or repeated, so each id has one: a
+wrong pick is reversed (a `reversal` line), and a slip in the record is noted
+in its outcome's `note`. Outcome lines are corrected by appending another (see
 `outcome`).
+
+**Invalid lines.** A line that does not parse as one JSON object (a torn
+write, say), or that breaks this schema (a required field missing, a value
+outside its set, a `ts` in another form), is invalid. It is left out of every
+count, and how many there were is reported with the counts. A decision whose
+only line is invalid is appended again, complete, with the same id. If an id
+ends up with more than one valid decision line, all of them are left out and
+reported.
 
 Two bead branches that both append to the file conflict when the second is
 merged, whichever way the merge runs. Resolve it by keeping every line from
@@ -25,7 +36,7 @@ side's, and no rule here reads the order of lines.
 |---|---|---|
 | `record` | yes | `"decision"` |
 | `id` | yes | `d-<bead>-<n>`, `n` from 1 within the bead. Bead-scoped so two branches cannot mint the same id |
-| `ts` | yes | ISO 8601, UTC: when the decision took effect |
+| `ts` | yes | `YYYY-MM-DDTHH:MM:SSZ`: when the decision took effect |
 | `bead` | yes | The bead in progress |
 | `sha` | yes | `HEAD` when the decision was taken |
 | `question` | yes | The question as it would have been asked |
@@ -46,7 +57,7 @@ side's, and no rule here reads the order of lines.
 |---|---|---|
 | `record` | yes | `"outcome"` |
 | `decision_id` | yes | The decision reviewed |
-| `ts` | yes | When the outcome was determined (the review), not when the line was written |
+| `ts` | yes | `YYYY-MM-DDTHH:MM:SSZ`: when the user gave this answer, not when the line was written. A correction of an earlier outcome carries the time the correction was given, so it is later than the line it corrects |
 | `value` | yes | `correct`, `incorrect` or `indeterminate` |
 | `source` | yes | `human_audit` in phase 1 |
 | `note` | no | One line |
@@ -63,7 +74,7 @@ until an outcome with a later `ts` is appended. Line order never decides.
 |---|---|---|
 | `record` | yes | `"reversal"` |
 | `decision_id` | yes | The decision reversed |
-| `ts` | yes | When |
+| `ts` | yes | `YYYY-MM-DDTHH:MM:SSZ`: when the user reversed it |
 | `type` | yes | `human_override` in phase 1 |
 | `actor_type` | yes | `human` |
 | `new_value` | no | Label of the option now in force |
@@ -107,9 +118,12 @@ with no NthLayer component installed.
 
 ## Measures (hand counts in phase 1)
 
-Each count uses a decision's outcome in effect. An outcome or reversal that
-names no decision in the file is left out of every count, and how many were
-left out is reported with the counts.
+Each count uses a decision's outcome in effect. A decision with no outcome in
+effect (none yet, or a tie) is unresolved: it is left out of the reversal rate
+and the high-confidence failure rate. An outcome or reversal that names no
+decision in the file, and an invalid line, is left out of every count, and how
+many were left out is reported with the counts. A measure whose denominator is
+zero is reported as `n/a (0)`, not as 0.
 
 | Measure | Definition |
 |---|---|

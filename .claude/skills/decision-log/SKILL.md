@@ -97,22 +97,53 @@ meanings and a full example of each kind of line: `.curamoir/decisions.md`.
 - **This repository is public.** Write the question, options and rationale in
   your own words. Do not quote or cite private specs, private handoffs or
   another project's internals.
-- Append only. Never edit or delete a line. A decision line is never
+- `ts` is UTC to the whole second, `YYYY-MM-DDTHH:MM:SSZ`, on every line.
+- Append only. Never edit or delete a line. A valid decision line is never
   corrected or written twice: a wrong pick is reversed, and a slip in the
-  record goes in its outcome's `note`.
+  record goes in its outcome's `note`. A decision whose line is invalid (it
+  does not parse, or breaks the schema) is appended again, complete, with the
+  same id.
 - If merging the bead's branch conflicts in `decisions.jsonl` (another
   branch appended too), keep every line from both sides, in any order.
 
 **How to append**, as `src/curamoir/ledger.py` does: one object per line,
 keys sorted, UTF-8, every line ending in a newline, and a last line left
 without its newline (a crash mid-write) closed with one before the new line
-is added. No tool does this for you in phase 1; a one-off script will:
+is added. No tool does this for you in phase 1; this one-off script checks the
+record against the schema first and writes nothing if a check fails. Fill in
+`record` with every field of its kind; it runs from anywhere in the checkout:
 
 ```bash
 python3 - <<'EOF'
-import json, pathlib
-path = pathlib.Path(".curamoir/decisions.jsonl")
-record = {"record": "decision", "id": "d-cm-abc-3"}  # every required field
+import json, pathlib, re, subprocess
+top = subprocess.check_output(["git", "rev-parse", "--show-toplevel"], text=True).strip()
+path = pathlib.Path(top, ".curamoir", "decisions.jsonl")
+record = {"record": "decision", "id": "d-cm-abc-3"}  # every field of its kind
+required = {
+    "decision": "autonomous bead class confidence depends_on falsifier id options question rationale reversible sha ts undo value",
+    "outcome": "decision_id source ts value",
+    "reversal": "actor_type decision_id ts type",
+}[record["record"]].split()
+missing = [name for name in required if name not in record]
+assert not missing, f"missing: {missing}"
+assert re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ", record["ts"]), "ts: YYYY-MM-DDTHH:MM:SSZ"
+if record["record"] == "decision":
+    labels = [option["label"] for option in record["options"]]
+    assert len(labels) >= 2 and len(set(labels)) == len(labels), "two or more options, distinct labels"
+    assert record["value"] in labels and record["value"] != "escalate", "value: a label, never escalate"
+    assert type(record["confidence"]) in (int, float) and 0 <= record["confidence"] <= 1, "confidence: 0 to 1"
+    assert record["class"] in ("A", "B", "C"), "class: A, B or C"
+    assert record["reversible"] is (record["class"] != "C"), "reversible: false for class C only"
+    assert record["autonomous"] is (record["class"] != "C"), "autonomous: false for class C only"
+    assert re.fullmatch(rf"d-{re.escape(record['bead'])}-[1-9][0-9]*", record["id"]), "id: d-<bead>-<n>"
+    assert record["falsifier"].strip() and isinstance(record["depends_on"], list), "falsifier, depends_on"
+elif record["record"] == "outcome":
+    assert record["value"] in ("correct", "incorrect", "indeterminate"), "value"
+    assert record["source"] == "human_audit", "source: human_audit"
+    assert record.get("reclassified_to", "A") in ("A", "B", "C"), "reclassified_to"
+else:
+    assert record["record"] == "reversal", "record: decision, outcome or reversal"
+    assert record["type"] == "human_override" and record["actor_type"] == "human", "type, actor_type"
 data = path.read_bytes() if path.exists() else b""
 with path.open("a", encoding="utf-8") as handle:
     if data and not data.endswith(b"\n"):
@@ -146,7 +177,9 @@ same way:
 ```
 
 `value` is `correct`, `incorrect` or `indeterminate`. `ts` is when the user
-gave the answer, not when you wrote the line. A reversed decision gets both
+gave the answer, not when you wrote the line; correcting an outcome you
+recorded wrongly is a new outcome line whose `ts` is when the user gave the
+correction. A reversed decision gets both
 lines: the reversal, and an outcome of `incorrect`. If the user moves a
 decision to another class, add `"reclassified_to":"B"` to its outcome line.
 
