@@ -4,6 +4,8 @@ One JSON object per line, append-only, committed with the bead that produced
 it. Written by an agent working under the `decision-log` project skill
 (`.claude/skills/decision-log/SKILL.md`, phase 1 trial); the first record
 creates the file. Three kinds of line, told apart by `record`.
+`tests/test_decision_log.py` checks the skill's append script and the
+examples below against the tables in this file.
 
 Lines are written as `src/curamoir/ledger.py` writes its own: one object per
 line, keys sorted, UTF-8, each line ending in a newline; a last line left
