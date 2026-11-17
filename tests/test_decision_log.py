@@ -98,9 +98,45 @@ def test_the_value_sets_in_the_tables_are_the_ones_the_snippet_checks():
     assert _backticked(outcome["reclassified_to"][1]) == {"A", "B", "C"}
     assert _backticked(reversal["type"][1]) == {"human_override"}
     assert _backticked(reversal["actor_type"][1]) == {"human"}
-    assert {"A", "B", "C"} <= _backticked(decision["class"][1])
+    assert _backticked(decision["class"][1]) == {"A", "B", "C"}
     assert "escalate" in _backticked(decision["value"][1])
     assert "YYYY-MM-DDTHH:MM:SSZ" in decision["ts"][1]
+    # The wording each refusal below encodes, so the table cannot change alone.
+    assert "two or more" in decision["options"][1]
+    assert "0.0 to 1.0" in decision["confidence"][1]
+    assert "`d-<bead>-<n>`" in decision["id"][1]
+    assert "`false` for class C, else `true`" in decision["reversible"][1]
+    assert "`false` when the user answered" in decision["autonomous"][1]
+
+
+#: (kind, field) -> the value set its table row gives, read from decisions.md.
+def _value_sets():
+    outcome, reversal, decision = _table("outcome"), _table("reversal"), _table("decision")
+    return {
+        ("outcome", "value"): _backticked(outcome["value"][1]),
+        ("outcome", "source"): _backticked(outcome["source"][1]),
+        ("outcome", "reclassified_to"): _backticked(outcome["reclassified_to"][1]),
+        ("reversal", "type"): _backticked(reversal["type"][1]),
+        ("reversal", "actor_type"): _backticked(reversal["actor_type"][1]),
+        ("decision", "class"): _backticked(decision["class"][1]),
+    }
+
+
+def _with(kind, field, value):
+    record = {**_example(kind), field: value}
+    if (kind, field) == ("decision", "class"):
+        record["reversible"] = record["autonomous"] = value != "C"
+    return record
+
+
+@pytest.mark.parametrize("kind, field", list(_value_sets()), ids="-".join)
+def test_the_snippet_accepts_exactly_the_value_set_its_table_gives(snippet, kind, field):
+    allowed = _value_sets()[(kind, field)]
+    for value in allowed:
+        assert snippet["problems"](_with(kind, field, value)) == [], value
+    outside = {max(allowed) + "x", "x" + min(allowed), chr(ord(max(allowed)[0]) + 1), "wrong", "right", "D", ""}
+    for value in outside - allowed:
+        assert snippet["problems"](_with(kind, field, value)) != [], value
 
 
 # --- the examples ------------------------------------------------------------
@@ -115,6 +151,9 @@ def test_each_file_has_one_valid_example_of_each_kind_all_in_json_fences(snippet
         kinds[record["record"]] += 1
         assert json.dumps(record, sort_keys=True) == line, "not in json.dumps(sort_keys=True) form"
         assert snippet["problems"](record) == []
+        for (kind, field), allowed in _value_sets().items():
+            if kind == record["record"] and field in record:
+                assert record[field] in allowed, (kind, field, "not in its table's set")
     assert kinds == {"decision": 1, "outcome": 1, "reversal": 1}
 
 
@@ -145,6 +184,11 @@ def _broken():
         "ts not text": ({**d, "ts": 20261116}, "ts:"),
         "empty question": ({**d, "question": " "}, "question:"),
         "empty sha": ({**d, "sha": ""}, "sha:"),
+        "empty bead": ({**d, "bead": ""}, "bead:"),
+        "empty rationale": ({**d, "rationale": ""}, "rationale:"),
+        "blank undo": ({**d, "undo": "  "}, "undo:"),
+        "empty falsifier": ({**d, "falsifier": ""}, "falsifier:"),
+        "falsifier not text": ({**d, "falsifier": None}, "falsifier:"),
         "one option": ({**d, "options": d["options"][:1]}, "options:"),
         "repeated label": ({**d, "options": [d["options"][0], d["options"][0]]}, "options:"),
         "option without summary": ({**d, "options": no_summary}, "options:"),
@@ -176,6 +220,7 @@ def _broken():
         "reversal actor_type": ({**r, "actor_type": "service"}, "actor_type"),
         "reversal empty new_value": ({**r, "new_value": ""}, "new_value"),
         "reversal empty decision_id": ({**r, "decision_id": " "}, "decision_id:"),
+        "reversal reason not text": ({**r, "reason": 3}, "reason"),
     }
 
 
@@ -222,10 +267,23 @@ def test_it_writes_each_kind_as_one_sorted_line_from_a_subdirectory(checkout):
     expected = ""
     for kind in ("decision", "outcome", "reversal"):
         record = _example(kind)
-        run = _append(checkout, record, cwd=checkout / "sub" / "deep")
+        # Keys in reverse order, so only sort_keys can give the sorted line.
+        unsorted = dict(reversed(list(record.items())))
+        assert json.dumps(unsorted) != json.dumps(record, sort_keys=True)
+        run = _append(checkout, unsorted, cwd=checkout / "sub" / "deep")
         assert run.returncode == 0, run.stderr
         expected += json.dumps(record, sort_keys=True) + "\n"
     assert _log(checkout).read_text(encoding="utf-8") == expected
+
+
+def test_a_decision_may_be_appended_again_over_a_line_that_breaks_the_schema(checkout):
+    record = _example("decision")
+    broken = json.dumps(_without(record, "falsifier"), sort_keys=True) + "\n"
+    _log(checkout).write_text(broken, encoding="utf-8")
+    run = _append(checkout, record)
+    assert run.returncode == 0, run.stderr
+    assert _log(checkout).read_text(encoding="utf-8") == broken + json.dumps(record, sort_keys=True) + "\n"
+    assert _append(checkout, record).returncode != 0
 
 
 def test_run_twice_it_writes_one_decision_line(checkout):
