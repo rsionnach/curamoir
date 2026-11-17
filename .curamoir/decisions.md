@@ -15,11 +15,9 @@ outcome's `note`. Outcome lines are corrected by appending another (see
 `outcome`).
 
 Two bead branches that both append to the file conflict when the second is
-merged. Resolve it by keeping every line from both sides: the lines already on the
-branch merged into first, then the merged-in branch's lines, each side in its
-own order. Ids are bead-scoped, so no line duplicates the other side's, and the
-fixed order keeps the tie-break below (the later line) from depending on who
-resolved the conflict.
+merged, whichever way the merge runs. Resolve it by keeping every line from
+both sides, in any order: ids are bead-scoped, so no line duplicates the other
+side's, and no rule here reads the order of lines.
 
 ## `decision`
 
@@ -54,8 +52,10 @@ resolved the conflict.
 | `note` | no | One line |
 | `reclassified_to` | no | `A`, `B` or `C`, when the reviewer moves the decision to another class |
 
-The outcome in effect for a decision is the one with the latest `ts`; on equal
-`ts`, the later line.
+The outcome in effect for a decision is the one with the latest `ts`. If
+several share the latest `ts` and differ in `value` or `reclassified_to`, none
+is in effect: the decision counts as unresolved, and is listed with the counts,
+until an outcome with a later `ts` is appended. Line order never decides.
 
 ## `reversal`
 
