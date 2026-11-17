@@ -21,8 +21,9 @@ in its outcome's `note`. Outcome lines are corrected by appending another (see
 write, say), or that breaks this schema (a required field missing, a value
 outside its set, a `ts` in another form), is invalid. It is left out of every
 count, and how many there were is reported with the counts. A decision whose
-only line is invalid is appended again, complete, with the same id. If an id
-ends up with more than one valid decision line, all of them are left out and
+only line is invalid is appended again, complete, with the same id. Identical
+valid decision lines for one id (the same record written twice) count as one.
+If an id has valid decision lines that differ, all of them are left out and
 reported.
 
 Two bead branches that both append to the file conflict when the second is

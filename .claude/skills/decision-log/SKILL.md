@@ -110,41 +110,88 @@ meanings and a full example of each kind of line: `.curamoir/decisions.md`.
 keys sorted, UTF-8, every line ending in a newline, and a last line left
 without its newline (a crash mid-write) closed with one before the new line
 is added. No tool does this for you in phase 1; this one-off script checks the
-record against the schema first and writes nothing if a check fails. Fill in
-`record` with every field of its kind; it runs from anywhere in the checkout:
+record against the schema first, and refuses a decision whose id already has
+a valid line, so running it twice writes one line. It writes nothing when it
+refuses, and says why. Fill in `record` with every field of its kind; it runs
+from anywhere in the checkout:
 
 ```bash
 python3 - <<'EOF'
-import json, pathlib, re, subprocess
+import datetime, json, pathlib, re, subprocess, sys
+
 top = subprocess.check_output(["git", "rev-parse", "--show-toplevel"], text=True).strip()
 path = pathlib.Path(top, ".curamoir", "decisions.jsonl")
 record = {"record": "decision", "id": "d-cm-abc-3"}  # every field of its kind
-required = {
+
+REQUIRED = {
     "decision": "autonomous bead class confidence depends_on falsifier id options question rationale reversible sha ts undo value",
     "outcome": "decision_id source ts value",
     "reversal": "actor_type decision_id ts type",
-}[record["record"]].split()
-missing = [name for name in required if name not in record]
-assert not missing, f"missing: {missing}"
-assert re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ", record["ts"]), "ts: YYYY-MM-DDTHH:MM:SSZ"
-if record["record"] == "decision":
-    labels = [option["label"] for option in record["options"]]
-    assert len(labels) >= 2 and len(set(labels)) == len(labels), "two or more options, distinct labels"
-    assert record["value"] in labels and record["value"] != "escalate", "value: a label, never escalate"
-    assert type(record["confidence"]) in (int, float) and 0 <= record["confidence"] <= 1, "confidence: 0 to 1"
-    assert record["class"] in ("A", "B", "C"), "class: A, B or C"
-    assert record["reversible"] is (record["class"] != "C"), "reversible: false for class C only"
-    assert record["autonomous"] is (record["class"] != "C"), "autonomous: false for class C only"
-    assert re.fullmatch(rf"d-{re.escape(record['bead'])}-[1-9][0-9]*", record["id"]), "id: d-<bead>-<n>"
-    assert record["falsifier"].strip() and isinstance(record["depends_on"], list), "falsifier, depends_on"
-elif record["record"] == "outcome":
-    assert record["value"] in ("correct", "incorrect", "indeterminate"), "value"
-    assert record["source"] == "human_audit", "source: human_audit"
-    assert record.get("reclassified_to", "A") in ("A", "B", "C"), "reclassified_to"
-else:
-    assert record["record"] == "reversal", "record: decision, outcome or reversal"
-    assert record["type"] == "human_override" and record["actor_type"] == "human", "type, actor_type"
+}
+
+def text(value):
+    return isinstance(value, str) and value.strip() != ""
+
+def problems(r):
+    """Why r breaks the schema in .curamoir/decisions.md; empty when valid."""
+    if not isinstance(r, dict) or r.get("record") not in REQUIRED:
+        return ["record: decision, outcome or reversal"]
+    missing = [name for name in REQUIRED[r["record"]].split() if name not in r]
+    if missing:
+        return [f"missing: {missing}"]
+    found = []
+    def check(ok, message):
+        if not ok:
+            found.append(message)
+    ts = r["ts"]
+    try:
+        real = datetime.datetime.strptime(ts, "%Y-%m-%dT%H:%M:%SZ") is not None
+    except (TypeError, ValueError):
+        real = False
+    check(real and re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ", ts), "ts: YYYY-MM-DDTHH:MM:SSZ, a real time")
+    if r["record"] == "decision":
+        for name in ("bead", "id", "sha", "question", "rationale", "undo", "falsifier"):
+            check(text(r[name]), f"{name}: non-empty text")
+        options = r["options"]
+        good = isinstance(options, list) and all(
+            isinstance(o, dict) and text(o.get("label")) and text(o.get("summary")) for o in options)
+        labels = [o["label"] for o in options] if good else []
+        check(good and len(labels) >= 2 and len(set(labels)) == len(labels),
+              "options: two or more, each a distinct label and a summary")
+        check(r["value"] in labels and r["value"] != "escalate", "value: an option's label, never escalate")
+        check(type(r["confidence"]) in (int, float) and 0 <= r["confidence"] <= 1, "confidence: a number, 0 to 1")
+        check(r["class"] in ("A", "B", "C"), "class: A, B or C")
+        check(r["reversible"] is (r["class"] != "C"), "reversible: false for class C only")
+        check(r["autonomous"] is (r["class"] != "C"), "autonomous: false for class C only")
+        check(text(r["bead"]) and text(r["id"])
+              and re.fullmatch(rf"d-{re.escape(r['bead'])}-[1-9][0-9]*", r["id"]), "id: d-<bead>-<n>")
+        check(isinstance(r["depends_on"], list) and all(text(d) for d in r["depends_on"]),
+              "depends_on: a list of ids")
+    elif r["record"] == "outcome":
+        check(text(r["decision_id"]), "decision_id: non-empty text")
+        check(r["value"] in ("correct", "incorrect", "indeterminate"), "value: correct, incorrect or indeterminate")
+        check(r["source"] == "human_audit", "source: human_audit")
+        check(r.get("reclassified_to", "A") in ("A", "B", "C"), "reclassified_to: A, B or C")
+        check(isinstance(r.get("note", ""), str), "note: text")
+    else:
+        check(text(r["decision_id"]), "decision_id: non-empty text")
+        check(r["type"] == "human_override" and r["actor_type"] == "human", "type, actor_type")
+        check(text(r.get("new_value", "x")) and isinstance(r.get("reason", ""), str), "new_value, reason: text")
+    return found
+
+errors = problems(record)
 data = path.read_bytes() if path.exists() else b""
+if not errors and record["record"] == "decision":
+    for line in data.decode("utf-8", "replace").splitlines():
+        try:
+            old = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(old, dict) and old.get("record") == "decision" and old.get("id") == record["id"] and not problems(old):
+            errors.append(f"{record['id']} already has a valid decision line")
+            break
+if errors:
+    sys.exit("not written: " + "; ".join(errors))
 with path.open("a", encoding="utf-8") as handle:
     if data and not data.endswith(b"\n"):
         handle.write("\n")
