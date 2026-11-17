@@ -101,7 +101,8 @@ meanings and a full example of each kind of line: `.curamoir/decisions.md`.
   corrected or written twice: a wrong pick is reversed, and a slip in the
   record goes in its outcome's `note`.
 - If merging the bead's branch conflicts in `decisions.jsonl` (another
-  branch appended too), keep every line from both sides.
+  branch appended too), keep every line from both sides: the target's lines
+  first, then this branch's.
 
 **How to append**, as `src/curamoir/ledger.py` does: one object per line,
 keys sorted, UTF-8, every line ending in a newline, and a last line left

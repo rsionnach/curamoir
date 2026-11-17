@@ -15,8 +15,11 @@ outcome's `note`. Outcome lines are corrected by appending another (see
 `outcome`).
 
 Two bead branches that both append to the file conflict when the second is
-merged. Resolve it by keeping every line from both sides, in either order:
-ids are bead-scoped, so no line is ever a duplicate of the other side's.
+merged. Resolve it by keeping every line from both sides: the lines already on the
+branch merged into first, then the merged-in branch's lines, each side in its
+own order. Ids are bead-scoped, so no line duplicates the other side's, and the
+fixed order keeps the tie-break below (the later line) from depending on who
+resolved the conflict.
 
 ## `decision`
 
