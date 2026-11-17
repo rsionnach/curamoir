@@ -142,3 +142,24 @@ zero is reported as `n/a (0)`, not as 0.
 | Rework | For each reversed decision, the number of decisions whose `depends_on` reaches it, directly or through other decisions; the mean over reversed decisions |
 | Prompts avoided | Class A and B decisions per bead |
 | Findings traced to a decision | From each bead's digest |
+
+## Thresholds (phase 1)
+
+Confirmed by the user on 2026-11-17 for the trial that starts on the first
+trial bead. Each is applied to the counts above when the trial ends (30
+decisions logged, or three trial beads closed), except misclassification,
+which applies the moment it is found. "Reviewed" means the decision has an
+outcome in effect.
+
+| Measure | Threshold | Applies when |
+|---|---|---|
+| Reversal rate, class A | Below 10%: stop at phase 1. 10% or more: build phase 2 | 15 or more class A decisions reviewed |
+| Reversal rate, class B | 25% or more: class B becomes stop-and-ask | 8 or more class B decisions reviewed |
+| Misclassification | Any class C decision logged as A or B: stop using the skill and say so | Always, at once |
+| Rework | A mean above 2 dependents per reversed decision: review moves to checkpoints inside the bead, not at its close | At trial end |
+| High-confidence failure rate | Reported only | — |
+| Prompts avoided | Reported only | — |
+
+If a class is under its minimum when the trial ends, the trial is extended by
+one bead, once. A class still under its minimum after that is reported with
+its counts and no threshold applied.
