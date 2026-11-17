@@ -8,7 +8,15 @@ creates the file. Three kinds of line, told apart by `record`.
 Lines are written as `src/curamoir/ledger.py` writes its own: one object per
 line, keys sorted, UTF-8, each line ending in a newline; a last line left
 without its newline is closed with one before the next is appended. A line is
-never edited or deleted: a correction is a new line.
+never edited or deleted: a correction is a new line. A decision line itself is
+never corrected or repeated, so each id has exactly one: a wrong pick is
+reversed (a `reversal` line), and a slip in the record is noted in its
+outcome's `note`. Outcome lines are corrected by appending another (see
+`outcome`).
+
+Two bead branches that both append to the file conflict when the second is
+merged. Resolve it by keeping every line from both sides, in either order:
+ids are bead-scoped, so no line is ever a duplicate of the other side's.
 
 ## `decision`
 
@@ -102,9 +110,9 @@ left out is reported with the counts.
 
 | Measure | Definition |
 |---|---|
-| Reversal rate, class A or B | Decisions of that class with a reversal ÷ decisions of that class with an outcome |
+| Reversal rate, class A or B | Decisions of that class with an outcome and a reversal ÷ decisions of that class with an outcome |
 | High-confidence failure rate | Among autonomous decisions logged at confidence ≥ 0.8 whose outcome is `correct` or `incorrect`: the share that are `incorrect` (unresolved and `indeterminate` excluded) |
 | Misclassification | Outcomes carrying `reclassified_to` |
-| Rework | Mean number of decisions whose `depends_on` reaches a reversed decision |
+| Rework | For each reversed decision, the number of decisions whose `depends_on` reaches it, directly or through other decisions; the mean over reversed decisions |
 | Prompts avoided | Class A and B decisions per bead |
 | Findings traced to a decision | From each bead's digest |
