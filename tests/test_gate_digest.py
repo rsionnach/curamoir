@@ -183,3 +183,16 @@ def test_verdict_inputs_are_read_only(repo):
     built = digest.verdict_inputs(repo, TREE, contents={"brief": b"x"})
     with pytest.raises(TypeError):
         built.inputs["brief"] = "sha256:" + "0" * 64
+
+
+@pytest.mark.parametrize("path", [None, 3, b"brief.md"])
+def test_an_input_path_that_is_not_a_path_is_a_digest_error(repo, path):
+    with pytest.raises(DigestError, match="not a path"):
+        digest.verdict_inputs(repo, TREE, files={"brief": path})
+
+
+def test_a_repository_argument_below_the_work_tree_top_is_refused(repo):
+    # The tracked-blob lookup reads HEAD's tree from the root, so a
+    # sub-directory would make every tracked file read as untracked.
+    with pytest.raises(DigestError, match="not the top of its git work tree"):
+        digest.of_file(repo / "lens", "correctness.md")

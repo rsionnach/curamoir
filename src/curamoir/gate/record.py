@@ -6,9 +6,18 @@ branch and its ``base``/``head``, one entry in ``rounds`` per round, and at
 the end a ``verdict`` keyed to the tree it reviewed.
 
 **Crash safety.** The file is rewritten whole after each round: into a
-temporary file beside it, fsynced, then renamed over it. A reader therefore
-sees the record as it stood after some completed round, never a partial one,
-and a crash mid-round costs that round alone (R5-R48).
+temporary file beside it, fsynced, renamed over it, and the directory
+fsynced so the rename itself is durable. A reader therefore sees the record
+as it stood after some completed round, never a partial one, and a crash
+mid-round costs that round alone (R5-R48). Each change (start, a round, the
+verdict) holds an exclusive lock on ``record.lock`` beside the record for its
+whole read, change and write, so two writers to one bead cannot lose each
+other's rounds. A failed write is a :class:`RecordError` and leaves the
+record as it was.
+
+**Not committed.** ``.curamoir/.gitignore`` (and the one ``curamoir init``
+writes) ignores ``state/r5/``: a record committed into the tree its verdict is
+keyed to would change that tree and make its own verdict stale.
 
 **What reaches the record.** A round's lens entries keep the keys §11 gives
 them and no others, and each finding in them keeps the Finding contract's
@@ -29,10 +38,13 @@ job, once the runner registers the gate job; this module does not write it.
 
 from __future__ import annotations
 
+import contextlib
 import copy
+import fcntl
 import json
 import os
 import re
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -42,6 +54,7 @@ from curamoir.git_guard import GitGuardError, git
 #: Where a bead's record lives, under the repository's root.
 RECORD_DIR = (".curamoir", "state", "r5")
 RECORD_NAME = "record.json"
+LOCK_NAME = "record.lock"
 
 KINDS = ("preflight", "review", "fix", "verify")
 STATES = ("CLEAN", "ESCALATED", "PREFLIGHT_FAILED", "BUDGET")
@@ -87,7 +100,7 @@ def load(repo, bead: str) -> dict:
     except (OSError, UnicodeDecodeError) as error:
         raise RecordError(f"the gate record for {bead} cannot be read: {error}") from error
     try:
-        record = json.loads(text)
+        record = json.loads(text, parse_constant=_refuse_constant)
     except ValueError as error:
         raise RecordError(f"the gate record for {bead} is not JSON: {error}") from error
     if not isinstance(record, dict) or not isinstance(record.get("rounds"), list):
@@ -101,8 +114,6 @@ def start(repo, bead: str, *, repo_name: str, branch: str, base: str, head: str,
     this refuses, unless ``replace`` is true: an earlier gate's record is
     never lost by accident."""
     path = record_path(repo, bead)
-    if path.exists() and not replace:
-        raise RecordError(f"a gate record for {bead} already exists at {path}")
     for name, value in (("repo_name", repo_name), ("branch", branch)):
         if not (isinstance(value, str) and value.strip()):
             raise RecordError(f"{name} must be non-empty text")
@@ -110,7 +121,10 @@ def start(repo, bead: str, *, repo_name: str, branch: str, base: str, head: str,
         _object_id(name, value)
     record = {"bead": bead, "repo": repo_name, "branch": branch, "base": base, "head": head,
               "rounds": []}
-    _write(path, record)
+    with _locked(path):
+        if path.exists() and not replace:
+            raise RecordError(f"a gate record for {bead} already exists at {path}")
+        _write(path, record)
     return record
 
 
@@ -118,11 +132,13 @@ def append_round(repo, bead: str, round_: dict) -> dict:
     """Add one completed round and write the record. The round's ``n`` is
     the next number; its lens entries and their findings keep only the keys
     §11 gives them. No round is added after the verdict."""
-    record = load(repo, bead)
-    if "verdict" in record:
-        raise RecordError(f"the gate record for {bead} already has its verdict")
-    record["rounds"].append(_round(round_, expected_n=len(record["rounds"]) + 1))
-    _write(record_path(repo, bead), record)
+    path = record_path(repo, bead)
+    with _locked(path):
+        record = load(repo, bead)
+        if "verdict" in record:
+            raise RecordError(f"the gate record for {bead} already has its verdict")
+        record["rounds"].append(_round(round_, expected_n=len(record["rounds"]) + 1))
+        _write(path, record)
     return record
 
 
@@ -131,6 +147,12 @@ def set_verdict(repo, bead: str, state: str, *, tree_sha: str, head_sha: str, at
     """Write the verdict. ``inputs``, when given, is the digest module's
     :class:`VerdictInputs` for this same ``tree_sha``; nothing else may
     supply a verdict's inputs or ``input_digest``."""
+    with _locked(record_path(repo, bead)):
+        return _set_verdict(repo, bead, state, tree_sha=tree_sha, head_sha=head_sha, at=at,
+                            inputs=inputs)
+
+
+def _set_verdict(repo, bead, state, *, tree_sha, head_sha, at, inputs):
     record = load(repo, bead)
     if "verdict" in record:
         raise RecordError(f"the gate record for {bead} already has its verdict")
@@ -242,22 +264,56 @@ def _lens_entry(name, entry) -> dict:
     return kept
 
 
+def _refuse_constant(name: str):
+    raise ValueError(f"{name} is not a JSON number")
+
+
+@contextlib.contextmanager
+def _locked(path: Path):
+    """An exclusive flock on ``record.lock`` beside ``path``, held for one
+    read, change and write; released when the block ends or the process
+    dies."""
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        # Closed in the finally below, after the lock it carries is released.
+        handle = path.with_name(LOCK_NAME).open("a")
+    except OSError as error:
+        raise RecordError(f"the gate record's lock cannot be taken: {error}") from error
+    try:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        yield
+    finally:
+        handle.close()
+
+
 def _write(path: Path, record: dict) -> None:
-    """The whole record, atomically: a temporary file beside ``path`` (named
-    by pid, so two writers never share one), fsynced, renamed over it."""
+    """The whole record, atomically: a temporary file beside ``path`` with a
+    name no other writer, thread or process, can share, fsynced, renamed over
+    it, then the directory fsynced. Any failure is a RecordError, and the
+    record on disk is left as it was."""
     try:
         text = json.dumps(record, sort_keys=True, indent=2, ensure_ascii=False,
                           allow_nan=False) + "\n"
     except (TypeError, ValueError) as error:
         raise RecordError(f"the record cannot be written as JSON: {error}") from error
-    path.parent.mkdir(parents=True, exist_ok=True)
-    scratch = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+    scratch = None
     try:
-        with scratch.open("w", encoding="utf-8") as handle:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd, name = tempfile.mkstemp(dir=path.parent, prefix=f"{path.name}.", suffix=".tmp")
+        scratch = Path(name)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
             handle.write(text)
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(scratch, path)
-    except BaseException:
-        scratch.unlink(missing_ok=True)
-        raise
+        scratch = None
+        directory = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+    except OSError as error:
+        raise RecordError(f"the gate record cannot be written at {path}: {error}") from error
+    finally:
+        if scratch is not None:
+            scratch.unlink(missing_ok=True)

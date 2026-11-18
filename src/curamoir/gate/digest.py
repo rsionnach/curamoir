@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 from collections.abc import Mapping
 from pathlib import Path
@@ -61,7 +62,10 @@ def of_file(repo, path) -> str:
     the path is tracked at HEAD and its bytes on disk are that blob, else
     ``sha256:`` over the bytes. ``path`` must be a regular file inside the
     repository (a symlink is not followed out of it)."""
+    if not isinstance(path, (str, os.PathLike)):
+        raise DigestError(f"input path {path!r} is not a path")
     repo = Path(repo).resolve()
+    _require_top_level(repo)
     target = (repo / path)
     try:
         resolved = target.resolve(strict=True)
@@ -77,6 +81,14 @@ def of_file(repo, path) -> str:
     if blob is not None and blob == _blob_id(repo, data):
         return "git:" + blob
     return of_bytes(data)
+
+
+def _require_top_level(repo: Path) -> None:
+    """``repo`` must be its work tree's top: the tracked-blob lookup reads
+    HEAD's tree from the root, so a sub-directory would never match."""
+    top = git(repo, "rev-parse", "--show-toplevel").decode("utf-8", "surrogateescape").strip()
+    if os.path.realpath(top) != os.path.realpath(repo):
+        raise DigestError(f"{repo} is not the top of its git work tree ({top})")
 
 
 def _tracked_blob(repo: Path, relative: str) -> str | None:

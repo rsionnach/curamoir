@@ -1,6 +1,9 @@
 # Machine-local cúramóir state. Everything else here is meant to be committed.
 handoff/journal.jsonl
 state/lock
+# The gate's round records: a record cannot be committed in the tree its
+# verdict is keyed to, or committing it would make that verdict stale.
+state/r5/
 curamoir.yaml.new
 # A writer killed mid-write leaves one of these; it is never content.
 *.tmp

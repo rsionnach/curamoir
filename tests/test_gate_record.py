@@ -165,7 +165,7 @@ def test_a_crash_while_writing_a_round_leaves_the_completed_rounds(repo, monkeyp
         raise OSError("the disk went away mid-round")
 
     monkeypatch.setattr(record.os, "replace", crash)
-    with pytest.raises(OSError):
+    with pytest.raises(RecordError, match="cannot be written"):
         record.append_round(repo, "cm-x.1", _round(repo, 3, kind="verify"))
     monkeypatch.undo()
 
@@ -437,3 +437,91 @@ def test_a_value_json_cannot_hold_is_a_record_error_and_leaves_the_record(repo, 
     with pytest.raises(RecordError, match="cannot be written as JSON"):
         record.append_round(repo, "cm-x.1", raw)
     assert [r["n"] for r in record.load(repo, "cm-x.1")["rounds"]] == [1]
+
+
+def test_a_gates_record_leaves_git_status_clean_and_the_verdict_survives_a_commit(repo):
+    # Rob, 2026-11-18: .curamoir/.gitignore (and the one curamoir init
+    # writes) ignores state/r5/, so committing everything after the gate
+    # cannot put the record in the tree its verdict is keyed to.
+    from curamoir.scaffold import GITIGNORE
+    (repo / ".curamoir").mkdir()
+    (repo / ".curamoir" / ".gitignore").write_text(GITIGNORE, encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "curamoir init")
+    _start(repo)
+    record.append_round(repo, "cm-x.1", _round(repo, 1))
+    _clean(repo)
+    assert _git(repo, "status", "--porcelain") == ""
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "--allow-empty", "-m", "commit everything after the gate")
+    assert record.check_verdict(repo, "cm-x.1") is None
+
+
+def test_concurrent_writers_to_one_record_lose_no_round(repo):
+    # Each change holds an exclusive flock on record.lock for its whole read,
+    # change and write: of several processes appending the same round, one
+    # writes it and the rest are refused, never silently overwritten.
+    _start(repo)
+    script = (
+        "import json, sys\n"
+        "from curamoir.gate import record\n"
+        "try:\n"
+        f"    record.append_round({str(repo)!r}, 'cm-x.1', json.loads(sys.argv[1]))\n"
+        "    print('ok')\n"
+        "except record.RecordError as error:\n"
+        "    print('refused', error)\n")
+    src = str(record.__file__).rsplit("/curamoir/", 1)[0]
+    env = {**os.environ, "PYTHONPATH": os.pathsep.join([src, os.environ.get("PYTHONPATH", "")])}
+    children = [subprocess.Popen(["python3", "-c", script, json.dumps(_round(repo, 1))],
+                                 env=env, stdout=subprocess.PIPE, text=True) for _ in range(6)]
+    outcomes = [child.communicate(timeout=60)[0].strip() for child in children]
+    assert outcomes.count("ok") == 1, outcomes
+    assert all(o == "ok" or "must be 2" in o for o in outcomes), outcomes
+    assert [r["n"] for r in record.load(repo, "cm-x.1")["rounds"]] == [1]
+
+
+def test_threads_in_one_process_never_share_a_temporary_file(repo):
+    import threading
+    _start(repo)
+    path = record.record_path(repo, "cm-x.1")
+    errors = []
+
+    def write():
+        try:
+            for _ in range(20):
+                record._write(path, {"rounds": []})
+        except Exception as error:  # collected and asserted below
+            errors.append(error)
+
+    threads = [threading.Thread(target=write) for _ in range(4)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert errors == []
+    assert list(path.parent.glob("*.tmp")) == []
+
+
+def test_a_write_the_disk_refuses_is_a_record_error_and_keeps_the_record(repo):
+    _start(repo)
+    record.append_round(repo, "cm-x.1", _round(repo, 1))
+    directory = record.record_path(repo, "cm-x.1").parent
+    before = (directory / "record.json").read_bytes()
+    directory.chmod(0o500)
+    try:
+        if os.access(directory, os.W_OK):
+            pytest.skip("this user can write a read-only directory (root)")
+        with pytest.raises(RecordError):
+            record.append_round(repo, "cm-x.1", _round(repo, 2))
+    finally:
+        directory.chmod(0o700)
+    assert (directory / "record.json").read_bytes() == before
+
+
+def test_a_record_holding_nan_or_infinity_is_refused_as_not_json(repo):
+    for constant in ("NaN", "Infinity", "-Infinity"):
+        path = record.record_path(repo, "cm-x.1")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text('{"rounds": [], "x": ' + constant + "}", encoding="utf-8")
+        with pytest.raises(RecordError, match="not JSON"):
+            record.load(repo, "cm-x.1")

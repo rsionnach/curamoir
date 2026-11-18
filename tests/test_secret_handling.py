@@ -104,3 +104,6 @@ def test_init_keeps_the_journal_and_lock_out_of_git(tmp_path):
     # the suite green — a stray temp from a writer killed mid-write would have
     # gone on being committed with nobody noticing.
     assert "*.tmp" in ignore
+    # The gate's records (gate/record.py): committing one changes the tree
+    # its verdict is keyed to, so it would stale itself (cm-8ap.14).
+    assert "state/r5/" in ignore.splitlines()
