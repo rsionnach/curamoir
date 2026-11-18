@@ -97,8 +97,9 @@ def test_starting_over_an_existing_record_refuses_unless_told_to_replace(repo):
     assert record.load(repo, "cm-x.1")["rounds"] == []
 
 
-@pytest.mark.parametrize("name, value", [("base", "abc"), ("head", "Z" * 40), ("base", None)])
-def test_start_needs_full_object_ids(repo, name, value):
+@pytest.mark.parametrize("name, value", [("base", "abc"), ("head", "Z" * 40), ("base", None),
+                                         ("repo_name", ""), ("branch", " "), ("branch", None)])
+def test_start_needs_full_object_ids_and_names(repo, name, value):
     head = _head(repo)
     kwargs = {"repo_name": "curamoir", "branch": "b", "base": head, "head": head, name: value}
     with pytest.raises(RecordError, match=name):
@@ -119,6 +120,8 @@ def test_rounds_are_numbered_from_one_in_order(repo):
     ({"kind": "rest"}, "kind"),
     ({"head": "nope"}, "round head"),
     ({"started": ""}, "started"),
+    ({"ended": ""}, "ended"),
+    ({"ended": 5}, "ended"),
     ({"lenses": []}, "lenses"),
 ])
 def test_a_round_outside_the_contract_is_refused(repo, change, reason):
@@ -457,26 +460,32 @@ def test_a_gates_record_leaves_git_status_clean_and_the_verdict_survives_a_commi
     assert record.check_verdict(repo, "cm-x.1") is None
 
 
-def test_concurrent_writers_to_one_record_lose_no_round(repo):
+def test_a_writer_waits_for_the_records_lock(repo):
     # Each change holds an exclusive flock on record.lock for its whole read,
-    # change and write: of several processes appending the same round, one
-    # writes it and the rest are refused, never silently overwritten.
+    # change and write. Holding that lock here, a child's append_round must
+    # wait for it, and finish only once it is released.
+    import fcntl
+    import time
     _start(repo)
     script = (
         "import json, sys\n"
         "from curamoir.gate import record\n"
-        "try:\n"
-        f"    record.append_round({str(repo)!r}, 'cm-x.1', json.loads(sys.argv[1]))\n"
-        "    print('ok')\n"
-        "except record.RecordError as error:\n"
-        "    print('refused', error)\n")
+        f"record.append_round({str(repo)!r}, 'cm-x.1', json.loads(sys.argv[1]))\n"
+        "print('ok')\n")
     src = str(record.__file__).rsplit("/curamoir/", 1)[0]
     env = {**os.environ, "PYTHONPATH": os.pathsep.join([src, os.environ.get("PYTHONPATH", "")])}
-    children = [subprocess.Popen(["python3", "-c", script, json.dumps(_round(repo, 1))],
-                                 env=env, stdout=subprocess.PIPE, text=True) for _ in range(6)]
-    outcomes = [child.communicate(timeout=60)[0].strip() for child in children]
-    assert outcomes.count("ok") == 1, outcomes
-    assert all(o == "ok" or "must be 2" in o for o in outcomes), outcomes
+    lock = record.record_path(repo, "cm-x.1").with_name(record.LOCK_NAME)
+    with lock.open("a") as held:
+        fcntl.flock(held.fileno(), fcntl.LOCK_EX)
+        child = subprocess.Popen(["python3", "-c", script, json.dumps(_round(repo, 1))],
+                                 env=env, stdout=subprocess.PIPE, text=True)
+        time.sleep(2)
+        still_waiting = child.poll() is None
+        rounds_while_held = len(record.load(repo, "cm-x.1")["rounds"])
+    out = child.communicate(timeout=60)[0].strip()
+    assert still_waiting, "the child wrote while the lock was held"
+    assert rounds_while_held == 0
+    assert out == "ok" and child.returncode == 0
     assert [r["n"] for r in record.load(repo, "cm-x.1")["rounds"]] == [1]
 
 
@@ -545,3 +554,85 @@ def test_a_directory_fsync_the_file_system_refuses_does_not_report_a_written_rou
     record.append_round(repo, "cm-x.1", _round(repo, 1))
     monkeypatch.undo()
     assert [r["n"] for r in record.load(repo, "cm-x.1")["rounds"]] == [1]
+
+
+# --- the record's own filters, fed directly (provenance round 1) ----------------
+
+def test_findings_in_a_lens_entry_keep_only_the_finding_contracts_keys(repo):
+    # The record's own filter, not the parser's: a finding with stray keys
+    # handed straight to append_round is written with the contract's keys only.
+    _start(repo)
+    stray = {"lens": "correctness", "severity": "MINOR", "path": "src.py", "start_line": 1,
+             "end_line": 1, "claim": "c", "evidence": "e", "fix": None, "fingerprint": "1" * 16,
+             "resolves": None, "regression": False, "status": "open",
+             "input_digest": PLANTED, "inputs": {"brief": PLANTED}, "note": "unknown key"}
+    raw = _round(repo, 1)
+    raw["lenses"]["correctness"]["findings"] = [stray]
+    record.append_round(repo, "cm-x.1", raw)
+    (written,) = record.load(repo, "cm-x.1")["rounds"][0]["lenses"]["correctness"]["findings"]
+    assert set(written) == set(stray) - {"input_digest", "inputs", "note"}
+    assert set(written) <= set(record.FINDING_KEYS)
+
+
+@pytest.mark.parametrize("findings_value", ["x", {}, [1], [{"lens": "correctness"}, "y"]])
+def test_a_lens_entrys_findings_must_be_a_list_of_objects(repo, findings_value):
+    _start(repo)
+    raw = _round(repo, 1)
+    raw["lenses"]["correctness"]["findings"] = findings_value
+    with pytest.raises(RecordError, match="must be a list of findings"):
+        record.append_round(repo, "cm-x.1", raw)
+
+
+@pytest.mark.parametrize("field, value", [("tree_sha", "abc"), ("head_sha", None), ("at", ""),
+                                          ("at", 5), ("tree_sha", "G" * 40)])
+def test_set_verdict_checks_its_shas_and_time(repo, field, value):
+    _start(repo)
+    kwargs = {"tree_sha": _tree(repo), "head_sha": _head(repo), "at": "2026-11-17T11:00:00Z",
+              field: value}
+    with pytest.raises(RecordError, match=field):
+        record.set_verdict(repo, "cm-x.1", "CLEAN", **kwargs)
+    assert "verdict" not in record.load(repo, "cm-x.1")
+
+
+def test_the_record_is_fsynced_before_its_rename_and_its_directory_after(repo, monkeypatch):
+    import stat
+    _start(repo)
+    events = []
+    real_fsync, real_replace = os.fsync, os.replace
+
+    def fsync(fd):
+        events.append("dir-fsync" if stat.S_ISDIR(os.fstat(fd).st_mode) else "file-fsync")
+        return real_fsync(fd)
+
+    def replace(src, dst):
+        events.append("replace")
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(record.os, "fsync", fsync)
+    monkeypatch.setattr(record.os, "replace", replace)
+    record.append_round(repo, "cm-x.1", _round(repo, 1))
+    assert events == ["file-fsync", "replace", "dir-fsync"]
+
+
+def test_this_checkouts_own_gitignore_keeps_gate_records_out_of_git():
+    # The repository's own .curamoir/.gitignore, not only the template:
+    # its gate records must never be committable.
+    from pathlib import Path
+
+    from curamoir.scaffold import GITIGNORE
+    root = Path(__file__).resolve().parents[1]
+    ignore = (root / ".curamoir" / ".gitignore").read_text(encoding="utf-8").splitlines()
+    patterns = [line for line in GITIGNORE.splitlines() if line and not line.startswith("#")]
+    assert [p for p in patterns if p not in ignore] == []
+    checked = subprocess.run(["git", "-C", str(root), "check-ignore", "-q",
+                              ".curamoir/state/r5/cm-x.1/record.json"])
+    assert checked.returncode == 0
+
+
+def test_doctors_hint_for_a_missing_gitignore_names_every_pattern_init_writes(tmp_path):
+    from curamoir.doctor import _check_gitignore
+    from curamoir.scaffold import GITIGNORE
+    finding = _check_gitignore(tmp_path)
+    patterns = [line for line in GITIGNORE.splitlines() if line and not line.startswith("#")]
+    assert finding.level == "warning"
+    assert [p for p in patterns if p not in finding.fix] == []

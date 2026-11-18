@@ -206,3 +206,40 @@ def test_a_directory_that_is_not_a_work_tree_is_a_digest_error(tmp_path):
         digest.of_file(plain, "brief.md")
     with pytest.raises(DigestError, match="not a git work tree"):
         digest.verdict_inputs(plain, TREE, files={"brief": "brief.md"})
+
+
+def test_every_input_name_the_contract_lists_is_accepted(repo):
+    contents = {name: name.encode() for name in digest.FIXED_NAMES}
+    built = digest.verdict_inputs(repo, TREE, files={"lens:edge-cases": "lens/correctness.md"},
+                                  contents=contents)
+    assert set(built.inputs) == set(digest.FIXED_NAMES) | {"lens:edge-cases"}
+    assert set(digest.FIXED_NAMES) == {"brief", "plan", "mutations", "gate_config", "runner_version"}
+
+
+def test_a_sha256_repository_records_its_own_blob_ids(tmp_path):
+    # _blob_id hashes in the repository's object format: in a SHA-256
+    # repository the id must be git's own 64-hex blob id.
+    root = tmp_path / "sha256"
+    root.mkdir()
+    made = subprocess.run(["git", "-C", str(root), "init", "-q", "--object-format=sha256"],
+                          capture_output=True, text=True)
+    if made.returncode != 0:
+        pytest.skip(f"this git cannot make a SHA-256 repository: {made.stderr.strip()}")
+    _git(root, "config", "user.email", "test@example.invalid")
+    _git(root, "config", "user.name", "Test")
+    (root / "b.md").write_text("in a sha256 repository\n", encoding="utf-8")
+    _git(root, "add", "-A")
+    _git(root, "commit", "-q", "-m", "base")
+    blob = _git(root, "rev-parse", "HEAD:b.md")
+    assert len(blob) == 64
+    assert digest.of_file(root, "b.md") == "git:" + blob
+
+
+def test_the_tracked_blob_lookup_takes_only_an_exact_blob_entry(repo):
+    # ls-tree given a directory with a trailing slash lists the one file in
+    # it under another name; a tree entry is not a blob. Neither is taken.
+    assert digest._tracked_blob(repo, "lens/") is None
+    assert digest._tracked_blob(repo, "lens") is None
+    assert digest._tracked_blob(repo, "lens/correctness.md") == \
+        _git(repo, "rev-parse", "HEAD:lens/correctness.md")
+    assert digest._tracked_blob(repo, "missing.md") is None
