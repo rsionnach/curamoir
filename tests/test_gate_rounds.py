@@ -254,9 +254,10 @@ def test_a_changed_test_that_is_skipped_blocks_and_an_unchanged_one_does_not(rep
 
     result = round0(repo, base)
 
-    assert claims(result) == [("tests/test_old.py", "CRITICAL",
-                               "tests/test_old.py::test_added_and_skipped was skipped in the "
-                               "full suite's run, so the change to it was not tested")]
+    assert [(f["path"], f["severity"], f["claim"]) for f in result.findings] == [
+        ("tests/test_old.py", "CRITICAL",
+         "tests/test_old.py::test_added_and_skipped was skipped in the "
+         "full suite's run, so the change to it was not tested")]
     (finding,) = result.findings
     assert (finding["start_line"], finding["end_line"]) == (10, 12)
     assert "not on this checkout" in finding["evidence"]

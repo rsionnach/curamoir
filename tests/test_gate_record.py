@@ -692,3 +692,66 @@ def test_a_git_failure_while_reading_the_tree_is_a_refusal_not_an_exception(repo
     refusal = record.check_verdict(repo, "cm-x.1")
     assert isinstance(refusal, Refusal)
     assert "cannot be read" in str(refusal) and "did not finish" in str(refusal)
+
+
+# --- round 0's tool output: a preflight round's `preflight` key (cm-8ap.15) ---
+
+def _step(**change):
+    step = {"name": "suite", "argv": ["pytest", "-q"], "exit": 1, "duration_s": 4.2,
+            "output_tail": "1 failed", "output_bytes": 8}
+    step.update(change)
+    return step
+
+
+def test_a_preflight_round_keeps_its_steps(repo):
+    _start(repo)
+    round_ = _round(repo, 1, kind="preflight")
+    round_["preflight"] = {"steps": [_step(), _step(name="lint", exit=None)]}
+
+    written = record.append_round(repo, "cm-x.1", round_)
+
+    assert written["rounds"][0]["preflight"] == round_["preflight"]
+    assert record.load(repo, "cm-x.1")["rounds"][0]["preflight"]["steps"][1]["exit"] is None
+
+
+def test_only_a_preflight_round_carries_preflight(repo):
+    _start(repo)
+    round_ = _round(repo, 1, kind="review")
+    round_["preflight"] = {"steps": [_step()]}
+
+    with pytest.raises(record.RecordError, match="only a preflight round carries preflight"):
+        record.append_round(repo, "cm-x.1", round_)
+
+
+@pytest.mark.parametrize(("preflight", "reason"), [
+    ([], r'preflight must be \{"steps"'),
+    ({"steps": [], "extra": 1}, r'preflight must be \{"steps"'),
+    ({"steps": [{k: v for k, v in _step().items() if k != "output_bytes"}]}, "exactly"),
+    ({"steps": [_step(path="/tmp/full.log")]}, "exactly"),
+    ({"steps": [_step(name=" ")]}, "name must be non-empty"),
+    ({"steps": [_step(argv=[])]}, "argv is a non-empty list"),
+    ({"steps": [_step(argv="pytest -q")]}, "argv is a non-empty list"),
+    ({"steps": [_step(exit=True)]}, "exit is an integer"),
+    ({"steps": [_step(exit="1")]}, "exit is an integer"),
+    ({"steps": [_step(duration_s=-1)]}, "duration_s"),
+    ({"steps": [_step(duration_s="4")]}, "duration_s"),
+    ({"steps": [_step(output_tail="x" * (record.PREFLIGHT_TAIL_CHARS + 1))]}, "at most"),
+    ({"steps": [_step(output_bytes=-1)]}, "output_bytes"),
+    ({"steps": [_step(output_bytes=8.0)]}, "output_bytes"),
+])
+def test_a_preflight_step_outside_the_contract_is_refused(repo, preflight, reason):
+    _start(repo)
+    round_ = _round(repo, 1, kind="preflight")
+    round_["preflight"] = preflight
+
+    with pytest.raises(record.RecordError, match=reason):
+        record.append_round(repo, "cm-x.1", round_)
+    assert record.load(repo, "cm-x.1")["rounds"] == []
+
+
+def test_a_tail_of_exactly_the_limit_is_kept(repo):
+    _start(repo)
+    round_ = _round(repo, 1, kind="preflight")
+    round_["preflight"] = {"steps": [_step(output_tail="x" * record.PREFLIGHT_TAIL_CHARS)]}
+
+    assert record.append_round(repo, "cm-x.1", round_)["rounds"][0]["preflight"]
