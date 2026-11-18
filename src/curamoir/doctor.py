@@ -535,7 +535,7 @@ def _check_gitignore(base):
             "text) and the lock (a pid) would be committed",
             fix=(
                 "Create .curamoir/.gitignore with: handoff/journal.jsonl, "
-                "state/lock, curamoir.yaml.new, *.tmp"
+                "state/lock, state/r5/, curamoir.yaml.new, *.tmp"
             ),
         )
     missing = [
