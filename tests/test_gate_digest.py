@@ -243,3 +243,10 @@ def test_the_tracked_blob_lookup_takes_only_an_exact_blob_entry(repo):
     assert digest._tracked_blob(repo, "lens/correctness.md") == \
         _git(repo, "rev-parse", "HEAD:lens/correctness.md")
     assert digest._tracked_blob(repo, "missing.md") is None
+
+
+@pytest.mark.parametrize("files, contents", [(["brief"], {}), ({}, [("brief", b"x")]),
+                                             ("brief.md", {}), ({}, None)])
+def test_files_and_contents_must_each_be_a_mapping(repo, files, contents):
+    with pytest.raises(DigestError, match="must each map"):
+        digest.verdict_inputs(repo, TREE, files=files, contents=contents)

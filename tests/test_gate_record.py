@@ -676,3 +676,19 @@ def test_a_directory_that_cannot_be_opened_for_its_fsync_does_not_fail_a_written
     record.append_round(repo, "cm-x.1", _round(repo, 1))
     monkeypatch.undo()
     assert [r["n"] for r in record.load(repo, "cm-x.1")["rounds"]] == [1]
+
+
+def test_a_git_failure_while_reading_the_tree_is_a_refusal_not_an_exception(repo, monkeypatch):
+    # The gate guard calls check_verdict and acts on its answer: git timing
+    # out, or failing in a way git_guard reports, must be a Refusal.
+    from curamoir.git_guard import GitGuardError
+    _start(repo)
+    _clean(repo)
+
+    def failing(*args, **kwargs):
+        raise GitGuardError("git rev-parse did not finish within 30 seconds")
+
+    monkeypatch.setattr(record, "git", failing)
+    refusal = record.check_verdict(repo, "cm-x.1")
+    assert isinstance(refusal, Refusal)
+    assert "cannot be read" in str(refusal) and "did not finish" in str(refusal)
