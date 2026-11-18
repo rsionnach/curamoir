@@ -130,11 +130,12 @@ def test_a_round_outside_the_contract_is_refused(repo, change, reason):
         record.append_round(repo, "cm-x.1", {**_round(repo, 1), **change})
 
 
-def test_a_round_missing_a_required_key_is_refused(repo):
+@pytest.mark.parametrize("key", ["n", "kind", "head", "started", "ended", "lenses"])
+def test_a_round_missing_a_required_key_is_refused(repo, key):
     _start(repo)
     raw = _round(repo, 1)
-    del raw["ended"]
-    with pytest.raises(RecordError, match="missing ended"):
+    del raw[key]
+    with pytest.raises(RecordError, match=f"missing {key}"):
         record.append_round(repo, "cm-x.1", raw)
 
 
@@ -467,11 +468,18 @@ def test_a_writer_waits_for_the_records_lock(repo):
     import fcntl
     import time
     _start(repo)
+    # The child says when it reaches the lock, so a slow start cannot pass
+    # for waiting on it.
     script = (
         "import json, sys\n"
         "from curamoir.gate import record\n"
+        "real = record.fcntl.flock\n"
+        "def announced(fd, op):\n"
+        "    print('at-lock', flush=True)\n"
+        "    return real(fd, op)\n"
+        "record.fcntl.flock = announced\n"
         f"record.append_round({str(repo)!r}, 'cm-x.1', json.loads(sys.argv[1]))\n"
-        "print('ok')\n")
+        "print('ok', flush=True)\n")
     src = str(record.__file__).rsplit("/curamoir/", 1)[0]
     env = {**os.environ, "PYTHONPATH": os.pathsep.join([src, os.environ.get("PYTHONPATH", "")])}
     lock = record.record_path(repo, "cm-x.1").with_name(record.LOCK_NAME)
@@ -479,10 +487,12 @@ def test_a_writer_waits_for_the_records_lock(repo):
         fcntl.flock(held.fileno(), fcntl.LOCK_EX)
         child = subprocess.Popen(["python3", "-c", script, json.dumps(_round(repo, 1))],
                                  env=env, stdout=subprocess.PIPE, text=True)
-        time.sleep(2)
+        reached = child.stdout.readline().strip()
+        time.sleep(1)
         still_waiting = child.poll() is None
         rounds_while_held = len(record.load(repo, "cm-x.1")["rounds"])
     out = child.communicate(timeout=60)[0].strip()
+    assert reached == "at-lock"
     assert still_waiting, "the child wrote while the lock was held"
     assert rounds_while_held == 0
     assert out == "ok" and child.returncode == 0
@@ -636,3 +646,13 @@ def test_doctors_hint_for_a_missing_gitignore_names_every_pattern_init_writes(tm
     patterns = [line for line in GITIGNORE.splitlines() if line and not line.startswith("#")]
     assert finding.level == "warning"
     assert [p for p in patterns if p not in finding.fix] == []
+
+
+def test_a_lock_that_cannot_be_taken_is_a_record_error(repo):
+    _start(repo)
+    lock = record.record_path(repo, "cm-x.1").with_name(record.LOCK_NAME)
+    lock.unlink(missing_ok=True)
+    lock.mkdir()  # a directory cannot be opened for appending
+    with pytest.raises(RecordError, match="lock cannot be taken"):
+        record.append_round(repo, "cm-x.1", _round(repo, 1))
+    assert record.load(repo, "cm-x.1")["rounds"] == []
