@@ -22,6 +22,36 @@ All four are `ast-grep` rules, the default matcher. Each is tested against a
 planted violation in `fixtures/sample-repo` and must find exactly what is
 planted there — no more — by `tests/test_bundled_rules.py`.
 
+### The test guard rules
+
+Five more Python rules check test files only (`test_*.py`, `*_test.py`) for
+the shapes in which a test passes without checking anything. They cite the
+starter principle `tests-actually-run`, and the R5 gate runs them in its
+round 0 over every test file a change adds or touches, with no model.
+
+| file | principle | severity | matcher | finds |
+|---|---|---|---|---|
+| `python/no-module-level-skip.yaml` | `tests-actually-run` | `error` | `rule:` | `pytestmark` with `skip`/`skipif`, `pytest.skip(..., allow_module_level=True)` or `pytest.importorskip(...)` at module level |
+| `python/no-layout-relative-path.yaml` | `tests-actually-run` | `error` | `rule:` | a path from `__file__` that climbs out of its directory: `.parents[N]` with N ≥ 1, `.parent.parent` |
+| `python/no-early-return-in-test.yaml` | `tests-actually-run` | `error` | `rule:` | a `return` in a `test_*` function's own body, not in a helper nested in it |
+| `python/no-bare-except-pass.yaml` | `tests-actually-run` | `error` | `rule:` | `except:`, `except Exception` or `except BaseException` whose body is only `pass` or `...` |
+| `python/parametrize-needs-minimum.yaml` | `tests-actually-run` | `error` | `rule:` | `@pytest.mark.parametrize` over values computed at collection (a call, a comprehension, a name not bound to a literal) in a module that asserts no minimum |
+
+Each gives ast-grep's own rule object under `rule:` instead of a `pattern`,
+because what it looks for is structure a single pattern cannot state (see
+`docs/rules-authoring.md`). Each carries the snippets it is proved on:
+`fires_on`, which it must match, and `silent_on`, which it must not. Both are
+checked before a run searches anything, and a rule that fails either does not
+run (exit 2). `tests/test_guard_rules.py` checks them further, on the two
+shapes from a real escaped test the gate is built to stop.
+
+All five are `error`: in the gate every hit blocks. Installed in your own
+rules they fail the lint too, and they will find things in an existing suite
+(run against cúramóir's own `tests/`, they report a repository-root
+`parents[1]` in 40 places and 23 collection-time parametrise lists). Install
+them when you mean to clear those, or leave them to the gate, which only
+looks at the test files a change touches.
+
 ## Installing them
 
 Copy the files you want into your repository's `.curamoir/rules/`, **flat**:
@@ -94,6 +124,18 @@ mistakes a clean run for more than it is:
   cannot say "without": `raise $E($$$A)` also matches `raise E(...) from err`.
   The rule format would need ast-grep's relational rules (`inside`, `not`) to
   express it; until then it stays a principle, checked in review.
+- The test guard rules read one file at a time, so they cannot see what
+  another module holds. `parametrize-needs-minimum` reports a name imported
+  from elsewhere even when it is a literal there, and accepts any module-level
+  `assert len(...)` as the minimum without checking it is about the same
+  list; it does not see values passed by keyword (`argvalues=`).
+  `no-layout-relative-path` cannot tell a path to the repository root from one
+  past it, as it does not know how deep the file is. `no-bare-except-pass`
+  does not match a clause naming one exception (`except KeyError: pass`), or
+  one that logs and carries on. None of them sees a skip applied at run time
+  (`pytest.skip()` inside a test, a deselecting `-k`), or a test collected
+  from a file not named `test_*.py`: the gate's round 0 catches those by
+  running the suite.
 - `no-file-variant-proliferation` (`handlers_v2.py`) is a filename, which no
   AST pattern can match. It is the documented case for the `regex` matcher with
   `target: path` (see `docs/rules-authoring.md`), and is not bundled here.

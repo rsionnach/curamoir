@@ -1,0 +1,52 @@
+# tests-actually-run, for Python tests. Matches a path built from `__file__`
+# that climbs out of the test's own directory: `.parents[N]` with N of 1 or
+# more, or `.parent.parent` (and longer chains, reported once). Such a path
+# is right only for one layout of the source tree, and when it reaches past
+# the repository (a sibling checkout) the test finds nothing on any other
+# machine, which a skip or an empty parametrise list then turns into a pass.
+#
+# A rule object, not a pattern, for two reasons: the `__file__` may be wrapped
+# (`Path(__file__).resolve()`), and a chain of three `.parent`s holds two
+# chains of two, so only the outermost is reported (`not: inside:` an
+# attribute that continues the chain).
+#
+# It does not know how deep the file is, so it cannot tell a path to the
+# repository root from one past it: `parents[1]` from `tests/test_x.py` is the
+# root, and is matched too. Resolve the root once, in a conftest or a helper
+# module, and import it.
+id: no-layout-relative-path
+principle: tests-actually-run
+severity: error
+matcher: ast-grep
+rule:
+  any:
+    - kind: subscript
+      regex: '__file__'
+      has:
+        field: value
+        kind: attribute
+        regex: '\.parents$'
+      not:
+        regex: '\[\s*0\s*\]$'
+    - kind: attribute
+      regex: '__file__[\s\S]*\.parent\s*\.\s*parent$'
+      not:
+        inside:
+          kind: attribute
+          regex: '\.parent$'
+fires_on: |
+  from pathlib import Path
+
+  ECOSYSTEM_ROOT = Path(__file__).resolve().parents[2]
+  SPEC = Path(__file__).parent.parent.parent / "spec"
+silent_on: |
+  from pathlib import Path
+
+  HERE = Path(__file__).parent
+  SAME = Path(__file__).resolve().parents[0]
+  DATA = HERE / "data"
+message: "{match} resolves a path from where this file sits in the source tree, so the test reads something else, or nothing, in another layout"
+fix: "import the repository root from one place (a conftest or a helper module), or build the input in tmp_path"
+languages: [python]
+files: ["**/test_*.py", "**/*_test.py"]
+exclude: []

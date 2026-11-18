@@ -166,7 +166,7 @@ def lint(repo, *args, capsys):
 def fake_ast_grep(tmp_path, stdout="", stderr="", exit_code=0, log=None, summary=True,
                   sleep=0, skipped=0, version="ast-grep 0.50.0\n",
                   version_stream="stdout", version_sleep=0, version_bytes=None,
-                  stdout_bytes=None):
+                  stdout_bytes=None, rule_counts=(1, 0)):
     """An executable standing in for ast-grep, for the paths the real binary
     cannot be made to take on demand (and for machines without it). With `log`,
     each call appends its argv and working directory there as a JSON line.
@@ -186,7 +186,10 @@ def fake_ast_grep(tmp_path, stdout="", stderr="", exit_code=0, log=None, summary
     JSON would test nothing. `version_stream` is where that answer goes and
     `version_sleep` how long it takes, for a probe that misbehaves.
     `version_bytes` and `stdout_bytes`, when given, are written raw in place
-    of `version` and `stdout`, for output that is not UTF-8."""
+    of `version` and `stdout`, for output that is not UTF-8; `FIRST_FILE` in
+    `stdout` is replaced by the first file the call names. A `scan` (a rule
+    object, cm-8ap.15) also gets 0.50.0's third line, the rule counts, as
+    `rule_counts` (effective, skipped), or none when it is None."""
     script = tmp_path / "bin" / "ast-grep"
     script.parent.mkdir(parents=True, exist_ok=True)
     record = (
@@ -202,6 +205,9 @@ def fake_ast_grep(tmp_path, stdout="", stderr="", exit_code=0, log=None, summary
         "sys.stderr.write(f'sg: summary|project: {project}\\n')\n"
         "sys.stderr.write(f'sg: summary|file: scannedFileCount={len(files)},"
         f"skippedFileCount={skipped}\\n')\n"
+        + (f"if sys.argv[1] == 'scan':\n"
+           f"    sys.stderr.write('sg: summary|rule: effectiveRuleCount={rule_counts[0]},"
+           f"skippedRuleCount={rule_counts[1]}\\n')\n" if rule_counts is not None else "")
         if summary else ""
     )
     script.write_text(
@@ -216,7 +222,9 @@ def fake_ast_grep(tmp_path, stdout="", stderr="", exit_code=0, log=None, summary
         "    sys.exit(0)\n"
         f"time.sleep({sleep})\n"
         + (f"sys.stdout.buffer.write({stdout_bytes!r})\n"
-           if stdout_bytes is not None else f"sys.stdout.write({stdout!r})\n") +
+           if stdout_bytes is not None else
+           f"sys.stdout.write({stdout!r}.replace('FIRST_FILE', "
+           "(sys.argv[sys.argv.index('--') + 1:] or [''])[0]))\n") +
         f"sys.stderr.write({stderr!r})\n"
         f"{inspect}"
         f"sys.exit({exit_code})\n",
@@ -2428,3 +2436,208 @@ def test_the_ci_snippet_pins_curamoir_and_ast_grep():
 
     assert "'ast-grep-cli==0.50.*'" in snippet
     assert "--branch v" in snippet
+
+
+# --- a rule object in place of a pattern (cm-8ap.15) -------------------------
+#
+# A `rule:` rule runs through `ast-grep scan --inline-rules` with `run`'s
+# hardening, and every rule's `fires_on` / `silent_on` snippets are checked
+# before it searches the repository: a rule object whose sub-rules are wrong
+# matches nothing without error, which would otherwise read as clean.
+
+RULE_OBJECT_PRINT = textwrap.dedent("""\
+    id: print-in-a-function
+    principle: structured-logging
+    severity: error
+    matcher: ast-grep
+    rule:
+      kind: call
+      has: {field: function, regex: '^print$'}
+      inside: {kind: function_definition, stopBy: end}
+    fires_on: |
+      def f():
+          print("x")
+    silent_on: |
+      print("at module level")
+    languages: [python]
+    message: "{match} prints inside a function"
+    fix: "logger.info(...)"
+""")
+
+
+def _scan_repo(tmp_path, rule=RULE_OBJECT_PRINT, files=None):
+    repo = sample_repo(tmp_path, rule)
+    for name, text in (files or {"src/app.py": "print('top')\n\ndef f():\n    print('in f')\n"}
+                       ).items():
+        (repo / name).parent.mkdir(parents=True, exist_ok=True)
+        (repo / name).write_text(text, encoding="utf-8")
+    return repo
+
+
+@needs_ast_grep
+def test_a_rule_object_finds_what_its_structure_says_and_nothing_else(tmp_path):
+    repo = _scan_repo(tmp_path)
+
+    result = run_lint(repo, ast_grep=shutil.which("ast-grep"))
+
+    assert result.skipped == ()
+    found = sorted((v.path, v.line, v.col, v.end_line, v.end_col, v.match)
+                   for v in result.violations)
+    # The fixture's own prints are inside functions too; the module-level one
+    # in app.py is not reported.
+    assert ("src/app.py", 4, 5, 4, 18, "print('in f')") in found
+    assert not [f for f in found if f[0] == "src/app.py" and f[1] == 1]
+    planted = sorted((v["path"], v["line"]) for v in PLANTED["violations"]
+                     if v["principle_id"] == "structured-logging")
+    assert sorted((f[0], f[1]) for f in found if f[0] != "src/app.py") == planted
+
+
+@needs_ast_grep
+def test_a_rule_object_with_constraints_applies_them(tmp_path):
+    rule = RULE_OBJECT_PRINT.replace(
+        "  has: {field: function, regex: '^print$'}\n",
+        "  pattern: print($ARG)\n").replace(
+        "fires_on: |\n  def f():\n      print(\"x\")\n",
+        "constraints:\n  ARG: {regex: '^.in'}\n"
+        "fires_on: |\n  def f():\n      print('in')\n")
+    assert "constraints:" in rule and "pattern: print($ARG)" in rule
+    repo = _scan_repo(tmp_path, rule, {"src/app.py": "def f():\n    print('in f')\n"
+                                                     "    print('out')\n"})
+
+    result = run_lint(repo, ast_grep=shutil.which("ast-grep"))
+
+    assert result.skipped == ()
+    assert [(v.path, v.line) for v in result.violations if v.path == "src/app.py"] == \
+        [("src/app.py", 2)]
+
+
+@needs_ast_grep
+def test_a_rule_that_misses_its_fires_on_snippet_does_not_run(tmp_path, capsys):
+    # `stopBy: end` removed: `inside` then looks at the direct parent only,
+    # which for a call is an expression statement, never a function. The
+    # rule loads, and would match nothing anywhere, silently.
+    broken = RULE_OBJECT_PRINT.replace(", stopBy: end}", "}")
+    assert "stopBy" not in broken
+    repo = _scan_repo(tmp_path, broken)
+
+    result = run_lint(repo, ast_grep=shutil.which("ast-grep"))
+    code, _, err = lint(repo, "--format", "json", capsys=capsys)
+    assert "print-in-a-function" in err
+
+    assert [s.rule_id for s in result.skipped] == ["print-in-a-function"]
+    assert "does not match its own `fires_on` snippet" in result.skipped[0].reason
+    assert result.violations == ()
+    assert code == EXIT_ERROR
+
+
+@needs_ast_grep
+def test_a_rule_that_matches_its_silent_on_snippet_does_not_run(tmp_path):
+    too_broad = RULE_OBJECT_PRINT.replace(
+        "  inside: {kind: function_definition, stopBy: end}\n", "")
+    assert "inside: {" not in too_broad
+    repo = _scan_repo(tmp_path, too_broad)
+
+    result = run_lint(repo, ast_grep=shutil.which("ast-grep"))
+
+    assert [s.rule_id for s in result.skipped] == ["print-in-a-function"]
+    assert "matches its own `silent_on` snippet" in result.skipped[0].reason
+    assert "line 1" in result.skipped[0].reason
+
+
+@needs_ast_grep
+def test_a_pattern_rules_snippets_are_checked_too(tmp_path):
+    rule = AST_GREP_PRINT + "silent_on: \"logger.info('x')\\nprint('oops')\\n\"\n"
+    repo = sample_repo(tmp_path, rule)
+
+    result = run_lint(repo, ast_grep=shutil.which("ast-grep"))
+
+    assert [s.rule_id for s in result.skipped] == ["no-bare-print-ast"]
+    assert "line 2" in result.skipped[0].reason
+
+
+def test_a_regex_rules_snippets_are_checked_without_ast_grep(tmp_path):
+    misses = NO_BARE_PRINT + "fires_on: \"logger.info('x')\\n\"\n"
+    holds = NO_BARE_PRINT + "fires_on: \"print('x')\\n\"\nsilent_on: \"logger.print('x')\\n\"\n"
+
+    missed = run_lint(sample_repo(tmp_path / "a", misses), ast_grep=None)
+    held = run_lint(sample_repo(tmp_path / "b", holds), ast_grep=None)
+
+    assert [s.rule_id for s in missed.skipped] == ["no-bare-print"]
+    assert held.skipped == () and held.violations
+
+
+def test_a_rule_object_runs_scan_with_the_hardening_run_has(tmp_path):
+    """The same defences as `run` (test_ast_grep_never_runs_where_it_could_
+    find_the_repos_sgconfig): its own `--config`, a cwd outside the repo,
+    files named absolutely. And the inline rule is the loader's fields only,
+    severity `info` so a match never sets scan's exit 1."""
+    # No silent_on: the fake answers every call alike, so it would match.
+    rule = RULE_OBJECT_PRINT.split("silent_on:")[0] + RULE_OBJECT_PRINT.split(
+        "print(\"at module level\")\n")[1]
+    assert "silent_on" not in rule
+    repo = _scan_repo(tmp_path, rule)
+    log = tmp_path / "ast-grep-calls.jsonl"
+
+    run_lint(repo, ast_grep=fake_ast_grep(tmp_path, stdout='[{"text":"print(\\"x\\")",'
+             '"range":{"start":{"line":1,"column":4},"end":{"line":1,"column":14}},'
+             '"file":"FIRST_FILE"}]', log=log))
+
+    calls = [json.loads(line) for line in log.read_text().splitlines()]
+    scans = [call for call in calls if call["argv"][0] == "scan"]
+    assert scans and not [call for call in calls if call["argv"][0] == "run"]
+    root = repo.resolve()
+    for call in scans:
+        cwd = Path(call["cwd"]).resolve()
+        assert root != cwd and root not in cwd.parents
+        config = [a.split("=", 1)[1] for a in call["argv"] if a.startswith("--config=")]
+        assert len(config) == 1 and root not in Path(config[0]).resolve().parents
+        inline = [json.loads(a.split("=", 1)[1]) for a in call["argv"]
+                  if a.startswith("--inline-rules=")]
+        assert inline == [{"id": "curamoir-lint", "language": "python", "severity": "info",
+                           "rule": json.loads(parse_rule_object())}]
+        assert not [a for a in call["argv"] if a.startswith(("--pattern", "--lang"))]
+
+
+def parse_rule_object():
+    from curamoir.rules import parse_rule
+
+    return parse_rule(RULE_OBJECT_PRINT, source="r.yaml",
+                      known_principles={"structured-logging"}).rule_object
+
+
+@pytest.mark.parametrize("counts", [None, (0, 0), (2, 0), (1, 1)])
+def test_a_scan_that_did_not_apply_exactly_this_rule_is_a_runner_error(tmp_path, counts):
+    """`scan` would also apply any rules a config it found pointed at; a count
+    other than one effective rule means its matches are not this rule's."""
+    repo = _scan_repo(tmp_path)
+
+    with pytest.raises(LintError, match="did not report applying exactly this one rule"):
+        run_lint(repo, ast_grep=fake_ast_grep(tmp_path, stdout="[]", rule_counts=counts))
+
+
+@needs_ast_grep
+@pytest.mark.parametrize("config", sorted({**HOSTILE_SGCONFIGS,
+                                           "ruleDirs": "ruleDirs: [rules]\n"}))
+def test_the_real_ast_grep_scan_ignores_an_sgconfig_in_the_repo(tmp_path, config):
+    repo = _scan_repo(tmp_path)
+    for directory in (repo, repo / "src"):
+        (directory / "sgconfig.yml").write_text(
+            {**HOSTILE_SGCONFIGS, "ruleDirs": "ruleDirs: [rules]\n"}[config], encoding="utf-8")
+    (repo / "rules").mkdir()
+    (repo / "rules" / "extra.yml").write_text(
+        "id: extra\nlanguage: python\nseverity: info\nrule: {kind: identifier}\n",
+        encoding="utf-8")
+
+    result = run_lint(repo, ast_grep=shutil.which("ast-grep"))
+
+    assert result.skipped == ()
+    assert ("src/app.py", 4) in [(v.path, v.line) for v in result.violations]
+    assert all(v.match.startswith("print(") for v in result.violations)
+
+
+@needs_ast_grep
+def test_the_real_ast_grep_rejecting_a_rule_object_fails_the_run(tmp_path):
+    repo = _scan_repo(tmp_path, RULE_OBJECT_PRINT.replace("kind: call", "kind: cal"))
+
+    with pytest.raises(LintError, match="ast-grep failed"):
+        run_lint(repo, ast_grep=shutil.which("ast-grep"))

@@ -54,6 +54,25 @@ def rule_files(language):
     return sorted(LANGUAGE_DIRECTORIES[language].glob("*.yaml"))
 
 
+#: The principle the test guard rules cite (cm-8ap.15). They check test
+#: files only and are proved on their own snippets and in
+#: tests/test_guard_rules.py, not on the sample repo's plants: the sample
+#: repo is E3's fixture, whose planted set is fixed, and its one test file
+#: has none of their shapes.
+GUARD_PRINCIPLE = "tests-actually-run"
+
+
+def is_guard_rule(path):
+    import yaml
+
+    return yaml.safe_load(path.read_text(encoding="utf-8"))["principle"] == GUARD_PRINCIPLE
+
+
+def e2r6_rule_files(language):
+    """The E2-R6 examples: every bundled rule but the test guard rules."""
+    return [p for p in rule_files(language) if not is_guard_rule(p)]
+
+
 def parse_bundled(path):
     """A bundled rule file through the real parser, against the starter
     principles it is written for."""
@@ -65,14 +84,15 @@ def starter_ids():
     return {p.id for p in parse_principles(STARTER.read_text(encoding="utf-8")).principles}
 
 
-def install(repo, *languages):
+def install(repo, *languages, guards=True):
     """Copy the bundled rules into `repo/.curamoir/rules/`, flat, as the
-    README tells a user to, and seed the starter principles as init does."""
+    README tells a user to, and seed the starter principles as init does.
+    `guards=False` leaves out the test guard rules (GUARD_PRINCIPLE)."""
     rules = repo / ".curamoir" / "rules"
     rules.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(STARTER, repo / ".curamoir" / "principles.md")
     for language in languages:
-        for path in rule_files(language):
+        for path in rule_files(language) if guards else e2r6_rule_files(language):
             shutil.copyfile(path, rules / path.name)
     return repo
 
@@ -82,7 +102,7 @@ def fixture_copy(tmp_path, *languages):
     bundled languages unless named."""
     repo = tmp_path / "sample"
     shutil.copytree(FIXTURE, repo, ignore=shutil.ignore_patterns(".pytest_cache", "__pycache__"))
-    return install(repo, *(languages or sorted(LANGUAGE_DIRECTORIES)))
+    return install(repo, *(languages or sorted(LANGUAGE_DIRECTORIES)), guards=False)
 
 
 def expected_findings():
@@ -141,10 +161,12 @@ def test_both_languages_use_the_same_fields():
     format."""
     import yaml
 
+    # The E2-R6 examples, all `pattern` rules: the test guard rules give a
+    # `rule:` object and its snippets, which no TypeScript rule needs yet.
     def keys(language):
         return {
             frozenset(yaml.safe_load(p.read_text(encoding="utf-8")))
-            for p in rule_files(language)
+            for p in e2r6_rule_files(language)
         }
 
     assert keys("python") == keys("typescript")
@@ -171,7 +193,7 @@ def test_python_and_typescript_rules_install_together(tmp_path):
 def test_the_manifest_names_only_bundled_rules():
     """So an expected finding cannot cite a rule that does not exist and pass
     by never being looked for."""
-    bundled = {p.stem for language in LANGUAGE_DIRECTORIES for p in rule_files(language)}
+    bundled = {p.stem for language in LANGUAGE_DIRECTORIES for p in e2r6_rule_files(language)}
 
     assert {f["rule_id"] for f in PLANTED["bundled_rule_findings"]} == bundled
     assert {f["rule_id"] for f in PLANTED["bundled_rule_non_findings"]} <= bundled
@@ -195,6 +217,12 @@ DOCUMENTED_SEVERITIES = {
     "no-console-log": "error",
     "no-raise-runtime-error": "warning",
     "no-assert-mock-called": "warning",
+    # The test guard rules: every hit blocks the R5 gate's round 0.
+    "no-module-level-skip": "error",
+    "no-layout-relative-path": "error",
+    "no-early-return-in-test": "error",
+    "no-bare-except-pass": "error",
+    "parametrize-needs-minimum": "error",
 }
 
 
@@ -270,7 +298,7 @@ def test_each_language_alone_finds_its_own_plants(tmp_path, language):
     """Installed alone, a language's rules find their plants and nothing of the
     other's — the scoping is part of what makes the second language a proof."""
     repo = fixture_copy(tmp_path, language)
-    own = {p.stem for p in rule_files(language)}
+    own = {p.stem for p in e2r6_rule_files(language)}
 
     result = run_lint(repo, ast_grep=shutil.which("ast-grep"))
 
@@ -333,7 +361,11 @@ def test_what_the_bundled_rules_find_in_curamoirs_own_code(tmp_path):
     ignore = shutil.ignore_patterns("__pycache__", ".pytest_cache")
     for directory in ("src", "tests"):
         shutil.copytree(ROOT / directory, repo / directory, ignore=ignore)
-    install(repo, "python", "typescript")
+    # The E2-R6 examples only. The test guard rules do find things in tests/
+    # (examples/README.md gives the counts), and the gate runs them over the
+    # test files a change touches; pinned here, every new test using the
+    # repository-root idiom would fail this test rather than the gate.
+    install(repo, "python", "typescript", guards=False)
     # The zero for tests/ below means something only while tests/ has
     # RuntimeErrors for the exclusions to keep out.
     assert any("raise RuntimeError(" in p.read_text(encoding="utf-8")

@@ -20,9 +20,10 @@ note on stderr, because a fresh repo is not a failing one:
     1  every rule ran and at least one violation met the threshold
     2  the run cannot be trusted: a rule or the config did not load, ast-grep
        is needed and absent, a rule could not search every file in its scope
-       (no grammar, skipped by ast-grep, unreadable), part of the repo could
-       not be listed, ast-grep failed or hung, the run outlasted --timeout,
-       or the report could not be written
+       (no grammar, skipped by ast-grep, unreadable), a rule failed its own
+       `fires_on` or `silent_on` snippet, part of the repo could not be
+       listed, ast-grep failed or hung, the run outlasted --timeout, or the
+       report could not be written
 
 2 outranks 1, because "incomplete" is the more fundamental fact: a run that
 skipped half its rules and found one violation has not shown the other half
@@ -90,6 +91,7 @@ from curamoir.rules import (
     ALWAYS_EXCLUDED,
     AST_GREP_INSTALL,
     AST_GREP_LANGUAGES,
+    LANGUAGE_PATTERNS,
     ROOT_EXCLUDED,
     SEVERITIES,
     RuleError,
@@ -189,6 +191,12 @@ INSPECT_PREFIX = "sg: "
 #: including the skipped ones.
 AST_GREP_SUMMARY = re.compile(
     r"sg: summary\|file: scannedFileCount=(\d+),skippedFileCount=(\d+)"
+)
+
+#: The `--inspect=summary` line of a `scan` that says how many rules it
+#: applied, verbatim from ast-grep 0.50.0.
+AST_GREP_RULE_SUMMARY = re.compile(
+    r"sg: summary\|rule: effectiveRuleCount=(\d+),skippedRuleCount=(\d+)"
 )
 
 #: What `ast-grep --version` prints, verbatim from 0.50.0: `ast-grep 0.50.0`.
@@ -327,6 +335,10 @@ def run_lint(repo, ast_grep=None, ast_grep_timeout=DEFAULT_TIMEOUT):
             # rules neither uses ast-grep nor should depend on it answering.
             ast_grep_answer = _ast_grep_version(
                 ast_grep, _version_probe_timeout(ast_grep_timeout))
+        unproven = _snippet_problem(rule, ast_grep, ast_grep_timeout)
+        if unproven is not None:
+            skipped.append(Skipped(rule.id, unproven))
+            continue
         complete = True
         try:
             if rule.matcher == "ast-grep":
@@ -515,6 +527,44 @@ def _why_rule_cannot_run(rule, scoped, ast_grep):
         f"({shown}{more}), so it did not run. Narrow `files:` or add "
         "them to `exclude:`; for prose or config, write a `regex` rule.",
     )
+
+
+def _snippet_problem(rule, ast_grep, timeout):
+    """Why `rule` fails its own snippets, or None (rules.FIRES_ON,
+    rules.SILENT_ON): a `fires_on` snippet it does not match, or a
+    `silent_on` snippet it does. Checked before the rule searches the
+    repository, because a rule object whose sub-rules are wrong matches
+    nothing without any error, and a run of it would report its scope clean.
+
+    Each snippet is written to a fresh temporary directory, named for its
+    language's first suffix, and searched exactly as a repository file is,
+    so the snippet proves the same command the run then uses."""
+    for field, snippets, wanted in (("fires_on", rule.fires_on, True),
+                                    ("silent_on", rule.silent_on, False)):
+        for language, snippet in snippets:
+            suffix = (LANGUAGE_PATTERNS[language][0].rsplit("*", 1)[1] if language
+                      else ".txt")
+            name = "snippet" + suffix
+            with tempfile.TemporaryDirectory(prefix="curamoir-lint-snippet-") as directory:
+                (Path(directory) / name).write_text(snippet, encoding="utf-8")
+                try:
+                    if rule.matcher == "ast-grep":
+                        matches = _ast_grep_matches(Path(directory), rule, [name], ast_grep,
+                                                    timeout)
+                    else:
+                        matches = _regex_matches(Path(directory), rule, [name])
+                except RuleIncomplete as incomplete:
+                    return f"its `{field}` snippet could not be searched: {incomplete}"
+            where = f" for {language}" if language else ""
+            if wanted and not matches:
+                return (f"it does not match its own `fires_on` snippet{where}, so it would "
+                        "report its scope clean whatever it holds; fix the rule (a rule "
+                        "object's sub-rules are the usual cause) or the snippet")
+            if not wanted and matches:
+                return (f"it matches its own `silent_on` snippet{where} (at line "
+                        f"{matches[0][1]}: {one_line(matches[0][5])!r}), so it reports "
+                        "code it says it does not; narrow the rule or fix the snippet")
+    return None
 
 
 def _at_or_above(severity, fail_on):
@@ -1070,10 +1120,23 @@ def _ast_grep_batch(repo, rule, binary, language, batch, scratch, timeout):
       are converted back to repo-relative POSIX paths below.
     """
     root = repo.resolve()
+    config = f"--config={Path(scratch) / SCRATCH_SGCONFIG}"
+    if rule.rule_object:
+        # `scan` with the rule given inline: the same config, cwd and file
+        # list as `run`. `severity: info` so a match never sets exit 1 (scan
+        # exits 1 for error-level matches); the language is the batch's, as
+        # `--lang` is for `run`. Built as JSON, which is YAML, from fields
+        # the loader has validated, so nothing in the rule file can add a
+        # key beside `rule` and `constraints` (no `utils`, `files`, `fix`).
+        inline = {"id": "curamoir-lint", "language": language, "severity": "info",
+                  "rule": json.loads(rule.rule_object)}
+        if rule.constraints:
+            inline["constraints"] = json.loads(rule.constraints)
+        matcher = ["scan", config, f"--inline-rules={json.dumps(inline)}"]
+    else:
+        matcher = ["run", config, f"--pattern={rule.pattern}", f"--lang={language}"]
     command = [
-        binary, "run", f"--config={Path(scratch) / SCRATCH_SGCONFIG}",
-        f"--pattern={rule.pattern}",
-        f"--lang={language}", "--json=compact", "--inspect=summary", "--",
+        binary, *matcher, "--json=compact", "--inspect=summary", "--",
         *(str(root / path) for path in batch),
     ]
     try:
@@ -1100,6 +1163,8 @@ def _ast_grep_batch(repo, rule, binary, language, batch, scratch, timeout):
             "it parses: https://ast-grep.github.io/playground.html"
         )
     unsearched = _unsearched(root, rule, batch, inspect)
+    if rule.rule_object:
+        _require_one_rule(rule, inspect)
     matches = []
     for record in _ast_grep_records(rule, stdout):
         path = _repo_relative(root, rule, record["file"])
@@ -1177,6 +1242,22 @@ def _unsearched(root, rule, batch, inspect):
         named.append("ast-grep does not say which" + (" others" if named else ""))
     return (f"ast-grep skipped {unsearched} of the {len(batch)} file(s) it was given "
             f"({'; '.join(named)})")
+
+
+def _require_one_rule(rule, inspect):
+    """LintError unless a `scan`'s summary says it applied exactly the one
+    inline rule: any other count means rules came from somewhere else (a
+    config the hardening missed) or the inline rule was dropped, and either
+    way its results are not this rule's."""
+    counts = [found.groups() for found in map(AST_GREP_RULE_SUMMARY.fullmatch, inspect)
+              if found]
+    if counts != [("1", "0")]:
+        raise LintError(
+            f"rule {rule.id!r}: ast-grep's scan did not report applying exactly this one "
+            f"rule (`--inspect=summary` rule counts: {counts or 'none'}), so its matches "
+            "cannot be taken as this rule's. curamoir-lint is verified against ast-grep "
+            "0.50.0."
+        )
 
 
 def _likely_skipped(root, batch, unsearched):

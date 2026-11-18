@@ -1,0 +1,78 @@
+# tests-actually-run, for Python tests. Matches `@pytest.mark.parametrize`
+# whose values (the second argument) are computed when the module is
+# collected: a call, a comprehension, or a name the module does not bind to a
+# literal list or tuple. An empty list does not fail: pytest reports the test
+# as skipped ("got empty parameter set"), so a directory of cases that is
+# empty on this checkout quietly becomes no test at all.
+#
+# A rule object, not a pattern: the values are the second argument whatever
+# else is passed (`ids=`, `indirect=`), and both "the module binds this name
+# to a literal" and "the module asserts a minimum" are checks on the module
+# around the decorator. `$VALUES` is bound by the first sub-rule and read by
+# the second, so their order in `all:` matters.
+#
+# A module-level `assert len(...)` or `assert NAME` (a non-empty sequence is
+# truthy) counts as the minimum. It is not checked to be about the same list;
+# keep it next to the list it guards. Not matched: values passed by keyword
+# (`argvalues=`). Matched although harmless: a name imported from another
+# module, whose literal this rule cannot see; assert its length here.
+id: parametrize-needs-minimum
+principle: tests-actually-run
+severity: error
+matcher: ast-grep
+rule:
+  kind: decorator
+  all:
+    - has:
+        kind: call
+        all:
+          - has:
+              field: function
+              regex: '(^|\.)mark\.parametrize$'
+          - has:
+              field: arguments
+              has:
+                nthChild: 2
+                pattern: $VALUES
+    - not:
+        inside:
+          kind: module
+          stopBy: end
+          any:
+            - has:
+                kind: expression_statement
+                has:
+                  kind: assignment
+                  all:
+                    - has: {field: left, pattern: $VALUES}
+                    - has: {field: right, any: [{kind: list}, {kind: tuple}]}
+            - has:
+                kind: assert_statement
+                regex: '^assert\s+(len\(|\w+\s*(#[^\n]*)?$)'
+constraints:
+  VALUES:
+    not:
+      any: [{kind: list}, {kind: tuple}, {kind: keyword_argument}, {kind: string}]
+fires_on: |
+  import pytest
+
+  @pytest.mark.parametrize("spec_path", _archetype_paths(), ids=lambda p: p.name)
+  def test_spec(spec_path):
+      assert load(spec_path)
+silent_on: |
+  import pytest
+
+  MUST_DENY = ["rm -rf /", "git push --force"]
+
+  @pytest.mark.parametrize("command", MUST_DENY)
+  def test_denied(command):
+      assert refused(command)
+
+  @pytest.mark.parametrize("n", [1, 2, 3], ids=str)
+  def test_n(n):
+      assert n
+message: "{match} parametrises over a list computed at collection with no minimum, so an empty list passes as a skip"
+fix: "assert the count at module level, next to the list (CASES = ...; assert len(CASES) >= 3), or list the cases literally"
+languages: [python]
+files: ["**/test_*.py", "**/*_test.py"]
+exclude: []
