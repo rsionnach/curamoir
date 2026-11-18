@@ -525,3 +525,23 @@ def test_a_record_holding_nan_or_infinity_is_refused_as_not_json(repo):
         path.write_text('{"rounds": [], "x": ' + constant + "}", encoding="utf-8")
         with pytest.raises(RecordError, match="not JSON"):
             record.load(repo, "cm-x.1")
+
+
+def test_a_directory_fsync_the_file_system_refuses_does_not_report_a_written_round_as_failed(
+        repo, monkeypatch):
+    # The rename has already replaced the record when the directory is
+    # fsynced; a file system that refuses that fsync (EINVAL) must not make
+    # the caller retry a round that is on disk.
+    _start(repo)
+    real = os.fsync
+
+    def refuse_directories(fd):
+        import stat
+        if stat.S_ISDIR(os.fstat(fd).st_mode):
+            raise OSError(22, "Invalid argument")
+        return real(fd)
+
+    monkeypatch.setattr(record.os, "fsync", refuse_directories)
+    record.append_round(repo, "cm-x.1", _round(repo, 1))
+    monkeypatch.undo()
+    assert [r["n"] for r in record.load(repo, "cm-x.1")["rounds"]] == [1]

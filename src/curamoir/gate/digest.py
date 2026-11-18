@@ -34,7 +34,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from types import MappingProxyType
 
-from curamoir.git_guard import git
+from curamoir.git_guard import GitGuardError, git
 
 #: The input names §11 lists, ``lens:<name>`` aside.
 FIXED_NAMES = ("brief", "plan", "mutations", "gate_config", "runner_version")
@@ -86,7 +86,10 @@ def of_file(repo, path) -> str:
 def _require_top_level(repo: Path) -> None:
     """``repo`` must be its work tree's top: the tracked-blob lookup reads
     HEAD's tree from the root, so a sub-directory would never match."""
-    top = git(repo, "rev-parse", "--show-toplevel").decode("utf-8", "surrogateescape").strip()
+    try:
+        top = git(repo, "rev-parse", "--show-toplevel").decode("utf-8", "surrogateescape").strip()
+    except GitGuardError as error:
+        raise DigestError(f"{repo} is not a git work tree: {error}") from error
     if os.path.realpath(top) != os.path.realpath(repo):
         raise DigestError(f"{repo} is not the top of its git work tree ({top})")
 

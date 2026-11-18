@@ -289,8 +289,8 @@ def _locked(path: Path):
 def _write(path: Path, record: dict) -> None:
     """The whole record, atomically: a temporary file beside ``path`` with a
     name no other writer, thread or process, can share, fsynced, renamed over
-    it, then the directory fsynced. Any failure is a RecordError, and the
-    record on disk is left as it was."""
+    it, then the directory fsynced (best effort). A failure before the
+    rename is a RecordError and leaves the record on disk as it was."""
     try:
         text = json.dumps(record, sort_keys=True, indent=2, ensure_ascii=False,
                           allow_nan=False) + "\n"
@@ -307,13 +307,26 @@ def _write(path: Path, record: dict) -> None:
             os.fsync(handle.fileno())
         os.replace(scratch, path)
         scratch = None
-        directory = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
-        try:
-            os.fsync(directory)
-        finally:
-            os.close(directory)
     except OSError as error:
         raise RecordError(f"the gate record cannot be written at {path}: {error}") from error
     finally:
         if scratch is not None:
             scratch.unlink(missing_ok=True)
+    _fsync_directory(path.parent)
+
+
+def _fsync_directory(directory: Path) -> None:
+    """Make the rename durable where the file system allows it. Best effort:
+    the record has already been replaced, so a file system that refuses to
+    fsync a directory (EINVAL) or fails it must not report the write as
+    failed. The previous complete record or this one survives either way."""
+    try:
+        handle = os.open(directory, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    except OSError:
+        return
+    try:
+        os.fsync(handle)
+    except OSError:
+        pass
+    finally:
+        os.close(handle)

@@ -196,3 +196,13 @@ def test_a_repository_argument_below_the_work_tree_top_is_refused(repo):
     # sub-directory would make every tracked file read as untracked.
     with pytest.raises(DigestError, match="not the top of its git work tree"):
         digest.of_file(repo / "lens", "correctness.md")
+
+
+def test_a_directory_that_is_not_a_work_tree_is_a_digest_error(tmp_path):
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    (plain / "brief.md").write_text("x\n", encoding="utf-8")
+    with pytest.raises(DigestError, match="not a git work tree"):
+        digest.of_file(plain, "brief.md")
+    with pytest.raises(DigestError, match="not a git work tree"):
+        digest.verdict_inputs(plain, TREE, files={"brief": "brief.md"})
