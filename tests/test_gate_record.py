@@ -656,3 +656,23 @@ def test_a_lock_that_cannot_be_taken_is_a_record_error(repo):
     with pytest.raises(RecordError, match="lock cannot be taken"):
         record.append_round(repo, "cm-x.1", _round(repo, 1))
     assert record.load(repo, "cm-x.1")["rounds"] == []
+
+
+def test_a_directory_that_cannot_be_opened_for_its_fsync_does_not_fail_a_written_round(
+        repo, monkeypatch):
+    # The other best-effort branch: opening the directory for its fsync
+    # fails (a bead directory with write and search but no read permission
+    # does this). The round is already on disk, so append_round returns.
+    _start(repo)
+    real = os.open
+    directory = str(record.record_path(repo, "cm-x.1").parent)
+
+    def refuse_directory(path, flags, *args, **kwargs):
+        if str(path) == directory:
+            raise PermissionError(13, "Permission denied")
+        return real(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(record.os, "open", refuse_directory)
+    record.append_round(repo, "cm-x.1", _round(repo, 1))
+    monkeypatch.undo()
+    assert [r["n"] for r in record.load(repo, "cm-x.1")["rounds"]] == [1]
