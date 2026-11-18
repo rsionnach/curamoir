@@ -142,3 +142,37 @@ zero is reported as `n/a (0)`, not as 0.
 | Rework | For each reversed decision, the number of decisions whose `depends_on` reaches it, directly or through other decisions; the mean over reversed decisions |
 | Prompts avoided | Class A and B decisions per bead |
 | Findings traced to a decision | From each bead's digest |
+
+## Thresholds (phase 1)
+
+Confirmed by the user on 2026-11-17 for the trial that starts on the first
+trial bead. Logging stops, as the skill says, when 30 decisions are logged or
+three trial beads have closed. The trial ends once the user has reviewed every
+decision it logged, which is at the close of the bead in which logging
+stopped, so no review is still to come. Each threshold is applied to
+the counts above at that point, except misclassification, which applies the
+moment it is found.
+
+"Reviewed" means the decision has an outcome in effect. A decision counts
+under the class of that outcome's `reclassified_to` when it has one, and
+under the class it was logged with otherwise, for the minimums and the rates
+alike.
+
+| Measure | Threshold | Applies when |
+|---|---|---|
+| Reversal rate, class A | Below 10%: stop at phase 1. 10% or more: build phase 2 | 15 or more class A decisions reviewed |
+| Reversal rate, class B | 25% or more: class B becomes stop-and-ask | 8 or more class B decisions reviewed |
+| Misclassification | Any class C decision logged as A or B: stop using the skill and say so | Always, at once |
+| Rework | A mean above 2 dependents per reversed decision: review moves to checkpoints inside the bead, not at its close | At trial end |
+| High-confidence failure rate | Reported only | — |
+| Prompts avoided | Reported only | — |
+
+Every other measure (misclassification between A and B, findings traced to a
+decision) is reported only.
+
+If a class is under its minimum when the trial ends, the trial is extended by
+one bead, once: that bead is worked under the decision log, and the trial then
+ends in the same way at its close. Every
+threshold is then applied at the new end, for both classes. A class still
+under its minimum after that is reported with its counts and no threshold
+applied.
