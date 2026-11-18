@@ -40,7 +40,8 @@ packages = ["src/curamoir"]
 # The plugin files an installed cúramóir reads, copied into the package at
 # build time (curamoir.plugin_files: its presence is what marks an install).
 # hooks.json for the fix step's denylist --settings; templates/ for
-# `curamoir init`. Not scripts/: their launchers need a checkout, and an
+# `curamoir init`; examples/python/ for the test guard rules the R5 gate's
+# round 0 runs (gate/rounds.py). Not scripts/: their launchers need a checkout, and an
 # install reaches the same code through its console scripts and interpreter.
 # An editable install (`uv sync` here) gets the copy too, in site-packages
 # beside its .pth, but imports the package from src/, which has none, so it
@@ -48,6 +49,7 @@ packages = ["src/curamoir"]
 [tool.hatch.build.targets.wheel.force-include]
 "hooks/hooks.json" = "curamoir/_plugin/hooks/hooks.json"
 "templates" = "curamoir/_plugin/templates"
+"examples/python" = "curamoir/_plugin/examples/python"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

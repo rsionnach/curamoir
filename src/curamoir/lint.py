@@ -320,6 +320,43 @@ def run_lint(repo, ast_grep=None, ast_grep_timeout=DEFAULT_TIMEOUT):
         raise LintError(str(invalid)) from invalid
 
     files, symlinks, not_regular = _repository_files(repo)
+    return _run_rules(repo, rules, principles, files, symlinks, not_regular, ast_grep,
+                      ast_grep_timeout)
+
+
+def run_rules(repo, rules, principles, paths, ast_grep=None, ast_grep_timeout=DEFAULT_TIMEOUT):
+    """Run `rules` over `paths` (repo-relative POSIX paths) only, each rule
+    still limited to its own scope, and return what they found, as
+    run_lint does. For a caller with rules of its own that are not the
+    repository's (the R5 gate's round 0 runs the bundled test guard rules
+    over the test files a change touched). `principles` is the
+    principles.Principles every rule's principle resolves in.
+
+    Every path must be one the repository listing has as a regular file
+    (the listing run_lint searches). Anything else in `paths` (a symlink, a
+    FIFO, a path outside the repository or not there at all) is a LintError
+    and nothing is read: a file the caller expected to be checked and was not
+    would read as clean."""
+    repo = Path(repo)
+    if not repo.is_dir():
+        raise LintError(f"{repo} is not a directory")
+    files, _, _ = _repository_files(repo)
+    wanted = set(paths)
+    missing = sorted(wanted - set(files))
+    if missing:
+        raise LintError(f"not regular files in {repo}, so they cannot be checked: "
+                        f"{', '.join(missing[:5])}")
+    return _run_rules(repo, rules, principles, [f for f in files if f in wanted], (), (),
+                      ast_grep, ast_grep_timeout)
+
+
+def _run_rules(repo, rules, principles, files, symlinks, not_regular, ast_grep,
+               ast_grep_timeout):
+    """The rules over `files`: run_lint and run_rules both, once loaded."""
+    for rule in rules:
+        if principles.by_id(rule.principle) is None:
+            raise LintError(f"rule {rule.id!r} cites principle {rule.principle!r}, which "
+                            "the principles given do not define")
     found, checked, skipped = [], [], []
     # (version, problem) once asked; None until then.
     ast_grep_answer = None

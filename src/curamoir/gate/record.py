@@ -26,6 +26,14 @@ keys; a verdict's ``inputs`` and ``input_digest`` come only from a
 builds. So nothing a reviewer writes (a stray ``input_digest`` key, a digest
 quoted in its output) becomes the record's digest (R5-R75).
 
+**Round 0's tool output** (R5-R1, cm-8ap.15). A ``preflight`` round carries
+``preflight: {"steps": [...]}``, one entry per deterministic step it ran
+(PREFLIGHT_STEP_KEYS): its name and argv, its exit status (None when it was
+killed or never started), how long it took, the last
+PREFLIGHT_TAIL_CHARS characters of its combined output and the full output's
+length in bytes. Only a ``preflight`` round may carry it. Its R5-R33 hits are
+findings under ``lenses.provenance`` with ``model`` None, as any lens's are.
+
 **The verdict check** (§11, R5-R49). A close, push or merge passes when the
 verdict's state is ``CLEAN`` and ``HEAD^{tree}`` equals ``verdict.tree_sha``;
 anything else refuses, naming the state or the mismatch. A missing or
@@ -70,7 +78,14 @@ _FINDING_LISTS = ("findings",)
 FINDING_KEYS = ("lens", "severity", "path", "start_line", "end_line", "claim", "evidence",
                 "fix", "fingerprint", "verification_level", "resolves", "regression", "status")
 #: The keys of a round other than its lenses (§11).
-ROUND_KEYS = ("n", "kind", "head", "started", "ended", "lenses", "merge", "fix", "mutations")
+ROUND_KEYS = ("n", "kind", "head", "started", "ended", "lenses", "merge", "fix", "mutations",
+              "preflight")
+#: The keys of one step in a ``preflight`` round's ``preflight.steps``, every
+#: one required (§11, cm-8ap.15).
+PREFLIGHT_STEP_KEYS = ("name", "argv", "exit", "duration_s", "output_tail", "output_bytes")
+#: How much of a step's combined output the record keeps: the last this many
+#: characters. ``output_bytes`` says how much there was.
+PREFLIGHT_TAIL_CHARS = 4000
 _ROUND_REQUIRED = ("n", "kind", "head", "started", "ended", "lenses")
 
 _BEAD = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
@@ -249,7 +264,37 @@ def _round(raw, *, expected_n: int) -> dict:
         raise RecordError("round lenses must map a lens to its entry")
     kept = {k: copy.deepcopy(raw[k]) for k in ROUND_KEYS if k in raw}
     kept["lenses"] = {name: _lens_entry(name, entry) for name, entry in raw["lenses"].items()}
+    if "preflight" in raw:
+        if raw["kind"] != "preflight":
+            raise RecordError(f"only a preflight round carries preflight, not a {raw['kind']} round")
+        kept["preflight"] = _preflight(raw["preflight"])
     return kept
+
+
+def _preflight(raw) -> dict:
+    """``{"steps": [...]}``, each step exactly PREFLIGHT_STEP_KEYS, checked."""
+    if not isinstance(raw, dict) or set(raw) != {"steps"} or not isinstance(raw["steps"], list):
+        raise RecordError("preflight must be {\"steps\": [...]}")
+    steps = []
+    for step in raw["steps"]:
+        if not isinstance(step, dict) or set(step) != set(PREFLIGHT_STEP_KEYS):
+            raise RecordError(f"a preflight step has exactly {', '.join(PREFLIGHT_STEP_KEYS)}")
+        _text("preflight step name", step["name"])
+        if not (isinstance(step["argv"], list) and step["argv"]
+                and all(isinstance(a, str) for a in step["argv"])):
+            raise RecordError("a preflight step's argv is a non-empty list of strings")
+        if step["exit"] is not None and type(step["exit"]) is not int:
+            raise RecordError("a preflight step's exit is an integer, or None when it has none")
+        if type(step["duration_s"]) not in (int, float) or step["duration_s"] < 0:
+            raise RecordError("a preflight step's duration_s is a number of seconds, not negative")
+        if not isinstance(step["output_tail"], str) \
+                or len(step["output_tail"]) > PREFLIGHT_TAIL_CHARS:
+            raise RecordError(f"a preflight step's output_tail is text of at most "
+                              f"{PREFLIGHT_TAIL_CHARS} characters")
+        if type(step["output_bytes"]) is not int or step["output_bytes"] < 0:
+            raise RecordError("a preflight step's output_bytes is a count of bytes")
+        steps.append(copy.deepcopy(step))
+    return {"steps": steps}
 
 
 def _lens_entry(name, entry) -> dict:

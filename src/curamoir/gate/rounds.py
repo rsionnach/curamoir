@@ -1,0 +1,436 @@
+"""R5-R1 and R5-R33: round 0, the gate's deterministic pre-pass.
+
+Before any model is dispatched, round 0 runs on ``BASE..HEAD`` what needs
+none: the caller's steps (``curamoir-lint``, the configured linters and type
+check, the full suite) and the provenance mechanical checks of R5-R33. Any
+failure ends the gate ``PREFLIGHT_FAILED``, with the tool output as the
+record (§11: a ``preflight`` round's ``preflight.steps``).
+
+**The R5-R33 checks**, over the test files the change adds or touches:
+
+- the bundled test guard rules (``examples/python/``, principle
+  ``tests-actually-run``: a module-level skip, a layout-relative path, an
+  early return in a test body, an except that swallows, a collection-time
+  parametrise list with no minimum), run in process by ``curamoir-lint``'s
+  own runner, whatever rules the repository installs;
+- from the suite's own per-test results (JUnit XML, pytest's ``xunit1``
+  family): no test the change added or changed was skipped or left out of
+  the run (deselected, or never collected), and no changed test module
+  collected nothing.
+
+A hit is a blocking finding under the provenance lens, recorded in the round
+with ``model`` None; a check that cannot run blocks as well, so round 0
+never passes having looked at less than it says.
+
+**What the caller supplies** (Rob, 2026-11-18). The steps and the function
+that runs them. Round 0 has no default run function and reads no
+configuration: where a step runs and under what isolation (R5-R44's OS
+sandbox, or a hosted runner's VM) is the gate job's, as are the config keys
+that name the steps. A run function takes a :class:`Step` and the checkout
+and returns a :class:`StepRun`; for the suite step (``suite=True``) it also
+returns the JUnit XML of that run, produced with
+``--junitxml=<file> -o junit_family=xunit1`` from the checkout's root, so the
+file paths and class names in it are the checkout's. Round 0 itself runs no
+repository code: the guard rules are read by ast-grep, and the test files by
+``ast``.
+
+R5-R2 onwards (the review rounds, the merge, the loop) are the next bead's,
+in this module.
+"""
+
+from __future__ import annotations
+
+import ast
+import datetime
+import re
+import xml.etree.ElementTree as ElementTree
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass, field
+from pathlib import Path
+
+from curamoir import plugin_files
+from curamoir.gate import record
+from curamoir.gate.findings import fingerprint
+from curamoir.git_guard import GitGuardError, git
+from curamoir.lint import DEFAULT_TIMEOUT, LintError, run_rules
+from curamoir.principles import PrincipleError, parse_principles
+from curamoir.rules import RuleError, parse_rule
+
+#: The principle the R5-R33 guard rules cite (templates/principles.md).
+GUARD_PRINCIPLE = "tests-actually-run"
+
+#: A test file, as the guard rules scope it (`files:` in each rule) and as
+#: pytest collects one by default.
+TEST_FILE = re.compile(r"(?:.*/)?(?:test_[^/]*|[^/]*_test)\.py")
+
+#: pytest's default prefixes for a test function and a test class.
+TEST_FUNCTION_PREFIX = "test"
+TEST_CLASS_PREFIX = "Test"
+
+#: The most JUnit XML round 0 reads. A suite's results are kilobytes to a
+#: few megabytes; anything past this is refused, not parsed.
+MAX_JUNIT_BYTES = 64 << 20
+
+LENS = "provenance"
+
+_HUNK = re.compile(rb"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@", re.MULTILINE)
+
+
+class Round0Error(ValueError):
+    """Round 0 was called wrongly: the checkout is not ``head`` as
+    committed, or the steps are not a valid set. Nothing was run."""
+
+
+@dataclass(frozen=True)
+class Step:
+    """One deterministic step: a name for the record, the argv to run, and
+    a bound in seconds that the run function enforces. ``suite`` marks the
+    full suite, whose run also returns its JUnit XML."""
+
+    name: str
+    argv: tuple
+    timeout: float
+    suite: bool = False
+
+
+@dataclass(frozen=True)
+class StepRun:
+    """What a run function returns for one step: its exit status (None if
+    it was killed or never started, with the reason in ``output``), its
+    combined stdout and stderr, how long it took, and for the suite step its
+    JUnit XML (None when there is none)."""
+
+    exit: int | None
+    output: bytes
+    duration_s: float
+    junit_xml: bytes | None = None
+
+
+RunFunction = Callable[[Step, Path], StepRun]
+
+
+@dataclass(frozen=True)
+class Round0:
+    """Round 0's outcome: the record round (``kind: preflight``), ready for
+    :func:`record.append_round`, and whether it passed."""
+
+    round: dict
+    passed: bool
+    findings: tuple = field(default=())
+    failed_steps: tuple = field(default=())
+
+
+def run_round0(repo, *, base: str, head: str, steps: Sequence[Step], run: RunFunction,
+               ast_grep: str | None, ast_grep_timeout: float = DEFAULT_TIMEOUT,
+               n: int = 1) -> Round0:
+    """Run round 0 on ``base..head`` in ``repo``, a checkout of ``head``
+    with no tracked change. Every step runs, in order, whatever the ones
+    before it did, so the record holds all of their output; then the R5-R33
+    checks. ``ast_grep`` is the ast-grep binary the guard rules need (None:
+    they cannot run, which fails the round). ``n`` is the round's number in
+    the record."""
+    repo = Path(repo).resolve()
+    _check_steps(steps)
+    _check_checkout(repo, base, head)
+    started = _now()
+
+    step_records, failed, junit = [], [], None
+    for step in steps:
+        outcome = run(step, repo)
+        if not isinstance(outcome, StepRun):
+            raise Round0Error(f"the run function returned {type(outcome).__name__} for "
+                              f"{step.name!r}, not a StepRun")
+        step_records.append(_step_record(step, outcome))
+        if outcome.exit != 0:
+            failed.append(step.name)
+        if step.suite:
+            junit = outcome.junit_xml
+
+    changed = _changed_test_files(repo, base, head)
+    findings, available = _guard_findings(repo, changed, ast_grep, ast_grep_timeout)
+    findings += _run_findings(repo, base, head, changed, junit)
+    for finding in findings:
+        finding["fingerprint"] = fingerprint(LENS, finding["path"], finding["claim"])
+        finding["status"] = "open"
+
+    round_ = {
+        "n": n, "kind": "preflight", "head": head, "started": started, "ended": _now(),
+        "lenses": {LENS: {"model": None, "status": "ok" if available else "UNAVAILABLE",
+                          "findings": findings}},
+        "preflight": {"steps": step_records},
+    }
+    return Round0(round=round_, passed=not failed and not findings and available,
+                  findings=tuple(findings), failed_steps=tuple(failed))
+
+
+def write_round0(repo, bead: str, result: Round0) -> dict:
+    """Append round 0 to the bead's record (started by the caller with
+    :func:`record.start`) and, when it failed, end the gate there: the
+    verdict ``PREFLIGHT_FAILED``, keyed to the tree round 0 ran on."""
+    written = record.append_round(repo, bead, result.round)
+    if result.passed:
+        return written
+    head = result.round["head"]
+    try:
+        tree = git(repo, "rev-parse", f"{head}^{{tree}}").decode("ascii").strip()
+    except GitGuardError as error:
+        raise record.RecordError(f"the tree of {head} cannot be read: {error}") from error
+    return record.set_verdict(repo, bead, "PREFLIGHT_FAILED", tree_sha=tree, head_sha=head,
+                              at=result.round["ended"])
+
+
+def guard_rules():
+    """(rules, principles): the bundled test guard rules, every rule in
+    plugin_files.PYTHON_EXAMPLES citing GUARD_PRINCIPLE, and the starter
+    principles they resolve in. RuleError if there are none or one does
+    not load: round 0 never runs fewer checks than it ships."""
+    try:
+        principles = parse_principles(
+            (plugin_files.TEMPLATES / "principles.md").read_text(encoding="utf-8"))
+    except (OSError, PrincipleError) as error:
+        raise RuleError(f"the starter principles cannot be read: {error}") from error
+    known = {p.id for p in principles.principles}
+    rules = []
+    for path in sorted(plugin_files.PYTHON_EXAMPLES.glob("*.yaml")):
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError as error:
+            raise RuleError(f"{path.name}: cannot be read: {error}") from error
+        rule = parse_rule(text, source=path.name, known_principles=known)
+        if rule.principle == GUARD_PRINCIPLE:
+            rules.append(rule)
+    if not rules:
+        raise RuleError(f"no rule in {plugin_files.PYTHON_EXAMPLES} cites {GUARD_PRINCIPLE}")
+    return rules, principles
+
+
+# --- the checkout and the steps --------------------------------------------
+
+def _check_steps(steps) -> None:
+    if not isinstance(steps, Sequence) or not steps:
+        raise Round0Error("round 0 needs its steps, the full suite among them")
+    names = set()
+    for step in steps:
+        if not isinstance(step, Step):
+            raise Round0Error(f"a step is a gate.rounds.Step, not {type(step).__name__}")
+        if not (isinstance(step.name, str) and step.name.strip()) or step.name in names:
+            raise Round0Error(f"step names are distinct non-empty text: {step.name!r}")
+        names.add(step.name)
+        if not (isinstance(step.argv, tuple) and step.argv
+                and all(isinstance(a, str) for a in step.argv)):
+            raise Round0Error(f"step {step.name!r}: argv is a non-empty tuple of strings")
+        if type(step.timeout) not in (int, float) or not step.timeout > 0:
+            raise Round0Error(f"step {step.name!r}: timeout is a positive number of seconds")
+    suites = [step.name for step in steps if step.suite]
+    if len(suites) != 1:
+        raise Round0Error(f"exactly one step is the full suite (suite=True), not {len(suites)}: "
+                          "the R5-R33 run checks read its results")
+
+
+def _check_checkout(repo: Path, base: str, head: str) -> None:
+    """``repo`` is ``head`` checked out with no tracked change, and both
+    ends are commits: round 0 reads the files on disk as ``head``'s."""
+    try:
+        for name, value in (("base", base), ("head", head)):
+            if not (isinstance(value, str) and re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", value)):
+                raise Round0Error(f"{name} must be a full commit id")
+            git(repo, "cat-file", "-e", f"{value}^{{commit}}")
+        checked_out = git(repo, "rev-parse", "HEAD").decode("ascii").strip()
+        dirty = git(repo, "status", "--porcelain", "-z", "--untracked-files=no",
+                    "--ignore-submodules=all")
+    except GitGuardError as error:
+        raise Round0Error(f"{repo} cannot be read as a checkout of {head}: {error}") from error
+    if checked_out != head:
+        raise Round0Error(f"{repo} has {checked_out} checked out, not head {head}")
+    if dirty:
+        raise Round0Error(f"{repo} has tracked changes, so its files are not head's")
+
+
+def _step_record(step: Step, outcome: StepRun) -> dict:
+    output = outcome.output if isinstance(outcome.output, bytes) else b""
+    text = output.decode("utf-8", "replace")
+    return {"name": step.name, "argv": list(step.argv),
+            "exit": outcome.exit if type(outcome.exit) is int else None,
+            "duration_s": round(float(outcome.duration_s), 3),
+            "output_tail": text[-record.PREFLIGHT_TAIL_CHARS:],
+            "output_bytes": len(output)}
+
+
+# --- R5-R33: which tests the change touched ---------------------------------
+
+def _changed_test_files(repo: Path, base: str, head: str) -> list:
+    """The test files ``base..head`` adds, modifies, renames into or copies,
+    as repo-relative POSIX paths; a deleted one has nothing left to run."""
+    out = git(repo, "diff", "--name-only", "-z", "-M", "--diff-filter=AMRC", base, head)
+    paths = [p.decode("utf-8", "surrogateescape") for p in out.split(b"\0") if p]
+    return sorted(p for p in paths if TEST_FILE.fullmatch(p))
+
+
+def _changed_lines(repo: Path, base: str, head: str, path: str) -> set:
+    """The lines of ``path`` at ``head`` that ``base..head`` adds or changes,
+    and for a deletion the line it was deleted after (and the one after
+    that), so a test that only lost lines still counts as changed."""
+    out = git(repo, "diff", "-U0", "--no-color", "--no-ext-diff", base, head, "--", path)
+    lines = set()
+    for start, count in _HUNK.findall(out):
+        first, length = int(start), 1 if count == b"" else int(count)
+        lines.update(range(first, first + length) if length else (first, first + 1))
+    return lines
+
+
+def _tests_in(source: str):
+    """[(class chain, function name, first line, last line)] for every test
+    function pytest would collect by its default names: ``test*`` at module
+    level or in a ``Test*`` class (nested ones included). The first line is
+    the first decorator's."""
+    tree = ast.parse(source)
+    found = []
+
+    def visit(body, chain):
+        for node in body:
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) \
+                    and node.name.startswith(TEST_FUNCTION_PREFIX):
+                first = min([node.lineno] + [d.lineno for d in node.decorator_list])
+                found.append((chain, node.name, first, node.end_lineno))
+            elif isinstance(node, ast.ClassDef) and node.name.startswith(TEST_CLASS_PREFIX):
+                visit(node.body, (*chain, node.name))
+
+    visit(tree.body, ())
+    return found
+
+
+# --- R5-R33: the guard rules -------------------------------------------------
+
+def _guard_findings(repo: Path, changed: list, ast_grep, timeout):
+    """(findings, available): a finding per guard-rule hit in ``changed``,
+    and whether every guard rule ran. A rule that could not run is one
+    finding saying so, and ``available`` is False."""
+    if not changed:
+        return [], True
+    try:
+        rules, principles = guard_rules()
+        result = run_rules(repo, rules, principles, changed, ast_grep=ast_grep,
+                           ast_grep_timeout=timeout)
+    except (RuleError, LintError) as error:
+        return [_unavailable(changed[0], str(error))], False
+    findings = [{
+        "lens": LENS, "severity": "IMPORTANT", "path": v.path,
+        "start_line": v.line, "end_line": v.end_line,
+        "claim": f"{v.rule_id}: {v.message}",
+        "evidence": v.match, "fix": v.fix, "verification_level": "script",
+        "resolves": None, "regression": False,
+    } for v in result.violations]
+    for skipped in result.skipped:
+        findings.append(_unavailable(changed[0], f"rule {skipped.rule_id}: {skipped.reason}"))
+    return findings, not result.skipped
+
+
+def _unavailable(path: str, reason: str) -> dict:
+    return {"lens": LENS, "severity": "CRITICAL", "path": path, "start_line": 1,
+            "end_line": 1,
+            "claim": "the R5-R33 guard checks could not run over the changed test files, "
+                     "so round 0 has not shown them free of the shapes that make a test "
+                     "pass without checking anything",
+            "evidence": reason, "fix": None, "verification_level": "script",
+            "resolves": None, "regression": False}
+
+
+# --- R5-R33: what the suite run shows ----------------------------------------
+
+def _run_findings(repo: Path, base: str, head: str, changed: list, junit) -> list:
+    """A finding for each changed test module that collected nothing, each
+    changed test that was skipped or not run, and a suite whose results
+    cannot be read. Nothing to check when no test file changed."""
+    if not changed:
+        return []
+    cases = _junit_cases(junit)
+    if isinstance(cases, str):
+        return [_run_finding(changed[0], 1, 1, f"the full suite's per-test results cannot be "
+                             f"read ({cases}), so round 0 cannot show that the changed tests "
+                             "ran", "the suite step's JUnit XML")]
+    findings = []
+    for path in changed:
+        module = path[:-len(".py")].replace("/", ".")
+        in_module = [c for c in cases if c["file"] == path or c["classname"] == module
+                     or c["classname"].startswith(module + ".")]
+        source = (repo / path).read_text(encoding="utf-8", errors="replace")
+        try:
+            tests = _tests_in(source)
+        except SyntaxError as error:
+            findings.append(_run_finding(path, error.lineno or 1, error.lineno or 1,
+                                         f"{path} does not parse, so its tests cannot run",
+                                         str(error)))
+            continue
+        if not [c for c in in_module if c["kind"] != "error" or c["name"] != module]:
+            findings.append(_run_finding(
+                path, 1, 1, f"{path} collected no test in the full suite's run, so nothing "
+                "in it ran", f"no test case under {module} in the JUnit XML"
+                + (f"; collection error: {in_module[0]['message']}" if in_module else "")))
+            continue
+        touched = _changed_lines(repo, base, head, path)
+        for chain, name, first, last in tests:
+            if not touched.intersection(range(first, last + 1)):
+                continue
+            classname = ".".join((module, *chain))
+            runs = [c for c in in_module
+                    if c["classname"] == classname and c["name"].split("[", 1)[0] == name]
+            node = "::".join((path, *chain, name))
+            if not runs:
+                findings.append(_run_finding(
+                    path, first, last, f"{node} was not in the full suite's run (deselected "
+                    "or never collected), so the change to it was not tested",
+                    f"no test case {classname}.{name} in the JUnit XML"))
+                continue
+            skipped = [c for c in runs if c["kind"] == "skipped"]
+            if skipped:
+                findings.append(_run_finding(
+                    path, first, last, f"{node} was skipped in the full suite's run, so the "
+                    "change to it was not tested",
+                    "; ".join(f"{c['name']}: {c['message']}" for c in skipped[:5])))
+    return findings
+
+
+def _run_finding(path, first, last, claim, evidence) -> dict:
+    return {"lens": LENS, "severity": "CRITICAL", "path": path, "start_line": first,
+            "end_line": last, "claim": claim, "evidence": evidence or "(none)",
+            "fix": None, "verification_level": "reproduced", "resolves": None,
+            "regression": False}
+
+
+def _junit_cases(junit):
+    """Every ``testcase`` in ``junit`` as {file, classname, name, kind,
+    message}, ``kind`` one of passed, failed, error, skipped (an expected
+    failure, pytest's ``xfail``, ran and is ``passed``); or a string saying
+    why there are none to read."""
+    if junit is None:
+        return "the suite step returned no JUnit XML"
+    if not isinstance(junit, bytes):
+        return f"the JUnit XML is {type(junit).__name__}, not bytes"
+    if len(junit) > MAX_JUNIT_BYTES:
+        return f"the JUnit XML is {len(junit)} bytes, over {MAX_JUNIT_BYTES}"
+    if b"<!DOCTYPE" in junit or b"<!ENTITY" in junit:
+        return "the JUnit XML declares a DOCTYPE or an entity, which pytest never writes"
+    try:
+        root = ElementTree.fromstring(junit)
+    except ElementTree.ParseError as error:
+        return f"the JUnit XML does not parse: {error}"
+    cases = []
+    for case in root.iter("testcase"):
+        kind, message = "passed", ""
+        for child in case:
+            if child.tag == "skipped" and child.get("type") != "pytest.xfail":
+                kind, message = "skipped", child.get("message", "")
+            elif child.tag in ("failure", "error") and kind == "passed":
+                kind, message = ("failed" if child.tag == "failure" else "error",
+                                 child.get("message", ""))
+        cases.append({"file": case.get("file", ""), "classname": case.get("classname", ""),
+                      "name": case.get("name", ""), "kind": kind, "message": message})
+    if not cases:
+        return "the JUnit XML holds no test case at all"
+    if not any(c["file"] for c in cases):
+        return "the JUnit XML has no file attribute on any test case (not junit_family=xunit1)"
+    return cases
+
+
+def _now() -> str:
+    return datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
