@@ -331,3 +331,27 @@ def test_the_early_return_rule_on_a_real_test_file_from_the_corpus(tmp_path):
     assert lines[380].strip() == "return"
     # Real returns the rule must not report: helpers nested in tests.
     assert [n for n in (440, 442) if lines[n - 1].lstrip().startswith("return")] == [440, 442]
+
+
+@needs_ast_grep
+def test_the_except_rule_on_a_real_file_from_the_corpus(tmp_path):
+    """A real swallowing except, from the replay corpus (opensrm-jmy.22,
+    which adds the module whole): the rule reports its one `except
+    Exception: pass` and nothing else in the file. The file is source, not a
+    test, so it is checked under a test file's name, which is the only scope
+    the rule has."""
+    source_path = "src/nthlayer_workers/learn/_interactive_app.py"
+    diff = ROOT / "fixtures" / "r5-replay" / "opensrm-jmy.22-nthlayer-workers" / "diff.patch"
+    repo = tmp_path / "jmy22"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    subprocess.run(["git", "apply", f"--include={source_path}", str(diff)], cwd=repo,
+                   check=True)
+    source = (repo / source_path).read_text(encoding="utf-8")
+
+    found = reported(tmp_path / "lint", {"tests/test_interactive_app.py": source})
+
+    excepts = sorted(line for _, line, rule in found if rule == "no-bare-except-pass")
+    assert excepts == [204]
+    lines = source.splitlines()
+    assert lines[203].strip() == "except Exception:" and lines[204].strip() == "pass"
