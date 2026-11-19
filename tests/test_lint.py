@@ -47,6 +47,7 @@ from curamoir.lint import (
     fingerprint,
     main,
     run_lint,
+    run_rules,
 )
 from curamoir.principles import load_principles
 from curamoir.rules import AST_GREP_LANGUAGES
@@ -2641,3 +2642,57 @@ def test_the_real_ast_grep_rejecting_a_rule_object_fails_the_run(tmp_path):
 
     with pytest.raises(LintError, match="ast-grep failed"):
         run_lint(repo, ast_grep=shutil.which("ast-grep"))
+
+
+# --- run_rules (round 0's entry, cm-8ap.15) ----------------------------------
+
+@pytest.mark.parametrize("path", ["src/link.py", "src/missing.py", "../outside.py",
+                                  "node_modules/test_x.py"])
+def test_run_rules_refuses_a_path_that_is_not_a_listed_regular_file(tmp_path, path):
+    """A path the caller expected checked and that the walk does not list as
+    a regular file is an error, never dropped: dropped, it would read as
+    clean."""
+    from curamoir.principles import load_principles
+    from curamoir.rules import load_rules
+
+    repo = sample_repo(tmp_path, NO_BARE_PRINT)
+    (repo / "src" / "link.py").symlink_to(repo / "src" / "sample" / "config.py")
+    (tmp_path / "outside.py").write_text("print('x')\n", encoding="utf-8")
+    (repo / "node_modules").mkdir()
+    (repo / "node_modules" / "test_x.py").write_text("print('x')\n", encoding="utf-8")
+    rules, principles = load_rules(repo), load_principles(repo)
+
+    with pytest.raises(LintError, match="not regular files"):
+        run_rules(repo, rules, principles, ["src/sample/core/billing.py", path])
+    assert run_rules(repo, rules, principles, ["src/sample/core/billing.py"]).violations
+
+
+@needs_ast_grep
+def test_a_rule_objects_snippet_is_parsed_as_its_own_language(tmp_path):
+    """The snippet file is named for its language's suffix: a TypeScript
+    rule's `fires_on` read as Python would match nothing, and the rule would
+    fail its own snippet."""
+    rule = textwrap.dedent("""\
+        id: console-in-a-function
+        principle: structured-logging
+        severity: error
+        matcher: ast-grep
+        rule:
+          kind: call_expression
+          regex: '^console\\.log'
+          inside: {kind: function_declaration, stopBy: end}
+        fires_on: |
+          function f(): void {
+            console.log("x");
+          }
+        silent_on: |
+          console.log("top");
+        languages: [typescript]
+        message: "{match} logs inside a function"
+    """)
+    repo = sample_repo(tmp_path, rule)
+
+    result = run_lint(repo, ast_grep=shutil.which("ast-grep"))
+
+    assert result.skipped == ()
+    assert "console-in-a-function" in result.checked

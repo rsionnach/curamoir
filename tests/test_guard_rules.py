@@ -15,8 +15,8 @@ would pass a rule that also fires on half the file.
 """
 
 import shutil
+import subprocess
 import textwrap
-from pathlib import Path
 
 from curamoir.lint import run_lint
 from curamoir.principles import parse_principles
@@ -24,9 +24,10 @@ from curamoir.rules import parse_rule
 
 # The shared marker: skipped exactly where test_lint's ast-grep tests are,
 # and required (not skipped) in CI.
+from tests.repo_root import REPO_ROOT
 from tests.test_lint import needs_ast_grep
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = REPO_ROOT
 EXAMPLES = ROOT / "examples" / "python"
 STARTER = ROOT / "templates" / "principles.md"
 PRINCIPLE = "tests-actually-run"
@@ -56,7 +57,11 @@ def reported(tmp_path, files):
     result = run_lint(guard_repo(tmp_path, files), ast_grep=shutil.which("ast-grep"))
     assert result.skipped == ()
     assert set(result.checked) == set(GUARD_RULES)
-    return {(v.path, v.line, v.rule_id) for v in result.violations}
+    found = [(v.path, v.line, v.rule_id) for v in result.violations]
+    # One report per shape: a rule that matched one chain twice (the layout
+    # rule's `.parent.parent.parent` holds two `.parent.parent`s) fails here.
+    assert len(found) == len(set(found)), sorted(found)
+    return set(found)
 
 
 # --- the rule files ----------------------------------------------------------
@@ -108,6 +113,9 @@ def test_module_level_skips(tmp_path):
         yaml = pytest.importorskip("yaml")
         pytestmark = pytest.mark.slow
         pytestmark = pytest.mark.xfail(reason="known")
+        pytestmark = pytest.mark.skip_slow
+        pytestmark = pytest.mark.noskipif
+        pytest.skip("not module level", allow_module_level=False)
 
         def test_inside():
             pytest.skip("a skip in a test is the run's to report")
@@ -125,7 +133,7 @@ def test_module_level_skips(tmp_path):
     """})
 
     assert found == {("tests/test_skips.py", line, "no-module-level-skip")
-                     for line in (2, 3, 4, 5, 6, 18, 22)}
+                     for line in (2, 3, 4, 5, 6, 21, 25)}
 
 
 @needs_ast_grep
@@ -175,10 +183,20 @@ def test_early_returns_in_test_bodies(tmp_path):
 
         def _not_a_test():
             return 2
+
+        def helper_for_test_x():
+            return 3
+
+        def helper():
+            test_value = 4
+            return test_value
+
+        def testcamel():
+            return
     """})
 
     assert found == {("tests/test_returns.py", line, "no-early-return-in-test")
-                     for line in (3, 7, 11)}
+                     for line in (3, 7, 11, 35)}
 
 
 @needs_ast_grep
@@ -213,10 +231,18 @@ def test_excepts_that_swallow(tmp_path):
                 assert f()
             except:
                 raise
+            try:
+                assert f()
+            except Exception:
+                pass  # the reason, after the pass
+            try:
+                assert f()
+            except builtins.Exception:
+                pass
     """})
 
     assert found == {("tests/test_excepts.py", line, "no-bare-except-pass")
-                     for line in (4, 8, 12, 16)}
+                     for line in (4, 8, 12, 16, 32, 36)}
 
 
 @needs_ast_grep
@@ -252,6 +278,15 @@ def test_parametrise_lists_computed_at_collection(tmp_path):
 
             @mark.parametrize("c", _paths())
             def test_bare_mark(c): ...
+
+            @pytest.mark.parametrize("c", argvalues=_paths())
+            def test_by_keyword(c): ...
+
+            @pytest.mark.parametrize("a,b", "xy")
+            def test_string_values(a, b): ...
+
+            @fixtures.parametrize("c", _paths())
+            def test_not_a_mark(c): ...
         """,
         "tests/test_with_a_minimum.py": """\
             import pytest
@@ -273,3 +308,26 @@ def test_parametrise_lists_computed_at_collection(tmp_path):
 
     assert found == {("tests/test_computed.py", line, "parametrize-needs-minimum")
                      for line in (7, 10, 13, 16, 28)}
+
+
+@needs_ast_grep
+def test_the_early_return_rule_on_a_real_test_file_from_the_corpus(tmp_path):
+    """A real early return, from the replay corpus (opensrm-wo62-1,
+    checkpoint C, which adds the file whole): the rule reports the `return`
+    inside a test and not the ones in helpers nested in tests."""
+    path = "tests/test_manifest_switch_blind_spots.py"
+    diff = ROOT / "fixtures" / "r5-replay" / "opensrm-wo62-1-checkpointC" / "diff.patch"
+    repo = tmp_path / "wo62"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    subprocess.run(["git", "apply", f"--include={path}", str(diff)], cwd=repo, check=True)
+    source = (repo / path).read_text(encoding="utf-8")
+
+    found = reported(tmp_path / "lint", {path: source})
+
+    returns = sorted(line for p, line, rule in found if rule == "no-early-return-in-test")
+    assert returns == [381]
+    lines = source.splitlines()
+    assert lines[380].strip() == "return"
+    # Real returns the rule must not report: helpers nested in tests.
+    assert [n for n in (440, 442) if lines[n - 1].lstrip().startswith("return")] == [440, 442]

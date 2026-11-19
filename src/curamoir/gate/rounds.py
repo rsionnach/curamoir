@@ -513,8 +513,8 @@ def _run_findings(repo: Path, changed: list, read: dict, junit) -> list:
     findings = []
     for path in changed:
         module = path[:-len(".py")].replace("/", ".")
-        in_module = [c for c in cases if c["file"] == path or c["classname"] == module
-                     or c["classname"].startswith(module + ".")]
+        # By file: the xunit1 check above means every case names one.
+        in_module = [c for c in cases if c["file"] == path]
         if isinstance(read[path], dict):
             findings.append(read[path])
             continue

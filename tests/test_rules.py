@@ -706,6 +706,8 @@ def test_a_rule_object_is_held_as_text_so_the_rule_stays_hashable():
     (lambda t: t.replace(RULE_BODY, "rule: return_statement\n"), "`rule` that is not a mapping"),
     (lambda t: t.replace(RULE_BODY, "rule: {}\n"), "missing required field(s): rule"),
     (lambda t: t + "constraints: [a]\n", "`constraints` that is not a mapping"),
+    (lambda t: t + "constraints: {}\n", "`constraints` that is not a mapping"),
+    (lambda t: t + "constraints:\n  V: {regex: .nan}\n", "not text, a number"),
     (lambda t: t + "constraints:\n  V: {regex: 2026-11-18}\n", "not text, a number"),
 ])
 def test_a_malformed_rule_object_is_refused_at_load(change, message):

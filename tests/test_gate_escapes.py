@@ -36,14 +36,14 @@ from __future__ import annotations
 import json
 import shutil
 import subprocess
-from pathlib import Path
 
 import pytest
 
 from curamoir.gate.rounds import Step, StepRun, _tests_in, run_round0
+from tests.repo_root import REPO_ROOT
 from tests.test_lint import needs_ast_grep
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = REPO_ROOT
 CORPUS = ROOT / "fixtures" / "r5-replay"
 
 #: The entry and the new test files its diff adds whole.

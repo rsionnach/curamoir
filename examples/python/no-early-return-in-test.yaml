@@ -1,5 +1,6 @@
 # tests-actually-run, for Python tests. Matches a `return` in the body of a
-# test function (a `def` or `async def` named `test_*`, a method included),
+# test function (a `def` or `async def` named `test*`, as pytest collects by
+# default, a method included),
 # the `if not <thing>: return` that ends a test before its assertions and
 # reports it as passed.
 #
@@ -17,7 +18,7 @@ rule:
     kind: function_definition
     has:
       field: name
-      regex: '^test_'
+      regex: '^test'
     stopBy:
       kind: function_definition
 fires_on: |

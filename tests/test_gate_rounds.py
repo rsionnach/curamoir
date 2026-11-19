@@ -17,12 +17,12 @@ import subprocess
 import sys
 import textwrap
 import time
-from pathlib import Path
 
 import pytest
 
 from curamoir.gate import record, rounds
 from curamoir.gate.rounds import Round0Error, Step, StepRun, run_round0, write_round0
+from tests.repo_root import REPO_ROOT
 from tests.test_lint import needs_ast_grep
 
 AST_GREP = shutil.which("ast-grep")
@@ -128,7 +128,8 @@ def test_a_failing_step_fails_round_0_and_every_step_still_runs(repo):
     base = _git(repo, "rev-parse", "HEAD")
     commit(repo, {"src/app.py": "VALUE = 2\n"}, "no test change")
     loud = Step("types", (sys.executable, "-c",
-                          "import sys; sys.stdout.write('x' * 5000 + 'END'); sys.exit(3)"), 60)
+                          "import sys; sys.stdout.buffer.write(b'x' * 4997 + 'é'.encode() + "
+                          "b'\\xffEND'); sys.exit(3)"), 60)
 
     result = round0(repo, base, steps=(loud, LINT, SUITE))
 
@@ -136,9 +137,10 @@ def test_a_failing_step_fails_round_0_and_every_step_still_runs(repo):
     assert result.failed_steps == ("types",)
     types, lint, suite = result.round["preflight"]["steps"]
     assert (types["exit"], lint["exit"], suite["exit"]) == (3, 0, 0)
+    # Bytes, not characters: 4997 + 2 (é) + 1 (an invalid byte) + 3.
     assert types["output_bytes"] == 5003
     assert len(types["output_tail"]) == record.PREFLIGHT_TAIL_CHARS
-    assert types["output_tail"].endswith("xEND")
+    assert types["output_tail"].endswith("x\u00e9\ufffdEND")
     assert types["argv"] == list(loud.argv)
     assert result.findings == ()
 
@@ -453,7 +455,7 @@ def test_the_guard_rules_are_the_bundled_tests_actually_run_rules():
     rules, principles = rounds.guard_rules()
 
     assert sorted(r.id for r in rules) == sorted(
-        p.stem for p in (Path(__file__).resolve().parents[1] / "examples" / "python").glob("*.yaml")
+        p.stem for p in (REPO_ROOT / "examples" / "python").glob("*.yaml")
         if "principle: tests-actually-run" in p.read_text(encoding="utf-8"))
     assert len(rules) == 5
     assert principles.by_id("tests-actually-run") is not None
@@ -558,6 +560,10 @@ def test_a_changed_test_file_that_cannot_be_read_is_a_finding_not_a_crash(repo):
     assert not result.passed
     assert any(f["claim"] == "tests/test_link.py cannot be read, so its tests cannot be told "
                "apart" for f in result.findings)
+    # The guard rules refuse a path that is not a regular file: that is
+    # their being unable to run, which blocks on its own.
+    assert result.round["lenses"]["provenance"]["status"] == "UNAVAILABLE"
+    assert [f for f in result.findings if "guard checks could not run" in f["claim"]]
 
 
 @needs_ast_grep
@@ -769,12 +775,24 @@ def test_tests_under_any_module_level_block_are_checked(repo):
             @pytest.mark.skip(reason="under a try/except* else")
             def test_under_try_star():
                 pass
+
+        try:
+            import not_installed_anywhere
+        except ImportError:
+            @pytest.mark.skip(reason="under an except handler")
+            def test_under_except():
+                pass
+        finally:
+            @pytest.mark.skip(reason="under a finally")
+            def test_under_finally():
+                pass
     """}, "tests under every block")
 
     result = round0(repo, base)
 
     assert sorted(f["claim"].split(" was ")[0] for f in result.findings) == [
-        f"tests/test_new.py::test_under_{kind}" for kind in ("for", "match", "try_star", "while")]
+        f"tests/test_new.py::test_under_{kind}"
+        for kind in ("except", "finally", "for", "match", "try_star", "while")]
 
 
 @needs_ast_grep
@@ -813,6 +831,13 @@ def test_excluded_test_paths_and_the_whole_repository(repo):
 
     assert any(f["path"] == "tests/fixtures/test_sample_data.py" for f in blocked.findings)
     assert excluded.passed, excluded.findings
+    # "." is the whole repository, not nothing: a shape outside tests/ is seen.
+    commit(repo, {"other/test_elsewhere.py": "def test_elsewhere():\n    return\n"}, "elsewhere")
+    whole = run_round0(repo, base=base, head=_git(repo, "rev-parse", "HEAD"),
+                       steps=(LINT, SUITE), run=pytest_run, test_paths=(".",),
+                       test_excludes=("tests/fixtures",), ast_grep=AST_GREP)
+    assert [f["claim"].split(":")[0] for f in whole.findings
+            if f["path"] == "other/test_elsewhere.py"] == ["no-early-return-in-test"]
 
 
 @needs_ast_grep
@@ -826,3 +851,87 @@ def test_a_step_that_moves_head_fails_the_round(repo):
     moved = [f for f in result.findings if f["claim"].startswith("a step changed the checkout")]
     assert len(moved) == 1 and moved[0]["path"] == "."
     assert "after the steps, not" in moved[0]["evidence"]
+
+
+# --- fix round 1 (provenance review) -------------------------------------------
+
+@needs_ast_grep
+def test_a_changed_test_file_named_with_the_test_suffix_is_checked(repo):
+    base = _git(repo, "rev-parse", "HEAD")
+    commit(repo, {"tests/thing_test.py": """\
+        import pytest
+
+        @pytest.mark.skip(reason="off")
+        def test_thing():
+            pass
+    """}, "a *_test.py file")
+    suite = Step("suite", (*PYTEST, "tests/thing_test.py", "tests/test_old.py"), 120, suite=True)
+
+    result = round0(repo, base, steps=(suite,))
+
+    assert [f["claim"].split(" was ")[0] for f in result.findings] == [
+        "tests/thing_test.py::test_thing"]
+
+
+@needs_ast_grep
+def test_a_renamed_test_file_is_checked_under_its_new_name(repo):
+    base = _git(repo, "rev-parse", "HEAD")
+    _git(repo, "mv", "tests/test_old.py", "tests/test_renamed.py")
+    head = commit(repo, {"tests/test_renamed.py": """\
+        import pytest
+
+        def test_old():
+            assert True
+
+        @pytest.mark.skip(reason="skipped before this change")
+        def test_old_skipped():
+            pass
+
+        @pytest.mark.skip(reason="added in the rename")
+        def test_added_in_the_rename():
+            pass
+    """}, "rename")
+    status = _git(repo, "diff", "--name-status", "-M", base, head)
+    assert status.startswith("R"), status
+
+    result = round0(repo, base)
+
+    # A rename has no old lines to keep, so every test in it counts as changed.
+    assert sorted(f["claim"].split(" was ")[0] for f in result.findings) == [
+        "tests/test_renamed.py::test_added_in_the_rename",
+        "tests/test_renamed.py::test_old_skipped"]
+
+
+@needs_ast_grep
+def test_a_test_left_out_of_a_unittest_class_of_any_name_blocks(repo):
+    base = _git(repo, "rev-parse", "HEAD")
+    commit(repo, {"tests/test_new.py": """\
+        import unittest
+
+        class Checks(unittest.TestCase):
+            def test_kept(self):
+                self.assertTrue(True)
+
+            def test_left_out(self):
+                self.assertTrue(True)
+    """}, "a unittest class")
+    deselecting = Step("suite", (*PYTEST, "-k", "not left_out"), 120, suite=True)
+
+    result = round0(repo, base, steps=(deselecting,))
+
+    assert [f["claim"].split(" was ")[0] for f in result.findings] == [
+        "tests/test_new.py::Checks::test_left_out"]
+
+
+def test_junit_xml_over_the_size_cap_is_refused(repo, monkeypatch):
+    base = _git(repo, "rev-parse", "HEAD")
+    commit(repo, {"tests/test_new.py": "def test_new():\n    assert True\n"}, "new")
+    xml = (b"<testsuite><testcase file='tests/test_new.py' classname='tests.test_new' "
+           b"name='test_new'/></testsuite>")
+    monkeypatch.setattr(rounds, "MAX_JUNIT_BYTES", len(xml) - 1)
+
+    result = round0(repo, base, steps=(SUITE,), ast_grep=None,
+                    run=lambda step, checkout: StepRun(0, b"", 0.0, xml))
+
+    claims_ = [f["claim"] for f in result.findings if "per-test results" in f["claim"]]
+    assert len(claims_) == 1 and f"bytes, over {len(xml) - 1}" in claims_[0]
