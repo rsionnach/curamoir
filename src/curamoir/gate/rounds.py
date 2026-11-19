@@ -29,8 +29,11 @@ sandbox, or a hosted runner's VM) is the gate job's, as are the config keys
 that name the steps. A run function takes a :class:`Step` and the checkout
 and returns a :class:`StepRun`; for the suite step (``suite=True``) it also
 returns the JUnit XML of that run, produced with
-``--junitxml=<file> -o junit_family=xunit1`` from the checkout's root, so the
-file paths and class names in it are the checkout's. Round 0 itself runs no
+``--junitxml=<file> -o junit_family=xunit1 --rootdir=<checkout>``: pytest
+names files and classes from its rootdir, not its working directory, so
+``--rootdir`` is what makes them the checkout's paths. Results whose paths
+are not the checkout's are refused as unreadable, never read as "collected
+nothing". Round 0 itself runs no
 repository code: the guard rules are read by ast-grep, and the test files by
 ``ast``.
 
@@ -54,7 +57,7 @@ from curamoir.gate.findings import fingerprint
 from curamoir.git_guard import GitGuardError, git
 from curamoir.lint import DEFAULT_TIMEOUT, LintError, run_rules
 from curamoir.principles import PrincipleError, parse_principles
-from curamoir.rules import RuleError, parse_rule
+from curamoir.rules import ALWAYS_EXCLUDED, ROOT_EXCLUDED, RuleError, parse_rule
 
 #: The principle the R5-R33 guard rules cite (templates/principles.md).
 GUARD_PRINCIPLE = "tests-actually-run"
@@ -305,24 +308,42 @@ def _guard_findings(repo: Path, changed: list, ast_grep, timeout):
     """(findings, available): a finding per guard-rule hit in ``changed``,
     and whether every guard rule ran. A rule that could not run is one
     finding saying so, and ``available`` is False."""
-    if not changed:
+    # The lint walk never searches these directories (rules.ALWAYS_EXCLUDED
+    # anywhere, rules.ROOT_EXCLUDED at the root), so no rule can check a
+    # test file in one; the run checks below still see it.
+    searchable = [path for path in changed if not _lint_excluded(path)]
+    if not searchable:
         return [], True
     try:
         rules, principles = guard_rules()
-        result = run_rules(repo, rules, principles, changed, ast_grep=ast_grep,
+        result = run_rules(repo, rules, principles, searchable, ast_grep=ast_grep,
                            ast_grep_timeout=timeout)
     except (RuleError, LintError) as error:
-        return [_unavailable(changed[0], str(error))], False
-    findings = [{
-        "lens": LENS, "severity": "IMPORTANT", "path": v.path,
-        "start_line": v.line, "end_line": v.end_line,
-        "claim": f"{v.rule_id}: {v.message}",
-        "evidence": v.match, "fix": v.fix, "verification_level": "script",
-        "resolves": None, "regression": False,
-    } for v in result.violations]
-    for skipped in result.skipped:
-        findings.append(_unavailable(changed[0], f"rule {skipped.rule_id}: {skipped.reason}"))
+        return [_unavailable(searchable[0], str(error))], False
+    findings, seen = [], {}
+    for v in result.violations:
+        # The message quotes only the match, so two identical hits in one
+        # file would share a claim, and so a fingerprint; the count keeps
+        # each one its own finding.
+        key = (v.path, v.rule_id, v.message)
+        seen[key] = seen.get(key, 0) + 1
+        again = f" (occurrence {seen[key]} in this file)" if seen[key] > 1 else ""
+        findings.append({
+            "lens": LENS, "severity": "IMPORTANT", "path": v.path,
+            "start_line": v.line, "end_line": v.end_line,
+            "claim": f"{v.rule_id}: {v.message}{again}",
+            "evidence": v.match, "fix": v.fix, "verification_level": "script",
+            "resolves": None, "regression": False,
+        })
+    if result.skipped:
+        findings.append(_unavailable(searchable[0], "; ".join(
+            f"rule {skipped.rule_id}: {skipped.reason}" for skipped in result.skipped)))
     return findings, not result.skipped
+
+
+def _lint_excluded(path: str) -> bool:
+    parts = path.split("/")
+    return parts[0] in ROOT_EXCLUDED or any(part in ALWAYS_EXCLUDED for part in parts[:-1])
 
 
 def _unavailable(path: str, reason: str) -> dict:
@@ -348,24 +369,45 @@ def _run_findings(repo: Path, base: str, head: str, changed: list, junit) -> lis
         return [_run_finding(changed[0], 1, 1, f"the full suite's per-test results cannot be "
                              f"read ({cases}), so round 0 cannot show that the changed tests "
                              "ran", "the suite step's JUnit XML")]
+    named = {c["file"] for c in cases if c["file"]}
+    if not any((repo / name).is_file() for name in named):
+        return [_run_finding(changed[0], 1, 1, "the full suite's per-test results cannot be "
+                             "read (no file they name is in the checkout, as when pytest's "
+                             "rootdir is not the checkout's root), so round 0 cannot show that "
+                             "the changed tests ran",
+                             "files named: " + ", ".join(sorted(named)[:5]))]
     findings = []
     for path in changed:
         module = path[:-len(".py")].replace("/", ".")
         in_module = [c for c in cases if c["file"] == path or c["classname"] == module
                      or c["classname"].startswith(module + ".")]
-        source = (repo / path).read_text(encoding="utf-8", errors="replace")
         try:
+            source = (repo / path).read_text(encoding="utf-8", errors="replace")
             tests = _tests_in(source)
+        except OSError as error:
+            findings.append(_run_finding(path, 1, 1, f"{path} cannot be read, so its tests "
+                                         "cannot be told apart", str(error)))
+            continue
         except SyntaxError as error:
             findings.append(_run_finding(path, error.lineno or 1, error.lineno or 1,
                                          f"{path} does not parse, so its tests cannot run",
                                          str(error)))
             continue
-        if not [c for c in in_module if c["kind"] != "error" or c["name"] != module]:
-            findings.append(_run_finding(
-                path, 1, 1, f"{path} collected no test in the full suite's run, so nothing "
-                "in it ran", f"no test case under {module} in the JUnit XML"
-                + (f"; collection error: {in_module[0]['message']}" if in_module else "")))
+        # A module-level entry (named for the module, no class) is pytest's
+        # report on collecting the module itself: an error, or a skip of the
+        # whole module. Only the other entries are tests.
+        whole = [c for c in in_module if c["name"] == module and not c["classname"]]
+        if not [c for c in in_module if c not in whole]:
+            skipped = [c for c in whole if c["kind"] == "skipped"]
+            if skipped:
+                findings.append(_run_finding(
+                    path, 1, 1, f"{path} was skipped as a whole in the full suite's run, so "
+                    "none of its tests ran", skipped[0]["message"] or "collection skipped"))
+            else:
+                findings.append(_run_finding(
+                    path, 1, 1, f"{path} collected no test in the full suite's run, so "
+                    "nothing in it ran", f"no test case under {module} in the JUnit XML"
+                    + (f"; collection error: {whole[0]['message']}" if whole else "")))
             continue
         touched = _changed_lines(repo, base, head, path)
         for chain, name, first, last in tests:
@@ -419,7 +461,9 @@ def _junit_cases(junit):
         kind, message = "passed", ""
         for child in case:
             if child.tag == "skipped" and child.get("type") != "pytest.xfail":
-                kind, message = "skipped", child.get("message", "")
+                kind, message = "skipped", " ".join(
+                    part for part in (child.get("message", ""), (child.text or "").strip()[:300])
+                    if part)
             elif child.tag in ("failure", "error") and kind == "passed":
                 kind, message = ("failed" if child.tag == "failure" else "error",
                                  child.get("message", ""))

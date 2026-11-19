@@ -75,7 +75,7 @@ def pytest_run(step, checkout):
     junit = None
     if step.suite:
         junit = checkout.parent / f"junit-{time.monotonic_ns()}.xml"
-        argv += [f"--junitxml={junit}", "-o", "junit_family=xunit1"]
+        argv += [f"--junitxml={junit}", "-o", "junit_family=xunit1", f"--rootdir={checkout}"]
     env = {k: v for k, v in os.environ.items() if not k.startswith("PYTEST_")}
     started = time.monotonic()
     done = subprocess.run(argv, cwd=checkout, env=env, stdout=subprocess.PIPE,
@@ -213,8 +213,8 @@ def test_the_guard_rules_not_running_blocks_round_0(repo):
 
     assert not result.passed
     assert result.round["lenses"]["provenance"]["status"] == "UNAVAILABLE"
-    assert [f["severity"] for f in result.findings] == ["CRITICAL"] * 5
-    assert all("ast-grep is not installed" in f["evidence"] for f in result.findings)
+    assert [f["severity"] for f in result.findings] == ["CRITICAL"]
+    assert "ast-grep is not installed" in result.findings[0]["evidence"]
 
 
 def test_no_changed_test_file_needs_no_guard_rules(repo):
@@ -455,3 +455,116 @@ def test_the_guard_rules_are_the_bundled_tests_actually_run_rules():
         if "principle: tests-actually-run" in p.read_text(encoding="utf-8"))
     assert len(rules) == 5
     assert principles.by_id("tests-actually-run") is not None
+
+
+# --- fix round 1 (correctness review) ------------------------------------------
+
+@needs_ast_grep
+def test_a_conditional_module_level_skip_added_to_an_existing_module_blocks(repo):
+    """The usual form: a skip under a module-level `if`, the tests themselves
+    unchanged. Both the guard rule and the run see it."""
+    base = _git(repo, "rev-parse", "HEAD")
+    commit(repo, {"tests/test_old.py": """\
+        import sys
+
+        import pytest
+
+        if sys.platform.startswith("linux") or True:
+            pytest.skip("not here", allow_module_level=True)
+
+        def test_old():
+            assert True
+
+        @pytest.mark.skip(reason="skipped before this change")
+        def test_old_skipped():
+            pass
+    """}, "skip the module")
+
+    result = round0(repo, base)
+
+    assert sorted((f["severity"], f["claim"].split(",")[0]) for f in result.findings) == [
+        ("CRITICAL", "tests/test_old.py was skipped as a whole in the full suite's run"),
+        ("IMPORTANT", 'no-module-level-skip: pytest.skip("not here"'),
+    ]
+    whole = next(f for f in result.findings if f["severity"] == "CRITICAL")
+    assert "not here" in whole["evidence"]
+
+
+@needs_ast_grep
+def test_results_whose_paths_are_not_the_checkouts_are_unreadable_not_empty(repo):
+    """pytest names files from its rootdir: a suite run with another rootdir
+    (here tests/, through a tests/pytest.ini) is not 'collected nothing'."""
+    base = _git(repo, "rev-parse", "HEAD")
+    commit(repo, {"tests/pytest.ini": "[pytest]\n",
+                  "tests/test_new.py": "def test_new():\n    assert True\n"}, "own rootdir")
+
+    def elsewhere(step, checkout):
+        junit = checkout.parent / "elsewhere.xml"
+        env = {k: v for k, v in os.environ.items() if not k.startswith("PYTEST_")}
+        done = subprocess.run([*step.argv, "tests", f"--junitxml={junit}", "-o",
+                               "junit_family=xunit1"], cwd=checkout, env=env,
+                              capture_output=True, timeout=120)
+        return StepRun(done.returncode, done.stdout, 1.0, junit.read_bytes())
+
+    result = round0(repo, base, steps=(SUITE,), run=elsewhere)
+
+    assert result.failed_steps == ()
+    assert [f["claim"].split(" (")[0] for f in result.findings] == [
+        "the full suite's per-test results cannot be read"]
+
+
+@needs_ast_grep
+def test_identical_guard_hits_in_one_file_are_separate_findings(repo):
+    base = _git(repo, "rev-parse", "HEAD")
+    commit(repo, {"tests/test_new.py": """\
+        def test_new():
+            try:
+                assert f()
+            except Exception:
+                pass
+            try:
+                assert f()
+            except Exception:
+                pass
+    """}, "two swallows")
+
+    result = round0(repo, base)
+
+    prints = [f["fingerprint"] for f in result.findings]
+    assert len(prints) == 2 and len(set(prints)) == 2
+
+
+def test_guard_rules_that_cannot_run_are_one_finding(repo):
+    base = _git(repo, "rev-parse", "HEAD")
+    commit(repo, {"tests/test_new.py": "def test_new():\n    assert True\n"}, "new")
+
+    result = round0(repo, base, ast_grep=None)
+
+    guard = [f for f in result.findings if "guard checks could not run" in f["claim"]]
+    assert len(guard) == 1 and guard[0]["evidence"].count("ast-grep is not installed") == 5
+
+
+@needs_ast_grep
+def test_a_changed_test_file_that_cannot_be_read_is_a_finding_not_a_crash(repo):
+    base = _git(repo, "rev-parse", "HEAD")
+    (repo / "tests").mkdir(exist_ok=True)
+    (repo / "tests" / "test_link.py").symlink_to("nowhere.py")
+    commit(repo, {"tests/test_new.py": "def test_new():\n    assert True\n"}, "a dangling link")
+
+    result = round0(repo, base)
+
+    assert not result.passed
+    assert any(f["claim"] == "tests/test_link.py cannot be read, so its tests cannot be told "
+               "apart" for f in result.findings)
+
+
+@needs_ast_grep
+def test_a_test_file_the_lint_walk_excludes_is_left_to_the_run_checks(repo):
+    base = _git(repo, "rev-parse", "HEAD")
+    commit(repo, {"build/test_built.py": "def test_built():\n    return\n"}, "under build/")
+
+    result = round0(repo, base)
+
+    assert result.round["lenses"]["provenance"]["status"] == "ok"
+    assert not [f for f in result.findings if "guard checks" in f["claim"]]
+    assert not [f for f in result.findings if f["claim"].startswith("no-early-return")]

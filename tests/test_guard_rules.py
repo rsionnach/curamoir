@@ -113,12 +113,19 @@ def test_module_level_skips(tmp_path):
             pytest.skip("a skip in a test is the run's to report")
             pytest.importorskip("yaml")
 
-        if True:
-            pytest.skip("nested in a block is not at module level")
+        class TestMarked:
+            pytestmark = pytest.mark.skip(reason="a class's own mark")
+
+        if sys.platform == "win32":
+            pytest.skip("under a module-level if", allow_module_level=True)
+        try:
+            import yaml
+        except ImportError:
+            pytest.skip("under a module-level try", allow_module_level=True)
     """})
 
     assert found == {("tests/test_skips.py", line, "no-module-level-skip")
-                     for line in (2, 3, 4, 5, 6)}
+                     for line in (2, 3, 4, 5, 6, 18, 22)}
 
 
 @needs_ast_grep
