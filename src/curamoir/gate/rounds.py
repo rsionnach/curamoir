@@ -386,17 +386,27 @@ def _tests_in(source: str):
 
 
 def _classes_in(source: str) -> frozenset:
-    """The names of the classes the module defines outside any function,
-    under any block: the first part of a class chain pytest can collect."""
+    """The names the module binds outside any function, under any block: a
+    class it defines, a name it imports (``from x import TestBase``,
+    ``import x as y``) or assigns. pytest collects a module's attributes by
+    name whatever bound them, so these are the names a test's class chain
+    under this module can start with."""
     names = set()
 
     def visit(body):
         for node in body:
-            if isinstance(node, ast.ClassDef):
+            if isinstance(node, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
                 names.add(node.name)
-            elif not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                for block in _blocks(node):
-                    visit(block)
+            elif isinstance(node, (ast.Import, ast.ImportFrom)):
+                names.update((alias.asname or alias.name).split(".")[0]
+                             for alias in node.names)
+            elif isinstance(node, (ast.Assign, ast.AnnAssign)):
+                targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+                names.update(t.id for target in targets for t in ast.walk(target)
+                             if isinstance(t, ast.Name))
+            for block in _blocks(node) if not isinstance(
+                    node, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)) else ():
+                visit(block)
 
     visit(ast.parse(source).body)
     return frozenset(names)
@@ -535,13 +545,16 @@ def _run_findings(repo: Path, changed: list, read: dict, junit) -> list:
             findings.append(read[path])
             continue
         tests, touched, classes = read[path]
-        # A case is this module's when it names the file, or when its class is
-        # one this module defines: xunit1's `file` is the file that defines
-        # the test function, so a test a class here inherits from another
-        # file names that other file (tests.test_b.TestB, file
-        # tests/test_base.py). Only the module's own classes, so that a
-        # sibling package (tests/test_a/...) is never taken for tests/test_a.py.
-        in_module = [c for c in cases if c["file"] == path
+        # A case is this module's when it names the file, or when its class
+        # name is the module's: the module itself (a test function at its top
+        # level) or the module followed by a name the module binds. xunit1's
+        # `file` is the file that defines the test function, so a test this
+        # module inherits or imports from another file names that other file
+        # (classname tests.test_b.TestB, file tests/test_base.py). Only names
+        # the module binds, so that a sibling package's cases
+        # (tests.test_a.test_inner under tests/test_a/) are never taken for
+        # tests/test_a.py's.
+        in_module = [c for c in cases if c["file"] == path or c["classname"] == module
                      or (c["classname"].startswith(module + ".")
                          and c["classname"][len(module) + 1:].split(".")[0] in classes)]
         # A module-level entry (named for the module, no class) is pytest's

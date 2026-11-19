@@ -984,3 +984,28 @@ def test_a_sibling_package_of_a_changed_module_is_not_its_tests(repo):
 
     assert [f["claim"] for f in result.findings if f["path"] == "tests/test_a.py"] == [
         "tests/test_a.py collected no test in the full suite's run, so nothing in it ran"]
+
+
+@needs_ast_grep
+def test_a_module_whose_tests_are_imported_from_another_file_has_tests(repo):
+    """An imported test function runs under the importing module
+    (classname tests.test_c), and an imported class under the module's name
+    for it (tests.test_d.Shared): both are the module's, by name."""
+    commit(repo, {"tests/__init__.py": "", "tests/test_base.py": """\
+        def test_shared():
+            assert True
+
+
+        class TestBase:
+            def test_x(self):
+                assert True
+    """}, "a shared suite")
+    base = _git(repo, "rev-parse", "HEAD")
+    commit(repo, {
+        "tests/test_c.py": "from tests.test_base import test_shared  # noqa: F401\n",
+        "tests/test_d.py": "from tests.test_base import TestBase as TestShared  # noqa: F401\n",
+    }, "modules that import their tests")
+
+    result = round0(repo, base)
+
+    assert result.passed, result.findings
