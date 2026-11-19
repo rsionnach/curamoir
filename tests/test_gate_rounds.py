@@ -935,3 +935,52 @@ def test_junit_xml_over_the_size_cap_is_refused(repo, monkeypatch):
 
     claims_ = [f["claim"] for f in result.findings if "per-test results" in f["claim"]]
     assert len(claims_) == 1 and f"bytes, over {len(xml) - 1}" in claims_[0]
+
+
+# --- final correctness (after provenance) --------------------------------------
+
+@needs_ast_grep
+def test_a_module_whose_tests_are_all_inherited_from_another_file_has_tests(repo):
+    """xunit1's `file` is the file that defines the test function: a class
+    here re-running another file's tests names that other file. The run's
+    cases are this module's by their class, so it did collect tests."""
+    commit(repo, {"tests/__init__.py": "", "tests/test_base.py": """\
+        class TestBase:
+            backend = "a"
+
+            def test_x(self):
+                assert self.backend
+    """}, "a shared suite")
+    base = _git(repo, "rev-parse", "HEAD")
+    commit(repo, {"tests/test_b.py": """\
+        from tests.test_base import TestBase
+
+
+        class TestB(TestBase):
+            backend = "b"
+    """}, "the suite against another backend")
+
+    result = round0(repo, base)
+
+    assert result.passed, result.findings
+
+
+@needs_ast_grep
+def test_a_sibling_package_of_a_changed_module_is_not_its_tests(repo):
+    """tests/test_a/ is not tests/test_a.py: a case under the package, whose
+    class the module does not define, does not count as the module's."""
+    base = _git(repo, "rev-parse", "HEAD")
+    commit(repo, {"tests/test_a.py": "HELPER = 1\n",
+                  "tests/test_a/__init__.py": "",
+                  "tests/test_a/test_inner.py": "def test_inner():\n    assert True\n"},
+           "a module beside a package of the same name")
+    xml = (b"<testsuite><testcase file='tests/test_a/test_inner.py' "
+           b"classname='tests.test_a.test_inner' name='test_inner'/>"
+           b"<testcase file='tests/test_old.py' classname='tests.test_old' "
+           b"name='test_old'/></testsuite>")
+
+    result = round0(repo, base, steps=(SUITE,),
+                    run=lambda step, checkout: StepRun(0, b"", 0.0, xml))
+
+    assert [f["claim"] for f in result.findings if f["path"] == "tests/test_a.py"] == [
+        "tests/test_a.py collected no test in the full suite's run, so nothing in it ran"]

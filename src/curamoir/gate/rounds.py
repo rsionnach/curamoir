@@ -385,6 +385,23 @@ def _tests_in(source: str):
     return found
 
 
+def _classes_in(source: str) -> frozenset:
+    """The names of the classes the module defines outside any function,
+    under any block: the first part of a class chain pytest can collect."""
+    names = set()
+
+    def visit(body):
+        for node in body:
+            if isinstance(node, ast.ClassDef):
+                names.add(node.name)
+            elif not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                for block in _blocks(node):
+                    visit(block)
+
+    visit(ast.parse(source).body)
+    return frozenset(names)
+
+
 def _blocks(node):
     """The statement lists directly inside a compound statement, whatever
     its kind: bodies, else branches, finally, except handlers and match
@@ -416,13 +433,14 @@ def _is_test_case(base) -> bool:
 
 
 def _read_tests(repo: Path, base: str, head: str, changed: list) -> dict:
-    """{path: (tests, changed lines)} for each changed test file, read
+    """{path: (tests, changed lines, classes)} for each changed test file, read
     before any step runs, or {path: finding} for one that cannot be read or
     parsed."""
     read = {}
     for path in changed:
         try:
-            tests = _tests_in((repo / path).read_text(encoding="utf-8", errors="replace"))
+            source = (repo / path).read_text(encoding="utf-8", errors="replace")
+            tests, classes = _tests_in(source), _classes_in(source)
         except OSError as error:
             read[path] = _run_finding(path, 1, 1, f"{path} cannot be read, so its tests "
                                       "cannot be told apart", str(error))
@@ -432,7 +450,7 @@ def _read_tests(repo: Path, base: str, head: str, changed: list) -> dict:
                                       f"{path} does not parse, so its tests cannot run",
                                       str(error))
             continue
-        read[path] = (tests, _changed_lines(repo, base, head, path))
+        read[path] = (tests, _changed_lines(repo, base, head, path), classes)
     return read
 
 
@@ -513,12 +531,19 @@ def _run_findings(repo: Path, changed: list, read: dict, junit) -> list:
     findings = []
     for path in changed:
         module = path[:-len(".py")].replace("/", ".")
-        # By file: the xunit1 check above means every case names one.
-        in_module = [c for c in cases if c["file"] == path]
         if isinstance(read[path], dict):
             findings.append(read[path])
             continue
-        tests, touched = read[path]
+        tests, touched, classes = read[path]
+        # A case is this module's when it names the file, or when its class is
+        # one this module defines: xunit1's `file` is the file that defines
+        # the test function, so a test a class here inherits from another
+        # file names that other file (tests.test_b.TestB, file
+        # tests/test_base.py). Only the module's own classes, so that a
+        # sibling package (tests/test_a/...) is never taken for tests/test_a.py.
+        in_module = [c for c in cases if c["file"] == path
+                     or (c["classname"].startswith(module + ".")
+                         and c["classname"][len(module) + 1:].split(".")[0] in classes)]
         # A module-level entry (named for the module, no class) is pytest's
         # report on collecting the module itself: an error, or a skip of the
         # whole module. Only the other entries are tests.
