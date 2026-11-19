@@ -89,9 +89,10 @@ SUITE = Step("suite", PYTEST, 120, suite=True)
 LINT = Step("lint", (sys.executable, "-c", "print('lint: clean')"), 60)
 
 
-def round0(repo, base, *, steps=(LINT, SUITE), run=pytest_run, ast_grep=AST_GREP):
+def round0(repo, base, *, steps=(LINT, SUITE), run=pytest_run, ast_grep=AST_GREP,
+           test_paths=("tests",)):
     return run_round0(repo, base=base, head=_git(repo, "rev-parse", "HEAD"), steps=steps,
-                      run=run, ast_grep=ast_grep)
+                      run=run, test_paths=test_paths, ast_grep=ast_grep)
 
 
 def claims(result):
@@ -390,7 +391,8 @@ def test_invalid_steps_are_refused_before_anything_runs(repo, steps, message):
 
     with pytest.raises(Round0Error, match=message):
         run_round0(repo, base=_git(repo, "rev-parse", "HEAD"), head=_git(repo, "rev-parse", "HEAD"),
-                   steps=steps, run=lambda step, checkout: ran.append(step), ast_grep=None)
+                   steps=steps, run=lambda step, checkout: ran.append(step), test_paths=("tests",),
+                   ast_grep=None)
     assert ran == []
 
 
@@ -402,12 +404,12 @@ def test_round_0_runs_only_on_a_clean_checkout_of_head(repo):
         raise AssertionError("nothing may run")
 
     with pytest.raises(Round0Error, match="not head"):
-        run_round0(repo, base=head, head=base, steps=(SUITE,), run=refuse, ast_grep=None)
+        run_round0(repo, base=head, head=base, steps=(SUITE,), run=refuse, test_paths=('tests',), ast_grep=None)
     (repo / "src" / "app.py").write_text("VALUE = 10\n", encoding="utf-8")
     with pytest.raises(Round0Error, match="tracked changes"):
-        run_round0(repo, base=base, head=head, steps=(SUITE,), run=refuse, ast_grep=None)
+        run_round0(repo, base=base, head=head, steps=(SUITE,), run=refuse, test_paths=('tests',), ast_grep=None)
     with pytest.raises(Round0Error, match="full commit id"):
-        run_round0(repo, base="main", head=head, steps=(SUITE,), run=refuse, ast_grep=None)
+        run_round0(repo, base="main", head=head, steps=(SUITE,), run=refuse, test_paths=('tests',), ast_grep=None)
 
 
 def test_a_run_function_must_return_a_step_run(repo):
@@ -563,8 +565,139 @@ def test_a_test_file_the_lint_walk_excludes_is_left_to_the_run_checks(repo):
     base = _git(repo, "rev-parse", "HEAD")
     commit(repo, {"build/test_built.py": "def test_built():\n    return\n"}, "under build/")
 
-    result = round0(repo, base)
+    result = round0(repo, base, test_paths=("tests", "build"))
 
     assert result.round["lenses"]["provenance"]["status"] == "ok"
     assert not [f for f in result.findings if "guard checks" in f["claim"]]
     assert not [f for f in result.findings if f["claim"].startswith("no-early-return")]
+
+
+# --- fix round 1 (edge-cases review) -------------------------------------------
+
+@needs_ast_grep
+def test_a_step_that_rewrites_a_changed_test_file_cannot_hide_it(repo):
+    """The checks read head's files before any step runs repository code,
+    and a step that changes the checkout fails the round."""
+    base = _git(repo, "rev-parse", "HEAD")
+    commit(repo, {"tests/test_new.py": """\
+        import pytest
+
+        pytest.skip("off", allow_module_level=True)
+
+        def test_new():
+            assert True
+    """}, "a skipped module")
+    rewrite = Step("format", (sys.executable, "-c",
+                              "open('tests/test_new.py', 'w').write("
+                              "'def test_new():\\n    assert True\\n')"), 60)
+
+    result = round0(repo, base, steps=(rewrite, SUITE))
+
+    claims_ = [f["claim"] for f in result.findings]
+    assert any(c.startswith("no-module-level-skip:") for c in claims_)
+    moved = [f for f in result.findings if f["claim"].startswith("a step changed the checkout")]
+    assert len(moved) == 1 and moved[0]["path"] == "tests/test_new.py"
+    assert "tests/test_new.py" in moved[0]["evidence"]
+    assert not result.passed
+
+
+@needs_ast_grep
+def test_an_xfail_that_is_never_run_is_a_test_that_did_not_run(repo):
+    base = _git(repo, "rev-parse", "HEAD")
+    commit(repo, {"tests/test_new.py": """\
+        import pytest
+
+        @pytest.mark.xfail(run=False, reason="later")
+        def test_never_run():
+            assert 1 == 2
+    """}, "an xfail that never runs")
+
+    result = round0(repo, base)
+
+    assert [f["claim"] for f in result.findings] == [
+        "tests/test_new.py::test_never_run was skipped in the full suite's run, so the change "
+        "to it was not tested"]
+    assert "[NOTRUN] later" in result.findings[0]["evidence"]
+
+
+@needs_ast_grep
+def test_a_skipped_test_in_a_unittest_class_of_any_name_is_checked(repo):
+    base = _git(repo, "rev-parse", "HEAD")
+    commit(repo, {"tests/test_new.py": """\
+        import unittest
+
+        class Checks(unittest.TestCase):
+            @unittest.skip("off")
+            def test_skipped(self):
+                pass
+
+        class Helper:
+            def test_not_collected(self):
+                pass
+    """}, "a unittest class")
+
+    result = round0(repo, base)
+
+    assert [f["claim"] for f in result.findings] == [
+        "tests/test_new.py::Checks::test_skipped was skipped in the full suite's run, so the "
+        "change to it was not tested"]
+
+
+@needs_ast_grep
+def test_a_test_defined_under_a_module_level_block_is_checked(repo):
+    base = _git(repo, "rev-parse", "HEAD")
+    commit(repo, {"tests/test_new.py": """\
+        import sys
+
+        import pytest
+
+        if sys.version_info >= (3,):
+            @pytest.mark.skip(reason="under an if")
+            def test_under_if():
+                pass
+        try:
+            import json
+        except ImportError:
+            pass
+        else:
+            @pytest.mark.skip(reason="under a try's else")
+            def test_under_else():
+                pass
+    """}, "tests under blocks")
+
+    result = round0(repo, base)
+
+    assert sorted(f["claim"].split(" was ")[0] for f in result.findings) == [
+        "tests/test_new.py::test_under_else", "tests/test_new.py::test_under_if"]
+
+
+@needs_ast_grep
+def test_a_file_named_like_a_test_outside_the_test_paths_is_not_checked(repo):
+    """A fixture named test_*.py (this repository has some) is not one of
+    the suite's tests, and may hold the guard shapes on purpose."""
+    base = _git(repo, "rev-parse", "HEAD")
+    commit(repo, {"fixtures/sample/tests/test_planted.py": """\
+        import pytest
+        pytestmark = pytest.mark.skip(reason="a planted violation")
+
+        def test_planted():
+            return
+    """, "tests/test_new.py": "def test_new():\n    assert True\n"}, "a fixture")
+
+    assert round0(repo, base).passed
+
+
+@pytest.mark.parametrize("test_paths", ["tests", (), ("/tests",), ("../x",), ("a//b",), (3,)])
+def test_test_paths_must_be_plain_repo_relative_paths(repo, test_paths):
+    base = _git(repo, "rev-parse", "HEAD")
+
+    with pytest.raises(Round0Error, match=r"test path|test_paths"):
+        round0(repo, base, run=lambda step, checkout: None, ast_grep=None, test_paths=test_paths)
+
+
+@pytest.mark.parametrize("duration", [None, float("nan"), float("inf"), -1, "1"])
+def test_a_run_function_giving_no_real_duration_is_refused(repo, duration):
+    base = _git(repo, "rev-parse", "HEAD")
+
+    with pytest.raises(Round0Error, match="not a finite number of seconds"):
+        round0(repo, base, run=lambda step, checkout: StepRun(0, b"", duration), ast_grep=None)

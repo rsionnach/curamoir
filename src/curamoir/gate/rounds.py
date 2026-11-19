@@ -45,6 +45,7 @@ from __future__ import annotations
 
 import ast
 import datetime
+import math
 import re
 import xml.etree.ElementTree as ElementTree
 from collections.abc import Callable, Sequence
@@ -124,18 +125,32 @@ class Round0:
 
 
 def run_round0(repo, *, base: str, head: str, steps: Sequence[Step], run: RunFunction,
-               ast_grep: str | None, ast_grep_timeout: float = DEFAULT_TIMEOUT,
-               n: int = 1) -> Round0:
+               test_paths: Sequence[str], ast_grep: str | None,
+               ast_grep_timeout: float = DEFAULT_TIMEOUT, n: int = 1) -> Round0:
     """Run round 0 on ``base..head`` in ``repo``, a checkout of ``head``
-    with no tracked change. Every step runs, in order, whatever the ones
-    before it did, so the record holds all of their output; then the R5-R33
-    checks. ``ast_grep`` is the ast-grep binary the guard rules need (None:
-    they cannot run, which fails the round). ``n`` is the round's number in
-    the record."""
+    with no tracked change.
+
+    The R5-R33 checks read the changed test files first, before any step
+    runs repository code that could rewrite them; then every step runs, in
+    order, whatever the ones before it did, so the record holds all of their
+    output; then the checkout is checked again, and a step that moved HEAD
+    or changed a tracked file fails the round. ``test_paths`` are the
+    repo-relative directories (or files) the suite collects tests from, the
+    project's ``testpaths``: a changed ``test_*.py`` outside them (a fixture
+    named like a test) is not one of the suite's tests and is not checked.
+    ``ast_grep`` is the ast-grep binary the guard rules need (None: they
+    cannot run, which fails the round). ``n`` is the round's number in the
+    record."""
     repo = Path(repo).resolve()
     _check_steps(steps)
+    scope = _check_test_paths(test_paths)
     _check_checkout(repo, base, head)
     started = _now()
+
+    changed = [path for path in _changed_test_files(repo, base, head)
+               if any(path == root or path.startswith(root + "/") for root in scope)]
+    findings, available = _guard_findings(repo, changed, ast_grep, ast_grep_timeout)
+    read = _read_tests(repo, base, head, changed)
 
     step_records, failed, junit = [], [], None
     for step in steps:
@@ -149,9 +164,11 @@ def run_round0(repo, *, base: str, head: str, steps: Sequence[Step], run: RunFun
         if step.suite:
             junit = outcome.junit_xml
 
-    changed = _changed_test_files(repo, base, head)
-    findings, available = _guard_findings(repo, changed, ast_grep, ast_grep_timeout)
-    findings += _run_findings(repo, base, head, changed, junit)
+    moved, where = _moved_by_the_steps(repo, head)
+    if moved:
+        findings.append(_run_finding(where, 1, 1, "a step changed the checkout round 0 ran "
+                                     "on, so its results are not head's", moved))
+    findings += _run_findings(repo, changed, read, junit)
     for finding in findings:
         finding["fingerprint"] = fingerprint(LENS, finding["path"], finding["claim"])
         finding["status"] = "open"
@@ -230,6 +247,38 @@ def _check_steps(steps) -> None:
                           "the R5-R33 run checks read its results")
 
 
+def _check_test_paths(test_paths) -> tuple:
+    if isinstance(test_paths, str) or not isinstance(test_paths, Sequence) or not test_paths:
+        raise Round0Error("test_paths names the directories the suite collects tests from, "
+                          "a non-empty sequence of repo-relative paths")
+    scope = []
+    for root in test_paths:
+        parts = root.strip("/").split("/") if isinstance(root, str) else []
+        if not parts or root.startswith("/") or any(p in ("", ".", "..") for p in parts):
+            raise Round0Error(f"test path {root!r} is not a plain repo-relative path")
+        scope.append("/".join(parts))
+    return tuple(scope)
+
+
+def _moved_by_the_steps(repo: Path, head: str) -> tuple:
+    """(why, path): why the checkout is no longer ``head`` as committed
+    after the steps, and the first file changed ("." when HEAD moved or the
+    checkout cannot be read); ("", "") when it still is head."""
+    try:
+        checked_out = git(repo, "rev-parse", "HEAD").decode("ascii").strip()
+        dirty = git(repo, "status", "--porcelain", "-z", "--untracked-files=no",
+                    "--ignore-submodules=all")
+    except GitGuardError as error:
+        return f"the checkout cannot be read after the steps: {error}", "."
+    if checked_out != head:
+        return f"HEAD is {checked_out} after the steps, not {head}", "."
+    if dirty:
+        names = [entry[3:].decode("utf-8", "replace") for entry in dirty.split(b"\0")
+                 if len(entry) > 3]
+        return "tracked files changed by the steps: " + ", ".join(names[:10]), names[0]
+    return "", ""
+
+
 def _check_checkout(repo: Path, base: str, head: str) -> None:
     """``repo`` is ``head`` checked out with no tracked change, and both
     ends are commits: round 0 reads the files on disk as ``head``'s."""
@@ -250,6 +299,10 @@ def _check_checkout(repo: Path, base: str, head: str) -> None:
 
 
 def _step_record(step: Step, outcome: StepRun) -> dict:
+    duration = outcome.duration_s
+    if type(duration) not in (int, float) or not math.isfinite(duration) or duration < 0:
+        raise Round0Error(f"the run function gave step {step.name!r} a duration_s of "
+                          f"{duration!r}, not a finite number of seconds")
     output = outcome.output if isinstance(outcome.output, bytes) else b""
     text = output.decode("utf-8", "replace")
     return {"name": step.name, "argv": list(step.argv),
@@ -295,11 +348,48 @@ def _tests_in(source: str):
                     and node.name.startswith(TEST_FUNCTION_PREFIX):
                 first = min([node.lineno] + [d.lineno for d in node.decorator_list])
                 found.append((chain, node.name, first, node.end_lineno))
-            elif isinstance(node, ast.ClassDef) and node.name.startswith(TEST_CLASS_PREFIX):
+            elif isinstance(node, ast.ClassDef) and (node.name.startswith(TEST_CLASS_PREFIX)
+                                                     or any(map(_is_test_case, node.bases))):
                 visit(node.body, (*chain, node.name))
+            elif isinstance(node, (ast.If, ast.Try, ast.With)):
+                # A definition under a module- or class-level block is still
+                # collected: `if sys.version_info >= ...: def test_...`.
+                for block in (node.body, getattr(node, "orelse", []),
+                              getattr(node, "finalbody", [])):
+                    visit(block, chain)
+                for handler in getattr(node, "handlers", []):
+                    visit(handler.body, chain)
 
     visit(tree.body, ())
     return found
+
+
+def _is_test_case(base) -> bool:
+    """Whether a class base names a ``unittest.TestCase`` (or a subclass
+    named for it): pytest collects such a class whatever its own name."""
+    name = base.attr if isinstance(base, ast.Attribute) else getattr(base, "id", "")
+    return name.endswith("TestCase")
+
+
+def _read_tests(repo: Path, base: str, head: str, changed: list) -> dict:
+    """{path: (tests, changed lines)} for each changed test file, read
+    before any step runs, or {path: finding} for one that cannot be read or
+    parsed."""
+    read = {}
+    for path in changed:
+        try:
+            tests = _tests_in((repo / path).read_text(encoding="utf-8", errors="replace"))
+        except OSError as error:
+            read[path] = _run_finding(path, 1, 1, f"{path} cannot be read, so its tests "
+                                      "cannot be told apart", str(error))
+            continue
+        except SyntaxError as error:
+            read[path] = _run_finding(path, error.lineno or 1, error.lineno or 1,
+                                      f"{path} does not parse, so its tests cannot run",
+                                      str(error))
+            continue
+        read[path] = (tests, _changed_lines(repo, base, head, path))
+    return read
 
 
 # --- R5-R33: the guard rules -------------------------------------------------
@@ -358,7 +448,7 @@ def _unavailable(path: str, reason: str) -> dict:
 
 # --- R5-R33: what the suite run shows ----------------------------------------
 
-def _run_findings(repo: Path, base: str, head: str, changed: list, junit) -> list:
+def _run_findings(repo: Path, changed: list, read: dict, junit) -> list:
     """A finding for each changed test module that collected nothing, each
     changed test that was skipped or not run, and a suite whose results
     cannot be read. Nothing to check when no test file changed."""
@@ -381,18 +471,10 @@ def _run_findings(repo: Path, base: str, head: str, changed: list, junit) -> lis
         module = path[:-len(".py")].replace("/", ".")
         in_module = [c for c in cases if c["file"] == path or c["classname"] == module
                      or c["classname"].startswith(module + ".")]
-        try:
-            source = (repo / path).read_text(encoding="utf-8", errors="replace")
-            tests = _tests_in(source)
-        except OSError as error:
-            findings.append(_run_finding(path, 1, 1, f"{path} cannot be read, so its tests "
-                                         "cannot be told apart", str(error)))
+        if isinstance(read[path], dict):
+            findings.append(read[path])
             continue
-        except SyntaxError as error:
-            findings.append(_run_finding(path, error.lineno or 1, error.lineno or 1,
-                                         f"{path} does not parse, so its tests cannot run",
-                                         str(error)))
-            continue
+        tests, touched = read[path]
         # A module-level entry (named for the module, no class) is pytest's
         # report on collecting the module itself: an error, or a skip of the
         # whole module. Only the other entries are tests.
@@ -409,7 +491,6 @@ def _run_findings(repo: Path, base: str, head: str, changed: list, junit) -> lis
                     "nothing in it ran", f"no test case under {module} in the JUnit XML"
                     + (f"; collection error: {whole[0]['message']}" if whole else "")))
             continue
-        touched = _changed_lines(repo, base, head, path)
         for chain, name, first, last in tests:
             if not touched.intersection(range(first, last + 1)):
                 continue
@@ -460,7 +541,10 @@ def _junit_cases(junit):
     for case in root.iter("testcase"):
         kind, message = "passed", ""
         for child in case:
-            if child.tag == "skipped" and child.get("type") != "pytest.xfail":
+            # An xfail ran and failed as expected, so it counts as run;
+            # one with run=False (message "[NOTRUN] ...") never ran.
+            if child.tag == "skipped" and (child.get("type") != "pytest.xfail"
+                                           or child.get("message", "").startswith("[NOTRUN]")):
                 kind, message = "skipped", " ".join(
                     part for part in (child.get("message", ""), (child.text or "").strip()[:300])
                     if part)

@@ -285,7 +285,8 @@ def _preflight(raw) -> dict:
             raise RecordError("a preflight step's argv is a non-empty list of strings")
         if step["exit"] is not None and type(step["exit"]) is not int:
             raise RecordError("a preflight step's exit is an integer, or None when it has none")
-        if type(step["duration_s"]) not in (int, float) or step["duration_s"] < 0:
+        if type(step["duration_s"]) not in (int, float) or not step["duration_s"] >= 0 \
+                or step["duration_s"] == float("inf"):
             raise RecordError("a preflight step's duration_s is a number of seconds, not negative")
         if not isinstance(step["output_tail"], str) \
                 or len(step["output_tail"]) > PREFLIGHT_TAIL_CHARS:

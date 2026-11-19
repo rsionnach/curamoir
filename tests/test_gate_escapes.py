@@ -96,7 +96,8 @@ def green_suite(step, checkout):
 def round0(repo, base):
     return run_round0(repo, base=base, head=_git(repo, "rev-parse", "HEAD"),
                       steps=(Step("suite", ("pytest", "-q"), 600, suite=True),),
-                      run=green_suite, ast_grep=shutil.which("ast-grep"))
+                      run=green_suite, test_paths=("tests",),
+                      ast_grep=shutil.which("ast-grep"))
 
 
 def test_both_entries_are_the_corpus_escapes():

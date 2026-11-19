@@ -735,6 +735,8 @@ def test_only_a_preflight_round_carries_preflight(repo):
     ({"steps": [_step(exit="1")]}, "exit is an integer"),
     ({"steps": [_step(duration_s=-1)]}, "duration_s"),
     ({"steps": [_step(duration_s="4")]}, "duration_s"),
+    ({"steps": [_step(duration_s=float("nan"))]}, "duration_s"),
+    ({"steps": [_step(duration_s=float("inf"))]}, "duration_s"),
     ({"steps": [_step(output_tail="x" * (record.PREFLIGHT_TAIL_CHARS + 1))]}, "at most"),
     ({"steps": [_step(output_bytes=-1)]}, "output_bytes"),
     ({"steps": [_step(output_bytes=8.0)]}, "output_bytes"),
