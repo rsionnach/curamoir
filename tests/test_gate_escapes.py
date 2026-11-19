@@ -85,7 +85,7 @@ def green_suite(step, checkout):
     cases = []
     for path in sorted(p.relative_to(checkout).as_posix() for p in checkout.rglob("test_*.py")):
         module = path[:-len(".py")].replace("/", ".")
-        for chain, name, _, _ in _tests_in((checkout / path).read_text(encoding="utf-8")):
+        for chain, name, *_ in _tests_in((checkout / path).read_text(encoding="utf-8")):
             cases.append(f'<testcase classname="{".".join((module, *chain))}" name="{name}" '
                          f'file="{path}" line="1" time="0.001"/>')
     assert cases

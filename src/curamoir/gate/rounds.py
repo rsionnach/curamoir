@@ -125,7 +125,8 @@ class Round0:
 
 
 def run_round0(repo, *, base: str, head: str, steps: Sequence[Step], run: RunFunction,
-               test_paths: Sequence[str], ast_grep: str | None,
+               test_paths: Sequence[str], test_excludes: Sequence[str] = (),
+               ast_grep: str | None,
                ast_grep_timeout: float = DEFAULT_TIMEOUT, n: int = 1) -> Round0:
     """Run round 0 on ``base..head`` in ``repo``, a checkout of ``head``
     with no tracked change.
@@ -136,19 +137,23 @@ def run_round0(repo, *, base: str, head: str, steps: Sequence[Step], run: RunFun
     output; then the checkout is checked again, and a step that moved HEAD
     or changed a tracked file fails the round. ``test_paths`` are the
     repo-relative directories (or files) the suite collects tests from, the
-    project's ``testpaths``: a changed ``test_*.py`` outside them (a fixture
-    named like a test) is not one of the suite's tests and is not checked.
+    project's ``testpaths`` (``"."`` for the whole repository): a changed
+    ``test_*.py`` outside them (a fixture named like a test) is not one of
+    the suite's tests and is not checked, and neither is one under
+    ``test_excludes`` (what the project's ``collect_ignore`` or
+    ``norecursedirs`` keeps out).
     ``ast_grep`` is the ast-grep binary the guard rules need (None: they
     cannot run, which fails the round). ``n`` is the round's number in the
     record."""
     repo = Path(repo).resolve()
     _check_steps(steps)
-    scope = _check_test_paths(test_paths)
+    scope = _check_test_paths(test_paths, "test_paths")
+    excluded = _check_test_paths(test_excludes, "test_excludes", empty=True)
     _check_checkout(repo, base, head)
     started = _now()
 
     changed = [path for path in _changed_test_files(repo, base, head)
-               if any(path == root or path.startswith(root + "/") for root in scope)]
+               if _under(path, scope) and not _under(path, excluded)]
     findings, available = _guard_findings(repo, changed, ast_grep, ast_grep_timeout)
     read = _read_tests(repo, base, head, changed)
 
@@ -247,17 +252,26 @@ def _check_steps(steps) -> None:
                           "the R5-R33 run checks read its results")
 
 
-def _check_test_paths(test_paths) -> tuple:
-    if isinstance(test_paths, str) or not isinstance(test_paths, Sequence) or not test_paths:
-        raise Round0Error("test_paths names the directories the suite collects tests from, "
-                          "a non-empty sequence of repo-relative paths")
+def _check_test_paths(paths, name, empty=False) -> tuple:
+    """``paths`` as normalised repo-relative paths, "" for ``"."`` (the
+    whole repository)."""
+    if isinstance(paths, str) or not isinstance(paths, Sequence) or (not paths and not empty):
+        raise Round0Error(f"{name} is a {'' if empty else 'non-empty '}sequence of repo-relative "
+                          "paths (directories or files)")
     scope = []
-    for root in test_paths:
+    for root in paths:
+        if root == ".":
+            scope.append("")
+            continue
         parts = root.strip("/").split("/") if isinstance(root, str) else []
         if not parts or root.startswith("/") or any(p in ("", ".", "..") for p in parts):
-            raise Round0Error(f"test path {root!r} is not a plain repo-relative path")
+            raise Round0Error(f"test path {root!r} in {name} is not a plain repo-relative path")
         scope.append("/".join(parts))
     return tuple(scope)
+
+
+def _under(path: str, roots: tuple) -> bool:
+    return any(root == "" or path == root or path.startswith(root + "/") for root in roots)
 
 
 def _moved_by_the_steps(repo: Path, head: str) -> tuple:
@@ -335,33 +349,63 @@ def _changed_lines(repo: Path, base: str, head: str, path: str) -> set:
 
 
 def _tests_in(source: str):
-    """[(class chain, function name, first line, last line)] for every test
-    function pytest would collect by its default names: ``test*`` at module
-    level or in a ``Test*`` class (nested ones included). The first line is
-    the first decorator's."""
+    """[(class chain, function name, first line, last line, collected by
+    name, xfails first)] for every function named ``test*`` defined in the
+    module or in its classes, under any block (``if``, ``try``, ``for``,
+    ``with``, ``match`` ...), but not inside another function. The first
+    line is the first decorator's.
+
+    "Collected by name" is whether pytest's default rules collect it on its
+    name alone: at module level, or in classes each named ``Test*`` or with a
+    direct ``*TestCase`` base. Only such a test is reported as left out of
+    the run when the run does not name it; any other (a test in a subclass
+    of a project base class, a mixin's method) is checked only through what
+    the run reports for it. "Xfails first" marks a test whose first
+    statement is ``pytest.xfail(...)``: its expected failure means none of
+    it ran."""
     tree = ast.parse(source)
     found = []
 
-    def visit(body, chain):
+    def visit(body, chain, by_name):
         for node in body:
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) \
-                    and node.name.startswith(TEST_FUNCTION_PREFIX):
-                first = min([node.lineno] + [d.lineno for d in node.decorator_list])
-                found.append((chain, node.name, first, node.end_lineno))
-            elif isinstance(node, ast.ClassDef) and (node.name.startswith(TEST_CLASS_PREFIX)
-                                                     or any(map(_is_test_case, node.bases))):
-                visit(node.body, (*chain, node.name))
-            elif isinstance(node, (ast.If, ast.Try, ast.With)):
-                # A definition under a module- or class-level block is still
-                # collected: `if sys.version_info >= ...: def test_...`.
-                for block in (node.body, getattr(node, "orelse", []),
-                              getattr(node, "finalbody", [])):
-                    visit(block, chain)
-                for handler in getattr(node, "handlers", []):
-                    visit(handler.body, chain)
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                if node.name.startswith(TEST_FUNCTION_PREFIX):
+                    first = min([node.lineno] + [d.lineno for d in node.decorator_list])
+                    found.append((chain, node.name, first, node.end_lineno, by_name,
+                                  _xfails_first(node)))
+            elif isinstance(node, ast.ClassDef):
+                visit(node.body, (*chain, node.name),
+                      by_name and (node.name.startswith(TEST_CLASS_PREFIX)
+                                   or any(map(_is_test_case, node.bases))))
+            else:
+                for block in _blocks(node):
+                    visit(block, chain, by_name)
 
-    visit(tree.body, ())
+    visit(tree.body, (), True)
     return found
+
+
+def _blocks(node):
+    """The statement lists directly inside a compound statement, whatever
+    its kind: bodies, else branches, finally, except handlers and match
+    cases."""
+    for name in ("body", "orelse", "finalbody"):
+        value = getattr(node, name, None)
+        if isinstance(value, list):
+            yield value
+    for name in ("handlers", "cases"):
+        for part in getattr(node, name, None) or ():
+            yield part.body
+
+
+def _xfails_first(function) -> bool:
+    first = function.body[0] if function.body else None
+    if isinstance(first, ast.Expr) and isinstance(first.value, ast.Constant) \
+            and len(function.body) > 1:
+        first = function.body[1]
+    call = first.value if isinstance(first, ast.Expr) else None
+    return isinstance(call, ast.Call) and isinstance(call.func, ast.Attribute) \
+        and call.func.attr == "xfail" and getattr(call.func.value, "id", "") == "pytest"
 
 
 def _is_test_case(base) -> bool:
@@ -491,7 +535,7 @@ def _run_findings(repo: Path, changed: list, read: dict, junit) -> list:
                     "nothing in it ran", f"no test case under {module} in the JUnit XML"
                     + (f"; collection error: {whole[0]['message']}" if whole else "")))
             continue
-        for chain, name, first, last in tests:
+        for chain, name, first, last, by_name, xfails_first in tests:
             if not touched.intersection(range(first, last + 1)):
                 continue
             classname = ".".join((module, *chain))
@@ -499,12 +543,15 @@ def _run_findings(repo: Path, changed: list, read: dict, junit) -> list:
                     if c["classname"] == classname and c["name"].split("[", 1)[0] == name]
             node = "::".join((path, *chain, name))
             if not runs:
+                if not by_name:
+                    continue
                 findings.append(_run_finding(
                     path, first, last, f"{node} was not in the full suite's run (deselected "
                     "or never collected), so the change to it was not tested",
                     f"no test case {classname}.{name} in the JUnit XML"))
                 continue
-            skipped = [c for c in runs if c["kind"] == "skipped"]
+            skipped = [c for c in runs if c["kind"] == "skipped"
+                       or (xfails_first and c["kind"] == "xfailed")]
             if skipped:
                 findings.append(_run_finding(
                     path, first, last, f"{node} was skipped in the full suite's run, so the "
@@ -522,9 +569,10 @@ def _run_finding(path, first, last, claim, evidence) -> dict:
 
 def _junit_cases(junit):
     """Every ``testcase`` in ``junit`` as {file, classname, name, kind,
-    message}, ``kind`` one of passed, failed, error, skipped (an expected
-    failure, pytest's ``xfail``, ran and is ``passed``); or a string saying
-    why there are none to read."""
+    message}, ``kind`` one of passed, failed, error, skipped, xfailed (an
+    expected failure that ran; one marked ``run=False``, reported
+    ``[NOTRUN]``, never ran and is ``skipped``); or a string saying why
+    there are none to read."""
     if junit is None:
         return "the suite step returned no JUnit XML"
     if not isinstance(junit, bytes):
@@ -543,8 +591,10 @@ def _junit_cases(junit):
         for child in case:
             # An xfail ran and failed as expected, so it counts as run;
             # one with run=False (message "[NOTRUN] ...") never ran.
-            if child.tag == "skipped" and (child.get("type") != "pytest.xfail"
-                                           or child.get("message", "").startswith("[NOTRUN]")):
+            if child.tag == "skipped" and child.get("type") == "pytest.xfail" \
+                    and not child.get("message", "").startswith("[NOTRUN]"):
+                kind, message = "xfailed", child.get("message", "")
+            elif child.tag == "skipped":
                 kind, message = "skipped", " ".join(
                     part for part in (child.get("message", ""), (child.text or "").strip()[:300])
                     if part)

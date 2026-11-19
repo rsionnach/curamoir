@@ -701,3 +701,128 @@ def test_a_run_function_giving_no_real_duration_is_refused(repo, duration):
 
     with pytest.raises(Round0Error, match="not a finite number of seconds"):
         round0(repo, base, run=lambda step, checkout: StepRun(0, b"", duration), ast_grep=None)
+
+
+# --- fix round 2 (edge-cases review) -------------------------------------------
+
+@needs_ast_grep
+def test_skipped_tests_in_subclasses_of_a_base_or_an_alias_are_checked(repo):
+    """Which classes pytest collects is the run's to say: a skip it reports
+    is matched to its function wherever the class came from."""
+    base = _git(repo, "rev-parse", "HEAD")
+    commit(repo, {"tests/test_new.py": """\
+        import unittest
+        from unittest import TestCase as TC
+
+        class Base(unittest.TestCase):
+            pass
+
+        class Checks(Base):
+            @unittest.skip("via a base")
+            def test_via_base(self):
+                pass
+
+        class Aliased(TC):
+            @unittest.skip("via an alias")
+            def test_via_alias(self):
+                pass
+
+        class Mixin:
+            def test_never_collected(self):
+                pass
+    """}, "indirect TestCase subclasses")
+
+    result = round0(repo, base)
+
+    assert sorted(f["claim"].split(" was ")[0] for f in result.findings) == [
+        "tests/test_new.py::Aliased::test_via_alias", "tests/test_new.py::Checks::test_via_base"]
+
+
+@needs_ast_grep
+def test_tests_under_any_module_level_block_are_checked(repo):
+    base = _git(repo, "rev-parse", "HEAD")
+    commit(repo, {"tests/test_new.py": """\
+        import pytest
+
+        for _ in [0]:
+            @pytest.mark.skip(reason="under a for")
+            def test_under_for():
+                pass
+
+        while True:
+            @pytest.mark.skip(reason="under a while")
+            def test_under_while():
+                pass
+            break
+
+        match 1:
+            case 1:
+                @pytest.mark.skip(reason="under a match")
+                def test_under_match():
+                    pass
+
+        try:
+            pass
+        except* ValueError:
+            pass
+        else:
+            @pytest.mark.skip(reason="under a try/except* else")
+            def test_under_try_star():
+                pass
+    """}, "tests under every block")
+
+    result = round0(repo, base)
+
+    assert sorted(f["claim"].split(" was ")[0] for f in result.findings) == [
+        f"tests/test_new.py::test_under_{kind}" for kind in ("for", "match", "try_star", "while")]
+
+
+@needs_ast_grep
+def test_an_imperative_xfail_first_is_a_test_that_did_not_run(repo):
+    base = _git(repo, "rev-parse", "HEAD")
+    commit(repo, {"tests/test_new.py": """\
+        import pytest
+
+        def test_xfails_first():
+            \"\"\"Documented.\"\"\"
+            pytest.xfail("later")
+            assert 1 == 2
+
+        @pytest.mark.xfail(reason="a known bug", strict=True)
+        def test_xfails_after_running():
+            assert 1 == 2
+    """}, "an imperative xfail")
+
+    result = round0(repo, base)
+
+    assert [f["claim"].split(" was ")[0] for f in result.findings] == [
+        "tests/test_new.py::test_xfails_first"]
+
+
+@needs_ast_grep
+def test_excluded_test_paths_and_the_whole_repository(repo):
+    base = _git(repo, "rev-parse", "HEAD")
+    commit(repo, {"tests/conftest.py": "collect_ignore = ['fixtures']\n",
+                  "tests/fixtures/test_sample_data.py": "def test_sample():\n    return\n",
+                  "tests/test_new.py": "def test_new():\n    assert True\n"}, "a fixture")
+
+    blocked = round0(repo, base)
+    excluded = run_round0(repo, base=base, head=_git(repo, "rev-parse", "HEAD"),
+                          steps=(LINT, SUITE), run=pytest_run, test_paths=(".",),
+                          test_excludes=("tests/fixtures",), ast_grep=AST_GREP)
+
+    assert any(f["path"] == "tests/fixtures/test_sample_data.py" for f in blocked.findings)
+    assert excluded.passed, excluded.findings
+
+
+@needs_ast_grep
+def test_a_step_that_moves_head_fails_the_round(repo):
+    base = _git(repo, "rev-parse", "HEAD")
+    commit(repo, {"tests/test_new.py": "def test_new():\n    assert True\n"}, "new")
+    move = Step("move", ("git", "commit", "-q", "--allow-empty", "-m", "moved"), 60)
+
+    result = round0(repo, base, steps=(move, SUITE))
+
+    moved = [f for f in result.findings if f["claim"].startswith("a step changed the checkout")]
+    assert len(moved) == 1 and moved[0]["path"] == "."
+    assert "after the steps, not" in moved[0]["evidence"]
