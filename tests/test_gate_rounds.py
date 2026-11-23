@@ -1108,3 +1108,57 @@ def test_a_case_two_files_fit_equally_cannot_be_attributed(repo):
         ("tests/test_v1/test_x.py",
          "the full suite's results cannot be attributed to tests/test_v1/test_x.py alone")]
     assert not result.passed
+
+
+def test_a_prefix_match_stops_at_a_dot(repo):
+    """tests.test_abc.helpers begins with the characters of tests.test_a but
+    not with tests.test_a followed by a dot: it is not tests/test_a.py's
+    case (a doctest or custom python_files module, not a test file)."""
+    base = _git(repo, "rev-parse", "HEAD")
+    commit(repo, {"tests/test_a.py": "HELPER = 1\n"}, "a module with no tests")
+    xml = (b"<testsuite><testcase classname='tests.test_abc.helpers' name='f'/>"
+           b"<testcase classname='tests.test_old' name='test_old'/></testsuite>")
+
+    result = round0(repo, base, steps=(SUITE,), run=_stub(xml), ast_grep=None)
+
+    assert [f["claim"] for f in result.findings if f["path"] == "tests/test_a.py"
+            and "guard checks" not in f["claim"]] == [
+        "tests/test_a.py collected no test in the full suite's run, so nothing in it ran"]
+
+
+def pytest_run_default_family(step, checkout):
+    """The run function the module docstring documents: --junitxml and
+    --rootdir, with pytest's default JUnit family (not xunit1)."""
+    junit = checkout.parent / f"junit-{time.monotonic_ns()}.xml"
+    argv = [*step.argv, f"--junitxml={junit}", f"--rootdir={checkout}"]
+    env = {k: v for k, v in os.environ.items() if not k.startswith("PYTEST_")}
+    done = subprocess.run(argv, cwd=checkout, env=env, stdout=subprocess.PIPE,
+                          stderr=subprocess.STDOUT, timeout=step.timeout)
+    return StepRun(done.returncode, done.stdout, 1.0, junit.read_bytes())
+
+
+@needs_ast_grep
+def test_round_0_reads_pytests_default_junit_family(repo):
+    """No `file` attribute in the default family: attribution by class name
+    still finds an inherited module's tests, a skipped changed test and an
+    empty changed module."""
+    commit(repo, {"tests/__init__.py": "", "tests/test_base.py": """\
+        class TestBase:
+            def test_x(self):
+                assert True
+    """}, "a shared suite")
+    base = _git(repo, "rev-parse", "HEAD")
+    commit(repo, {
+        "tests/test_b.py": "from tests.test_base import TestBase\n\n\n"
+                           "class TestB(TestBase):\n    pass\n",
+        "tests/test_skip.py": "import pytest\n\n\n@pytest.mark.skip(reason='off')\n"
+                              "def test_off():\n    pass\n",
+        "tests/test_empty.py": "HELPER = 1\n",
+    }, "three modules")
+
+    result = round0(repo, base, steps=(SUITE,), run=pytest_run_default_family)
+
+    assert sorted(f["claim"] for f in result.findings) == [
+        "tests/test_empty.py collected no test in the full suite's run, so nothing in it ran",
+        "tests/test_skip.py::test_off was skipped in the full suite's run, so the change to "
+        "it was not tested"]
