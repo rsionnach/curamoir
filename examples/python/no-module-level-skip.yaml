@@ -1,0 +1,53 @@
+# tests-actually-run, for Python tests. Matches a skip that applies to a whole
+# test module: `pytestmark` holding a `skip` or `skipif` mark, a module-level
+# `pytest.skip(..., allow_module_level=True)`, and a module-level
+# `pytest.importorskip(...)`. Each makes every test in the file report as
+# skipped, or vanish, on a checkout where its condition holds, and a green
+# run does not say so.
+#
+# A rule object (`rule:`), not a pattern: "at module level" is where the
+# statement sits, which a pattern cannot say. Module level includes a
+# module-level `if` or `try` (`if sys.platform == ...: pytest.skip(...,
+# allow_module_level=True)`, the usual form): the rule matches any such
+# statement that is not inside a function or a class, so a skip inside a
+# test or a fixture is not matched (that is a skipped test, which round 0
+# sees by running it).
+#
+# Severity `error`: the R5 gate's round 0 treats every hit as blocking, and a
+# platform guard that is really needed belongs on the tests it guards, with a
+# reason, where the run reports it per test.
+id: no-module-level-skip
+principle: tests-actually-run
+severity: error
+matcher: ast-grep
+rule:
+  kind: expression_statement
+  not:
+    inside:
+      any: [{kind: function_definition}, {kind: class_definition}]
+      stopBy: end
+  any:
+    - regex: '^pytestmark\s*(:[^=]*)?=[\s\S]*\bskip(if)?\b'
+    - regex: '^pytest\.skip\([\s\S]*\ballow_module_level\s*=\s*True\b'
+    - regex: '^(\w+\s*=\s*)?pytest\.importorskip\('
+fires_on: |
+  import pytest
+
+  pytestmark = pytest.mark.skipif(not EXAMPLES.is_dir(), reason="no sibling checkout")
+  if sys.platform == "win32":
+      pytest.skip("not on Windows", allow_module_level=True)
+silent_on: |
+  import pytest
+
+  pytestmark = pytest.mark.slow
+
+  def test_x():
+      pytest.skip("not here")
+
+  class TestY:
+      pytestmark = pytest.mark.skip(reason="a class mark, on the class's own tests")
+message: "{match} skips the whole module, so its tests can pass on a checkout where none of them ran"
+fix: "make the test's inputs part of the repository (or a fixture it builds), and drop the module-level skip; a guard that must stay goes on the one test it guards, with a reason"
+languages: [python]
+files: ["**/test_*.py", "**/*_test.py"]
+exclude: []

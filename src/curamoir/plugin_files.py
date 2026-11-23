@@ -69,6 +69,10 @@ HOOKS_JSON = ROOT / "hooks" / "hooks.json"
 #: The files `curamoir init` scaffolds from.
 TEMPLATES = ROOT / "templates"
 
+#: The bundled Python example rules; the R5 gate's round 0 runs the test
+#: guard rules among them (gate/rounds.py).
+PYTHON_EXAMPLES = ROOT / "examples" / "python"
+
 #: The launcher scripts, in the checkout only: None when installed, since
 #: a wheel carries none (doctor does not probe the hooks there).
 SCRIPTS = None if INSTALLED else ROOT / "scripts"

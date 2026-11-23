@@ -1,0 +1,40 @@
+# tests-actually-run, for Python tests. Matches an `except` clause whose whole
+# body is `pass` (or `...`): a bare `except:`, or `except Exception` /
+# `except BaseException`, with or without `as name`. Around an assertion it
+# swallows the AssertionError itself, so the test cannot fail.
+#
+# A rule object, not a pattern: a pattern for the clause needs the whole
+# `try`, and the body must be checked to be nothing but `pass`; the regex on
+# the clause's own text does that, comments included.
+#
+# Not matched: a clause naming a specific exception (`except KeyError: pass`
+# is a decision about one error), or one whose body does anything else.
+id: no-bare-except-pass
+principle: tests-actually-run
+severity: error
+matcher: ast-grep
+rule:
+  kind: except_clause
+  regex: '^except(\s+\(?\s*(builtins\.)?(Base)?Exception\s*\)?(\s+as\s+\w+)?)?\s*:\s*(#[^\n]*\s*)*(pass|\.\.\.)\s*(#[^\n]*)?$'
+fires_on: |
+  def test_total():
+      try:
+          assert total() == 3
+      except:
+          pass
+silent_on: |
+  def test_total():
+      try:
+          assert total() == 3
+      except KeyError:
+          pass
+      try:
+          run()
+      except Exception:
+          log()
+          raise
+message: "{match} swallows every error, an AssertionError included, so the test around it cannot fail"
+fix: "let the error propagate, or use pytest.raises(TheError) where raising is the behaviour under test"
+languages: [python]
+files: ["**/test_*.py", "**/*_test.py"]
+exclude: []

@@ -45,8 +45,9 @@ refuses any other value rather than guess what it meant.
 `docs/golden-principles.md` and `docs/conventions.md`, genericised to drop
 project-specific references — per the spec's operating assumption 5,
 "extraction, not invention". Each principle's `source` field says which one it
-came from, and the two marked `spec` are additions the specification names that
-the source set did not have. The `why` sections are kept close to the original
+came from: the two marked `spec` are additions the specification names that
+the source set did not have, and `tests-actually-run` is an addition from the R5
+gate's guard checks. The `why` sections are kept close to the original
 wording, because they describe failures someone actually observed; several of
 them name *agent* behaviour specifically, which is the point.
 
@@ -255,3 +256,24 @@ them name *agent* behaviour specifically, which is the point.
   sits closer to a convention than a golden principle; it is here because the
   specification names it, and a rule for it will only ever catch the obvious
   cases.
+
+## tests-actually-run
+
+- **id:** `tests-actually-run`
+- **title:** A test that is added or changed runs, and can fail
+- **rule:** A new or changed test must run on every checkout and reach its assertions.
+- **why:** A test that is skipped, collects nothing or returns before it asserts
+  reports as passing while checking nothing, and nothing in a green run says so.
+  The usual causes are quiet: a module skipped when a sibling checkout is
+  missing, a parametrise list read from a directory that is empty here, an
+  `if not ...: return` at the top of a test, a bare `except: pass` around the
+  assertion. Each one turns "the suite is green" into "the suite did not look",
+  which is exactly when a reviewer stops reading. The cost of the check is a
+  line; the cost of missing it is a regression shipped under a passing test.
+- **good:** `CASES = sorted(DATA.glob("*.json")); assert len(CASES) >= 3`
+- **bad:** `pytestmark = pytest.mark.skipif(not EXAMPLES.is_dir(), reason="no checkout")`
+- **tier:** principle
+- **promoted_on:** null
+- **source:** the R5 gate's execution and guard checks (cúramóir, cm-8ap.15), an
+  addition: the shapes a provenance reviewer found tests going quiet in, made
+  mechanical so they are checked with no model.

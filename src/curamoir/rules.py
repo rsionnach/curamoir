@@ -35,6 +35,20 @@ out the places the principle itself exempts, `fix` for the remediation E2-R4
 prints, `target` to match a path rather than a line, and `remedy` (REMEDIES)
 for a path rule whose fix the sweep applies itself.
 
+**A rule object in place of `pattern`** (cm-8ap.15, spec R5-R33). An
+`ast-grep` rule may give ast-grep's own rule object under `rule:` (`kind`,
+`inside`, `has`, `not`, `regex`, `stopBy` ...), with optional `constraints:`,
+instead of `pattern`: "a `return` inside a test function, but not inside a
+helper nested in one" is structure that no single pattern states. Exactly one
+of `pattern` and `rule` is given. A rule object can match nothing without
+error when its sub-rules are wrong (a `stopBy` in the wrong place, a `has`
+that should have been `inside`), so a `rule:` rule must also give `fires_on:`,
+a snippet it matches; a `pattern` rule may. Either may give `silent_on:`, a
+snippet it must not match. Both are checked before the rule searches anything
+(lint.run_lint), and a rule that fails either check does not run: the run
+exits 2 naming it. A rule with one language gives each as a string; a rule
+with several gives a map of language to snippet (`fires_on` for each of them).
+
 **Why `remedy` is a field** (cm-ul5). E2-R3 lists what a rule MUST define,
 not all it may, so an optional field extends the format the way `fix` and
 `target` already do: a rule without it means what it always meant. It exists
@@ -47,6 +61,7 @@ applies — so it is opt-in per rule and a closed vocabulary: a typo read as
 "no remedy" would leave the violation unfixed every sweep, saying nothing.
 """
 
+import json
 import os
 import re
 import stat
@@ -58,8 +73,20 @@ from curamoir.principles import PrincipleError, load_principles
 
 #: E2-R3's required fields. `fix` is not among them, though E2-R4 prints it:
 #: a rule for something with no mechanical remediation is still worth having,
-#: and demanding a fix would get a vacuous one.
+#: and demanding a fix would get a vacuous one. `pattern` is required unless
+#: an `ast-grep` rule gives `rule` (RULE_OBJECT) instead; exactly one of them.
 REQUIRED_FIELDS = ("id", "principle", "severity", "matcher", "pattern", "message")
+
+#: The field an `ast-grep` rule may give in place of `pattern`: ast-grep's
+#: own rule object. `constraints` goes with it, and only with it.
+RULE_OBJECT = "rule"
+CONSTRAINTS = "constraints"
+
+#: The snippets a rule is checked against before it searches anything:
+#: `fires_on` must be matched, `silent_on` must not be. `fires_on` is
+#: required for a rule object (RULE_OBJECT), optional for a pattern.
+FIRES_ON = "fires_on"
+SILENT_ON = "silent_on"
 
 #: DEC-3: ast-grep primary, regex as the declared escape hatch.
 MATCHERS = ("ast-grep", "regex")
@@ -204,6 +231,7 @@ class Rule:
     principle: str
     severity: str
     matcher: str
+    #: The ast-grep pattern or the regex; "" for a rule object.
     pattern: str
     message: str
     fix: str = ""
@@ -213,6 +241,15 @@ class Rule:
     target: str = "line"
     #: One of REMEDIES, or "" for none (the default).
     remedy: str = ""
+    #: An ast-grep rule object (RULE_OBJECT) and its `constraints`, each as
+    #: canonical JSON, or "" when the rule gives a `pattern`. Text rather than
+    #: a mapping so the rule stays frozen and hashable.
+    rule_object: str = ""
+    constraints: str = ""
+    #: ((language, snippet), ...): what the rule must match (FIRES_ON) and
+    #: must not (SILENT_ON). `language` is "" for a regex rule's snippet.
+    fires_on: tuple = ()
+    silent_on: tuple = ()
     #: Where this came from, for error messages and for E2-R4's output.
     source: str = ""
 
@@ -352,7 +389,9 @@ def parse_rule(text, source, known_principles):
     if not isinstance(data, dict):
         raise RuleError(f"{source}: expected a mapping of fields, got {type(data).__name__}")
 
-    missing = [name for name in REQUIRED_FIELDS if not _present(data.get(name))]
+    pattern_or_rule = "pattern" if RULE_OBJECT not in data else RULE_OBJECT
+    missing = [pattern_or_rule if name == "pattern" else name for name in REQUIRED_FIELDS
+               if not _present(data.get(pattern_or_rule if name == "pattern" else name))]
     if missing:
         raise RuleError(
             f"{source}: missing required field(s): {', '.join(missing)}. "
@@ -432,7 +471,8 @@ def parse_rule(text, source, known_principles):
             f"{', '.join(TARGETS)}."
         )
 
-    pattern = str(data["pattern"])
+    rule_object, constraints = _rule_object(data, matcher, rule_id, source)
+    pattern = "" if rule_object else str(data["pattern"])
     if matcher == "regex":
         _check_regex(pattern, target, rule_id, source)
     if target == "path" and matcher != "regex":
@@ -446,6 +486,14 @@ def parse_rule(text, source, known_principles):
         )
 
     remedy = _remedy(data.get("remedy"), target, rule_id, source)
+    fires_on = _snippets(data, FIRES_ON, matcher, languages, target, rule_id, source)
+    silent_on = _snippets(data, SILENT_ON, matcher, languages, target, rule_id, source)
+    if rule_object and not fires_on:
+        raise RuleError(
+            f"{source}: rule {rule_id!r} gives a `rule:` object and no `fires_on:`. A rule "
+            "object can match nothing without any error when its sub-rules are wrong, so "
+            "it must show a snippet it matches; give `fires_on:` (spec R5-R33)."
+        )
 
     return Rule(
         id=rule_id,
@@ -460,8 +508,120 @@ def parse_rule(text, source, known_principles):
         exclude=exclude,
         target=target,
         remedy=remedy,
+        rule_object=rule_object,
+        constraints=constraints,
+        fires_on=fires_on,
+        silent_on=silent_on,
         source=source,
     )
+
+
+def _rule_object(data, matcher, rule_id, source):
+    """(rule object, constraints) as canonical JSON, or ("", "") for a rule
+    that gives a `pattern`. RuleError for both or neither of `pattern` and
+    `rule`, a rule object on the regex matcher, `constraints` without one,
+    or either that is not a mapping JSON can hold."""
+    has_rule, has_pattern = RULE_OBJECT in data, "pattern" in data
+    if has_rule and has_pattern:
+        raise RuleError(
+            f"{source}: rule {rule_id!r} gives both `pattern` and `rule`. Give one: the "
+            "pattern, or ast-grep's rule object in its place."
+        )
+    if not has_rule:
+        if CONSTRAINTS in data:
+            raise RuleError(
+                f"{source}: rule {rule_id!r} gives `constraints` with a `pattern`. "
+                "`constraints` applies to a `rule:` object only."
+            )
+        return "", ""
+    if matcher != "ast-grep":
+        raise RuleError(
+            f"{source}: rule {rule_id!r} gives a `rule:` object with matcher {matcher!r}. "
+            "A rule object is ast-grep's; use `matcher: ast-grep`, or a `pattern`."
+        )
+    found = []
+    for name in (RULE_OBJECT, CONSTRAINTS):
+        value = data.get(name)
+        if name == CONSTRAINTS and value is None:
+            found.append("")
+            continue
+        if not isinstance(value, dict) or not value:
+            raise RuleError(
+                f"{source}: rule {rule_id!r} has a `{name}` that is not a mapping of "
+                "ast-grep rule fields (kind, inside, has, not, regex, ...)."
+            )
+        try:
+            found.append(json.dumps(value, sort_keys=True, ensure_ascii=False,
+                                    allow_nan=False))
+        except (TypeError, ValueError) as unwritable:
+            raise RuleError(
+                f"{source}: rule {rule_id!r} has a `{name}` holding a value that is not "
+                f"text, a number, a list or a mapping ({unwritable}); quote it."
+            ) from unwritable
+    return found[0], found[1]
+
+
+def _snippets(data, field, matcher, languages, target, rule_id, source):
+    """((language, snippet), ...) for `fires_on` or `silent_on`, () when the
+    field is absent. A string is the snippet of the rule's one language; a
+    map is language to snippet, and a `fires_on` map names every language
+    of the rule. Language is "" for a regex rule's snippet, which is matched
+    line by line whatever the language."""
+    value = data.get(field)
+    if value is None:
+        return ()
+    if target == "path":
+        raise RuleError(
+            f"{source}: rule {rule_id!r} gives `{field}` on a `target: path` rule, which "
+            "matches a filename, not code; drop it."
+        )
+    if matcher == "regex":
+        if not isinstance(value, str) or not value.strip():
+            raise RuleError(
+                f"{source}: rule {rule_id!r} has a `{field}` that is not a non-empty "
+                "snippet of text."
+            )
+        return (("", value),)
+    if not languages:
+        raise RuleError(
+            f"{source}: rule {rule_id!r} gives `{field}` with no `languages`. A snippet "
+            "is parsed as one language, so name the rule's languages."
+        )
+    if isinstance(value, str):
+        if len(languages) != 1:
+            raise RuleError(
+                f"{source}: rule {rule_id!r} has {len(languages)} languages, so `{field}` "
+                "must map each language to its snippet "
+                f"({', '.join(languages)}), not give one snippet for all."
+            )
+        value = {languages[0]: value}
+    if not isinstance(value, dict) or not value:
+        raise RuleError(
+            f"{source}: rule {rule_id!r} has a `{field}` that is neither a snippet nor a "
+            "map of language to snippet."
+        )
+    pairs = []
+    for language, snippet in value.items():
+        if language not in languages:
+            raise RuleError(
+                f"{source}: rule {rule_id!r} has a `{field}` snippet for {language!r}, "
+                f"which is not one of its languages ({', '.join(languages)})."
+            )
+        if not isinstance(snippet, str) or not snippet.strip():
+            raise RuleError(
+                f"{source}: rule {rule_id!r} has a `{field}` for {language!r} that is not "
+                "a non-empty snippet of code."
+            )
+        pairs.append((language, snippet))
+    if field == FIRES_ON:
+        absent = [name for name in languages if name not in value]
+        if absent:
+            raise RuleError(
+                f"{source}: rule {rule_id!r} has no `fires_on` snippet for "
+                f"{', '.join(absent)}: each of its languages parses the rule its own way, "
+                "so each needs one."
+            )
+    return tuple(sorted(pairs))
 
 
 def _remedy(value, target, rule_id, source):

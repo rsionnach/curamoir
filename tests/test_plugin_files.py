@@ -32,6 +32,7 @@ def test_from_the_checkout_the_root_is_the_checkout():
     assert plugin_files.ROOT == REPO_ROOT
     assert plugin_files.HOOKS_JSON == REPO_ROOT / "hooks" / "hooks.json"
     assert plugin_files.TEMPLATES == REPO_ROOT / "templates"
+    assert plugin_files.PYTHON_EXAMPLES == REPO_ROOT / "examples" / "python"
     assert plugin_files.SCRIPTS == REPO_ROOT / "scripts"
 
 

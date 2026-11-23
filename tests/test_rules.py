@@ -18,6 +18,8 @@ deliberate: a rule with a typo should fail when it is loaded, naming the file
 and the field, not halfway through a sweep.
 """
 
+import json
+import re
 import textwrap
 
 import pytest
@@ -637,3 +639,155 @@ def test_a_remedy_outside_the_closed_vocabulary_is_refused(tmp_path, value):
     assert "v.yaml" in message
     assert "remedy" in message
     assert "delete_file" in message
+
+
+# --- a rule object in place of a pattern (cm-8ap.15, spec R5-R33) -----------
+#
+# Three guard checks need structure one ast-grep pattern cannot state ("a
+# `return` inside a test, not inside a helper nested in one"), so an ast-grep
+# rule may give ast-grep's own rule object under `rule:`. A rule object can
+# match nothing without error when its sub-rules are wrong, so it must carry a
+# snippet it matches (`fires_on`); `silent_on` is a snippet it must not.
+
+RULE_OBJECT = textwrap.dedent("""\
+    id: no-early-return
+    principle: structured-logging
+    severity: error
+    matcher: ast-grep
+    rule:
+      kind: return_statement
+      inside: {kind: function_definition, stopBy: {kind: function_definition}}
+    fires_on: |
+      def test_x():
+          return
+    silent_on: "x = 1\\n"
+    languages: [python]
+    message: "{match} leaves the test early"
+""")
+
+
+RULE_BODY = ("rule:\n  kind: return_statement\n"
+             "  inside: {kind: function_definition, stopBy: {kind: function_definition}}\n")
+assert RULE_BODY in RULE_OBJECT
+
+
+def _parsed(text):
+    return parse_rule(text, source="r.yaml", known_principles={"structured-logging"})
+
+
+def test_a_rule_object_loads_in_place_of_a_pattern(tmp_path):
+    rule = load_rules(write(tmp_path, RULE_OBJECT, name="no-early-return.yaml"))[0]
+
+    assert rule.pattern == ""
+    assert json.loads(rule.rule_object) == {
+        "kind": "return_statement",
+        "inside": {"kind": "function_definition", "stopBy": {"kind": "function_definition"}}}
+    assert rule.constraints == ""
+    assert rule.fires_on == (("python", "def test_x():\n    return\n"),)
+    assert rule.silent_on == (("python", "x = 1\n"),)
+
+
+def test_constraints_go_with_a_rule_object_as_canonical_json():
+    rule = _parsed(RULE_OBJECT + "constraints:\n  V: {kind: identifier}\n")
+
+    assert rule.constraints == '{"V": {"kind": "identifier"}}'
+
+
+def test_a_rule_object_is_held_as_text_so_the_rule_stays_hashable():
+    rule = _parsed(RULE_OBJECT)
+
+    assert hash(rule) == hash(_parsed(RULE_OBJECT))
+
+
+@pytest.mark.parametrize(("change", "message"), [
+    (lambda t: t + "pattern: 'return'\n", "gives both `pattern` and `rule`"),
+    (lambda t: t.replace("matcher: ast-grep", "matcher: regex"), "with matcher 'regex'"),
+    (lambda t: t.replace(RULE_BODY, ""), "missing required field(s): pattern"),
+    (lambda t: t.replace(RULE_BODY, "rule: return_statement\n"), "`rule` that is not a mapping"),
+    (lambda t: t.replace(RULE_BODY, "rule: {}\n"), "missing required field(s): rule"),
+    (lambda t: t + "constraints: [a]\n", "`constraints` that is not a mapping"),
+    (lambda t: t + "constraints: {}\n", "`constraints` that is not a mapping"),
+    (lambda t: t + "constraints:\n  V: {regex: .nan}\n", "not text, a number"),
+    (lambda t: t + "constraints:\n  V: {regex: 2026-11-18}\n", "not text, a number"),
+])
+def test_a_malformed_rule_object_is_refused_at_load(change, message):
+    with pytest.raises(RuleError, match=re.escape(message)):
+        _parsed(change(RULE_OBJECT))
+
+
+def test_constraints_with_a_pattern_are_refused():
+    text = RULE.replace("matcher: regex", "matcher: ast-grep").replace(
+        "pattern: '^\\s*print\\('", "pattern: 'print($A)'") + "constraints: {A: {kind: string}}\n"
+
+    with pytest.raises(RuleError, match="applies to a `rule:` object only"):
+        parse_rule(text, source="r.yaml", known_principles={"structured-logging"})
+
+
+def test_a_rule_object_without_fires_on_is_refused():
+    text = RULE_OBJECT.replace("fires_on: |\n  def test_x():\n      return\n", "")
+    assert "fires_on" not in text
+
+    with pytest.raises(RuleError, match="no `fires_on:`"):
+        _parsed(text)
+
+
+def test_a_pattern_rule_may_give_snippets_and_needs_neither():
+    text = RULE.replace("matcher: regex", "matcher: ast-grep").replace(
+        "pattern: '^\\s*print\\('", "pattern: 'print($$$A)'")
+
+    assert _parsed(text).fires_on == ()
+    assert _parsed(text + "fires_on: 'print(1)'\n").fires_on == (("python", "print(1)"),)
+
+
+@pytest.mark.parametrize(("snippets", "message"), [
+    ("fires_on: 'x'\n", "must map each language to its snippet"),
+    ("fires_on: {python: 'x', go: 'y'}\n", "for 'go', which is not one of its languages"),
+    ("fires_on: {python: 'x'}\n", "no `fires_on` snippet for typescript"),
+    ("fires_on: {python: 'x', typescript: ''}\n", "not a non-empty snippet"),
+    ("fires_on: {python: 'x', typescript: 'y'}\nsilent_on: 3\n",
+     "neither a snippet nor a map"),
+])
+def test_several_languages_take_a_map_of_snippets(snippets, message):
+    text = RULE_OBJECT.replace("languages: [python]", "languages: [python, typescript]")
+    text = text.split("fires_on:")[0] + snippets + "languages: [python, typescript]\n" \
+        + 'message: "m"\n'
+
+    with pytest.raises(RuleError, match=re.escape(message)):
+        _parsed(text)
+
+
+def test_a_silent_on_map_may_name_some_of_the_languages():
+    text = RULE_OBJECT.split("fires_on:")[0] + (
+        "fires_on: {python: 'return', typescript: 'return'}\n"
+        "silent_on: {python: 'x = 1'}\n"
+        "languages: [python, typescript]\nmessage: m\n")
+
+    rule = _parsed(text)
+
+    assert rule.fires_on == (("python", "return"), ("typescript", "return"))
+    assert rule.silent_on == (("python", "x = 1"),)
+
+
+def test_a_snippet_needs_the_rules_languages():
+    text = RULE_OBJECT.replace("languages: [python]\n", "")
+
+    with pytest.raises(RuleError, match="with no `languages`"):
+        _parsed(text)
+
+
+def test_a_regex_rules_snippets_are_text_matched_line_by_line():
+    rule = parse_rule(RULE + "fires_on: \"  print('x')\\n\"\nsilent_on: 'logger.info(1)'\n",
+                      source="r.yaml", known_principles={"structured-logging"})
+
+    assert rule.fires_on == (("", "  print('x')\n"),)
+    with pytest.raises(RuleError, match="not a non-empty snippet of text"):
+        parse_rule(RULE + "fires_on: {python: x}\n", source="r.yaml",
+                   known_principles={"structured-logging"})
+
+
+def test_a_path_rule_takes_no_snippets():
+    text = RULE.replace("pattern: '^\\s*print\\('", "pattern: '_v2\\.py$'") + \
+        "target: path\nfires_on: a_v2.py\n"
+
+    with pytest.raises(RuleError, match="on a `target: path` rule"):
+        parse_rule(text, source="r.yaml", known_principles={"structured-logging"})

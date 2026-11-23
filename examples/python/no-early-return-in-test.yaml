@@ -1,0 +1,41 @@
+# tests-actually-run, for Python tests. Matches a `return` in the body of a
+# test function (a `def` or `async def` named `test*`, as pytest collects by
+# default, a method included),
+# the `if not <thing>: return` that ends a test before its assertions and
+# reports it as passed.
+#
+# A rule object, not a pattern: "inside a test, but not inside a helper
+# nested in one" is structure. `stopBy: {kind: function_definition}` stops
+# the search for the enclosing test at the nearest function, so a `return`
+# in a helper defined inside a test belongs to the helper and is not matched.
+id: no-early-return-in-test
+principle: tests-actually-run
+severity: error
+matcher: ast-grep
+rule:
+  kind: return_statement
+  inside:
+    kind: function_definition
+    has:
+      field: name
+      regex: '^test'
+    stopBy:
+      kind: function_definition
+fires_on: |
+  def test_cases(case):
+      if not case.exists():
+          return
+      assert load(case)
+silent_on: |
+  def test_with_a_helper():
+      def helper():
+          return 1
+      assert helper() == 1
+
+  def _not_a_test():
+      return 2
+message: "{match} leaves a test before its assertions, so the test passes without checking anything"
+fix: "fail instead of returning (assert case.exists(), f\"missing {case}\"), or build the input the test needs so the condition cannot hold"
+languages: [python]
+files: ["**/test_*.py", "**/*_test.py"]
+exclude: []

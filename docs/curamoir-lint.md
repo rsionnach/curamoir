@@ -58,6 +58,8 @@ as every wrapper) it takes the first that can import PyYAML.
 - a rule could not search every file in its scope (an `ast-grep` rule over a
   file it has no grammar for, or a file ast-grep skipped; any rule over a file
   that cannot be read);
+- a rule did not match its own `fires_on` snippet, or matched its own
+  `silent_on` (see `docs/rules-authoring.md`), so it did not run;
 - a directory in the repository could not be listed;
 - the run exceeded `--timeout`;
 - an option was invalid or empty (`--repo ""`);
@@ -68,8 +70,8 @@ as every wrapper) it takes the first that can import PyYAML.
 
 `2` outranks `1`. A run that skipped rules has not shown them clean, so it is
 reported as incomplete even if what did run found something. When rules were
-skipped — ast-grep missing, or a rule that could not search every file in its
-scope — the partial report is still printed, each skipped rule is in
+skipped — ast-grep missing, a rule that failed its own snippets, or a rule
+that could not search every file in its scope — the partial report is still printed, each skipped rule is in
 `rules_skipped` with the files named where they are known, and the other
 rules' findings are kept. So are a skipped rule's own findings in the files it
 did search: they are real violations, and are listed in `violations` like any

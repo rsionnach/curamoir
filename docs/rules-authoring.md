@@ -39,7 +39,12 @@ files: ["**/*.py"]               # or by glob, which wins over `languages`
 exclude: ["**/cli.py"]           # carve out what the principle itself exempts
 target: line                     # or `path`, to match a filename
 remedy: delete_file              # `target: path` only: the sweep deletes the file
+fires_on: "print('x')"           # a snippet the rule must match
+silent_on: "logger.info('x')"    # a snippet it must not
 ```
+
+An `ast-grep` rule may give ast-grep's own rule object under `rule:` in place
+of `pattern` (see [A rule object](#a-rule-object-in-place-of-a-pattern)).
 
 | field | what it is |
 |---|---|
@@ -52,6 +57,8 @@ remedy: delete_file              # `target: path` only: the sweep deletes the fi
 | `fix` | the remediation. Optional, because some principles have no mechanical fix — but write one if you can, because it is the field that stops an agent retrying the same thing. |
 | `target` | `line` (default) or `path`, for rules about filenames. |
 | `remedy` | `delete_file`, or leave it out. Only on a `target: path` rule, and only when the file's existence is the violation (`foo_v2.py` beside `foo.py`). See below. |
+| `rule`, `constraints` | an `ast-grep` rule only, in place of `pattern`: ast-grep's rule object and its metavariable constraints. See below. |
+| `fires_on`, `silent_on` | snippets the rule must match and must not, checked before every run. `fires_on` is required with `rule`. See below. |
 
 ### `remedy`: a fix the sweep applies itself
 
@@ -157,6 +164,60 @@ npm install -g @ast-grep/cli
 brew install ast-grep
 ```
 
+## A rule object in place of a pattern
+
+Some things a rule looks for are structure, not a shape: "a `return` inside a
+test function, but not inside a helper nested in one", "an `except` whose
+body is nothing but `pass`". One pattern cannot say either. For those, give
+ast-grep's own [rule object](https://ast-grep.github.io/guide/rule-config.html)
+under `rule:` instead of `pattern` (exactly one of the two), with optional
+`constraints:` on its metavariables:
+
+```yaml
+id: no-early-return-in-test
+principle: tests-actually-run
+severity: error
+matcher: ast-grep
+rule:
+  kind: return_statement
+  inside:
+    kind: function_definition
+    has: {field: name, regex: '^test_'}
+    stopBy: {kind: function_definition}
+fires_on: |
+  def test_cases(case):
+      if not case:
+          return
+silent_on: |
+  def test_with_a_helper():
+      def helper():
+          return 1
+      assert helper() == 1
+message: "{match} leaves a test before its assertions"
+languages: [python]
+```
+
+It runs through `ast-grep scan` with the rule given inline, from the same
+scratch directory and with the same empty config as a pattern, so nothing in
+the repository (an `sgconfig.yml`, a rules directory) changes what it
+matches; only `rule` and `constraints` are passed to ast-grep, never other
+keys of its rule format (`utils`, `fix`, `files`).
+
+**A rule object can match nothing and say nothing.** A `stopBy` in the wrong
+place, a `has` that should have been `inside`, or a sub-rule that reads a
+metavariable before the one that binds it (they run in order inside `all:`)
+gives a rule that loads, runs, and reports every file clean. So a `rule:`
+rule must carry `fires_on`, a snippet it matches; any rule may carry it, and
+`silent_on`, a snippet it must not match. Before a rule searches anything,
+`curamoir-lint` searches its snippets the same way; a rule that misses its
+`fires_on` or matches its `silent_on` does not run, and the run exits 2
+naming it. A rule with one language gives each as a string; a rule with
+several gives a map of language to snippet, with a `fires_on` for every
+language (each parses the rule its own way). A `regex` rule's snippets are
+text, matched line by line. Neither field applies to a `target: path` rule.
+
+The bundled test guard rules in `examples/python/` are all rule objects.
+
 ## Scoping
 
 A rule with neither `languages` nor `files` applies to every language cúramóir
@@ -249,6 +310,17 @@ naming the file and the field:
 - the `ast-grep` matcher over `languages: [markdown]` or `[toml]`, which
   `curamoir-lint` has no ast-grep grammar for (the rule would search nothing)
 - a `files` or `exclude` glob that does not compile
+- both `pattern` and `rule`, a `rule` on the `regex` matcher, `constraints`
+  without a `rule`, or a `rule` or `constraints` that is not a mapping
+- a `rule` without `fires_on`; a `fires_on` or `silent_on` that is empty, on a
+  `target: path` rule, on an ast-grep rule with no `languages`, a single
+  snippet for a rule of several languages, or a map naming a language the
+  rule does not have (or, for `fires_on`, missing one it has)
+
+Two checks need ast-grep, so they run at the start of every run instead, and
+fail it (exit 2) naming the rule: a rule that does not match its own
+`fires_on`, or matches its own `silent_on`. An invalid rule object (an
+unknown `kind`, say) is ast-grep's own error and fails the run too.
 
 `/curamoir:doctor` loads every rule for exactly this reason: so a broken rule is
 something you find when you ask, rather than during an unattended run.

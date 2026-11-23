@@ -144,6 +144,7 @@ def test_curamoir_is_imported_from_the_venv_and_reads_its_packaged_files(install
         "print(json.dumps({'file': curamoir.__file__, 'installed': p.INSTALLED,"
         " 'root': str(p.ROOT), 'hooks': p.HOOKS_JSON.is_file(),"
         " 'templates': sorted(x.name for x in p.TEMPLATES.iterdir()),"
+        " 'examples': sorted(x.name for x in p.PYTHON_EXAMPLES.iterdir()),"
         " 'lint': str(s.LINT), 'plugin_root': str(f.PLUGIN_ROOT)}))"))
 
     assert Path(seen["file"]).resolve().is_relative_to(venv)
@@ -152,6 +153,8 @@ def test_curamoir_is_imported_from_the_venv_and_reads_its_packaged_files(install
     assert Path(seen["root"]).is_relative_to(venv) and seen["plugin_root"] == seen["root"]
     assert seen["hooks"]
     assert seen["templates"] == sorted(p.name for p in (ROOT / "templates").iterdir())
+    # The test guard rules round 0 runs (cm-8ap.15) are in the wheel.
+    assert seen["examples"] == sorted(p.name for p in (ROOT / "examples" / "python").iterdir())
     assert Path(seen["lint"]).resolve() == (bin_directory / "curamoir-lint").resolve()
 
 
