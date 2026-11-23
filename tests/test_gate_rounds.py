@@ -360,7 +360,8 @@ def test_a_test_that_only_lost_lines_counts_as_changed(repo):
     (None, "returned no JUnit XML"),
     (b"<testsuite", "does not parse"),
     (b"<testsuite/>", "no test case at all"),
-    (b"<testsuite><testcase classname='a' name='b'/></testsuite>", "not junit_family=xunit1"),
+    (b"<testsuite><testcase classname='a' name='b'/></testsuite>",
+     "no test case is named for a test file"),
     (b"<!DOCTYPE x [<!ENTITY a 'b'>]><testsuite/>", "declares a DOCTYPE"),
 ])
 def test_suite_results_that_cannot_be_read_block(repo, junit, reason):
@@ -1009,3 +1010,101 @@ def test_a_module_whose_tests_are_imported_from_another_file_has_tests(repo):
     result = round0(repo, base)
 
     assert result.passed, result.findings
+
+
+
+# --- attribution by class name (Rob, 2026-11-23) --------------------------------
+#
+# A JUnit case belongs to the test file whose dotted module name its class
+# name is or begins, the longest winning; never to the file JUnit's `file`
+# names (the defining file). The four shapes a module gets tests in, and the
+# two collisions the longest match resolves.
+
+@needs_ast_grep
+def test_star_imported_and_bound_tests_are_the_importing_modules(repo):
+    commit(repo, {"tests/__init__.py": "", "tests/test_base.py": """\
+        class TestBase:
+            def test_x(self):
+                assert True
+    """}, "a shared suite")
+    base = _git(repo, "rev-parse", "HEAD")
+    commit(repo, {
+        "tests/test_star.py": "from tests.test_base import *  # noqa: F403\n",
+        "tests/test_for.py": """\
+            from tests import test_base
+
+            for TestLoop in [test_base.TestBase]:
+                pass
+        """,
+        "tests/test_with.py": """\
+            import contextlib
+
+            from tests import test_base
+
+            with contextlib.nullcontext(test_base.TestBase) as TestWith:
+                pass
+        """,
+    }, "modules whose tests arrive by star import and by binding")
+
+    result = round0(repo, base)
+
+    assert result.passed, result.findings
+
+
+def _stub(xml):
+    return lambda step, checkout: StepRun(0, b"", 0.0, xml)
+
+
+def test_a_dotted_directorys_cases_are_not_the_shorter_modules(repo):
+    """tests/test_v1.2/test_x.py reads as tests.test_v1.2.test_x, which begins
+    with tests.test_v1, the name of tests/test_v1.py: the longer name wins,
+    so the dotted directory's case is not taken for tests/test_v1.py."""
+    base = _git(repo, "rev-parse", "HEAD")
+    commit(repo, {"tests/test_v1.py": "HELPER = 1\n",
+                  "tests/test_v1.2/test_x.py": "def test_x():\n    assert True\n"},
+           "a dotted directory")
+    xml = (b"<testsuite><testcase classname='tests.test_v1.2.test_x' name='test_x'/>"
+           b"<testcase classname='tests.test_old' name='test_old'/></testsuite>")
+
+    result = round0(repo, base, steps=(SUITE,), run=_stub(xml), ast_grep=None)
+
+    run = [f for f in result.findings if "guard checks" not in f["claim"]]
+    assert [f["claim"] for f in run] == [
+        "tests/test_v1.py collected no test in the full suite's run, so nothing in it ran"]
+
+
+def test_attribution_ignores_the_file_attribute(repo):
+    """An inherited test's case names its base module's file; attributed by
+    class name, it is the subclassing module's."""
+    base = _git(repo, "rev-parse", "HEAD")
+    commit(repo, {"tests/test_b.py": "from tests.test_old import test_old  # noqa: F401\n"},
+           "an imported test")
+    xml = (b"<testsuite><testcase classname='tests.test_b' name='test_old' "
+           b"file='tests/test_old.py'/></testsuite>")
+
+    result = round0(repo, base, steps=(SUITE,), run=_stub(xml), ast_grep=None)
+
+    assert [f for f in result.findings if "guard checks" not in f["claim"]] == []
+
+
+def test_a_case_two_files_fit_equally_cannot_be_attributed(repo):
+    """tests/test_v1.test_x.py and tests/test_v1/test_x.py are both
+    tests.test_v1.test_x: a case under that name is neither file's alone,
+    which blocks, and is never read as "ran" or "collected no test"."""
+    base = _git(repo, "rev-parse", "HEAD")
+    commit(repo, {"tests/test_v1.test_x.py": "def test_x():\n    assert True\n",
+                  "tests/test_v1/test_x.py": "def test_x():\n    assert True\n"},
+           "two files with one dotted name")
+    xml = (b"<testsuite><testcase classname='tests.test_v1.test_x' name='test_x'/>"
+           b"</testsuite>")
+
+    result = round0(repo, base, steps=(SUITE,), run=_stub(xml), ast_grep=None)
+
+    run = sorted((f["path"], f["claim"].split(" (")[0]) for f in result.findings
+                 if "guard checks" not in f["claim"])
+    assert run == [
+        ("tests/test_v1.test_x.py",
+         "the full suite's results cannot be attributed to tests/test_v1.test_x.py alone"),
+        ("tests/test_v1/test_x.py",
+         "the full suite's results cannot be attributed to tests/test_v1/test_x.py alone")]
+    assert not result.passed

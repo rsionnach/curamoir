@@ -13,10 +13,10 @@ record (§11: a ``preflight`` round's ``preflight.steps``).
   early return in a test body, an except that swallows, a collection-time
   parametrise list with no minimum), run in process by ``curamoir-lint``'s
   own runner, whatever rules the repository installs;
-- from the suite's own per-test results (JUnit XML, pytest's ``xunit1``
-  family): no test the change added or changed was skipped or left out of
-  the run (deselected, or never collected), and no changed test module
-  collected nothing.
+- from the suite's own per-test results (JUnit XML, each case attributed
+  to a test file by its class name): no test the change added or changed
+  was skipped or left out of the run (deselected, or never collected), and
+  no changed test module collected nothing.
 
 A hit is a blocking finding under the provenance lens, recorded in the round
 with ``model`` None; a check that cannot run blocks as well, so round 0
@@ -29,11 +29,12 @@ sandbox, or a hosted runner's VM) is the gate job's, as are the config keys
 that name the steps. A run function takes a :class:`Step` and the checkout
 and returns a :class:`StepRun`; for the suite step (``suite=True``) it also
 returns the JUnit XML of that run, produced with
-``--junitxml=<file> -o junit_family=xunit1 --rootdir=<checkout>``: pytest
-names files and classes from its rootdir, not its working directory, so
-``--rootdir`` is what makes them the checkout's paths. Results whose paths
-are not the checkout's are refused as unreadable, never read as "collected
-nothing". Round 0 itself runs no
+``--junitxml=<file> --rootdir=<checkout>``: pytest names each case's class
+from its rootdir, not its working directory, so ``--rootdir`` is what makes
+those names the checkout's modules. A case is attributed to a changed test
+file by that class name alone (``_attribute``); results named for no test
+file in the checkout are refused as unreadable, never read as "collected
+nothing", and a case two files fit equally makes them "cannot attribute". Round 0 itself runs no
 repository code: the guard rules are read by ast-grep, and the test files by
 ``ast``.
 
@@ -156,6 +157,7 @@ def run_round0(repo, *, base: str, head: str, steps: Sequence[Step], run: RunFun
                if _under(path, scope) and not _under(path, excluded)]
     findings, available = _guard_findings(repo, changed, ast_grep, ast_grep_timeout)
     read = _read_tests(repo, base, head, changed)
+    every_test_file = _test_files_at(repo, head)
 
     step_records, failed, junit = [], [], None
     for step in steps:
@@ -173,7 +175,7 @@ def run_round0(repo, *, base: str, head: str, steps: Sequence[Step], run: RunFun
     if moved:
         findings.append(_run_finding(where, 1, 1, "a step changed the checkout round 0 ran "
                                      "on, so its results are not head's", moved))
-    findings += _run_findings(repo, changed, read, junit)
+    findings += _run_findings(changed, read, every_test_file, junit)
     for finding in findings:
         finding["fingerprint"] = fingerprint(LENS, finding["path"], finding["claim"])
         finding["status"] = "open"
@@ -385,33 +387,6 @@ def _tests_in(source: str):
     return found
 
 
-def _classes_in(source: str) -> frozenset:
-    """The names the module binds outside any function, under any block: a
-    class it defines, a name it imports (``from x import TestBase``,
-    ``import x as y``) or assigns. pytest collects a module's attributes by
-    name whatever bound them, so these are the names a test's class chain
-    under this module can start with."""
-    names = set()
-
-    def visit(body):
-        for node in body:
-            if isinstance(node, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
-                names.add(node.name)
-            elif isinstance(node, (ast.Import, ast.ImportFrom)):
-                names.update((alias.asname or alias.name).split(".")[0]
-                             for alias in node.names)
-            elif isinstance(node, (ast.Assign, ast.AnnAssign)):
-                targets = node.targets if isinstance(node, ast.Assign) else [node.target]
-                names.update(t.id for target in targets for t in ast.walk(target)
-                             if isinstance(t, ast.Name))
-            for block in _blocks(node) if not isinstance(
-                    node, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)) else ():
-                visit(block)
-
-    visit(ast.parse(source).body)
-    return frozenset(names)
-
-
 def _blocks(node):
     """The statement lists directly inside a compound statement, whatever
     its kind: bodies, else branches, finally, except handlers and match
@@ -443,14 +418,14 @@ def _is_test_case(base) -> bool:
 
 
 def _read_tests(repo: Path, base: str, head: str, changed: list) -> dict:
-    """{path: (tests, changed lines, classes)} for each changed test file, read
+    """{path: (tests, changed lines)} for each changed test file, read
     before any step runs, or {path: finding} for one that cannot be read or
     parsed."""
     read = {}
     for path in changed:
         try:
             source = (repo / path).read_text(encoding="utf-8", errors="replace")
-            tests, classes = _tests_in(source), _classes_in(source)
+            tests = _tests_in(source)
         except OSError as error:
             read[path] = _run_finding(path, 1, 1, f"{path} cannot be read, so its tests "
                                       "cannot be told apart", str(error))
@@ -460,7 +435,7 @@ def _read_tests(repo: Path, base: str, head: str, changed: list) -> dict:
                                       f"{path} does not parse, so its tests cannot run",
                                       str(error))
             continue
-        read[path] = (tests, _changed_lines(repo, base, head, path), classes)
+        read[path] = (tests, _changed_lines(repo, base, head, path))
     return read
 
 
@@ -520,10 +495,49 @@ def _unavailable(path: str, reason: str) -> dict:
 
 # --- R5-R33: what the suite run shows ----------------------------------------
 
-def _run_findings(repo: Path, changed: list, read: dict, junit) -> list:
-    """A finding for each changed test module that collected nothing, each
-    changed test that was skipped or not run, and a suite whose results
-    cannot be read. Nothing to check when no test file changed."""
+def _test_files_at(repo: Path, head: str) -> list:
+    """Every test file in ``head``'s tree, the candidates a JUnit case's
+    class name is attributed among."""
+    out = git(repo, "ls-tree", "-r", "-z", "--name-only", "--full-tree", head)
+    paths = [p.decode("utf-8", "surrogateescape") for p in out.split(b"\0") if p]
+    return sorted(p for p in paths if TEST_FILE.fullmatch(p))
+
+
+def _attribute(cases: list, test_files: list):
+    """({path: [case, ...]}, {path: [case, ...]}): each case attributed to
+    the test file whose dotted module name its class name is, or begins
+    (followed by a dot), the longest such name winning; and the cases that
+    fit two or more files equally, under each of those files.
+
+    By class name only (Rob, 2026-11-23): pytest names a case for the module
+    that collects it, while xunit1's ``file`` names the file that defines
+    the test function (an inherited, imported or star-imported test names
+    its base module's file), and other JUnit families have no ``file``. The
+    longest match keeps a sibling package's cases (tests.test_a.test_inner,
+    under tests/test_a/) and a dotted directory's (tests.v1.2.test_x, under
+    tests/v1.2/) from being taken for tests/test_a.py or tests/v1.py. A
+    module-level entry (pytest's report on collecting the module itself) has
+    no class name and is named for the module, so it is attributed by name."""
+    dotted = {path: path[:-len(".py")].replace("/", ".") for path in test_files}
+    owned, tied = {}, {}
+    for case in cases:
+        key = case["classname"] or case["name"]
+        fits = [path for path, name in dotted.items()
+                if key == name or key.startswith(name + ".")]
+        if not fits:
+            continue
+        longest = max(len(dotted[path]) for path in fits)
+        best = [path for path in fits if len(dotted[path]) == longest]
+        for path in best:
+            (owned if len(best) == 1 else tied).setdefault(path, []).append(case)
+    return owned, tied
+
+
+def _run_findings(changed: list, read: dict, test_files: list, junit) -> list:
+    """A finding for each changed test module that collected nothing or
+    whose results cannot be attributed to it alone, each changed test that
+    was skipped or not run, and a suite whose results cannot be read.
+    Nothing to check when no test file changed."""
     if not changed:
         return []
     cases = _junit_cases(junit)
@@ -531,32 +545,30 @@ def _run_findings(repo: Path, changed: list, read: dict, junit) -> list:
         return [_run_finding(changed[0], 1, 1, f"the full suite's per-test results cannot be "
                              f"read ({cases}), so round 0 cannot show that the changed tests "
                              "ran", "the suite step's JUnit XML")]
-    named = {c["file"] for c in cases if c["file"]}
-    if not any((repo / name).is_file() for name in named):
+    owned, tied = _attribute(cases, test_files)
+    if not owned and not tied:
+        named = sorted({c["classname"] or c["name"] for c in cases})
         return [_run_finding(changed[0], 1, 1, "the full suite's per-test results cannot be "
-                             "read (no file they name is in the checkout, as when pytest's "
-                             "rootdir is not the checkout's root), so round 0 cannot show that "
-                             "the changed tests ran",
-                             "files named: " + ", ".join(sorted(named)[:5]))]
+                             "read (no test case is named for a test file in the checkout, as "
+                             "when pytest's rootdir is not the checkout's root), so round 0 "
+                             "cannot show that the changed tests ran",
+                             "class names: " + ", ".join(named[:5]))]
     findings = []
     for path in changed:
         module = path[:-len(".py")].replace("/", ".")
         if isinstance(read[path], dict):
             findings.append(read[path])
             continue
-        tests, touched, classes = read[path]
-        # A case is this module's when it names the file, or when its class
-        # name is the module's: the module itself (a test function at its top
-        # level) or the module followed by a name the module binds. xunit1's
-        # `file` is the file that defines the test function, so a test this
-        # module inherits or imports from another file names that other file
-        # (classname tests.test_b.TestB, file tests/test_base.py). Only names
-        # the module binds, so that a sibling package's cases
-        # (tests.test_a.test_inner under tests/test_a/) are never taken for
-        # tests/test_a.py's.
-        in_module = [c for c in cases if c["file"] == path or c["classname"] == module
-                     or (c["classname"].startswith(module + ".")
-                         and c["classname"][len(module) + 1:].split(".")[0] in classes)]
+        tests, touched = read[path]
+        if path in tied:
+            findings.append(_run_finding(
+                path, 1, 1, f"the full suite's results cannot be attributed to {path} alone "
+                "(a test case's name fits it and another test file equally), so round 0 "
+                "cannot show whether its tests ran",
+                "; ".join(f"{c['classname'] or c['name']}::{c['name']}"
+                          for c in tied[path][:5])))
+            continue
+        in_module = owned.get(path, [])
         # A module-level entry (named for the module, no class) is pytest's
         # report on collecting the module itself: an error, or a skip of the
         # whole module. Only the other entries are tests.
@@ -643,8 +655,6 @@ def _junit_cases(junit):
                       "name": case.get("name", ""), "kind": kind, "message": message})
     if not cases:
         return "the JUnit XML holds no test case at all"
-    if not any(c["file"] for c in cases):
-        return "the JUnit XML has no file attribute on any test case (not junit_family=xunit1)"
     return cases
 
 
