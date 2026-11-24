@@ -56,6 +56,10 @@ class Reason(str, Enum):
                                          # kind at all (config.RunnerDeclarationError;
                                          # refused through job_guard's gateway, never
                                          # Degraded)
+    MUTATION_LIST = "mutation_list"      # cm-8ap.19 (Rob, 2026-11-24): the mutations
+                                         # job's brief has no r5-mutations block, more
+                                         # than one, or one the contract refuses on its
+                                         # face (gate.mutation_list.MutationListError)
 
     # Guard-layer failures. An unrecorded guard failure is a silent loss of
     # enforcement, so both are ledgered (DEC-5).

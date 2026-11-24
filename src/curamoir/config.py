@@ -83,6 +83,11 @@ class WholeRange:
 #: A test run's timeout: at least a second, at most a day.
 TIMEOUT_SECONDS = WholeRange(1, 86400)
 
+#: gate.worktrees.max_parallel (spec R5-R40, cm-8ap.19): how many mutation
+#: worktrees run at once. WHY not COUNT: 0 would run nothing and read as a
+#: clean kill check; above 64 it is a typo, not a machine.
+MAX_PARALLEL_WORKTREES = WholeRange(1, 64)
+
 #: The promotion ladder's window and threshold (E4-R1). WHY not COUNT: a
 #: threshold of 0 makes every principle a candidate whether or not it was
 #: ever fixed, and a window of 0 days counts nothing, so promotion silently
@@ -134,6 +139,10 @@ DEFAULTS = {
         "random_extra": 1,
         "backoff": {"clean_rounds_to_double": 2, "max_interval": "quarterly"},
     },
+    # cm-8ap.19 (spec R5-R40): mutation worktrees at once on the local
+    # runner; a hosted runner uses its core count, capped at 8, or this
+    # value if curamoir.yaml sets a lower one (gate.worktrees.max_parallel).
+    "gate": {"worktrees": {"max_parallel": 2}},
     "sweep": {
         "max_open_prs": 3,
         "max_files_per_pr": 20,
@@ -224,6 +233,7 @@ SCHEMA = {
         "random_extra": COUNT,
         "backoff": {"clean_rounds_to_double": COUNT, "max_interval": STRING},
     },
+    "gate": {"worktrees": {"max_parallel": MAX_PARALLEL_WORKTREES}},
     "sweep": {
         "max_open_prs": COUNT, "max_files_per_pr": COUNT,
         "test_command": STRING, "test_timeout_seconds": TIMEOUT_SECONDS, "max_test_runs": COUNT,

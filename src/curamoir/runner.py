@@ -102,9 +102,13 @@ from typing import Any, Optional
 
 from curamoir import github, publish
 from curamoir.brief import gh_pr_states, write_brief
-from curamoir.config import resolve_github_api
+from curamoir.config import RunnerDeclarationError, resolve_github_api, resolve_runner
+from curamoir.git_guard import GitGuardError, git
+from curamoir.guards.reasons import Reason
 from curamoir.job_guard import UNUSABLE_ROOT, run_guarded
 from curamoir.job_run import FAILURE, REFUSED, SUCCESS, UNKNOWN
+from curamoir.mutations_job import OPTIONS as MUTATION_OPTIONS
+from curamoir.mutations_job import run_mutations_job
 from curamoir.sweep_job import run_sweep
 from curamoir.termination import Terminated
 
@@ -145,7 +149,18 @@ class Job:
     #: Required, with no default: a PR-opening job registered without saying
     #: so would skip the cap by omission.
     opens_prs: bool
+    #: Required, with no default (Rob, 2026-11-24): whether the job may run
+    #: on a checkout with no .curamoir/, unguarded and with no ledger line
+    #: (run_job, "An uninitialised repository"). A job registered without
+    #: saying so would run unledgered by omission.
+    runs_uninitialised: bool
     open_pr_listing_for: Optional[Callable[[Path], Callable[[], Any]]] = None
+    #: The command-line options the job takes (`run --base`, say), passed to
+    #: `body` as keywords; any other option given to it is a usage error.
+    options: tuple = ()
+    #: Whether the job's stdout is machine-readable lines (`mutations`): the
+    #: run's sentence then goes to stderr.
+    lines_on_stdout: bool = False
 
 
 @dataclass(frozen=True)
@@ -154,6 +169,9 @@ class RunReport:
 
     exit_code: int
     sentence: str
+    #: Whether the sentence goes to stderr: the job's stdout is its lines
+    #: (Job.lines_on_stdout).
+    sentence_to_stderr: bool = False
 
 
 def _brief(repo, run):
@@ -194,8 +212,11 @@ def _gh_labels(root, *, github_api):
 
 
 JOBS = {
-    "brief": Job(body=_brief, opens_prs=False),
-    "sweep": Job(body=run_sweep, opens_prs=True, open_pr_listing_for=_gh_open_prs),
+    "brief": Job(body=_brief, opens_prs=False, runs_uninitialised=False),
+    "sweep": Job(body=run_sweep, opens_prs=True, runs_uninitialised=False,
+                 open_pr_listing_for=_gh_open_prs),
+    "mutations": Job(body=run_mutations_job, opens_prs=False, runs_uninitialised=True,
+                     options=MUTATION_OPTIONS, lines_on_stdout=True),
 }
 
 #: E10-R1's other jobs, with the bead that builds each; cm-x5a.1 registers
@@ -209,7 +230,7 @@ NOT_YET_BUILT = {
 
 
 def run_job(repo, name, *, open_pr_listing=None, repo_labels=None, now=None,
-            environ=None):
+            environ=None, options=None, emit=None, notice=None):
     """Run the job registered as `name` against `repo` and return a RunReport.
 
     `open_pr_listing`, when given, replaces the job's registered listing
@@ -225,12 +246,29 @@ def run_job(repo, name, *, open_pr_listing=None, repo_labels=None, now=None,
     one place a test or an embedding caller hands a different one in. The
     same mapping decides the run's gh calls (module docstring, "Which gh
     calls").
+    `options` are the job's command-line options (`Job.options`), every
+    one required and no other allowed; `emit` and `notice` write one line
+    to stdout and to stderr, for a job whose stdout is lines
+    (`Job.lines_on_stdout`).
     """
     job = JOBS.get(name)
     if job is None:
         return RunReport(EXIT_NOT_A_JOB, _not_a_job(name))
+    options = {key: value for key, value in (options or {}).items() if value is not None}
+    unknown = sorted(set(options) - set(job.options))
+    missing = [key for key in job.options if key not in options]
+    if unknown or missing:
+        wrong = (f"takes no --{', --'.join(unknown)}" if unknown
+                 else f"needs --{', --'.join(missing)}")
+        return RunReport(EXIT_NOT_A_JOB, f"cúramóir did not run {name!r}: it {wrong}. "
+                                         "Nothing ran.", job.lines_on_stdout)
+    keywords = dict(options)
+    if job.lines_on_stdout:
+        keywords.update(emit=emit or (lambda text: None), notice=notice or (lambda text: None))
 
     root = Path(repo)
+    if root.is_dir() and not os.path.lexists(root / ".curamoir") and job.runs_uninitialised:
+        return _run_unledgered(root, name, job, keywords, environ)
     if root.is_dir() and not (root / ".curamoir").is_dir():
         # Not only "uninitialised": --repo may be a subdirectory of a
         # repository that is, or `.curamoir` may be a regular file.
@@ -250,7 +288,7 @@ def run_job(repo, name, *, open_pr_listing=None, repo_labels=None, now=None,
     try:
         result = run_guarded(
             root, name, open_pr_listing,
-            lambda run: job.body(root, run),
+            lambda run: job.body(root, run, **keywords),
             now=now, repo_labels=repo_labels, opens_prs=job.opens_prs,
             environ=environ, github_api=github_api,
         )
@@ -273,7 +311,8 @@ def run_job(repo, name, *, open_pr_listing=None, repo_labels=None, now=None,
         # that raised has one from JobRun, an earlier raise has none. Either
         # way a sentence, not a traceback a slash command would relay as is.
         return RunReport(EXIT_FAILURE, f"cúramóir did not complete {name!r}: "
-                                       f"{_sentence(f'{type(crash).__name__}: {crash}')}")
+                                       f"{_sentence(f'{type(crash).__name__}: {crash}')}",
+                         job.lines_on_stdout)
 
     if result.outcome == UNUSABLE_ROOT:
         sentence = (f"cúramóir did not run {name!r}: unusable root (the reason is "
@@ -283,7 +322,59 @@ def run_job(repo, name, *, open_pr_listing=None, repo_labels=None, now=None,
         sentence = f"cúramóir ran {name!r}: {result.outcome}{reason}."
         if result.message.strip():
             sentence += f" {_sentence(result.message)}"
-    return RunReport(_EXIT_CODES[result.outcome], sentence)
+    return RunReport(_EXIT_CODES[result.outcome], sentence, job.lines_on_stdout)
+
+
+class _Unledgered:
+    """What a body reports to on a checkout with no .curamoir/: JobRun's
+    reporting methods and `runner`, and no ledger (Job.runs_uninitialised)."""
+
+    def __init__(self, runner):
+        self.runner = runner
+        self.outcome, self.reason, self.message = UNKNOWN, None, ""
+
+    def succeeded(self, summary="", **fields):
+        self.outcome, self.reason, self.message = SUCCESS, None, summary
+
+    def failed(self, message, **fields):
+        self.outcome, self.reason, self.message = FAILURE, None, message
+
+    def refused(self, refusal, **fields):
+        self.outcome, self.reason, self.message = REFUSED, refusal.reason, refusal.message
+
+
+def _run_unledgered(root, name, job, keywords, environ):
+    """A job that may run without .curamoir/ (Rob, 2026-11-24): only at the
+    git top level, with the runner kind resolved and refused as job_guard
+    does, and no ledger line or lock slot. The body's own termination
+    handling applies as on the guarded path."""
+    try:
+        top = git(root, "rev-parse", "--show-toplevel").decode("utf-8", "surrogateescape")
+    except GitGuardError:
+        top = None
+    if top is None or os.path.realpath(top.strip()) != os.path.realpath(root):
+        return RunReport(EXIT_UNUSABLE_ROOT,
+                         f"cúramóir did not run {name!r}: {root} is not the top of a git "
+                         "work tree, and with no .curamoir/ there it can run only there. "
+                         "Point --repo at the repository root.", job.lines_on_stdout)
+    try:
+        runner = resolve_runner(os.environ if environ is None else environ)
+    except RunnerDeclarationError as error:
+        return RunReport(EXIT_REFUSED, f"cúramóir ran {name!r}: refused ({Reason.RUNNER}). "
+                                       f"{_sentence(str(error))}", job.lines_on_stdout)
+    run = _Unledgered(runner)
+    try:
+        job.body(root, run, **keywords)
+    except (Exception, SystemExit, Terminated) as crash:
+        return RunReport(EXIT_FAILURE, f"cúramóir did not complete {name!r}: "
+                                       f"{_sentence(f'{type(crash).__name__}: {crash}')}",
+                         job.lines_on_stdout)
+    reason = f" ({run.reason})" if run.reason is not None else ""
+    sentence = (f"cúramóir ran {name!r} with no ledger line (no .curamoir/ here): "
+                f"{run.outcome}{reason}.")
+    if run.message.strip():
+        sentence += f" {_sentence(run.message)}"
+    return RunReport(_EXIT_CODES[run.outcome], sentence, job.lines_on_stdout)
 
 
 def _not_a_job(name):
