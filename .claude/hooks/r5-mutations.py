@@ -62,17 +62,19 @@ def main(argv) -> int:
         return _record(checkout, "none", None, 0, 0, None, "no block", EXIT_PASS)
     reports.mkdir(parents=True, exist_ok=True)
     n = 1 + len(list(reports.glob(f"{bead}-mutations-*.jsonl")))
-    stem = reports / f"{bead}-mutations-{n}"
-    brief_file = stem.with_suffix(".brief.md")
+    # Joined as text: a bead id has dots (cm-8ap.19), which Path.with_suffix
+    # would take for the file's suffix.
+    stem = f"{bead}-mutations-{n}"
+    jsonl, brief_file = reports / f"{stem}.jsonl", reports / f"{stem}.brief.md"
     brief_file.write_text(brief, encoding="utf-8")
-    command = _curamoir() + ["run", "mutations", "--repo", str(checkout), "--base", base,
-                             "--head", head, "--brief", str(brief_file)]
+    command = [*_curamoir(), "run", "mutations", "--repo", str(checkout), "--base", base,
+               "--head", head, "--brief", str(brief_file)]
     try:
         done = subprocess.run(command, cwd=checkout, capture_output=True, text=True)
     except OSError as error:
         return _record(checkout, "could_not_run", None, 0, 0, None,
                        f"curamoir could not be started: {error}", EXIT_COULD_NOT_RUN)
-    stem.with_suffix(".jsonl").write_text(done.stdout, encoding="utf-8")
+    jsonl.write_text(done.stdout, encoding="utf-8")
     sys.stderr.write(done.stderr)
     lines, problem = [], None
     for text in done.stdout.splitlines():
@@ -82,7 +84,7 @@ def main(argv) -> int:
             problem = "a line on stdout is not JSON"
     totals = {line.get("total") for line in lines if isinstance(line, dict)}
     total = totals.pop() if len(totals) == 1 else None
-    report = str(stem.with_suffix(".jsonl").relative_to(checkout))
+    report = str(jsonl.relative_to(checkout))
     if problem is None and total is not None and len(lines) == total:
         results = [line.get("result") for line in lines]
         if done.returncode == 0 and all(result == "red" for result in results):

@@ -240,12 +240,12 @@ def helper(repo, tmp_path, bin_dir):
     (repo / ".claude-plugin" / "plugin.json").write_text('{"name": "curamoir"}')
     head = _git(repo, "rev-parse", "HEAD")
     env = helper_env(repo, bin_dir)
-    for args in (("r5-lock.sh", "acquire", "r5-supervise", "cm-x"),
-                 ("r5-state.sh", "init", "cm-x", head, head)):
+    for args in (("r5-lock.sh", "acquire", "r5-supervise", "cm-x.1"),
+                 ("r5-state.sh", "init", "cm-x.1", head, head)):
         started = subprocess.run(["bash", str(hooks / args[0]), *args[1:]], cwd=repo, env=env,
                                  capture_output=True, text=True)
         assert started.returncode == 0, started.stderr
-    done = subprocess.run([sys.executable, str(hooks / "r5-mutations.py"), "cm-x", head, head],
+    done = subprocess.run([sys.executable, str(hooks / "r5-mutations.py"), "cm-x.1", head, head],
                           cwd=repo, env=env, capture_output=True, text=True, timeout=300)
     state = json.loads((repo / ".claude" / "r5-state.json").read_text(encoding="utf-8"))
     events = [e for e in state["audit_trail"] if e["event"] == "mutations_run"]
@@ -261,7 +261,7 @@ def helper_env(repo, bin_dir):
 
 def bead(*entries):
     body = "".join(textwrap.dedent(e) for e in entries)
-    return [{"id": "cm-x", "description": "Do the thing.",
+    return [{"id": "cm-x.1", "description": "Do the thing.",
              "notes": f"2026-11-24: the kill check.\n\n```r5-mutations\n{body}```\n"}]
 
 
@@ -286,7 +286,7 @@ def test_the_helper_blocks_on_a_surviving_mutation(repo, tmp_path):
 
 
 def test_a_brief_with_no_block_is_none(repo, tmp_path):
-    done, events = helper(repo, tmp_path, fake_bd(tmp_path, [{"id": "cm-x",
+    done, events = helper(repo, tmp_path, fake_bd(tmp_path, [{"id": "cm-x.1",
                                                               "description": "No block."}]))
 
     assert done.returncode == 0
@@ -303,7 +303,7 @@ def test_bd_failing_could_not_run(repo, tmp_path):
 
 def test_a_refused_block_could_not_run(repo, tmp_path):
     done, events = helper(repo, tmp_path, fake_bd(tmp_path, [{
-        "id": "cm-x", "description": "```r5-mutations\n[]\n```\n"}]))
+        "id": "cm-x.1", "description": "```r5-mutations\n[]\n```\n"}]))
 
     assert done.returncode == 2
     assert [(e["verdict"], e["exit"]) for e in events] == [("could_not_run", 3)]
@@ -347,3 +347,10 @@ def test_done_provenance_follows_the_helper_not_the_reviewer(repo, tmp_path):
     assert state("r5-state.sh", "done", "provenance", "0").returncode == 0, "refused"
 
 
+
+
+def test_the_helpers_reports_are_named_for_a_dotted_bead(repo, tmp_path):
+    _, events = helper(repo, tmp_path, fake_bd(tmp_path, bead(KILLED)))
+
+    assert events[0]["report"] == ".claude/r5-reports/cm-x.1-mutations-1.jsonl"
+    assert (repo / ".claude" / "r5-reports" / "cm-x.1-mutations-1.brief.md").is_file()
