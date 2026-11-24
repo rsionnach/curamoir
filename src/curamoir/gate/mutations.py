@@ -181,6 +181,7 @@ def _run_entry(repo, entry, total, path, hosted, timeout, groups) -> Result:
         return result(STALE, target)
     try:
         source = target.read_text(encoding="utf-8")
+        checked = os.lstat(target)
     except (OSError, UnicodeDecodeError) as error:
         return result(STALE, f"{entry.path} cannot be read at head: {error}")
     try:
@@ -201,7 +202,7 @@ def _run_entry(repo, entry, total, path, hosted, timeout, groups) -> Result:
                                     f"({baseline.why}), so a red mutant would prove nothing",
                       diff, baseline.output)
     try:
-        _write_no_follow(target, mutated)
+        _write_no_follow(path, entry.path, mutated, checked)
     except OSError as error:
         return result(INCONCLUSIVE, f"the mutation could not be written: {error}", diff)
     mutant = _run_selection(repo, path, argv, hosted, timeout, groups)
@@ -238,11 +239,31 @@ def _confined(worktree: Path, relative: str):
     return current
 
 
-def _write_no_follow(target: Path, text: str) -> None:
-    """Write `text` over `target`, refusing to follow a symlink put there
-    since it was checked."""
-    descriptor = os.open(target, os.O_WRONLY | os.O_TRUNC | os.O_NOFOLLOW)
+def _write_no_follow(worktree: Path, relative: str, text: str, checked) -> None:
+    """Write `text` over the worktree's `relative` file, the one `checked`
+    (its lstat when it was read). The baseline run has executed the
+    repository's code by now and could have swapped any component for a
+    symlink, so the path is walked from the worktree by directory file
+    descriptors, each opened O_NOFOLLOW, and the file opened at the end
+    must be the same regular file (device and inode) that was checked.
+    OSError otherwise, and nothing is written."""
+    parts = relative.split("/")
+    directory = os.open(worktree, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        for part in parts[:-1]:
+            inner = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                            dir_fd=directory)
+            os.close(directory)
+            directory = inner
+        descriptor = os.open(parts[-1], os.O_WRONLY | os.O_NOFOLLOW, dir_fd=directory)
+    finally:
+        os.close(directory)
     with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+        opened = os.fstat(handle.fileno())
+        if not stat.S_ISREG(opened.st_mode) or (opened.st_dev, opened.st_ino) != \
+                (checked.st_dev, checked.st_ino):
+            raise OSError(f"{relative} changed after it was checked")
+        handle.truncate(0)
         handle.write(text)
 
 

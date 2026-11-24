@@ -385,3 +385,24 @@ def test_worktrees_live_under_the_git_common_dir_never_the_working_tree(repo):
         other = worktrees.RunWorktrees(repo, "cm-x", base="0" * 40, head="0" * 40)
         assert other.run_id != trees.run_id
     assert not path.exists() and trees.removed == [str(path)]
+
+
+def test_a_parent_swapped_for_a_symlink_during_the_baseline_is_not_followed(repo, tmp_path):
+    """The baseline runs the repository's code, which may write in its
+    worktree: a parent directory replaced by a link to elsewhere before the
+    mutation is written is refused, and nothing outside is touched."""
+    outside = tmp_path / "elsewhere"
+    (outside / "pkg").mkdir(parents=True)
+    (outside / "pkg" / "core.py").write_text(CORE, encoding="utf-8")
+    swap = ("import os, shutil; shutil.move('src', 'src.moved'); "
+            f"os.symlink({str(outside)!r}, 'src')")
+    (result,) = run(repo, block(f'''\
+        - path: src/pkg/core.py
+          locate: {{lines: [4, 4]}}
+          mutation: return_constant
+          expect_red: "{sys.executable} -c \\"{swap}\\""
+    '''), runner=HOSTED)
+
+    assert result.result == "inconclusive"
+    assert "could not be written" in result.reason
+    assert (outside / "pkg" / "core.py").read_text(encoding="utf-8") == CORE
