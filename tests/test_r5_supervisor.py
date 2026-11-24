@@ -192,7 +192,19 @@ def clear_pass(root, name):
     run(STATE, "pass", name, root=root)
     hook(root)
     run(STATE, "findings", name, report(name, 0, 0, 0), root=root)
+    if name == "provenance":
+        # cm-8ap.19: done provenance reads the mechanical kill check's
+        # verdict for the round (.claude/hooks/r5-mutations.py).
+        mechanical_none(root)
     assert run(STATE, "done", name, "0", root=root).returncode == 0
+
+
+def mechanical_none(root):
+    """The bridge helper's verdict for a brief with no r5-mutations block,
+    as r5-mutations.py records it (cm-8ap.19)."""
+    assert run(STATE, "event", "mutations_run",
+               '{"verdict": "none", "exit": null, "lines": 0, "total": 0, '
+               '"report": null, "why": "no block"}', root=root).returncode == 0
 
 
 def clear_to_excellence(root):

@@ -49,6 +49,7 @@ import difflib
 import os
 import shlex
 import signal
+import stat
 import subprocess
 import tempfile
 import threading
@@ -175,7 +176,9 @@ def _run_entry(repo, entry, total, path, hosted, timeout, groups) -> Result:
                       entry.describe_mutation(), entry.behaviour, kind, reason, str(path),
                       diff, tail[-OUTPUT_TAIL:], round(time.monotonic() - start, 3))
 
-    target = path / entry.path
+    target = _confined(path, entry.path)
+    if isinstance(target, str):
+        return result(STALE, target)
     try:
         source = target.read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError) as error:
@@ -197,7 +200,10 @@ def _run_entry(repo, entry, total, path, hosted, timeout, groups) -> Result:
         return result(INCONCLUSIVE, f"the selection does not pass unmutated "
                                     f"({baseline.why}), so a red mutant would prove nothing",
                       diff, baseline.output)
-    target.write_text(mutated, encoding="utf-8")
+    try:
+        _write_no_follow(target, mutated)
+    except OSError as error:
+        return result(INCONCLUSIVE, f"the mutation could not be written: {error}", diff)
     mutant = _run_selection(repo, path, argv, hosted, timeout, groups)
     if mutant.verdict == "fail":
         return result(RED, f"the mutation was killed ({mutant.why})", diff, mutant.output)
@@ -208,6 +214,36 @@ def _run_entry(repo, entry, total, path, hosted, timeout, groups) -> Result:
                              f"{named!r}", diff, mutant.output)
     return result(INCONCLUSIVE, f"the mutant run did not show a failure ({mutant.why})",
                   diff, mutant.output)
+
+
+def _confined(worktree: Path, relative: str):
+    """The entry's file in the worktree as a Path, or why it cannot be one.
+    The runner reads and writes it outside the sandbox, so no component of
+    the path may be a symlink (a committed link to ~/.ssh, a linked
+    directory), and the file must be a regular file inside the worktree."""
+    current = worktree
+    for part in relative.split("/"):
+        current = current / part
+        try:
+            mode = os.lstat(current).st_mode
+        except OSError as error:
+            return f"{relative} is not in the tree at head: {error.strerror or error}"
+        if stat.S_ISLNK(mode):
+            return (f"{relative} goes through a symlink ({current.relative_to(worktree)}), "
+                    "which the runner does not follow")
+    if not stat.S_ISREG(mode):
+        return f"{relative} is not a regular file at head"
+    if not current.resolve().is_relative_to(worktree.resolve()):
+        return f"{relative} resolves outside the worktree"
+    return current
+
+
+def _write_no_follow(target: Path, text: str) -> None:
+    """Write `text` over `target`, refusing to follow a symlink put there
+    since it was checked."""
+    descriptor = os.open(target, os.O_WRONLY | os.O_TRUNC | os.O_NOFOLLOW)
+    with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+        handle.write(text)
 
 
 @dataclass(frozen=True)

@@ -185,7 +185,10 @@ Every command is namespaced under the plugin, so each one reads `/curamoir:<name
 
 The table doubles as the checklist. Rows switch to **working** as their epics land.
 `/curamoir:routine`, which shows the Routine prompt and its `/schedule` steps,
-is a helper and has no row.
+is a helper and has no row. `curamoir run mutations` has no slash command: it
+runs a brief's mutation list with no model, making each mutation in a
+throwaway worktree and checking that its tests fail
+([The mutation runner](docs/mutation-runner.md)).
 
 ## Guardrails
 

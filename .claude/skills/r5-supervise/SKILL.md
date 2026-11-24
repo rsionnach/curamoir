@@ -145,6 +145,22 @@ For each pass in the run's `passes` (`correctness`, `edge-cases`,
      `subprocess.run(..., timeout=...)`; it ends by printing
      `git status --short` verbatim. A pass whose kill check could not run is
      NOT clean.
+   - **provenance, before EVERY dispatch (cm-8ap.19):** run the mechanical
+     kill check, `uv run python .claude/hooks/r5-mutations.py <bead-id>
+     <base> <head>`. It reads the bead's brief from `bd show` and runs its
+     `r5-mutations` block through `curamoir run mutations`, recording a
+     `mutations_run` event; its verdict, not the reviewer's, decides the
+     mechanical half:
+     - exit 0 `none` (no block): tell the reviewer no mechanical checks ran;
+     - exit 0 `pass` (every entry red): give the reviewer the JSON lines
+       (`.claude/r5-reports/<bead-id>-mutations-<n>.jsonl`);
+     - exit 1 `block` (a green, stale or inconclusive entry): give the
+       reviewer the lines; each such entry is a blocking finding to fix;
+     - exit 2 `could_not_run` (bd or the brief unreadable, curamoir exit 3
+       or 4, a crash, missing lines): the pass is blocked; stop and tell
+       the user (escalate), as for a kill check that could not run.
+     `r5-state.sh done provenance` refuses unless the last `mutations_run`
+     since provenance was last requested is `pass` or `none`.
    While that reviewer runs, dispatch nothing else (the hook refuses).
 5. When it reports, write its report verbatim to
    `.claude/r5-reports/<bead-id>-<pass>-<iteration>.md` (gitignored) and run

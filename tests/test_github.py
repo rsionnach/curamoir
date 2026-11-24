@@ -543,7 +543,7 @@ def hub(repo):
 @pytest.fixture
 def stub_body(monkeypatch):
     monkeypatch.setitem(JOBS, "sweep", runner.Job(
-        body=lambda _root, run: run.failed(STUB), opens_prs=True,
+        runs_uninitialised=False, body=lambda _root, run: run.failed(STUB), opens_prs=True,
         open_pr_listing_for=JOBS["sweep"].open_pr_listing_for))
 
 
@@ -667,7 +667,7 @@ def test_two_listings_in_one_sweep_run_both_run_gh(gh, hub, monkeypatch):
         run.succeeded("listed")
 
     monkeypatch.setitem(JOBS, "sweep", runner.Job(
-        body=body, opens_prs=True, open_pr_listing_for=JOBS["sweep"].open_pr_listing_for))
+        runs_uninitialised=False, body=body, opens_prs=True, open_pr_listing_for=JOBS["sweep"].open_pr_listing_for))
 
     ran = run_job(hub.repo, "sweep", now=october)
 

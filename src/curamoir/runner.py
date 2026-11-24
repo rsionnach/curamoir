@@ -275,7 +275,8 @@ def run_job(repo, name, *, open_pr_listing=None, repo_labels=None, now=None,
         return RunReport(EXIT_UNUSABLE_ROOT,
                          f"cúramóir did not run {name!r}: there is no .curamoir/ "
                          f"directory at {root}, so there is no ledger to record the run "
-                         "in. Point --repo at the repository root, or run /curamoir:init.")
+                         "in. Point --repo at the repository root, or run /curamoir:init.",
+                         job.lines_on_stdout)
 
     # cm-2qp.9: decided once, here, from the mapping the runner kind is
     # declared in, and handed to everything below that runs gh.

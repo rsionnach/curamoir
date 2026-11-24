@@ -132,9 +132,13 @@ def _unindent(line: str, indent: int) -> str:
 def parse_entries(block: str) -> tuple:
     """The block's entries, each validated, in order. MutationListError
     names the entry (1-based) and the field for anything refused."""
+    # Imported here: the CLI imports this module and must start without
+    # PyYAML (scripts/curamoir picks an interpreter that may lack it).
+    import yaml
+
     try:
         data = safe_load_unique(block)
-    except (RefusedYAMLError, ValueError) as error:
+    except (RefusedYAMLError, ValueError, yaml.YAMLError) as error:
         raise MutationListError(f"the `{INFO_STRING}` block is not valid YAML: {error}") \
             from error
     if not isinstance(data, list) or not data:

@@ -36,6 +36,7 @@ from __future__ import annotations
 import json
 import shutil
 import subprocess
+import sys
 
 import pytest
 
@@ -146,3 +147,89 @@ def test_each_escape_has_its_new_test_files_whole_in_its_diff(entry):
     for path in ESCAPES[entry]:
         header = f"diff --git a/{path} b/{path}\nnew file mode"
         assert header in text, path
+
+
+# --- the mutation runner and opensrm-oh27 (R5-R59, cm-8ap.19) ---------------------
+
+def _added_function(diff: str, name: str) -> str:
+    """The lines a diff adds for one top-level function, without their '+'."""
+    lines, taking = [], False
+    for line in diff.splitlines():
+        if line.startswith(f"+def {name}("):
+            taking = True
+        elif taking and (line.startswith(("+def ", "+@", "+class ")) or not line.startswith("+")):
+            break
+        if taking:
+            lines.append(line[1:])
+    assert lines, name
+    return "\n".join(lines).rstrip() + "\n"
+
+
+@needs_ast_grep
+def test_the_mutation_runner_passes_oh27_and_why(tmp_path):
+    """oh27's escaped predicate, `isinstance(spec.get("slos"), list)`, and
+    the fixture shape that shares its mistake (`spec.slos` as a list, from
+    its own test_empty_string_header_is_counted) are both the corpus diff's
+    real lines. Real v1 manifests write `slos` as a mapping, so the
+    predicate never fires for one; but its tests are built on the same
+    shape, so a mutation of the predicate (here `list` -> `dict`) makes those
+    tests fail, and the runner reports it killed: red. The runner passes
+    oh27. That is the stated limit: no mechanical check sees a shape the
+    code and its fixtures share. Only a fixture traced to a real artefact
+    does (R5-R35, the provenance reviewer's duty).
+
+    Reconstructed, not checked out: the corpus holds the diff, not the
+    repository, and the two format predicates the function calls come from
+    nthlayer_common, which is not in it. They are stand-ins here that say
+    "not that format" for the fixture's empty header, as the real ones do
+    for an empty apiVersion; nothing about the escaped predicate depends on
+    them."""
+    from curamoir.config import LOCAL_RUNNER
+    from curamoir.gate import mutations
+
+    diff = (CORPUS / "opensrm-oh27" / "diff.patch").read_text(encoding="utf-8")
+    function = _added_function(diff, "_foreign_yaml_reason")
+    assert 'or isinstance(spec.get("slos"), list)' in function
+    fixture_header = 'apiVersion: ""\n'
+    assert '+            apiVersion: ""' in diff and "+              slos:" in diff
+
+    repo = tmp_path / "oh27"
+    (repo / "tests").mkdir(parents=True)
+    _git(tmp_path, "init", "-q", "-b", "main", str(repo))
+    _git(repo, "config", "user.email", "test@example.invalid")
+    _git(repo, "config", "user.name", "Test")
+    (repo / "retro.py").write_text(
+        "from pathlib import Path\n\nimport yaml\n\n\n"
+        "def is_opensrm_v2_format(data):  # stand-in for nthlayer_common's\n"
+        "    return data.get('apiVersion') == 'opensrm.nthlayer.io/v2'\n\n\n"
+        "def is_srm_v1_format(data):  # stand-in for nthlayer_common's\n"
+        "    return data.get('apiVersion') == 'srm/v1'\n\n\n" + function, encoding="utf-8")
+    (repo / "tests" / "test_retro.py").write_text(
+        "import textwrap\n\nfrom retro import _foreign_yaml_reason\n\n\n"
+        "def test_empty_string_header_is_counted(tmp_path):\n"
+        "    spec = tmp_path / 'blank.yaml'\n"
+        "    spec.write_text(textwrap.dedent('''\n"
+        f"        {fixture_header}"
+        "        kind: \"\"\n"
+        "        metadata: {name: blank}\n"
+        "        spec:\n"
+        "          slos:\n"
+        "            - name: availability\n"
+        "              target: 99.9\n"
+        "    '''))\n"
+        "    assert _foreign_yaml_reason(spec) is None\n", encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "oh27, reconstructed")
+    head = _git(repo, "rev-parse", "HEAD")
+    block = (
+        "- path: retro.py\n"
+        "  locate: {anchor: 'or isinstance(spec.get(\"slos\"), list)'}\n"
+        "  mutation: {replace: {from: list, to: dict}}\n"
+        f"  expect_red: \"{sys.executable} -m pytest -q -p no:cacheprovider tests\"\n"
+        "  behaviour: \"a headerless manifest with SLOs is still a manifest\"\n")
+
+    (result,) = mutations.run_mutations(repo, block, base=head, head=head,
+                                        runner=LOCAL_RUNNER, cap=1, timeout=120)
+
+    assert result.result == "red", result.reason
+    assert '+        or isinstance(spec.get("slos"), dict)' in result.diff
