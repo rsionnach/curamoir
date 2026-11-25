@@ -18,6 +18,7 @@ import os
 import subprocess
 import sys
 import textwrap
+from pathlib import Path
 
 import pytest
 
@@ -533,3 +534,74 @@ def test_done_provenance_needs_a_verdict_from_this_round(repo, tmp_path):
     assert state("r5-state.sh", "findings", "provenance", str(clean), "PASS").returncode == 0
     refused = state("r5-state.sh", "done", "provenance", "0")
     assert refused.returncode != 0 and "not run this round" in refused.stderr
+
+
+# --- provenance review, round 2 ------------------------------------------------
+
+def test_results_from_two_threads_are_printed_and_recorded_one_at_a_time(repo, tmp_path,
+                                                                        monkeypatch):
+    """The runner calls on_result from its worker threads. Two results are
+    delivered at the same instant; each printing takes a while; they must
+    never overlap, the record is made once, and every line is whole."""
+    import threading
+    import time
+
+    from curamoir.gate import mutations
+    from curamoir.scaffold import init_repo
+
+    init_repo(repo)
+    start, active, overlaps, made = threading.Barrier(2), [0], [], []
+    real_mkdir = Path.mkdir
+
+    def counting_mkdir(self, *args, **kwargs):
+        if self.parent.name == "runs":
+            made.append(self)
+        return real_mkdir(self, *args, **kwargs)
+
+    def emit(_line):
+        active[0] += 1
+        if active[0] > 1:
+            overlaps.append(True)
+        time.sleep(0.2)
+        active[0] -= 1
+
+    def two_at_once(*args, on_result, **kwargs):
+        results = [mutations.Result(n, 2, "src/pkg/core.py", "lines 4-4", "return_constant",
+                                    None, "red", "killed") for n in (1, 2)]
+
+        def deliver(result):
+            start.wait()
+            on_result(result)
+
+        threads = [threading.Thread(target=deliver, args=(r,)) for r in results]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        return results
+
+    monkeypatch.setattr(mutations, "run_mutations", two_at_once)
+    monkeypatch.setattr(Path, "mkdir", counting_mkdir)
+    from curamoir.config import LOCAL_RUNNER
+    from curamoir.mutations_job import run_mutations_job
+    from curamoir.runner import _Unledgered
+
+    head = _git(repo, "rev-parse", "HEAD")
+    run = _Unledgered(LOCAL_RUNNER)
+    run_mutations_job(repo, run, base=head, head=head, brief=str(brief(tmp_path, KILLED)),
+                      emit=emit, notice=lambda text: None)
+
+    assert run.outcome == "success" and overlaps == []
+    (record,) = (repo / ".curamoir" / "state" / "r5" / "runs").iterdir()
+    assert set(made) == {record} and (record / "mutations.yaml").is_file()
+    lines = (record / "results.jsonl").read_text(encoding="utf-8").splitlines()
+    assert sorted(json.loads(line)["index"] for line in lines) == [1, 2]
+
+
+def test_a_worktree_cap_above_64_is_refused_by_the_config():
+    from curamoir.config import ConfigError, load_config
+
+    with pytest.raises(ConfigError, match="max_parallel"):
+        load_config({"gate": {"worktrees": {"max_parallel": 65}}})
+    assert load_config({"gate": {"worktrees": {"max_parallel": 64}}})["gate"]["worktrees"] \
+        == {"max_parallel": 64}
