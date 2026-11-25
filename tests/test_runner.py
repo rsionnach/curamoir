@@ -117,8 +117,8 @@ def observe_steps(monkeypatch, job):
 
 # One registry, one guarded path, one line.
 
-def test_brief_and_sweep_are_registered_and_the_unbuilt_jobs_are_not():
-    assert set(JOBS) == {"brief", "sweep"}
+def test_brief_sweep_and_mutations_are_registered_and_the_unbuilt_jobs_are_not():
+    assert set(JOBS) == {"brief", "mutations", "sweep"}
     assert set(NOT_YET_BUILT) == {"review", "smoke", "sync", "grade"}
 
 
@@ -308,7 +308,7 @@ def test_an_unknown_job_exits_non_zero_listing_the_jobs_and_writes_no_line(repo,
 
     assert code == EXIT_NOT_A_JOB
     out = capsys.readouterr().out
-    assert "'deploy'" in out and "brief, sweep" in out
+    assert "'deploy'" in out and "brief, mutations, sweep" in out
     assert repo.ledger().entries() == []
 
 
@@ -366,7 +366,14 @@ def test_a_success_with_no_message_is_one_clean_sentence(repo, monkeypatch):
 def test_a_job_cannot_be_registered_without_saying_whether_it_opens_prs():
     """No default, so a PR-opening job cannot skip the cap by omission."""
     with pytest.raises(TypeError, match="opens_prs"):
-        runner.Job(body=lambda _repo, run: run.succeeded("done"))
+        runner.Job(body=lambda _repo, run: run.succeeded("done"), runs_uninitialised=False)
+
+
+def test_a_job_cannot_be_registered_without_saying_whether_it_runs_uninitialised():
+    """No default (Rob, 2026-11-24), so a job cannot run unledgered by
+    omission."""
+    with pytest.raises(TypeError, match="runs_uninitialised"):
+        runner.Job(body=lambda _repo, run: run.succeeded("done"), opens_prs=False)
 
 
 def test_a_subdirectory_of_a_repo_is_told_to_point_at_the_root(repo):

@@ -862,7 +862,7 @@ def test_the_run_job_decision_reaches_the_label_check_the_cap_and_the_body(
     github_origin_repo(harness)
     seen = []
     monkeypatch.setitem(runner.JOBS, "sweep", runner.Job(
-        body=lambda _root, run: (seen.append(run.github_api), run.succeeded("ok")),
+        runs_uninitialised=False, body=lambda _root, run: (seen.append(run.github_api), run.succeeded("ok")),
         opens_prs=True, open_pr_listing_for=runner.JOBS["sweep"].open_pr_listing_for))
 
     runner.run_job(harness.repo, "sweep", environ=CLOUD)
@@ -884,7 +884,7 @@ def test_the_job_line_says_rest_only_when_github_was_asked_through_rest(
     an Actions run's, whose lines stay as before cm-2qp.9."""
     init_repo(harness.repo)
     monkeypatch.setitem(runner.JOBS, "brief", runner.Job(
-        body=lambda _root, run: run.succeeded("ok"), opens_prs=False))
+        runs_uninitialised=False, body=lambda _root, run: run.succeeded("ok"), opens_prs=False))
 
     runner.run_job(harness.repo, "brief", environ=environ)
 

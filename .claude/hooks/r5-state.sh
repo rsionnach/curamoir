@@ -624,6 +624,24 @@ case "$CMD" in
       elif (.counts.critical == 0 and .counts.important == 0) then "clean"
       else "not clean" end')"
     [[ "$verdict" == "clean" ]] || _refuse "$pass cannot be done: its findings are $verdict"
+    if [[ "$pass" == provenance ]]; then
+      # cm-8ap.19 (Rob, 2026-11-24): the mechanical kill check
+      # (.claude/hooks/r5-mutations.py) runs on every provenance round, and
+      # its verdict decides whatever the reviewer's findings say: the last
+      # mutations_run since provenance was last requested must be pass or
+      # none.
+      mechanical="$(jq -r '
+        ([.audit_trail | to_entries[]
+          | select((.value.event == "reviewer_requested" or .value.event == "pass_started")
+                   and .value.pass == "provenance") | .key] | last) as $r
+        | if $r == null then "never requested"
+          else ([.audit_trail[$r:][] | select(.event == "mutations_run")] | last) as $m
+          | if $m == null then "not run this round (run .claude/hooks/r5-mutations.py)"
+            elif ($m.verdict == "pass" or $m.verdict == "none") then "ok"
+            else "\($m.verdict): \($m.why // "")" end end' "$STATE")"
+      [[ "$mechanical" == "ok" ]] \
+        || _refuse "provenance cannot be done: the mechanical kill check is $mechanical"
+    fi
     _apply '.completed_passes += [($x + {name:$p, fix_iterations:$n, completed_at:$t})] | .current_pass = null' \
       --arg p "$pass" --argjson n "$iters" --arg t "$(_now)" --argjson x "$extra"
     _event pass_completed --arg p "$pass" '{pass:$p}'

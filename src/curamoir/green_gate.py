@@ -775,6 +775,47 @@ def _wrapped(argv, sandbox, scratch, env, loopback):
         raise GateError(f"{_NO_SANDBOX}: {error}{_HOSTED_HINT}") from error
 
 
+def isolated_argv(argv, path, scratch, env, *, hosted, loopback=False):
+    """`argv` as a test run in `path` is launched (cm-8ap.19, the mutation
+    runner's worktrees): on a hosted runner as it is, the VM being the
+    boundary; locally wrapped in the OS sandbox exactly as the sweep's test
+    run is (_wrapped: writes only in `path` and `scratch`, no network, the
+    same read-only grants), GateError where there is none. It changes
+    nothing the sandbox may reach; it only lets a caller that is not the
+    sweep hold the process itself, to kill its group when it must stop."""
+    if hosted:
+        return list(argv)
+
+    class _Tree:
+        pass
+
+    tree = _Tree()
+    tree.path = path
+    return _wrapped(argv, tree, scratch, env, loopback)
+
+
+def check_sandbox(path, env):
+    """The OS sandbox's self-test for a run confined to `path`, as the
+    sweep runs it once per gate (_sandbox_self_test); GateError if the
+    sandbox is missing or cannot confine a run here."""
+
+    class _Tree:
+        pass
+
+    tree = _Tree()
+    tree.path = path
+    _sandbox_self_test(tree, env, False)
+
+
+def scratch_environment(path, env, scratch):
+    """`env` with a fresh HOME and TMPDIR inside `scratch` and PWD `path`,
+    as the sweep's test run gets (_scratch_env)."""
+    home, tmp = os.path.join(scratch, "home"), os.path.join(scratch, "tmp")
+    os.mkdir(home)
+    os.mkdir(tmp)
+    return dict(env, PWD=str(path), HOME=home, TMPDIR=tmp)
+
+
 def _read_only(env):
     """What a run may read that the OS sandbox otherwise hides
     (os_sandbox.wrap's `read_only`; on macOS, anything under the user's

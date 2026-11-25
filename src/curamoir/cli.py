@@ -69,6 +69,11 @@ def main(argv=None):
     # naming the bead that builds it, which a usage error cannot say.
     run.add_argument("job", help="the job to run (curamoir.runner.JOBS)")
     run.add_argument("--repo", default=".", help="repository root (default: cwd)")
+    # The mutations job's options (cm-8ap.19, E5-R23); a job that does not
+    # declare one refuses it (runner.Job.options).
+    run.add_argument("--base", help="mutations: the change's base commit")
+    run.add_argument("--head", help="mutations: the change's head commit, mutated in worktrees")
+    run.add_argument("--brief", help="mutations: the brief holding the r5-mutations block")
 
     state = subcommands.add_parser(
         "state", help="the hosted runner's ledger on its state branch")
@@ -135,11 +140,17 @@ def _run(arguments):
         print(path.read_text(encoding="utf-8"))
         return 0
     if arguments.command == "run":
-        ran = run_job(arguments.repo, arguments.job)
+        ran = run_job(arguments.repo, arguments.job,
+                      options={"base": arguments.base, "head": arguments.head,
+                               "brief": arguments.brief},
+                      emit=lambda text: _write_utf8(text + "\n"),
+                      notice=lambda text: _write_utf8(text + "\n", stream=sys.stderr))
         # As UTF-8 bytes (_write_utf8): print() under an ASCII locale raises
         # on the "ú" in every sentence, and main() would turn each outcome
-        # into exit 1, breaking the exit codes a scheduler reads.
-        _write_utf8(ran.sentence + "\n")
+        # into exit 1, breaking the exit codes a scheduler reads. A job whose
+        # stdout is lines (mutations) has its sentence on stderr.
+        _write_utf8(ran.sentence + "\n",
+                    stream=sys.stderr if ran.sentence_to_stderr else sys.stdout)
         return ran.exit_code
     if arguments.command == "sweep-work-list":
         return _sweep_work_list(arguments.repo)
@@ -185,26 +196,28 @@ def _sweep_work_list(repo):
     return 0
 
 
-def _write_utf8(text):
-    """Write `text` to stdout as UTF-8 bytes whatever the locale.
+def _write_utf8(text, stream=None):
+    """Write `text` to `stream` (stdout when None) as UTF-8 bytes whatever
+    the locale.
 
-    Printed through stdout's own encoding, a non-ASCII path or message under
-    an ASCII locale raises UnicodeEncodeError, which main() does not catch:
-    the caller would see a traceback and exit 1. An OSError (a closed pipe,
-    a full disk) is the caller's to handle.
+    Printed through the stream's own encoding, a non-ASCII path or message
+    under an ASCII locale raises UnicodeEncodeError, which main() does not
+    catch: the caller would see a traceback and exit 1. An OSError (a closed
+    pipe, a full disk) is the caller's to handle.
     """
-    if sys.stdout is None:
-        # stdout closed (`>&-`): nowhere to write, and print()'s own silent
-        # no-op, rather than an AttributeError that costs the exit code.
+    stream = sys.stdout if stream is None else stream
+    if stream is None:
+        # The stream closed (`>&-`): nowhere to write, and print()'s own
+        # silent no-op, rather than an AttributeError that costs the exit code.
         return
-    buffer = getattr(sys.stdout, "buffer", None)
+    buffer = getattr(stream, "buffer", None)
     if buffer is None:
         # An in-memory text stream (a test's capture) takes str whatever
         # the locale.
-        sys.stdout.write(text)
-        sys.stdout.flush()
+        stream.write(text)
+        stream.flush()
     else:
-        sys.stdout.flush()
+        stream.flush()
         buffer.write(text.encode("utf-8"))
         buffer.flush()
 

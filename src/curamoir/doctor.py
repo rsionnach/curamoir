@@ -70,6 +70,7 @@ def diagnose(repo, tools=None):
     findings.extend(_check_hooks(repo))
     findings.append(_check_writable(base))
     findings.append(_check_gitignore(base))
+    findings.extend(_check_worktrees(repo))
     findings.extend(_check_tools(tools, repo=repo))
 
     return sorted(findings, key=lambda f: LEVEL_ORDER[f.level])
@@ -97,6 +98,24 @@ def render_report(findings):
                 lines.append(f"    fix: {finding.fix}")
         lines.append("")
     return "\n".join(lines)
+
+
+def _check_worktrees(repo):
+    """R5-R42 (cm-8ap.19): a warning per orphan mutation-runner run, one
+    whose run is no longer alive: a run holds an flock on its run
+    directory's owner.lock while it lives, and the kernel drops it when the
+    process dies, so a lock that can be taken is a dead run's
+    (gate/worktrees.py, "Ownership"). A live run is never reported."""
+    from curamoir.gate import worktrees
+
+    orphans = worktrees.orphans(repo)
+    if not orphans:
+        return [Finding("worktrees", "ok", "no orphan R5 worktrees")]
+    return [Finding("worktrees", "warning",
+                    worktrees.ORPHAN_SENTENCE.format(path=path, scope=scope),
+                    fix="Remove the run's worktrees with `git worktree remove --force <path>`, "
+                        "then its directory, then run `git worktree prune`.")
+            for path, scope in orphans]
 
 
 def _check_pyyaml(tools):
