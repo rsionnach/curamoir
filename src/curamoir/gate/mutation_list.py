@@ -225,7 +225,7 @@ class Stale(Exception):
 def region(source: str, entry: Entry) -> tuple:
     """(first, last), the entry's region in ``source``, 1-based and
     inclusive. Stale when it matches nothing or is ambiguous."""
-    lines = source.splitlines()
+    lines = [line.rstrip("\r\n") for line in _lines(source)]
     kind, value = entry.locate
     if kind == "lines":
         first, last = value
@@ -242,8 +242,10 @@ def region(source: str, entry: Entry) -> tuple:
             tree = ast.parse(source)
         except SyntaxError as error:
             raise Stale(f"{entry.path} does not parse ({error})") from error
+        # The anchor may be on a decorated def's own line or its first
+        # decorator's: either starts the statement.
         starting = [node for node in ast.walk(tree)
-                    if isinstance(node, ast.stmt) and _first_line(node) == first]
+                    if isinstance(node, ast.stmt) and first in (node.lineno, _first_line(node))]
         if starting:
             return first, max(node.end_lineno for node in starting)
     return first, first
@@ -352,10 +354,21 @@ def _splice(source: str, node, how) -> str:
     return source[:start] + new + source[end:]
 
 
+def _lines(source: str) -> list:
+    """`source`'s lines with their endings, split on "\n" only, as Python's
+    line numbers count them (str.splitlines also splits on a form feed and
+    on Unicode line separators, which can sit in a comment or a string)."""
+    lines = source.split("\n")
+    out = [line + "\n" for line in lines[:-1]]
+    if lines[-1]:
+        out.append(lines[-1])
+    return out
+
+
 def _offsets(source: str) -> list:
     """The character offset where each line starts."""
     starts, total = [], 0
-    for line in source.splitlines(keepends=True):
+    for line in _lines(source):
         starts.append(total)
         total += len(line)
     starts.append(total)
@@ -364,7 +377,7 @@ def _offsets(source: str) -> list:
 
 def _byte_col(source: str, lineno: int, col: int) -> int:
     """ast's column is in UTF-8 bytes; the character column on that line."""
-    line = source.splitlines(keepends=True)[lineno - 1]
+    line = _lines(source)[lineno - 1]
     return len(line.encode("utf-8")[:col].decode("utf-8", "replace"))
 
 
@@ -378,7 +391,10 @@ def _without_last_argument(call, source: str) -> str:
 
 def _swapped(node, source: str, kind: str, operator: str) -> str:
     if kind == "compare":
-        return f"{_segment(node.left, source)} {operator} {_segment(node.comparators[0], source)}"
+        # Parenthesised as the other branches are: a node's segment does
+        # not include its own parentheses, so `(a or b) == c` would
+        # otherwise come back as `a or b != c`.
+        return f"({_segment(node.left, source)}) {operator} ({_segment(node.comparators[0], source)})"
     if kind == "binop":
         return f"({_segment(node.left, source)}) {operator} ({_segment(node.right, source)})"
     return f" {operator} ".join(f"({_segment(v, source)})" for v in node.values)

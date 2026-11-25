@@ -406,3 +406,74 @@ def test_a_parent_swapped_for_a_symlink_during_the_baseline_is_not_followed(repo
     assert result.result == "inconclusive"
     assert "could not be written" in result.reason
     assert (outside / "pkg" / "core.py").read_text(encoding="utf-8") == CORE
+
+
+
+# --- correctness review, round 1 ------------------------------------------------
+
+def test_a_files_line_endings_are_kept(repo):
+    (repo / "src" / "pkg" / "core.py").write_bytes(CORE.replace("\n", "\r\n").encode())
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "crlf")
+    head = _git(repo, "rev-parse", "HEAD")
+    with worktrees.RunWorktrees(repo, None, base=head, head=head) as trees:
+        path = trees.add()
+        entry = mutation_list.parse_entries(textwrap.dedent(SURVIVES))[0]
+        groups = mutations._Groups()
+        mutations._run_entry(repo, entry, 1, path, True, 60, groups)
+        written = (path / "src" / "pkg" / "core.py").read_bytes()
+    assert written.count(b"\r\n") == 4 and b"return None\r\n" in written
+
+
+def test_a_fifo_put_in_place_of_the_file_does_not_hang_the_write(repo, tmp_path):
+    swap = "import os; os.remove('src/pkg/core.py'); os.mkfifo('src/pkg/core.py')"
+    (result,) = run(repo, block(f'''\
+        - path: src/pkg/core.py
+          locate: {{lines: [4, 4]}}
+          mutation: return_constant
+          expect_red: "{sys.executable} -c \\"{swap}\\""
+    '''), runner=HOSTED, timeout=30)
+
+    assert result.result == "inconclusive" and "could not be written" in result.reason
+
+
+def test_a_sandbox_that_cannot_confine_refuses_before_any_worktree(repo, monkeypatch):
+    class Broken(Absent):
+        def wrap(self, argv, **kwargs):
+            return list(argv)
+
+    monkeypatch.setattr(green_gate, "OS_SANDBOX", Broken())
+
+    with pytest.raises(mutations.SandboxMissing):
+        run(repo, block(KILLED))
+    assert not worktrees.worktrees_root(repo).exists()
+
+
+def test_a_cleanup_failure_after_the_entries_keeps_their_results(repo, monkeypatch):
+    real = worktrees.RunWorktrees.__exit__
+
+    def fail(self, *exc):
+        real(self, *exc)
+        raise worktrees.CleanupError("worktrees could not be removed: planted")
+
+    monkeypatch.setattr(worktrees.RunWorktrees, "__exit__", fail)
+
+    with pytest.raises(mutations.CleanupFailed) as caught:
+        run(repo, block(KILLED))
+    assert [r.result for r in caught.value.results] == ["red"]
+
+
+def test_a_probe_never_creates_a_lock_and_a_starting_run_is_not_an_orphan(repo):
+    head = _git(repo, "rev-parse", "HEAD")
+    root = worktrees.worktrees_root(repo)
+    (root / "standalone" / ".20261125T000000Z-1-abc.starting").mkdir(parents=True)
+    bare = root / "standalone" / "20261125T000000Z-2-def"
+    bare.mkdir()
+
+    found = worktrees.orphans(repo)
+
+    assert [path for path, _ in found] == [bare]
+    assert not (bare / worktrees.OWNER_LOCK).exists()
+    with worktrees.RunWorktrees(repo, None, base=head, head=head) as trees:
+        assert trees.directory.exists() and trees.directory not in [p for p, _ in
+                                                                      worktrees.orphans(repo)]

@@ -794,6 +794,19 @@ def isolated_argv(argv, path, scratch, env, *, hosted, loopback=False):
     return _wrapped(argv, tree, scratch, env, loopback)
 
 
+def check_sandbox(path, env):
+    """The OS sandbox's self-test for a run confined to `path`, as the
+    sweep runs it once per gate (_sandbox_self_test); GateError if the
+    sandbox is missing or cannot confine a run here."""
+
+    class _Tree:
+        pass
+
+    tree = _Tree()
+    tree.path = path
+    _sandbox_self_test(tree, env, False)
+
+
 def scratch_environment(path, env, scratch):
     """`env` with a fresh HOME and TMPDIR inside `scratch` and PWD `path`,
     as the sweep's test run gets (_scratch_env)."""

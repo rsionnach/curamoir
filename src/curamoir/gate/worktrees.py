@@ -66,6 +66,11 @@ class WorktreeError(Exception):
     """A worktree could not be made or removed (R5-R43: refuse, don't degrade)."""
 
 
+class CleanupError(WorktreeError):
+    """The run's worktrees could not all be removed when it ended: what ran
+    still stands, and the leftovers are an orphan for doctor."""
+
+
 def worktrees_root(repo) -> Path:
     """``<git-common-dir>/r5-worktrees`` for the repository at ``repo``."""
     try:
@@ -106,10 +111,15 @@ class RunWorktrees:
         self._count = 0
 
     def __enter__(self):
+        # The lock is taken in a directory nothing else looks in, and the
+        # directory is renamed to its place only then, so no reader ever
+        # sees a run directory whose owner does not yet hold its lock.
+        staging = self.directory.parent / f".{self.run_id}.starting"
         try:
-            self.directory.mkdir(parents=True)
-            self._lock = open(self.directory / OWNER_LOCK, "w")
+            staging.mkdir(parents=True)
+            self._lock = open(staging / OWNER_LOCK, "w")
             fcntl.flock(self._lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            os.rename(staging, self.directory)
             (self.directory / OWNER_FILE).write_text(json.dumps({
                 "pid": os.getpid(), "run_id": self.run_id, "scope": self.scope,
                 "base": self.base, "head": self.head,
@@ -117,6 +127,7 @@ class RunWorktrees:
                 .strftime("%Y-%m-%dT%H:%M:%SZ")}) + "\n", encoding="utf-8")
         except OSError as error:
             self._close_lock()
+            shutil.rmtree(staging, ignore_errors=True)
             raise WorktreeError(f"the run directory {self.directory} could not be made: "
                                 f"{error}") from error
         return self
@@ -151,7 +162,7 @@ class RunWorktrees:
                 with contextlib.suppress(OSError):
                     self.directory.parent.rmdir()
         if problems and exc[0] is None:
-            raise WorktreeError("worktrees could not be removed: " + "; ".join(problems))
+            raise CleanupError("worktrees could not be removed: " + "; ".join(problems))
         return False
 
     def _close_lock(self):
@@ -174,15 +185,20 @@ def orphans(repo) -> list:
     if not root.is_dir():
         return found
     for scope in sorted(p for p in root.iterdir() if p.is_dir()):
-        for run in sorted(p for p in scope.iterdir() if p.is_dir()):
+        # A ".<run id>.starting" directory is a run taking its lock; it is
+        # renamed into place once it holds it.
+        for run in sorted(p for p in scope.iterdir()
+                          if p.is_dir() and not p.name.startswith(".")):
             if not _alive(run):
                 found.append((run, scope.name))
     return found
 
 
 def _alive(run: Path) -> bool:
+    """Whether the run that owns `run` still holds its lock. The lock file
+    is opened read-only and never created here: a probe must not make one."""
     try:
-        with open(run / OWNER_LOCK, "a") as handle:
+        with open(run / OWNER_LOCK) as handle:
             try:
                 fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError:

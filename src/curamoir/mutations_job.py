@@ -96,6 +96,11 @@ def run_mutations_job(repo, run, *, base, head, brief, emit, notice):
     except mutations.SandboxMissing as error:
         run.refused(Refusal(Reason.SANDBOX, f"no mutation ran: {error}"))
         return
+    except mutations.CleanupFailed as error:
+        # Every entry ran and printed its line; what failed is the clean-up
+        # after them, which is a failure, never "no mutation ran".
+        run.failed(f"{mutations.summary(error.results)}; then {error}")
+        return
     except worktrees.WorktreeError as error:
         run.refused(Refusal(Reason.SANDBOX, f"no mutation ran: {error}"))
         return

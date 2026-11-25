@@ -80,6 +80,15 @@ class SandboxMissing(Exception):
     """No OS sandbox confines a selection here, so nothing was run."""
 
 
+class CleanupFailed(Exception):
+    """Every entry ran, but a worktree could not be removed afterwards.
+    ``results`` are the entries' results, which stand."""
+
+    def __init__(self, message, results):
+        super().__init__(message)
+        self.results = results
+
+
 @dataclass
 class Result:
     """One entry's result: what the JSON line carries."""
@@ -119,11 +128,19 @@ def run_mutations(repo, block: str, *, base: str, head: str, runner, cap: int,
     for sentence in worktrees.orphan_sentences(repo):
         if notices is not None:
             notices(sentence)
-    total = len(entries)
     groups = _Groups()
     results = {}
-    with TerminationSignals(), worktrees.RunWorktrees(repo, scope, base=base,
-                                                      head=head) as trees:
+    trees = worktrees.RunWorktrees(repo, scope, base=base, head=head)
+    try:
+        return _run_all(repo, entries, trees, hosted, cap, timeout, groups, results, on_result)
+    except worktrees.CleanupError as error:
+        raise CleanupFailed(str(error), [results[e.index] for e in entries
+                                         if e.index in results]) from error
+
+
+def _run_all(repo, entries, trees, hosted, cap, timeout, groups, results, on_result):
+    total = len(entries)
+    with TerminationSignals(), trees:
         adding = threading.Lock()
 
         def one(entry):
@@ -159,11 +176,16 @@ def run_mutations(repo, block: str, *, base: str, head: str, runner, cap: int,
 
 
 def _require_sandbox(repo: Path, hosted: bool) -> None:
+    """The sweep's own OS-sandbox self-test, in a scratch tree, before any
+    worktree: a sandbox tool that is present but cannot confine anything
+    (user namespaces off, say) refuses the run here rather than making
+    every entry inconclusive."""
     if hosted:
         return
-    with tempfile.TemporaryDirectory(prefix="curamoir-mutation-probe-") as scratch:
+    with tempfile.TemporaryDirectory(prefix="curamoir-mutation-probe-") as tree:
+        env = green_gate.sandbox_environment(repo, root=tree)
         try:
-            green_gate.isolated_argv(["true"], str(repo), scratch, {}, hosted=False)
+            green_gate.check_sandbox(tree, env)
         except green_gate.GateError as error:
             raise SandboxMissing(str(error)) from error
 
@@ -180,7 +202,10 @@ def _run_entry(repo, entry, total, path, hosted, timeout, groups) -> Result:
     if isinstance(target, str):
         return result(STALE, target)
     try:
-        source = target.read_text(encoding="utf-8")
+        # newline="": the file's line endings are kept as they are, so the
+        # mutant differs from head by the mutation alone.
+        with open(target, encoding="utf-8", newline="") as handle:
+            source = handle.read()
         checked = os.lstat(target)
     except (OSError, UnicodeDecodeError) as error:
         return result(STALE, f"{entry.path} cannot be read at head: {error}")
@@ -255,10 +280,13 @@ def _write_no_follow(worktree: Path, relative: str, text: str, checked) -> None:
                             dir_fd=directory)
             os.close(directory)
             directory = inner
-        descriptor = os.open(parts[-1], os.O_WRONLY | os.O_NOFOLLOW, dir_fd=directory)
+        # O_NONBLOCK: a FIFO put there fails at once (no reader) instead of
+        # blocking before the check below can refuse it.
+        descriptor = os.open(parts[-1], os.O_WRONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
+                             dir_fd=directory)
     finally:
         os.close(directory)
-    with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+    with os.fdopen(descriptor, "w", encoding="utf-8", newline="") as handle:
         opened = os.fstat(handle.fileno())
         if not stat.S_ISREG(opened.st_mode) or (opened.st_dev, opened.st_ino) != \
                 (checked.st_dev, checked.st_ino):

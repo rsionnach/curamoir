@@ -183,7 +183,7 @@ def test_an_anchor_on_no_line_or_several_is_stale(anchor):
     ("return_constant", [4, 7], 6, "        return None"),
     ("delete_statement", [6, 7], 6, "        pass"),
     ("swap_operator", [4, 7], 5, '    if (spec.get("slos")) or (os.sep):'),
-    ("swap_operator", [11, 11], 11, "    return total(1, 2) != 3 + 4"),
+    ("swap_operator", [11, 11], 11, "    return (total(1, 2)) != (3 + 4)"),
     ("drop_argument", [11, 11], 11, "    return total(1) == 3 + 4"),
 ])
 def test_each_operator_changes_the_first_matching_node_and_nothing_else(mutation, locate, line,
@@ -226,4 +226,39 @@ def test_a_non_ascii_line_is_cut_at_the_right_character():
 
     # The comparison is the first node at that position (it holds the sum),
     # and its slice ends after the multi-byte characters, not inside them.
-    assert mutated == 'x = "é" + "ü" != "ö"\n'
+    assert mutated == 'x = ("é" + "ü") != ("ö")\n'
+
+
+
+# --- correctness review, round 1 ------------------------------------------------
+
+def test_a_swapped_comparison_keeps_its_operands_precedence():
+    mutated = m.mutate("def f(a, b, c):\n    return (a or b) == c\n",
+                       entry(mutation="swap_operator"), 1, 2)
+
+    assert mutated.splitlines()[1] == "    return (a or b) != (c)"
+    namespace = {}
+    exec(mutated, namespace)
+    # (0 or 1) != 1 is False: the swap, not `a or (b != c)`, which is True.
+    assert namespace["f"](0, 1, 1) is False
+
+
+def test_an_anchor_on_a_decorated_defs_own_line_takes_the_function():
+    source = "class K:\n    @staticmethod\n    def classify(x):\n        if x:\n" \
+             "            return 1\n        return 2\n"
+
+    # From the anchored def line to the function's end (the decorator above
+    # holds nothing an operator acts on).
+    assert m.region(source, entry(locate={"anchor": "def classify("})) == (3, 6)
+    assert m.mutate(source, entry(locate={"anchor": "def classify("}), 3, 6) \
+        .splitlines()[3] == "        if not (x):"
+
+
+@pytest.mark.parametrize("separator", ["\x0c", "\u2028"])
+def test_lines_are_counted_as_python_counts_them(separator):
+    source = f"x = 1  # a{separator}comment\ndef f(a):\n    return a == 1\n"
+
+    mutated = m.mutate(source, entry(locate={"lines": [3, 3]}, mutation="swap_operator"), 3, 3)
+
+    assert mutated.split("\n")[2] == "    return (a) != (1)"
+    assert m.region(source, entry(locate={"anchor": "return a == 1"})) == (3, 3)
