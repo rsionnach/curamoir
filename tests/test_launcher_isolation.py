@@ -1,0 +1,253 @@
+"""cm-6f0: no launcher in scripts/ imports code from the working directory.
+
+`python -m` and `python -c` put the working directory first on sys.path, and
+a hook's working directory is whatever repository is open: a `curamoir/`
+package or a `yaml.py` committed there ran with the developer's privileges.
+Every launcher now chooses and starts Python through src/curamoir/launcher.sh,
+with `-P -E` and a bootstrap that inserts the plugin's own src/.
+
+The planted modules write a marker file rather than print, so a launcher that
+swallows its output still shows that planted code ran.
+"""
+
+import os
+import re
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+import pytest
+
+ROOT = Path(__file__).resolve().parents[1]
+SCRIPTS = ROOT / "scripts"
+SELECTION = ROOT / "src" / "curamoir" / "launcher.sh"
+
+HOOKS = ("pretooluse", "stop", "precompact", "sessionend", "sessionstart")
+LAUNCHERS = (*(f"curamoir-hook-{hook}" for hook in HOOKS), "curamoir", "curamoir-lint")
+
+#: What each launcher is given: a hook reads a JSON payload on stdin.
+ARGS = {"curamoir": ["--help"], "curamoir-lint": ["--repo", "."]}
+
+
+def planted(directory, marker):
+    """A working directory holding a planted curamoir/ package (every module a
+    launcher runs, and its __init__), a planted yaml.py, and a planted yaml.py
+    and json.py under a relative PYTHONPATH entry, `vendor`."""
+    body = f"open({str(marker)!r}, 'a').write(__name__ + chr(10))\n"
+    package = directory / "curamoir"
+    (package / "hooks").mkdir(parents=True)
+    for module in ("__init__", "cli", "lint", "hooks/__init__",
+                   *(f"hooks/{hook}" for hook in HOOKS)):
+        (package / f"{module}.py").write_text(body, encoding="utf-8")
+    (directory / "yaml.py").write_text(body, encoding="utf-8")
+    (directory / "vendor").mkdir()
+    for name in ("yaml", "json"):
+        (directory / "vendor" / f"{name}.py").write_text(body, encoding="utf-8")
+
+
+def launch(name, cwd, env, stdin="{}"):
+    return subprocess.run([str(SCRIPTS / name), *ARGS.get(name, [])], cwd=cwd, env=env,
+                          input=stdin, capture_output=True, text=True, timeout=60)
+
+
+@pytest.mark.parametrize("name", LAUNCHERS)
+def test_no_launcher_or_probe_runs_planted_code(tmp_path, name):
+    marker = tmp_path / "ran.txt"
+    work = tmp_path / "work"
+    work.mkdir()
+    planted(work, marker)
+    env = {**os.environ, "PYTHONPATH": "vendor", "CLAUDE_PLUGIN_ROOT": str(ROOT),
+           "HOME": str(tmp_path)}
+
+    done = launch(name, work, env)
+
+    assert not marker.exists(), f"{name} ran planted code: {marker.read_text()}"
+    assert done.returncode == 0, done.stderr
+
+
+@pytest.mark.parametrize("name", LAUNCHERS)
+def test_the_planted_files_would_run_without_the_isolation(tmp_path, name):
+    """The fixture is live: run as the launchers used to (`-m`, the working
+    directory first, PYTHONPATH honoured), the planted code runs."""
+    marker = tmp_path / "ran.txt"
+    planted(tmp_path, marker)
+    module = {"curamoir": "curamoir.cli", "curamoir-lint": "curamoir.lint"}.get(
+        name, "curamoir.hooks." + name.removeprefix("curamoir-hook-"))
+
+    subprocess.run([sys.executable, "-m", module], cwd=tmp_path, input="{}",
+                   env={**os.environ, "PYTHONPATH": f"{ROOT / 'src'}:vendor"},
+                   capture_output=True, text=True, timeout=60)
+
+    assert marker.exists()
+
+
+# --- which interpreter qualifies ---------------------------------------------
+
+def stand_ins(tmp_path, names, behaviour=""):
+    """A PATH holding only bash and stand-ins for `names`, each logging its
+    arguments and then running this interpreter. `behaviour` is shell run
+    before that, with "$@" the arguments."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    for tool in ("bash", "dirname", "sed"):
+        (bin_dir / tool).symlink_to(shutil.which(tool))
+    log = tmp_path / "calls.log"
+    for name in names:
+        script = bin_dir / name
+        script.write_text(f'#!/bin/sh\nprintf "%s\\n" "{name} $*" >> "{log}"\n{behaviour}\n'
+                          f'exec "{sys.executable}" "$@"\n', encoding="utf-8")
+        script.chmod(0o755)
+    return {"PATH": str(bin_dir), "HOME": str(tmp_path), "CLAUDE_PLUGIN_ROOT": str(ROOT)}, log
+
+
+#: A python3 that is below the floor but has -P (3.11): the floor probe exits 1.
+BELOW_THE_FLOOR = 'case "$*" in *version_info*) exit 1 ;; esac'
+#: A python3 with no -P at all (before 3.11): Python exits 2 on the unknown flag.
+NO_SAFE_PATH = 'case "$1" in -P) echo "Unknown option: -P" >&2; exit 2 ;; esac'
+
+
+@pytest.mark.parametrize("behaviour", [BELOW_THE_FLOOR, NO_SAFE_PATH])
+@pytest.mark.parametrize("hook", HOOKS)
+def test_with_no_interpreter_that_qualifies_a_hook_exits_0_with_no_decision(tmp_path, hook,
+                                                                             behaviour):
+    env, log = stand_ins(tmp_path, ["python3"], behaviour)
+
+    done = launch(f"curamoir-hook-{hook}", tmp_path, env)
+
+    assert (done.returncode, done.stdout) == (0, "")
+    # Only the probe ran: never a hook module.
+    assert all("curamoir.hooks" not in line for line in log.read_text().splitlines())
+
+
+@pytest.mark.parametrize(("name", "code"), [("curamoir", 1), ("curamoir-lint", 2)])
+@pytest.mark.parametrize("behaviour", [BELOW_THE_FLOOR, NO_SAFE_PATH])
+def test_with_no_interpreter_that_qualifies_the_cli_and_lint_say_so_in_one_line(
+        tmp_path, name, code, behaviour):
+    env, _ = stand_ins(tmp_path, ["python3"], behaviour)
+
+    done = launch(name, tmp_path, env)
+
+    assert done.returncode == code and done.stdout == ""
+    (line,) = done.stderr.splitlines()
+    assert "needs Python 3.12 or later" in line
+
+
+@pytest.mark.skipif(not shutil.which("python3.9"), reason="needs a real python3.9 on PATH")
+def test_a_real_interpreter_without_safe_path_is_skipped_not_blocking(tmp_path):
+    """The case the probe exists for: a real 3.9 as python3 exits 2 on -P,
+    which a hook must never pass on (exit 2 blocks the tool call)."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "python3").symlink_to(shutil.which("python3.9"))
+    for tool in ("bash", "dirname"):
+        (bin_dir / tool).symlink_to(shutil.which(tool))
+    env = {"PATH": str(bin_dir), "HOME": str(tmp_path), "CLAUDE_PLUGIN_ROOT": str(ROOT)}
+
+    done = launch("curamoir-hook-pretooluse", tmp_path, env,
+                  stdin='{"tool_name": "Bash", "tool_input": {"command": "ls"}}')
+
+    assert (done.returncode, done.stdout, done.stderr) == (0, "", "")
+
+
+def test_a_versioned_interpreter_is_taken_unprobed(tmp_path):
+    """A hook runs on every Bash call: a versioned name is at or above the
+    floor by name and is started once, with no probe before it."""
+    env, log = stand_ins(tmp_path, ["python3.12", "python3"])
+
+    done = launch("curamoir-hook-stop", tmp_path, env)
+
+    assert done.returncode == 0, done.stderr
+    (call,) = log.read_text().splitlines()
+    assert call.startswith("python3.12 -P -E -c ") and call.endswith(" curamoir.hooks.stop")
+
+
+def test_an_unversioned_interpreter_is_probed_once_then_started(tmp_path):
+    env, log = stand_ins(tmp_path, ["python3"])
+
+    done = launch("curamoir-hook-stop", tmp_path, env)
+
+    assert done.returncode == 0, done.stderr
+    probe, start = log.read_text().splitlines()
+    assert probe == ("python3 -P -E -c import sys; "
+                     "raise SystemExit(sys.version_info < (3, 12))")
+    assert start.endswith(" curamoir.hooks.stop")
+
+
+def test_the_pyyaml_probe_uses_the_same_flags(tmp_path):
+    env, log = stand_ins(tmp_path, ["python3.14"])
+
+    launch("curamoir", tmp_path, env)
+
+    assert "python3.14 -P -E -c import yaml" in log.read_text().splitlines()
+
+
+# --- one place starts Python ---------------------------------------------------
+
+def test_every_file_in_scripts_is_one_of_the_seven_launchers():
+    assert sorted(p.name for p in SCRIPTS.iterdir()) == sorted(LAUNCHERS)
+
+
+@pytest.mark.parametrize("name", LAUNCHERS)
+def test_no_launcher_starts_python_outside_the_selection_file(name):
+    """Only src/curamoir/launcher.sh names an interpreter, probes one or
+    execs one; each launcher sources it and calls its functions."""
+    text = (SCRIPTS / name).read_text(encoding="utf-8")
+    code = [line for line in text.splitlines() if not line.lstrip().startswith("#")]
+    sourced = [line for line in code if re.search(r'^\s*\. "[^"]*/src/curamoir/launcher\.sh"',
+                                                  line)]
+    assert len(sourced) == 1, f"{name} does not source the selection file once"
+    for line in code:
+        # The selection file's own name and functions are what a launcher may say.
+        bare = re.sub(r"curamoir_\w+", "", line.replace("curamoir/launcher.sh", ""))
+        assert not re.search(r"python|\bexec\b|-m curamoir|\s-c\s", bare), (
+            f"{name} starts an interpreter itself: {line!r}")
+    assert re.search(r"^\s*curamoir_exec_module ", text, re.MULTILINE)
+
+
+# --- doctor ---------------------------------------------------------------------
+
+def test_doctor_says_pythonpath_is_ignored_only_when_it_is_set():
+    from curamoir.doctor import _check_pythonpath
+
+    (finding,) = _check_pythonpath({"PYTHONPATH": "vendor"})
+    assert finding.level == "warning" and "ignored" in finding.detail
+    assert _check_pythonpath({}) == [] and _check_pythonpath({"PYTHONPATH": ""}) == []
+
+
+def test_doctor_resolves_the_interpreter_the_launchers_would_take(monkeypatch):
+    """An unversioned name that fails the probe is skipped, as the launchers
+    skip it; with none that qualifies, the first that exists is reported, so
+    the version probe can say what is wrong with it."""
+    from curamoir import doctor
+
+    found = {"python3": "/x/python3", "python": "/x/python"}
+    monkeypatch.setattr(doctor.shutil, "which", found.get)
+    monkeypatch.setattr(doctor, "_qualifies", lambda path: path == "/x/python")
+    assert doctor._wrapper_interpreter() == "/x/python"
+
+    monkeypatch.setattr(doctor, "_qualifies", lambda path: False)
+    assert doctor._wrapper_interpreter() == "/x/python3"
+
+    found["python3.13"] = "/x/python3.13"
+    assert doctor._wrapper_interpreter() == "/x/python3.13"
+
+
+@pytest.mark.parametrize(("name", "code"), [
+    *((f"curamoir-hook-{hook}", 0) for hook in HOOKS), ("curamoir", 1), ("curamoir-lint", 2)])
+def test_a_missing_selection_file_is_guarded(tmp_path, name, code):
+    """A source of a missing file that went on would end in exit 1, which
+    the lint reads as violations: each launcher stops at the source instead,
+    a hook with no decision, the CLI and the lint with one line."""
+    copy = tmp_path / "plugin"
+    shutil.copytree(SCRIPTS, copy / "scripts")
+    shutil.copytree(ROOT / "src", copy / "src", ignore=shutil.ignore_patterns("__pycache__"))
+    (copy / "src" / "curamoir" / "launcher.sh").unlink()
+    env = {**os.environ, "CLAUDE_PLUGIN_ROOT": str(copy)}
+
+    done = subprocess.run([str(copy / "scripts" / name), *ARGS.get(name, [])], cwd=tmp_path,
+                          env=env, input="{}", capture_output=True, text=True, timeout=60)
+
+    assert done.returncode == code and done.stdout == ""
+    if code:
+        assert "cannot load" in done.stderr.splitlines()[-1]

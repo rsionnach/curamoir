@@ -121,6 +121,15 @@ Prerequisites:
 
 - **Python 3.12 or newer** as `python3` (or `python3.12` and up) on PATH,
   with PyYAML; `/curamoir:doctor` reports either missing.
+  - Every launcher in `scripts/` (the hooks, `curamoir` and `curamoir-lint`)
+    starts Python with `-P -E`. So nothing in the working directory, which for
+    a hook is whatever repository is open, can be imported in place of
+    cúramóir's own code.
+  - The flip side: **your `PYTHONPATH` is not honoured.** PyYAML must be
+    installed in the interpreter itself or in your user site-packages.
+    `/curamoir:doctor` warns when `PYTHONPATH` is set and being ignored.
+  - Which interpreter runs is still decided by PATH, so whoever controls your
+    PATH controls which `python3` runs.
 - **GitHub's `gh` CLI, authenticated** (`gh auth login`). Every scheduled
   job asks it whether the repository is paused (the `curamoir:paused`
   label), and the sweep uses it to count open PRs and to open its own.

@@ -52,73 +52,34 @@ esac
 # `..` would be the link's parent, which has no `src/`.
 root="$(cd -P "$here/.." && pwd -P)" || { echo "curamoir-lint: cannot locate its own directory" >&2; exit 2; }
 
-# Python must never start in the repository being linted. `python -c` and
-# `python -m` put the working directory at sys.path[0], AHEAD of PYTHONPATH, and
-# pre-commit and CI run this from the linted repo's root — so a `yaml.py`,
-# `json.py` or `curamoir/` committed in an unreviewed PR would be imported, and
-# executed, as the linter (and a hostile one exiting 1 reads as "violations").
-# `-P` / PYTHONSAFEPATH would drop that entry, but only on 3.11+, and the
-# fallback interpreter here may be 3.9. So the invoking directory is recorded,
-# and BOTH the PyYAML probe and the runner start in our own `src/`, whose
-# contents are the code being run anyway. lint.py moves back to the recorded
-# directory itself, after its imports, so `--repo` (default `.`, or a relative
-# path) means exactly what it meant to the person who typed it. PYTHONSAFEPATH
-# is set as well: belt and braces where it is understood, ignored where not.
-#
-# PYTHONPATH is still PREPENDED to, not replaced, as in every other wrapper: it
-# comes from whoever invoked the lint (a CI job, a test harness), not from the
-# repository, and replacing it would break an interpreter whose PyYAML is only
-# reachable through it. Its relative entries are made absolute against the
-# invoking directory before the `cd`, so `PYTHONPATH=vendor` still means the
-# `vendor` the caller meant. Empty entries are dropped: Python reads one as
-# the working directory, which is the repository — exactly what must not be
-# importable.
+# Python must never import from the repository being linted: pre-commit and
+# CI run this from the linted repo's root, so a `yaml.py`, `json.py` or
+# `curamoir/` committed in an unreviewed PR would be imported, and executed,
+# as the linter (and a hostile one exiting 1 reads as "violations"). Every
+# launch, the PyYAML probe included, is `-P -E` with our own src/ inserted by
+# a bootstrap: src/curamoir/launcher.sh says why, and why PYTHONPATH is
+# therefore not honoured. The working directory is still recorded and the
+# run starts in src/; lint.py moves back to the recorded directory after its
+# imports, so `--repo` (default `.`, or a relative path) means exactly what it
+# meant to the person who typed it.
 invoked_from="$PWD"
-inherited_pythonpath=""
-IFS=: read -r -a entries <<< "${PYTHONPATH:-}"
-# `${entries[@]+"${entries[@]}"}` rather than `"${entries[@]}"`: with no
-# PYTHONPATH the array is empty, and bash before 4.4 (macOS ships 3.2) treats
-# expanding an empty array under `set -u` as an unbound variable and exits.
-for entry in ${entries[@]+"${entries[@]}"}; do
-  case "$entry" in
-    "") continue ;;
-    /*) ;;
-    *) entry="$invoked_from/$entry" ;;
-  esac
-  inherited_pythonpath="${inherited_pythonpath:+${inherited_pythonpath}:}$entry"
-done
-if [ -n "$inherited_pythonpath" ]; then
-  export PYTHONPATH="$inherited_pythonpath"
-else
-  unset PYTHONPATH
-fi
 cd "$root/src" || { echo "curamoir-lint: cannot enter $root/src" >&2; exit 2; }
-export PYTHONSAFEPATH=1
 
-# The same candidates in the same order as every other wrapper (a test asserts
-# they agree with doctor), with one difference: the hooks take the first that
-# EXISTS, and this takes the first that can import PyYAML, falling back to the
-# first that exists. Rule files are YAML, and a machine where `python3.14` is a
-# bare Homebrew install and `python3.12` has PyYAML is ordinary — taking the
-# first would refuse to lint while a working interpreter sat on PATH. One probe
-# per candidate is affordable here in a way it is not on a per-Bash-call hook.
-# src/curamoir/lint.py keeps to syntax that imports on 3.9 (cm-bzb), so the
-# fallback still runs far enough to say what is missing.
-chosen=""
-for interpreter in python3.14 python3.13 python3.12 python3 python; do
-  if command -v "$interpreter" >/dev/null 2>&1; then
-    [ -n "$chosen" ] || chosen="$interpreter"
-    if "$interpreter" -c "import yaml" >/dev/null 2>&1; then
-      chosen="$interpreter"
-      break
-    fi
-  fi
-done
-
-if [ -z "$chosen" ]; then
-  echo "curamoir-lint: needs python3 on PATH, and found none. Nothing was checked." >&2
+# The same candidates and the same order as every other launcher, preferring
+# one that can import PyYAML (rule files are YAML), and falling back to the
+# first that qualifies. An interpreter below the floor no longer qualifies,
+# so the old 3.9 fallback is gone (cm-6f0): without -P it could not run
+# safely here.
+# Guarded: a source of a missing file that went on would end in exit 1, which
+# this script's contract reads as violations.
+. "$root/src/curamoir/launcher.sh" || {
+  echo "curamoir-lint: cannot load $root/src/curamoir/launcher.sh. Nothing was checked." >&2
+  exit 2
+}
+if ! curamoir_choose_python prefer-yaml; then
+  echo "curamoir-lint: $(curamoir_no_python_message) Nothing was checked." >&2
   exit 2
 fi
 
-CURAMOIR_LINT_INVOKED_FROM="$invoked_from" PYTHONPATH="${root}/src${PYTHONPATH:+:${PYTHONPATH}}" \
-  exec "$chosen" -m curamoir.lint "$@"
+export CURAMOIR_LINT_INVOKED_FROM="$invoked_from"
+curamoir_exec_module "${root}/src" curamoir.lint "$@"

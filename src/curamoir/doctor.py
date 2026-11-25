@@ -72,6 +72,7 @@ def diagnose(repo, tools=None):
     findings.append(_check_gitignore(base))
     findings.extend(_check_worktrees(repo))
     findings.extend(_check_tools(tools, repo=repo))
+    findings.extend(_check_pythonpath())
 
     return sorted(findings, key=lambda f: LEVEL_ORDER[f.level])
 
@@ -647,22 +648,59 @@ def _probe_bd(level, fix, repo=None):
     return Finding("bd", "ok", "available")
 
 
-#: The candidates the hook wrappers try, in their order. doctor must resolve the
-#: interpreter the WRAPPERS will use, not the one named `python3` — on a machine
+#: The candidates the launchers try, in their order. doctor must resolve the
+#: interpreter the LAUNCHERS will use, not the one named `python3` — on a machine
 #: with 3.12 installed alongside an older default, asking only about `python3`
 #: reported an error for hooks that work perfectly. The list is duplicated from
-#: `scripts/curamoir-hook-*` rather than read from them, because doctor must not
+#: `src/curamoir/launcher.sh` rather than read from it, because doctor must not
 #: depend on parsing shell; a test asserts the two agree.
 WRAPPER_INTERPRETERS = ("python3.14", "python3.13", "python3.12", "python3", "python")
 
+#: The names that file takes unprobed: each is at or above the floor by name.
+_VERSIONED_INTERPRETERS = ("python3.14", "python3.13", "python3.12")
+
+#: The probe that file runs on an unversioned name, in one call: an interpreter
+#: without -P (before 3.11) exits 2 before running anything, and one below the
+#: floor exits 1 (cm-6f0).
+_QUALIFIES = ("-P", "-E", "-c", "import sys; raise SystemExit(sys.version_info < (3, 12))")
+
+
+def _qualifies(resolved):
+    try:
+        return subprocess.run([resolved, *_QUALIFIES], capture_output=True, timeout=5,
+                              stdin=subprocess.DEVNULL).returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
+
 
 def _wrapper_interpreter():
-    """The interpreter a hook wrapper would exec, or None if there is none."""
+    """The interpreter a launcher would exec; else, when none qualifies, the
+    first that exists, so the version probe can say what is wrong with it;
+    else None."""
+    first = None
     for candidate in WRAPPER_INTERPRETERS:
         found = shutil.which(candidate)
-        if found is not None:
+        if found is None:
+            continue
+        first = first or found
+        if candidate in _VERSIONED_INTERPRETERS or _qualifies(found):
             return found
-    return None
+    return first
+
+
+def _check_pythonpath(environ=None):
+    """PYTHONPATH is ignored by every launcher (`-E`, cm-6f0); say so when it is
+    set, since someone who set it expects it to matter. Nothing when unset."""
+    environ = os.environ if environ is None else environ
+    if not environ.get("PYTHONPATH"):
+        return []
+    return [Finding(
+        "PYTHONPATH", "warning",
+        "set, but ignored: every cúramóir launcher starts Python with -P -E, so "
+        "nothing on PYTHONPATH is importable by its hooks, CLI or lint",
+        fix="Install what cúramóir needs (PyYAML) into the interpreter's own or "
+            "user site-packages; PYTHONPATH can stay for other tools.",
+    )]
 
 
 def _probe_python(resolved, level, detail, fix):
@@ -676,7 +714,9 @@ def _probe_python(resolved, level, detail, fix):
         return Finding("python3", level, detail, fix=fix)
     try:
         result = subprocess.run(
-            [resolved, "-c", "import sys; print('%d.%d' % sys.version_info[:2])"],
+            # -I: nothing from the working directory or PYTHON*, and unlike
+            # the launchers' -P it exists on the old interpreters this reports.
+            [resolved, "-I", "-c", "import sys; print('%d.%d' % sys.version_info[:2])"],
             capture_output=True, text=True, timeout=5, stdin=subprocess.DEVNULL,
         )
     except (OSError, subprocess.SubprocessError):
@@ -691,7 +731,8 @@ def _probe_python(resolved, level, detail, fix):
     if version < MINIMUM_PYTHON:
         return Finding(
             "python3", "error",
-            f"python3 on PATH is {reported}, below the 3.12 cúramóir requires",
+            f"python3 on PATH is {reported}, below the 3.12 cúramóir requires, so "
+            "every launcher skips it and the hooks exit without a decision",
             fix="Install Python 3.12 or later and ensure it is first on PATH.",
         )
     return Finding("python3", "ok", f"available ({reported})")

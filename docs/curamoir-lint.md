@@ -34,12 +34,15 @@ takes precedence over every other argument, so
 checked nothing.
 
 It makes no model calls and no network calls, and needs no cúramóir install
-(E2-R5): only `scripts/curamoir-lint`, the `src/` directory beside it, a Python 3
-that can import PyYAML (rule files are YAML), and `ast-grep` for ast-grep rules.
-The wrapper finds `src/` from its own location — never from
+(E2-R5): only `scripts/curamoir-lint`, the `src/` directory beside it, Python 3.12
+or later that can import PyYAML (rule files are YAML), and `ast-grep` for
+ast-grep rules. The wrapper finds `src/` from its own location — never from
 `CLAUDE_PLUGIN_ROOT`, which a lint run outside Claude Code may have inherited
 stale — and of the interpreters it tries (`python3.14` … `python`, the same list
-as every wrapper) it takes the first that can import PyYAML.
+as every wrapper) it takes the first that can import PyYAML. Python starts
+with `-P -E`, so nothing in the repository being linted can be imported in its
+place, and `PYTHONPATH` is not honoured: PyYAML must be installed in the
+interpreter or the user's site-packages (`pip install pyyaml`, as below).
 
 ## Exit codes
 

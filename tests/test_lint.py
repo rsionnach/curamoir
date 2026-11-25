@@ -25,6 +25,7 @@ and the real binary is exercised directly whenever it is installed.
 
 import json
 import os
+import shlex
 import shutil
 import stat
 import subprocess
@@ -881,28 +882,48 @@ def _environment(path, pythonpath=None):
 
 
 def test_the_wrapper_runs_from_a_plain_checkout_without_curamoir_installed(tmp_path):
-    """E2-R5. The interpreter is run with `-S`, so site-packages — where the
-    editable install of cúramóir lives — is never consulted; only PyYAML's
-    directory is added, because rule files are YAML. If the wrapper did not find
-    `src/` beside itself, `import curamoir` would fail here."""
-    import yaml
-
+    """E2-R5. The code that runs is the `src/` beside the wrapper, not the
+    editable install of cúramóir in site-packages: the vendored copy's package
+    leaves a marker when imported. (It used to run the interpreter with `-S`
+    and put PyYAML back through PYTHONPATH; every launcher now ignores
+    PYTHONPATH, cm-6f0.)"""
     wrapper = _vendored_copy(tmp_path)
+    marker = tmp_path / "vendored-imported"
+    init = wrapper.parents[1] / "src" / "curamoir" / "__init__.py"
+    init.write_text(init.read_text(encoding="utf-8")
+                    + f"\nopen({str(marker)!r}, 'w').close()\n", encoding="utf-8")
     repo = sample_repo(tmp_path, *ALL_REGEX_RULES)
 
     result = subprocess.run(
         [str(wrapper), "--format", "json"],
         capture_output=True, text=True, cwd=str(repo),
-        env=_environment(_shims(tmp_path, "-S"),
-                         pythonpath=str(Path(yaml.__file__).resolve().parents[1])),
+        env=_environment(_shims(tmp_path)),
     )
 
+    assert marker.is_file(), "the vendored src/ was not the copy imported"
     assert result.returncode == EXIT_VIOLATIONS, result.stderr
     assert len(json.loads(result.stdout)["violations"]) == len(PLANTED["violations"])
 
 
+def test_the_vendored_copy_without_the_launcher_file_exits_2(tmp_path):
+    """The wrapper sources src/curamoir/launcher.sh (cm-6f0). Without it, a
+    source that went on would end in exit 1, which reads as violations: the
+    wrapper stops at the source, exit 2, checking nothing."""
+    wrapper = _vendored_copy(tmp_path)
+    (wrapper.parents[1] / "src" / "curamoir" / "launcher.sh").unlink()
+    repo = sample_repo(tmp_path, *ALL_REGEX_RULES)
+
+    result = subprocess.run(
+        [str(wrapper), "--format", "json"],
+        capture_output=True, text=True, cwd=str(repo), env=_environment(_shims(tmp_path)),
+    )
+
+    assert result.returncode == EXIT_ERROR and result.stdout == ""
+    assert "cannot load" in result.stderr and "Nothing was checked" in result.stderr
+
+
 NETWORK_TRIPWIRE = '''\
-"""Loaded by `site` before the runner. Any socket, or any import of an HTTP
+"""Loaded by the stand-in interpreter before the runner. Any socket, or any import of an HTTP
 or model client, aborts the process — so a pass proves none happened."""
 import builtins, socket, sys
 from pathlib import Path
@@ -927,18 +948,40 @@ builtins.__import__ = _guarded
 '''
 
 
+def _tripwire_shims(tmp_path, tripwire):
+    """Stand-in interpreters that load `tripwire` before the launcher's own
+    bootstrap. It used to come in as a sitecustomize through PYTHONPATH, which
+    every launcher now ignores (`-E`, cm-6f0), so the stand-in imports it and
+    then runs the bootstrap it was given, with the same argv."""
+    shims = tmp_path / "tripwire-shims"
+    shims.mkdir()
+    preamble = (f"import sys; sys.path.insert(0, {str(tripwire)!r}); import tripwire; "
+                "sys.path.pop(0); exec(compile(sys.argv.pop(1), '<launcher>', 'exec'))")
+    for name in ("python3.14", "python3.13", "python3.12", "python3", "python"):
+        shim = shims / name
+        shim.write_text(
+            "#!/bin/sh\n"
+            'if [ "$1 $2 $3" = "-P -E -c" ]; then\n'
+            '  code="$4"; shift 4\n'
+            f'  exec "{sys.executable}" -P -E -c {shlex.quote(preamble)} "$code" "$@"\n'
+            "fi\n"
+            f'exec "{sys.executable}" "$@"\n', encoding="utf-8")
+        shim.chmod(0o755)
+    return f"{shims}:/usr/bin:/bin"
+
+
 def test_the_runner_makes_no_network_or_model_calls(tmp_path):
     """E2-R5 says "no model calls"; a model call is a network call, so the test
     forbids the network outright and fails if the tripwire never loaded."""
     tripwire = tmp_path / "tripwire"
     tripwire.mkdir()
-    (tripwire / "sitecustomize.py").write_text(NETWORK_TRIPWIRE, encoding="utf-8")
+    (tripwire / "tripwire.py").write_text(NETWORK_TRIPWIRE, encoding="utf-8")
     repo = sample_repo(tmp_path, *ALL_REGEX_RULES)
 
     result = subprocess.run(
         [str(WRAPPER), "--repo", str(repo), "--format", "json"],
         capture_output=True, text=True,
-        env=_environment(_shims(tmp_path), pythonpath=str(tripwire)),
+        env=_environment(_tripwire_shims(tmp_path, tripwire)),
     )
 
     assert (tripwire / "tripwire-loaded").is_file(), "the tripwire never ran"
@@ -991,18 +1034,6 @@ def test_with_no_pyyaml_anywhere_the_wrapper_says_so_and_exits_two(tmp_path):
     assert "PyYAML" in result.stderr
 
 
-def test_the_lint_modules_parse_as_python_3_9():
-    """The wrapper may fall back to a 3.9 interpreter (cm-bzb), where newer
-    syntax is an import error and Python's exit 1 would read as violations.
-    `feature_version` catches grammar, not newer library calls; the hand run
-    under 3.9 covers those."""
-    import ast
-
-    for name in ("__init__", "lint", "rules", "principles", "config"):
-        source = (ROOT / "src" / "curamoir" / f"{name}.py").read_text(encoding="utf-8")
-        ast.parse(source, filename=f"{name}.py", feature_version=(3, 9))
-
-
 # --- the wrapper imports nothing from the repository it lints ----------------
 
 HOSTILE_MODULES = ("yaml.py", "json.py", "tempfile.py", "curamoir/__init__.py")
@@ -1025,9 +1056,9 @@ def _plant_hostile_modules(repo, markers):
         )
 
 
-# Each of the wrapper's two defences against importing from the linted repo is
-# tested on its own: with PYTHONSAFEPATH honoured (3.11+, as here) and with it
-# neutralised (a 3.9 fallback interpreter), where only the `cd` stands.
+# The wrapper starts Python with -P -E (cm-6f0), so PYTHONSAFEPATH no longer
+# decides anything: both shapes are kept to show that, with it set or unset,
+# nothing in the linted repository is imported.
 SAFEPATH = pytest.mark.parametrize(
     "safepath", [True, False], ids=["PYTHONSAFEPATH-honoured", "PYTHONSAFEPATH-ignored"])
 
@@ -1076,28 +1107,23 @@ def test_the_wrapper_names_a_missing_relative_repo_as_given(tmp_path):
 
 
 @SAFEPATH
-def test_a_relative_pythonpath_means_what_it_meant_where_the_wrapper_was_invoked(tmp_path,
-                                                                                safepath):
-    """The wrapper starts Python in its own `src/`, so an inherited relative
-    `PYTHONPATH=vendor` (a CI job providing PyYAML that way) would resolve
-    there instead, and the run would exit 2 for want of PyYAML. Each entry is
-    made absolute against the invoking directory first. Empty entries, which
-    Python reads as the working directory, are dropped: the working directory
-    is the repository, and that is what Python must never import from."""
-    import yaml
-
+def test_pythonpath_is_not_honoured_relative_entries_and_empty_ones_included(tmp_path,
+                                                                            safepath):
+    """Every launcher starts Python with -E (cm-6f0), so PYTHONPATH is not
+    honoured at all: hostile modules on a relative entry (`vendor`) and on the
+    empty entries Python reads as the working directory are never imported,
+    and the run still lints, with the interpreter's own PyYAML."""
     invoked_from = tmp_path / "ci"
-    shutil.copytree(Path(yaml.__file__).parent, invoked_from / "vendor" / "yaml",
-                    ignore=shutil.ignore_patterns("__pycache__"))
     markers = tmp_path / "markers"
     markers.mkdir()
     _plant_hostile_modules(invoked_from, markers)
+    _plant_hostile_modules(invoked_from / "vendor", markers)
     repo = sample_repo(tmp_path, *ALL_REGEX_RULES)
 
     result = subprocess.run(
         [str(WRAPPER), "--repo", str(repo), "--format", "json"],
         capture_output=True, text=True, cwd=str(invoked_from),
-        env=_environment(_shims(tmp_path, "-S", safepath=safepath), pythonpath=":vendor:"),
+        env=_environment(_shims(tmp_path, safepath=safepath), pythonpath=":vendor:"),
     )
 
     assert sorted(p.name for p in markers.iterdir()) == []

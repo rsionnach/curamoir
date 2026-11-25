@@ -153,11 +153,8 @@ def test_doctor_probes_the_interpreter_the_wrappers_would_actually_use():
 
     from curamoir.doctor import WRAPPER_INTERPRETERS
 
-    for wrapper in sorted(Path("scripts").iterdir()):
-        text = wrapper.read_text(encoding="utf-8")
-        match = re.search(r"for interpreter in ([^;]+); do", text)
-        if not match:
-            continue
-        assert tuple(match.group(1).split()) == WRAPPER_INTERPRETERS, (
-            f"{wrapper} tries a different order than doctor probes"
-        )
+    text = Path("src/curamoir/launcher.sh").read_text(encoding="utf-8")
+    match = re.search(r'^CURAMOIR_PYTHON_CANDIDATES="([^"]+)"$', text, re.MULTILINE)
+    assert match, "src/curamoir/launcher.sh no longer names its candidates"
+    assert tuple(match.group(1).split()) == WRAPPER_INTERPRETERS, (
+        "the launchers try a different order than doctor probes")
