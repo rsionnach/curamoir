@@ -262,3 +262,15 @@ def test_lines_are_counted_as_python_counts_them(separator):
 
     assert mutated.split("\n")[2] == "    return (a) != (1)"
     assert m.region(source, entry(locate={"anchor": "return a == 1"})) == (3, 3)
+
+
+
+@pytest.mark.parametrize("ending", ["\r", "\r\n", "\n"])
+def test_every_line_ending_python_reads_is_a_line(ending):
+    source = ending.join(["import os", "def f(a):", "    if a:", "        return a == 1",
+                          "    return 0", ""])
+
+    assert m.region(source, entry(locate={"anchor": "def f("})) == (2, 5)
+    mutated = m.mutate(source, entry(locate={"lines": [4, 4]}, mutation="swap_operator"), 4, 4)
+    assert mutated.split(ending)[3] == "        return (a) != (1)"
+    assert mutated.count(ending) == source.count(ending)

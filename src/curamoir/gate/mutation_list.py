@@ -355,13 +355,14 @@ def _splice(source: str, node, how) -> str:
 
 
 def _lines(source: str) -> list:
-    """`source`'s lines with their endings, split on "\n" only, as Python's
-    line numbers count them (str.splitlines also splits on a form feed and
-    on Unicode line separators, which can sit in a comment or a string)."""
-    lines = source.split("\n")
-    out = [line + "\n" for line in lines[:-1]]
-    if lines[-1]:
-        out.append(lines[-1])
+    """`source`'s lines with their endings, split on "\r\n", "\r" or "\n"
+    as Python's tokenizer counts lines (the file is read with its own
+    endings kept; str.splitlines would also split on a form feed and on
+    Unicode line separators, which can sit in a comment or a string)."""
+    parts = re.split(r"(\r\n|\r|\n)", source)
+    out = [parts[i] + parts[i + 1] for i in range(0, len(parts) - 1, 2)]
+    if parts[-1]:
+        out.append(parts[-1])
     return out
 
 
