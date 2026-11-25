@@ -398,3 +398,22 @@ def test_a_fence_inside_a_fence_is_no_block_to_the_helper(repo, tmp_path):
     done, events = helper(repo, tmp_path, fake_bd(tmp_path, documented))
 
     assert done.returncode == 0 and [e["verdict"] for e in events] == ["none"]
+
+
+
+def test_a_record_that_cannot_be_written_is_a_notice_and_the_lines_still_print(
+        repo, tmp_path, capsys):
+    from curamoir.scaffold import init_repo
+
+    init_repo(repo)
+    runs = repo / ".curamoir" / "state" / "r5"
+    runs.mkdir(parents=True, exist_ok=True)
+    runs.chmod(0o500)
+    try:
+        code, out, err = cli(repo, brief(tmp_path, KILLED, SURVIVES), capsys)
+    finally:
+        runs.chmod(0o700)
+
+    assert code == runner.EXIT_FAILURE
+    assert sorted(json.loads(line)["result"] for line in out.splitlines()) == ["green", "red"]
+    assert err.count("could not be written") == 1

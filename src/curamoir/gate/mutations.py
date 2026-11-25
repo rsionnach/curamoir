@@ -47,6 +47,7 @@ import concurrent.futures
 import contextlib
 import difflib
 import os
+import re
 import shlex
 import signal
 import stat
@@ -308,13 +309,45 @@ class _Run:
     output: str
 
 
+#: Options of `uv run` and `timeout` that take a value.
+_VALUED = {"--extra", "--with", "--group", "--python", "-p", "--project", "--directory",
+           "--package", "--env-file", "-s", "--signal", "-k", "--kill-after"}
+
+
 def _is_pytest(argv) -> bool:
-    """Whether the command runs pytest, also behind a wrapper (`uv run
-    pytest`, `timeout 60 pytest`, `env A=1 pytest`, `python -mpytest`)."""
-    if any(os.path.basename(word) in ("pytest", "py.test") for word in argv):
+    """Whether the program the command runs is pytest, found by skipping the
+    wrappers in front of it (`env K=V`, `timeout N`, `uv run [options]`)
+    and reading a Python's `-m pytest`. A word that merely says pytest (a
+    `make pytest` target, `tox -e pytest`, `uv run --with pytest`) is not."""
+    i = 0
+    while i < len(argv):
+        word = os.path.basename(argv[i])
+        if word == "env":
+            i += 1
+            while i < len(argv) and ("=" in argv[i] or argv[i].startswith("-")):
+                i += 1
+        elif word == "timeout":
+            i += 1
+            while i < len(argv) and argv[i].startswith("-"):
+                i += 2 if argv[i] in _VALUED else 1
+            i += 1      # the duration
+        elif word == "uv" and i + 1 < len(argv) and argv[i + 1] == "run":
+            i += 2
+            while i < len(argv) and argv[i].startswith("-"):
+                i += 2 if argv[i] in _VALUED else 1
+        else:
+            break
+    if i >= len(argv):
+        return False
+    program = os.path.basename(argv[i])
+    if program in ("pytest", "py.test"):
         return True
-    return any(word == "-mpytest" for word in argv) or \
-        any(argv[i] == "-m" and argv[i + 1] == "pytest" for i in range(len(argv) - 1))
+    if re.fullmatch(r"python[0-9.]*", program):
+        rest = argv[i + 1:]
+        while rest and rest[0].startswith("-") and rest[0] not in ("-m", "-mpytest"):
+            rest = rest[1:]
+        return rest[:1] == ["-mpytest"] or rest[:2] == ["-m", "pytest"]
+    return False
 
 
 def _run_selection(repo, path, argv, hosted, timeout, groups) -> _Run:

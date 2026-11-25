@@ -165,7 +165,14 @@ class RunWorktrees:
                 # Removed while the lock is still held, so no probe sees a
                 # finishing run's directory unlocked. The scope directory
                 # stays: removing it could race another run starting there.
-                shutil.rmtree(self.directory, ignore_errors=True)
+                # Renamed out of the probes' sight first (orphans skips a
+                # dot name), so no probe sees it with its lock file gone.
+                leaving = self.directory.parent / f".{self.run_id}.leaving"
+                try:
+                    os.rename(self.directory, leaving)
+                except OSError:
+                    leaving = self.directory
+                shutil.rmtree(leaving, ignore_errors=True)
             self._close_lock()
         if problems and exc[0] is None:
             raise CleanupError("worktrees could not be removed: " + "; ".join(problems))

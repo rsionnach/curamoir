@@ -485,6 +485,9 @@ def test_a_probe_never_creates_a_lock_and_a_starting_run_is_not_an_orphan(repo):
     ("uv run --extra dev pytest tests/x.py -q", True), ("timeout 60 pytest t", True),
     ("env A=1 pytest t", True), ("python -mpytest t", True), ("python -m pytest t", True),
     ("/usr/bin/py.test t", True), ("python -c 'print(1)'", False), ("make test", False),
+    ("make pytest", False), ("tox -e pytest", False), ("nox -s pytest", False),
+    ("uv run --with pytest python check.py", False), ("python -I -m pytest t", True),
+    ("timeout -s KILL 60 env A=1 uv run --extra dev pytest t", True),
 ])
 def test_pytest_is_recognised_behind_a_wrapper(command, pytest_):
     import shlex
@@ -543,3 +546,20 @@ def test_a_clean_run_does_not_prune_the_users_other_worktrees(repo, tmp_path):
     run(repo, block(KILLED))
 
     assert str(elsewhere) in _git(repo, "worktree", "list", "--porcelain")
+
+
+
+def test_a_finishing_run_is_never_seen_as_an_orphan(repo, monkeypatch):
+    """Every unlink of the run's own files happens out of the probes' sight."""
+    head = _git(repo, "rev-parse", "HEAD")
+    seen, real = [], os.unlink
+
+    def spying(path, *args, **kwargs):
+        real(path, *args, **kwargs)
+        seen.append(worktrees.orphans(repo))
+
+    with worktrees.RunWorktrees(repo, None, base=head, head=head) as trees:
+        trees.add()
+        monkeypatch.setattr(os, "unlink", spying)
+    monkeypatch.setattr(os, "unlink", real)
+    assert seen and all(found == [] for found in seen)
