@@ -34,6 +34,7 @@ import datetime
 import json
 import os
 import secrets
+import threading
 from pathlib import Path
 
 from curamoir.config import ConfigError, safe_load_unique
@@ -85,15 +86,22 @@ def run_mutations_job(repo, run, *, base, head, brief, emit, notice):
     # entry leaves none; a record that cannot be written is a notice, and
     # the run's own lines still stand.
     record = {"dir": _record_dir(repo) if initialised else None, "made": False}
+    # Results arrive from the runner's worker threads: one at a time, so a
+    # line is printed and recorded whole and the record is made once.
+    writing = threading.Lock()
 
     def printed(result):
+        with writing:
+            _printed(result)
+
+    def _printed(result):
         line = json.dumps(result.line(), sort_keys=True)
         emit(line)
         if record["dir"] is None:
             return
         try:
             if not record["made"]:
-                record["dir"].mkdir(parents=True)
+                record["dir"].mkdir(parents=True, exist_ok=True)
                 (record["dir"] / "mutations.yaml").write_text(block, encoding="utf-8")
                 record["made"] = True
             with open(record["dir"] / "results.jsonl", "a", encoding="utf-8") as handle:

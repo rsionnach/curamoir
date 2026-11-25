@@ -18,7 +18,6 @@ import subprocess
 import sys
 import textwrap
 import time
-from pathlib import Path
 
 import pytest
 
@@ -131,12 +130,6 @@ def test_a_killed_mutation_is_red_a_surviving_one_green_and_an_empty_selection_i
     assert _git(repo, "status", "--porcelain") == ""
 
 
-def test_a_green_names_the_behaviour_the_entry_gives():
-    named = mutation_list.parse_entries(textwrap.dedent(SURVIVES) +
-                                        '  behaviour: "an empty spec is api"\n')[0]
-    assert named.behaviour == "an empty spec is api"
-
-
 def test_a_green_quotes_its_behaviour(repo):
     (green,) = run(repo, block(SURVIVES + '      behaviour: "an empty spec is api"\n'))
 
@@ -235,7 +228,7 @@ def test_the_selection_imports_the_worktrees_code_not_the_checkouts(repo):
     (result,) = run(repo, block(KILLED))
 
     assert result.result == "red"
-    assert "assert None == 'gate'" in result.output_tail or "'api'" in result.output_tail
+    assert "assert 'api' == 'gate'" in result.output_tail
 
 
 # --- the cap (R5-R40) ----------------------------------------------------------------
@@ -263,22 +256,25 @@ def test_no_more_than_the_cap_run_at_once(repo, monkeypatch):
           mutation: return_constant
           expect_red: "{PYTEST} tests/test_core.py::test_slow"
     '''
-    seen, peak = [], 0
-    original = worktrees.RunWorktrees.add
+    running, peak, lock = 0, 0, __import__("threading").Lock()
+    original = mutations._Groups.run
 
-    def counting(self):
-        nonlocal peak
-        path = original(self)
-        live = [p for p in self.created if Path(p).exists()]
-        seen.append(len(live))
-        peak = max(peak, len(live))
-        return path
+    def counting(self, *args, **kwargs):
+        nonlocal running, peak
+        with lock:
+            running += 1
+            peak = max(peak, running)
+        try:
+            return original(self, *args, **kwargs)
+        finally:
+            with lock:
+                running -= 1
 
-    monkeypatch.setattr(worktrees.RunWorktrees, "add", counting)
+    monkeypatch.setattr(mutations._Groups, "run", counting)
     started = time.monotonic()
     results = run(repo, block(slow, slow, slow, slow), cap=2)
 
-    assert len(results) == 4 and peak <= 4
+    assert len(results) == 4 and peak <= 2
     # Two at a time, each about two seconds (baseline and mutant): about 4 s,
     # not 8 s one by one, and not 2 s all at once.
     elapsed = time.monotonic() - started
@@ -583,3 +579,95 @@ def test_a_finishing_run_is_never_seen_as_an_orphan(repo, monkeypatch):
         monkeypatch.setattr(os, "unlink", spying)
     monkeypatch.setattr(os, "unlink", real)
     assert seen and all(found == [] for found in seen)
+
+
+
+# --- provenance review, round 1 ------------------------------------------------
+
+FIXTURE_TESTS = textwrap.dedent('''\
+    import pytest
+    from pkg.core import classify
+
+
+    @pytest.fixture
+    def api():
+        assert classify({}) == "api"     # an error in the fixture, not a failure
+
+
+    def test_uses_api(api):
+        pass
+
+
+    @pytest.mark.skip(reason="off")
+    def test_skipped():
+        assert classify({}) == "api"
+''')
+
+
+def _with_fixture_tests(repo):
+    (repo / "tests" / "test_fixture.py").write_text(FIXTURE_TESTS, encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "fixture tests")
+
+
+def test_a_mutant_that_only_errors_is_inconclusive_not_red(repo):
+    _with_fixture_tests(repo)
+
+    (result,) = run(repo, block(SURVIVES.replace("tests/test_core.py::test_weak",
+                                                 "tests/test_fixture.py::test_uses_api")))
+
+    assert result.result == "inconclusive"
+    assert "did not show a failure (pytest exit 1)" in result.reason
+
+
+def test_a_selection_whose_every_test_is_skipped_is_inconclusive(repo):
+    _with_fixture_tests(repo)
+
+    (result,) = run(repo, block(SURVIVES.replace("tests/test_core.py::test_weak",
+                                                 "tests/test_fixture.py::test_skipped")))
+
+    assert result.result == "inconclusive" and "no test ran" in result.reason
+
+
+def test_the_file_replaced_during_the_baseline_is_not_written(repo):
+    swap = ("import os; open('new.py', 'w').write('REPLACED = 1'); "
+            "os.replace('new.py', 'src/pkg/core.py')")
+    seen = {}
+    real = mutations._write_no_follow
+
+    def spying(worktree, relative, text, checked):
+        try:
+            real(worktree, relative, text, checked)
+        finally:
+            seen["after"] = (worktree / relative).read_text(encoding="utf-8")
+
+    import unittest.mock
+    with unittest.mock.patch.object(mutations, "_write_no_follow", spying):
+        (result,) = run(repo, block(f'''\
+            - path: src/pkg/core.py
+              locate: {{lines: [4, 4]}}
+              mutation: return_constant
+              expect_red: "{sys.executable} -c \\"{swap}\\""
+        '''), runner=HOSTED)
+
+    assert result.result == "inconclusive"
+    assert "changed after it was checked" in result.reason
+    assert seen["after"] == "REPLACED = 1"
+
+
+def test_a_worktree_that_cannot_be_removed_is_a_cleanup_error_and_prunes(repo, monkeypatch):
+    head = _git(repo, "rev-parse", "HEAD")
+    calls, real = [], worktrees.git
+
+    def recording(repo_, *args, **kwargs):
+        calls.append(args[:2])
+        return real(repo_, *args, **kwargs)
+
+    monkeypatch.setattr(worktrees, "git", recording)
+    with pytest.raises(worktrees.CleanupError, match="could not be removed"), \
+            worktrees.RunWorktrees(repo, None, base=head, head=head) as trees:
+        path = trees.add()
+        _git(repo, "worktree", "lock", str(path))   # remove --force then refuses
+    assert ("worktree", "prune") in calls
+    _git(repo, "worktree", "unlock", str(path))
+    _git(repo, "worktree", "remove", "--force", str(path))

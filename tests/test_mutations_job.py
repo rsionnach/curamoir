@@ -417,3 +417,119 @@ def test_a_record_that_cannot_be_written_is_a_notice_and_the_lines_still_print(
     assert code == runner.EXIT_FAILURE
     assert sorted(json.loads(line)["result"] for line in out.splitlines()) == ["green", "red"]
     assert err.count("could not be written") == 1
+
+
+# --- provenance review, round 1 ------------------------------------------------
+
+@pytest.mark.parametrize(("yaml_text", "runner_env", "cores", "cap"), [
+    ("gate:\n  worktrees:\n    max_parallel: 3\n", {}, 16, 3),
+    ("", {}, 16, 2),
+    ("gate:\n  worktrees:\n    max_parallel: 3\n",
+     {"CURAMOIR_RUNNER": "hosted", "GITHUB_ACTIONS": "true",
+      "RUNNER_ENVIRONMENT": "github-hosted"}, 16, 3),
+    ("", {"CURAMOIR_RUNNER": "hosted", "GITHUB_ACTIONS": "true",
+          "RUNNER_ENVIRONMENT": "github-hosted"}, 16, 8),
+])
+def test_the_configured_cap_reaches_the_runner(repo, tmp_path, capsys, monkeypatch, yaml_text,
+                                               runner_env, cores, cap):
+    from curamoir.gate import mutations
+    from curamoir.scaffold import init_repo
+
+    init_repo(repo)
+    config = repo / ".curamoir" / "curamoir.yaml"
+    config.write_text(config.read_text(encoding="utf-8") + yaml_text, encoding="utf-8")
+    for key, value in runner_env.items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.setattr(os, "cpu_count", lambda: cores)
+    seen = {}
+    monkeypatch.setattr(mutations, "run_mutations",
+                        lambda *a, **k: seen.update(cap=k["cap"]) or [])
+
+    cli(repo, brief(tmp_path, KILLED), capsys)
+
+    assert seen == {"cap": cap}
+
+
+def test_a_worktree_cap_of_0_is_refused_by_the_config():
+    from curamoir.config import ConfigError, load_config
+
+    with pytest.raises(ConfigError, match="max_parallel"):
+        load_config({"gate": {"worktrees": {"max_parallel": 0}}})
+
+
+def fake_curamoir(bin_dir, lines, exit_code):
+    script = bin_dir / "curamoir"
+    script.write_text(f"#!{sys.executable}\nimport sys\n"
+                      f"sys.stdout.write({''.join(json.dumps(line) + chr(10) for line in lines)!r})\n"
+                      f"sys.exit({exit_code})\n", encoding="utf-8")
+    script.chmod(0o755)
+
+
+RED_LINE = {"index": 1, "total": 2, "result": "red"}
+
+
+def test_exit_1_with_every_line_red_still_blocks(repo, tmp_path):
+    """A run that failed after its entries (a worktree it could not remove)
+    is not a pass: only exit 0 with every line red is."""
+    bin_dir = fake_bd(tmp_path, bead(KILLED))
+    fake_curamoir(bin_dir, [RED_LINE, dict(RED_LINE, index=2)], 1)
+
+    done, events = helper(repo, tmp_path, bin_dir)
+
+    assert done.returncode == 1
+    assert [e["verdict"] for e in events] == ["block"]
+    assert "every entry red, but the run failed after them" in events[0]["why"]
+
+
+@pytest.mark.parametrize(("lines", "exit_code"), [
+    ([RED_LINE], 0),                               # fewer lines than total
+    ([RED_LINE], 1),
+])
+def test_fewer_lines_than_total_could_not_run(repo, tmp_path, lines, exit_code):
+    bin_dir = fake_bd(tmp_path, bead(KILLED))
+    fake_curamoir(bin_dir, lines, exit_code)
+
+    done, events = helper(repo, tmp_path, bin_dir)
+
+    assert done.returncode == 2
+    assert [e["verdict"] for e in events] == ["could_not_run"]
+
+
+def test_a_brief_with_two_blocks_is_a_block_the_runner_refuses(repo, tmp_path):
+    two = bead(KILLED)
+    two[0]["description"] = "```r5-mutations\n" + textwrap.dedent(KILLED) + "```\n"
+
+    done, events = helper(repo, tmp_path, fake_bd(tmp_path, two))
+
+    assert done.returncode == 2
+    assert [(e["verdict"], e["exit"]) for e in events] == [("could_not_run", 3)]
+
+
+def test_done_provenance_needs_a_verdict_from_this_round(repo, tmp_path):
+    bin_dir = fake_bd(tmp_path, bead(KILLED))
+    _, events = helper(repo, tmp_path, bin_dir)
+    hooks, env = repo / ".claude" / "hooks", helper_env(repo, bin_dir)
+
+    def state(*args, stdin=""):
+        return subprocess.run(["bash", str(hooks / args[0]), *args[1:]], cwd=repo, env=env,
+                              input=stdin, capture_output=True, text=True)
+
+    state_file = repo / ".claude" / "r5-state.json"
+    data = json.loads(state_file.read_text())
+    data["completed_passes"] = [{"name": "correctness", "fix_iterations": 0},
+                                {"name": "edge-cases", "fix_iterations": 0}]
+    state_file.write_text(json.dumps(data))
+    clean = tmp_path / "clean.md"
+    clean.write_text("All good.\n\nR5-FINDINGS: []\n", encoding="utf-8")
+    assert state("r5-state.sh", "pass", "provenance").returncode == 0
+    assert state("r5-state.sh", "event", "mutations_run",
+                 json.dumps(dict(events[0], verdict="pass"))).returncode == 0
+    assert state("r5-parallel-block.sh", stdin=payload(cwd=repo)).returncode == 0
+    assert state("r5-state.sh", "findings", "provenance", str(clean), "PASS").returncode == 0
+
+    # A new round, and no new mutations_run: the earlier pass does not count.
+    assert state("r5-state.sh", "request", "provenance", "2").returncode == 0
+    assert state("r5-parallel-block.sh", stdin=payload(cwd=repo)).returncode == 0
+    assert state("r5-state.sh", "findings", "provenance", str(clean), "PASS").returncode == 0
+    refused = state("r5-state.sh", "done", "provenance", "0")
+    assert refused.returncode != 0 and "not run this round" in refused.stderr

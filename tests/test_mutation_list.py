@@ -274,3 +274,46 @@ def test_every_line_ending_python_reads_is_a_line(ending):
     mutated = m.mutate(source, entry(locate={"lines": [4, 4]}, mutation="swap_operator"), 4, 4)
     assert mutated.split(ending)[3] == "        return (a) != (1)"
     assert mutated.count(ending) == source.count(ending)
+
+
+
+# --- provenance review, round 1 ------------------------------------------------
+
+@pytest.mark.parametrize(("expression", "swapped"), [
+    ("a == b", "(a) != (b)"), ("a != b", "(a) == (b)"), ("a < b", "(a) >= (b)"),
+    ("a >= b", "(a) < (b)"), ("a > b", "(a) <= (b)"), ("a <= b", "(a) > (b)"),
+    ("a in b", "(a) not in (b)"), ("a not in b", "(a) in (b)"), ("a is b", "(a) is not (b)"),
+    ("a is not b", "(a) is (b)"), ("a + b", "(a) - (b)"), ("a - b", "(a) + (b)"),
+    ("a * b", "(a) / (b)"), ("a / b", "(a) * (b)"), ("a and b", "(a) or (b)"),
+    ("a or b", "(a) and (b)"),
+])
+def test_every_swap_is_the_opposite_operator(expression, swapped):
+    mutated = m.mutate(f"x = {expression}\n", entry(mutation="swap_operator"), 1, 1)
+
+    assert mutated == f"x = {swapped}\n"
+
+
+def test_return_constant_on_a_lone_return_none_is_stale():
+    with pytest.raises(Stale, match="finds nothing to act on"):
+        m.mutate("def f():\n    return None\n", entry(mutation="return_constant"), 1, 2)
+
+
+def test_an_anchor_on_a_decorator_takes_the_function():
+    source = "@cache\ndef classify(x):\n    if x:\n        return 1\n    return 2\n"
+
+    assert m.region(source, entry(locate={"anchor": "@cache"})) == (1, 5)
+
+
+@pytest.mark.parametrize(("brief", "content"), [
+    # A closing fence is the opening fence's character: ``` inside ~~~ is content.
+    ("~~~r5-mutations\n```\nA\n~~~\n", "```\nA\n"),
+    # A tilde fence's info string may hold a backtick (only a backtick fence's may not).
+    ("~~~r5-mutations `x`\nA\n~~~\n", "A\n"),
+])
+def test_commonmark_fence_characters(brief, content):
+    assert m.extract_block(brief) == content
+
+
+def test_a_backslash_path_is_refused():
+    with pytest.raises(MutationListError, match="not a plain repo-relative path"):
+        entry(path="src\\a.py")

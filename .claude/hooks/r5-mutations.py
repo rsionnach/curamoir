@@ -91,9 +91,13 @@ def main(argv) -> int:
             return _record(checkout, "pass", done.returncode, len(lines), total, report,
                            f"all {total} mutation(s) killed", EXIT_PASS)
         if done.returncode == 1:
+            failed = ", ".join(f"entry {line['index']} {line['result']}" for line in lines
+                               if line.get("result") != "red")
+            # Every line red and still exit 1: the run failed after its
+            # entries (a worktree it could not remove); it blocks all the same.
             return _record(checkout, "block", done.returncode, len(lines), total, report,
-                           ", ".join(f"entry {line['index']} {line['result']}" for line in lines
-                                     if line.get("result") != "red"), EXIT_BLOCK)
+                           failed or "every entry red, but the run failed after them "
+                                     "(see its stderr)", EXIT_BLOCK)
     why = problem or (f"exit {done.returncode}, {len(lines)} line(s) of "
                       f"{total if total is not None else 'an unknown number'}")
     return _record(checkout, "could_not_run", done.returncode, len(lines), total or 0, report,

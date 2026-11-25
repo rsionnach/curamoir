@@ -165,7 +165,6 @@ def _added_function(diff: str, name: str) -> str:
     return "\n".join(lines).rstrip() + "\n"
 
 
-@needs_ast_grep
 def test_the_mutation_runner_passes_oh27_and_why(tmp_path):
     """oh27's escaped predicate, `isinstance(spec.get("slos"), list)`, and
     the fixture shape that shares its mistake (`spec.slos` as a list, from
