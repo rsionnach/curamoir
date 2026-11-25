@@ -50,11 +50,13 @@ makes the mutation, and runs it again:
 | `stale` | the entry no longer fits the code: the path is gone or goes through a symlink, the locate matches nothing (or an anchor matches twice), or the mutation finds nothing to act on | yes |
 | `inconclusive` | the kill check did not run: the selection failed or errored unmutated, errored rather than failed with the mutation, timed out, or ran no test at all (none collected, or every one skipped or deselected) | yes |
 
-A `pytest` selection (`pytest` or `python -m pytest` anywhere in the
-command, so also behind `uv run`, `timeout` or `env`) is run with
-`--junitxml` added, so that a run whose every test was skipped is
-`inconclusive`, not `green`. Any other command is read by its exit code: 0
-passes, 1 fails, anything else is `inconclusive`. Each run is bounded by
+Every selection runs with `PYTEST_ADDOPTS=--junitxml=<file>` in its
+environment and its command exactly as written, so a pytest it starts,
+however it is launched (`uv run`, `poetry run`, `coverage run -m`, a `make`
+target), reports each test: a run whose every test was skipped is
+`inconclusive`, not `green`. A selection that writes no such file (pytest
+never ran) is read by its exit code: 0 passes, 1 fails, anything else is
+`inconclusive`. Each run is bounded by
 `sweep.test_timeout_seconds`.
 
 ## Output and exit codes

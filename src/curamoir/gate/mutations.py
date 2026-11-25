@@ -19,13 +19,15 @@ selection again, and records one result:
 
 Green, stale and inconclusive all block.
 
-**Reading a selection** (d-cm-8ap.19-11). A pytest selection (``pytest``
-or ``python -m pytest`` as its command) is run with ``--junitxml`` added:
-it is red only when it exits 1 having run a test that failed, green only
-when it exits 0 having run at least one test, and inconclusive otherwise
-(exit 5, no test collected; 2, 3 or 4, interrupted or misused; a run whose
-tests were all skipped). Any other command is read by its exit code alone:
-0 green, 1 red, anything else inconclusive.
+**Reading a selection** (d-cm-8ap.19-11, -21). Every selection runs with
+``PYTEST_ADDOPTS=--junitxml=<file>`` in its environment and its command
+untouched, so any pytest it starts, however launched, writes the file.
+When the file is there the run was pytest's: red only when it exits 1
+having run a test that failed, green only when it exits 0 having run at
+least one test, and inconclusive otherwise (exit 5, no test collected; 2, 3
+or 4, interrupted or misused; a run whose tests were all skipped). When it
+is not, the exit code alone decides: 0 green, 1 red, anything else
+inconclusive.
 
 **Isolation** (R5-R44, d-cm-8ap.19-12). Each run is launched through
 green_gate's own wrapping (``green_gate.isolated_argv``): locally in the OS
@@ -47,7 +49,6 @@ import concurrent.futures
 import contextlib
 import difflib
 import os
-import re
 import shlex
 import signal
 import stat
@@ -309,64 +310,27 @@ class _Run:
     output: str
 
 
-#: Options of `uv run` and `timeout` that take a value.
-_VALUED = {"--extra", "--with", "--group", "--python", "-p", "--project", "--directory",
-           "--package", "--env-file", "-s", "--signal", "-k", "--kill-after"}
-
-
-def _is_pytest(argv) -> bool:
-    """Whether the program the command runs is pytest, found by skipping the
-    wrappers in front of it (`env K=V`, `timeout N`, `uv run [options]`)
-    and reading a Python's `-m pytest`. A word that merely says pytest (a
-    `make pytest` target, `tox -e pytest`, `uv run --with pytest`) is not."""
-    i = 0
-    while i < len(argv):
-        word = os.path.basename(argv[i])
-        if word == "env":
-            i += 1
-            while i < len(argv) and ("=" in argv[i] or argv[i].startswith("-")):
-                i += 1
-        elif word == "timeout":
-            i += 1
-            while i < len(argv) and argv[i].startswith("-"):
-                i += 2 if argv[i] in _VALUED else 1
-            i += 1      # the duration
-        elif word == "uv" and i + 1 < len(argv) and argv[i + 1] == "run":
-            i += 2
-            while i < len(argv) and argv[i].startswith("-"):
-                i += 2 if argv[i] in _VALUED else 1
-        else:
-            break
-    if i >= len(argv):
-        return False
-    program = os.path.basename(argv[i])
-    if program in ("pytest", "py.test"):
-        return True
-    if re.fullmatch(r"python[0-9.]*", program):
-        rest = argv[i + 1:]
-        while rest and rest[0].startswith("-") and rest[0] not in ("-m", "-mpytest"):
-            rest = rest[1:]
-        return rest[:1] == ["-mpytest"] or rest[:2] == ["-m", "pytest"]
-    return False
-
-
 def _run_selection(repo, path, argv, hosted, timeout, groups) -> _Run:
     with tempfile.TemporaryDirectory(prefix="curamoir-mutation-run-") as scratch:
         junit = Path(scratch) / "junit.xml"
-        pytest = _is_pytest(argv)
-        command = [*argv, f"--junitxml={junit}"] if pytest else list(argv)
         env = green_gate.sandbox_environment(repo, root=str(path),
                                              src=(path / "src").is_dir())
         try:
             env = green_gate.scratch_environment(path, env, scratch)
-            wrapped = green_gate.isolated_argv(command, str(path), scratch, env,
+            # pytest reads PYTEST_ADDOPTS however it is launched (uv run,
+            # poetry run, coverage run -m, a make target) and nothing else
+            # does; the command itself is left exactly as written. A JUnit
+            # file afterwards is the evidence that pytest ran
+            # (d-cm-8ap.19-21).
+            env["PYTEST_ADDOPTS"] = f"--junitxml={junit}"
+            wrapped = green_gate.isolated_argv(list(argv), str(path), scratch, env,
                                                hosted=hosted)
         except (green_gate.GateError, OSError) as error:
             return _Run("neither", f"could not be launched: {error}", "")
         code, output = groups.run(wrapped, cwd=str(path), env=env, timeout=timeout)
         if code is None:
             return _Run("neither", output.splitlines()[-1] if output else "stopped", output)
-        if not pytest:
+        if not junit.exists():
             if code == 0:
                 return _Run("pass", "exit 0", output)
             if code == 1:

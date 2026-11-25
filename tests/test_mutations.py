@@ -481,18 +481,38 @@ def test_a_probe_never_creates_a_lock_and_a_starting_run_is_not_an_orphan(repo):
 
 # --- edge-cases review, round 1 --------------------------------------------------
 
-@pytest.mark.parametrize(("command", "pytest_"), [
-    ("uv run --extra dev pytest tests/x.py -q", True), ("timeout 60 pytest t", True),
-    ("env A=1 pytest t", True), ("python -mpytest t", True), ("python -m pytest t", True),
-    ("/usr/bin/py.test t", True), ("python -c 'print(1)'", False), ("make test", False),
-    ("make pytest", False), ("tox -e pytest", False), ("nox -s pytest", False),
-    ("uv run --with pytest python check.py", False), ("python -I -m pytest t", True),
-    ("timeout -s KILL 60 env A=1 uv run --extra dev pytest t", True),
+@pytest.mark.parametrize("launch", [
+    "env -u NOTHING {py} -m pytest", "{py} -X dev -m pytest", "{py} -W error -m pytest",
+    "timeout -s KILL 60 {py} -m pytest", "{py} -B -m pytest",
 ])
-def test_pytest_is_recognised_behind_a_wrapper(command, pytest_):
-    import shlex
+def test_pytest_is_recognised_however_it_is_launched(repo, launch):
+    """No command line is parsed: PYTEST_ADDOPTS reaches pytest behind any
+    wrapper, so an all-skipped selection is inconclusive, never green."""
+    command = launch.format(py=sys.executable) + " -q -p no:cacheprovider " \
+        "tests/test_core.py -k matches_nothing"
+    (result,) = run(repo, block(f'''\
+        - path: src/pkg/core.py
+          locate: {{lines: [4, 4]}}
+          mutation: return_constant
+          expect_red: "{command}"
+    '''), runner=HOSTED)
 
-    assert mutations._is_pytest(shlex.split(command)) is pytest_
+    assert result.result == "inconclusive" and "no test ran" in result.reason
+
+
+def test_a_command_that_only_names_pytest_is_read_by_its_exit_code(repo):
+    """A `make pytest` target, a tox env called pytest: the word is not the
+    program, the command is left as written, and no JUnit file appears."""
+    script = ("import sys, pkg.core as c; r = c.classify({}); "
+              "sys.exit(0 if r == 'api' else 1)")
+    (result,) = run(repo, block(f'''\
+        - path: src/pkg/core.py
+          locate: {{lines: [4, 4]}}
+          mutation: return_constant
+          expect_red: "{sys.executable} -c \\"{script}\\" pytest"
+    '''))
+
+    assert result.result == "red" and "exit 1" in result.reason
 
 
 def test_a_wrapped_pytest_that_runs_no_test_is_inconclusive(repo):
