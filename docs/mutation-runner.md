@@ -27,7 +27,7 @@ block's content) is a YAML list:
 |---|---|
 | `path` | the file to mutate, repo-relative. |
 | `locate` | `{lines: [first, last]}`, an inclusive 1-based range, or `{anchor: "text"}`, the one line containing the text, extended to the end of the statement that starts on it (an anchor on a `def` takes the whole function). |
-| `mutation` | `invert_condition`, `drop_argument`, `return_constant`, `delete_statement`, `swap_operator` (Python only: each acts on the first matching node of the syntax tree inside the region), or `{replace: {from: "...", to: "..."}}` (any file: the text must occur exactly once in the region). |
+| `mutation` | `invert_condition`, `drop_argument`, `return_constant`, `delete_statement`, `swap_operator` (Python only: each acts on the first matching node of the syntax tree that lies wholly inside the region, so a `lines` range must cover a whole statement, or an `anchor` on its first line be used), or `{replace: {from: "...", to: "..."}}` (any UTF-8 file: the text must occur exactly once in the region). |
 | `expect_red` | the test command that must fail once the mutation is made. |
 | `behaviour` | optional: what the entry protects. A surviving mutation's report names it. |
 
@@ -50,7 +50,8 @@ makes the mutation, and runs it again:
 | `stale` | the entry no longer fits the code: the path is gone or goes through a symlink, the locate matches nothing (or an anchor matches twice), or the mutation finds nothing to act on | yes |
 | `inconclusive` | the kill check did not run: the selection failed or errored unmutated, errored rather than failed with the mutation, timed out, or ran no test at all (none collected, or every one skipped or deselected) | yes |
 
-A `pytest` selection (`pytest ...` or `python -m pytest ...`) is run with
+A `pytest` selection (`pytest` or `python -m pytest` anywhere in the
+command, so also behind `uv run`, `timeout` or `env`) is run with
 `--junitxml` added, so that a run whose every test was skipped is
 `inconclusive`, not `green`. Any other command is read by its exit code: 0
 passes, 1 fails, anything else is `inconclusive`. Each run is bounded by

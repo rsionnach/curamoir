@@ -127,8 +127,23 @@ def _brief(bead: str, checkout: Path) -> str | None:
 
 
 def _has_block(text: str) -> bool:
-    """Whether the brief holds an `r5-mutations` fenced block at all; which
-    one, and whether it is valid, is the runner's to say (it refuses)."""
+    """Whether the brief holds an `r5-mutations` fenced block at all, decided
+    by the runner's own CommonMark reading (a fence inside another fence,
+    say, is not one) when curamoir can be imported here; whether the block
+    is valid is the runner's to say (it refuses)."""
+    try:
+        from curamoir.gate.mutation_list import MutationListError, extract_block
+    except ImportError:
+        return _looks_fenced(text)
+    try:
+        extract_block(text)
+    except MutationListError as error:
+        # Two blocks is still "a block": the runner refuses it, which blocks.
+        return "blocks" in str(error)
+    return True
+
+
+def _looks_fenced(text: str) -> bool:
     for line in text.splitlines():
         stripped = line.lstrip(" ")
         if len(line) - len(stripped) <= 3 and stripped[:3] in ("```", "~~~"):

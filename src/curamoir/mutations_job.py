@@ -33,6 +33,7 @@ from __future__ import annotations
 import datetime
 import json
 import os
+import secrets
 from pathlib import Path
 
 from curamoir.config import ConfigError, safe_load_unique
@@ -63,9 +64,12 @@ def run_mutations_job(repo, run, *, base, head, brief, emit, notice):
     except mutation_list.MutationListError as error:
         run.refused(Refusal(Reason.MUTATION_LIST, str(error)))
         return
+    pinned = {}
     for name, value in (("base", base), ("head", head)):
         try:
-            resolve_base(repo, value)
+            # Pinned to the commit now: each entry's worktree is made when a
+            # slot frees, and a ref (HEAD, a branch) could have moved by then.
+            pinned[name] = resolve_base(repo, value)
         except GitGuardError as error:
             run.refused(Refusal(Reason.SANDBOX, f"no mutation ran: --{name} {value!r} does "
                                                 f"not name a commit here ({error})"))
@@ -77,21 +81,30 @@ def run_mutations_job(repo, run, *, base, head, brief, emit, notice):
         return
     configured = config["gate"]["worktrees"]["max_parallel"]
     cap = worktrees.max_parallel(run.runner, configured, _set_explicitly(repo))
-    record = _record_dir(repo) if initialised else None
-    if record is not None:
-        record.mkdir(parents=True)
-        (record / "mutations.yaml").write_text(block, encoding="utf-8")
+    # The record is made with the first result, so a run refused before any
+    # entry leaves none; a record that cannot be written is a notice, and
+    # the run's own lines still stand.
+    record = {"dir": _record_dir(repo) if initialised else None, "made": False}
 
     def printed(result):
         line = json.dumps(result.line(), sort_keys=True)
         emit(line)
-        if record is not None:
-            with open(record / "results.jsonl", "a", encoding="utf-8") as handle:
+        if record["dir"] is None:
+            return
+        try:
+            if not record["made"]:
+                record["dir"].mkdir(parents=True)
+                (record["dir"] / "mutations.yaml").write_text(block, encoding="utf-8")
+                record["made"] = True
+            with open(record["dir"] / "results.jsonl", "a", encoding="utf-8") as handle:
                 handle.write(line + "\n")
+        except OSError as error:
+            notice(f"the run's record {record['dir']} could not be written: {error}")
+            record["dir"] = None
 
     try:
         results = mutations.run_mutations(
-            repo, block, base=base, head=head, runner=run.runner, cap=cap,
+            repo, block, base=pinned["base"], head=pinned["head"], runner=run.runner, cap=cap,
             timeout=config["sweep"]["test_timeout_seconds"], on_result=printed, notices=notice)
     except mutations.SandboxMissing as error:
         run.refused(Refusal(Reason.SANDBOX, f"no mutation ran: {error}"))
@@ -126,4 +139,4 @@ def _set_explicitly(repo: Path) -> bool:
 
 def _record_dir(repo: Path) -> Path:
     now = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    return repo.joinpath(*RECORD_DIR) / f"{now}-{os.getpid()}"
+    return repo.joinpath(*RECORD_DIR) / f"{now}-{os.getpid()}-{secrets.token_hex(3)}"

@@ -207,8 +207,14 @@ def _run_entry(repo, entry, total, path, hosted, timeout, groups) -> Result:
         with open(target, encoding="utf-8", newline="") as handle:
             source = handle.read()
         checked = os.lstat(target)
-    except (OSError, UnicodeDecodeError) as error:
+    except UnicodeDecodeError as error:
+        return result(INCONCLUSIVE, f"{entry.path} is not UTF-8, which the runner reads and "
+                                    f"writes ({error}); this is not drift")
+    except OSError as error:
         return result(STALE, f"{entry.path} cannot be read at head: {error}")
+    # A UTF-8 byte-order mark is kept out of the parse and written back.
+    bom = "\ufeff" if source.startswith("\ufeff") else ""
+    source = source[len(bom):]
     try:
         first, last = mutation_list.region(source, entry)
         mutated = mutation_list.mutate(source, entry, first, last)
@@ -227,7 +233,7 @@ def _run_entry(repo, entry, total, path, hosted, timeout, groups) -> Result:
                                     f"({baseline.why}), so a red mutant would prove nothing",
                       diff, baseline.output)
     try:
-        _write_no_follow(path, entry.path, mutated, checked)
+        _write_no_follow(path, entry.path, bom + mutated, checked)
     except OSError as error:
         return result(INCONCLUSIVE, f"the mutation could not be written: {error}", diff)
     mutant = _run_selection(repo, path, argv, hosted, timeout, groups)
@@ -303,11 +309,12 @@ class _Run:
 
 
 def _is_pytest(argv) -> bool:
-    if not argv:
-        return False
-    if os.path.basename(argv[0]) in ("pytest", "py.test"):
+    """Whether the command runs pytest, also behind a wrapper (`uv run
+    pytest`, `timeout 60 pytest`, `env A=1 pytest`, `python -mpytest`)."""
+    if any(os.path.basename(word) in ("pytest", "py.test") for word in argv):
         return True
-    return any(argv[i] == "-m" and argv[i + 1] == "pytest" for i in range(len(argv) - 1))
+    return any(word == "-mpytest" for word in argv) or \
+        any(argv[i] == "-m" and argv[i + 1] == "pytest" for i in range(len(argv) - 1))
 
 
 def _run_selection(repo, path, argv, hosted, timeout, groups) -> _Run:
@@ -422,9 +429,11 @@ def _kill(process):
 
 
 def _read(handle) -> str:
-    handle.seek(0)
-    data = handle.read()
-    return data[-4 * OUTPUT_TAIL:].decode("utf-8", "replace")
+    """The output's tail, read from its end: a run that printed gigabytes
+    costs a seek, not memory."""
+    size = handle.seek(0, os.SEEK_END)
+    handle.seek(max(0, size - 4 * OUTPUT_TAIL))
+    return handle.read().decode("utf-8", "replace")
 
 
 def summary(results) -> str:

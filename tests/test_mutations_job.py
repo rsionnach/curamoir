@@ -354,3 +354,47 @@ def test_the_helpers_reports_are_named_for_a_dotted_bead(repo, tmp_path):
 
     assert events[0]["report"] == ".claude/r5-reports/cm-x.1-mutations-1.jsonl"
     assert (repo / ".claude" / "r5-reports" / "cm-x.1-mutations-1.brief.md").is_file()
+
+
+# --- edge-cases review, round 1 --------------------------------------------------
+
+def test_head_is_pinned_to_its_commit_before_any_entry(repo, tmp_path, capsys, monkeypatch):
+    from curamoir.gate import mutations
+
+    seen = {}
+    real = mutations.run_mutations
+
+    def spy(*args, **kwargs):
+        seen.update(base=kwargs["base"], head=kwargs["head"])
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(mutations, "run_mutations", spy)
+    code = main(["run", "mutations", "--repo", str(repo), "--base", "main", "--head", "HEAD",
+                 "--brief", str(brief(tmp_path, KILLED))])
+    capsys.readouterr()
+
+    assert code == runner.EXIT_SUCCESS
+    assert seen == {"base": _git(repo, "rev-parse", "main"),
+                    "head": _git(repo, "rev-parse", "HEAD")}
+
+
+def test_a_refused_run_on_an_initialised_checkout_leaves_no_record(repo, tmp_path, capsys,
+                                                                  monkeypatch):
+    from curamoir.scaffold import init_repo
+
+    init_repo(repo)
+    monkeypatch.setattr(green_gate, "OS_SANDBOX", Absent())
+
+    code, out, _ = cli(repo, brief(tmp_path, KILLED), capsys)
+
+    assert (code, out) == (runner.EXIT_REFUSED, "")
+    assert not (repo / ".curamoir" / "state" / "r5" / "runs").exists()
+
+
+def test_a_fence_inside_a_fence_is_no_block_to_the_helper(repo, tmp_path):
+    documented = [{"id": "cm-x.1", "description":
+                   "The format:\n\n````markdown\n```r5-mutations\n- path: a.py\n```\n````\n"}]
+
+    done, events = helper(repo, tmp_path, fake_bd(tmp_path, documented))
+
+    assert done.returncode == 0 and [e["verdict"] for e in events] == ["none"]

@@ -20,7 +20,8 @@ reused pid cannot make a dead run look alive.
 **Lifecycle** (R5-R41). ``RunWorktrees`` is a context manager: on exit,
 inside ``TerminationSignals``' held phase so a second signal cannot cut it
 short, every worktree it made is removed with ``git worktree remove
---force``, the run directory goes, and ``git worktree prune`` runs. A run
+--force``, the run directory goes (before the lock is let go), and ``git
+worktree prune`` runs only if one of them could not be removed. A run
 killed outright (SIGKILL) cannot do that; its directory is then an orphan,
 which the next run names on stderr and ``/curamoir:doctor`` reports
 (``orphans``, ``ORPHAN_SENTENCE``).
@@ -154,13 +155,18 @@ class RunWorktrees:
                     self.removed.append(path)
                 except GitGuardError as error:
                     problems.append(f"{path}: {error}")
-            with contextlib.suppress(GitGuardError):
-                git(self.repo, "worktree", "prune")
-            self._close_lock()
-            if not problems:
+            if problems:
+                # Only when one of this run's own removals failed: a plain
+                # prune would also drop the user's worktrees whose
+                # directories happen to be missing now.
+                with contextlib.suppress(GitGuardError):
+                    git(self.repo, "worktree", "prune")
+            else:
+                # Removed while the lock is still held, so no probe sees a
+                # finishing run's directory unlocked. The scope directory
+                # stays: removing it could race another run starting there.
                 shutil.rmtree(self.directory, ignore_errors=True)
-                with contextlib.suppress(OSError):
-                    self.directory.parent.rmdir()
+            self._close_lock()
         if problems and exc[0] is None:
             raise CleanupError("worktrees could not be removed: " + "; ".join(problems))
         return False

@@ -477,3 +477,69 @@ def test_a_probe_never_creates_a_lock_and_a_starting_run_is_not_an_orphan(repo):
     with worktrees.RunWorktrees(repo, None, base=head, head=head) as trees:
         assert trees.directory.exists() and trees.directory not in [p for p, _ in
                                                                       worktrees.orphans(repo)]
+
+
+# --- edge-cases review, round 1 --------------------------------------------------
+
+@pytest.mark.parametrize(("command", "pytest_"), [
+    ("uv run --extra dev pytest tests/x.py -q", True), ("timeout 60 pytest t", True),
+    ("env A=1 pytest t", True), ("python -mpytest t", True), ("python -m pytest t", True),
+    ("/usr/bin/py.test t", True), ("python -c 'print(1)'", False), ("make test", False),
+])
+def test_pytest_is_recognised_behind_a_wrapper(command, pytest_):
+    import shlex
+
+    assert mutations._is_pytest(shlex.split(command)) is pytest_
+
+
+def test_a_wrapped_pytest_that_runs_no_test_is_inconclusive(repo):
+    (result,) = run(repo, block(f'''\
+        - path: src/pkg/core.py
+          locate: {{lines: [4, 4]}}
+          mutation: return_constant
+          expect_red: "env A=1 {PYTEST} tests/test_core.py -k matches_nothing"
+    '''))
+
+    assert result.result == "inconclusive" and "no test ran" in result.reason
+
+
+def test_a_byte_order_mark_is_kept_and_the_file_still_parses(repo):
+    (repo / "src" / "pkg" / "core.py").write_text("﻿" + CORE, encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "bom")
+    head = _git(repo, "rev-parse", "HEAD")
+    with worktrees.RunWorktrees(repo, None, base=head, head=head) as trees:
+        path = trees.add()
+        entry = mutation_list.parse_entries(textwrap.dedent(SURVIVES))[0]
+        result = mutations._run_entry(repo, entry, 1, path, True, 60, mutations._Groups())
+        written = (path / "src" / "pkg" / "core.py").read_text(encoding="utf-8")
+    assert result.result == "green"
+    assert written.startswith("﻿") and "return None" in written
+
+
+def test_a_file_that_is_not_utf8_is_inconclusive_not_drift(repo):
+    (repo / "src" / "pkg" / "core.py").write_bytes(b"# -*- coding: latin-1 -*-\nx = '\xe9'\n")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "latin-1")
+
+    (result,) = run(repo, block(SURVIVES.replace("[4, 4]", "[2, 2]")), runner=HOSTED)
+
+    assert result.result == "inconclusive" and "is not UTF-8" in result.reason
+
+
+def test_the_output_kept_is_the_tail_read_from_the_end(tmp_path):
+    with open(tmp_path / "out", "w+b") as handle:
+        handle.write(b"x" * 1_000_000 + b"END")
+        assert mutations._read(handle).endswith("END")
+        assert len(mutations._read(handle)) == 4 * mutations.OUTPUT_TAIL
+
+
+def test_a_clean_run_does_not_prune_the_users_other_worktrees(repo, tmp_path):
+    elsewhere = tmp_path / "elsewhere"
+    _git(repo, "worktree", "add", "--detach", str(elsewhere))
+    import shutil
+    shutil.rmtree(elsewhere)        # gone for now: unmounted media, say
+
+    run(repo, block(KILLED))
+
+    assert str(elsewhere) in _git(repo, "worktree", "list", "--porcelain")

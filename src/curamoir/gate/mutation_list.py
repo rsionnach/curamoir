@@ -267,7 +267,7 @@ def mutate(source: str, entry: Entry, first: int, last: int) -> str:
     edit = _OPERATIONS[entry.mutation](nodes)
     if edit is None:
         raise Stale(f"`{entry.mutation}` finds nothing to act on in {entry.path} "
-                    f"lines {first}-{last}")
+                    f"lines {first}-{last} (only a node wholly inside the lines counts)")
     node, text = edit
     return _splice(source, node, text)
 
