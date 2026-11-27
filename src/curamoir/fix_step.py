@@ -157,8 +157,9 @@ the result as if the prompt had said nothing.
   Bash, and this is what refuses its `rm -rf build` (cm-60c, below; user
   decision 2026-10-29). The hook only prints its decision; it writes
   nothing into the sandbox. CLAUDE_PLUGIN_ROOT is set to the same root in
-  the run's environment, since the hook's
-  launcher prefers it to its own location. Held by a stand-in `claude`
+  the run's environment, though the hook's launcher does not read it (it
+  takes its root from its own location, cm-6f0): so that nothing in the
+  fix agent's environment names another plugin's code. Held by a stand-in `claude`
   that loads hooks only from this flag (tests/test_job_env.py). That the
   real CLI runs them was checked once by hand (2026-10-27, Claude Code
   2.1.286, `-p --restricted --tools Bash --permission-mode dontAsk`,
