@@ -674,9 +674,9 @@ def _qualifies(resolved):
 
 
 def _wrapper_interpreter():
-    """The interpreter a launcher would exec; else, when none qualifies, the
-    first that exists, so the version probe can say what is wrong with it;
-    else None."""
+    """`(path, qualifies)`: the interpreter a launcher would exec and True;
+    else, when none qualifies, the first that exists and False, so the version
+    probe can say what is wrong with it; else `(None, False)`."""
     first = None
     for candidate in WRAPPER_INTERPRETERS:
         found = shutil.which(candidate)
@@ -684,8 +684,8 @@ def _wrapper_interpreter():
             continue
         first = first or found
         if candidate in _VERSIONED_INTERPRETERS or _qualifies(found):
-            return found
-    return first
+            return found, True
+    return first, False
 
 
 def _check_pythonpath(environ=None):
@@ -703,15 +703,34 @@ def _check_pythonpath(environ=None):
     )]
 
 
-def _probe_python(resolved, level, detail, fix):
+def _probe_python(resolved, level, detail, fix, qualifies=True):
     """The version the WRAPPERS would use, not the one running this code.
 
     The fix text has always said "Install Python 3.12 or later" while the check
     only asked whether `python3` resolves — and on a Mac with Command Line
     Tools it resolves to 3.9, which is what the hook wrappers would use.
+
+    `qualifies` False (no interpreter passed the launchers' own probe, and
+    `resolved` is only the first that exists) is an error whatever this probe
+    says: every launcher skips it, so the hooks protect nothing. An
+    interpreter too old for `-I` (before 3.4) cannot report its version here,
+    and that must not read as a mere warning (cm-6f0).
     """
     if resolved is None:
         return Finding("python3", level, detail, fix=fix)
+    finding = _probe_python_version(resolved, fix)
+    if qualifies or finding.level == "error":
+        return finding
+    return Finding(
+        "python3", "error",
+        f"no interpreter on PATH qualifies: {resolved} fails the launchers' own probe "
+        "(-P and 3.12), so every launcher skips it and the hooks exit without a "
+        f"decision (its version probe: {finding.detail})",
+        fix="Install Python 3.12 or later and ensure it is first on PATH.",
+    )
+
+
+def _probe_python_version(resolved, fix):
     try:
         result = subprocess.run(
             # -I: nothing from the working directory or PYTHON*, and unlike
@@ -765,8 +784,8 @@ def _check_tools(tools, repo=None):
             findings.append(_probe_bd(level, fix, repo=repo))
             continue
         if available is None and name == "python3":
-            resolved = _wrapper_interpreter()
-            findings.append(_probe_python(resolved, level, detail, fix))
+            resolved, qualifies = _wrapper_interpreter()
+            findings.append(_probe_python(resolved, level, detail, fix, qualifies))
             continue
         if available is None:
             # `bd` and `python3` are handled above and `continue` out, so this

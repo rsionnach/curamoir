@@ -12,7 +12,7 @@
 # wrapper finding no Python: a gate that exits 0 because it could not start
 # waves every commit through.
 #
-# Unlike the hook wrappers, CLAUDE_PLUGIN_ROOT is deliberately NOT consulted. A
+# As in every launcher (cm-6f0), CLAUDE_PLUGIN_ROOT is deliberately NOT consulted. A
 # lint gate runs outside Claude Code, and inheriting a stale plugin root from a
 # developer's shell would lint with a different copy of the code than the one
 # that was invoked. The script's own location is the only answer.

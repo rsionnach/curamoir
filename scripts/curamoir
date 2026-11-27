@@ -3,11 +3,13 @@
 #
 # Exists for the same reason the hook wrapper does: an installed plugin is an
 # unpacked directory, not a pip install, so `curamoir` is not on the import path.
-# ${CLAUDE_PLUGIN_ROOT} is substituted into a slash command's Markdown body by
-# Claude Code; when it is absent we fall back to this script's own location.
 set -euo pipefail
 
-root="${CLAUDE_PLUGIN_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+# The root is this script's own location, never CLAUDE_PLUGIN_ROOT (cm-6f0): a
+# relative value is read against the working directory, the open repository,
+# and an inherited one names some other copy of the code. Claude Code runs
+# this file by its path under the plugin root, so the two agree.
+root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 # Interpreter selection, the flags and the bootstrap live in one file all
 # seven launchers source, src/curamoir/launcher.sh (cm-6f0): see it for why every launch is `-P -E`, and

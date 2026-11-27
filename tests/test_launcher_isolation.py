@@ -10,8 +10,10 @@ The planted modules write a marker file rather than print, so a launcher that
 swallows its output still shows that planted code ran.
 """
 
+import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -224,13 +226,13 @@ def test_doctor_resolves_the_interpreter_the_launchers_would_take(monkeypatch):
     found = {"python3": "/x/python3", "python": "/x/python"}
     monkeypatch.setattr(doctor.shutil, "which", found.get)
     monkeypatch.setattr(doctor, "_qualifies", lambda path: path == "/x/python")
-    assert doctor._wrapper_interpreter() == "/x/python"
+    assert doctor._wrapper_interpreter() == ("/x/python", True)
 
     monkeypatch.setattr(doctor, "_qualifies", lambda path: False)
-    assert doctor._wrapper_interpreter() == "/x/python3"
+    assert doctor._wrapper_interpreter() == ("/x/python3", False)
 
     found["python3.13"] = "/x/python3.13"
-    assert doctor._wrapper_interpreter() == "/x/python3.13"
+    assert doctor._wrapper_interpreter() == ("/x/python3.13", True)
 
 
 @pytest.mark.parametrize(("name", "code"), [
@@ -251,3 +253,96 @@ def test_a_missing_selection_file_is_guarded(tmp_path, name, code):
     assert done.returncode == code and done.stdout == ""
     if code:
         assert "cannot load" in done.stderr.splitlines()[-1]
+
+
+# --- the root is the launcher's own location (cm-6f0, edge cases) -----------------
+
+def planted_root(directory, marker):
+    """A plugin root planted under `directory/rel`: its launcher.sh and every
+    module write the marker. A launcher that took its root from
+    CLAUDE_PLUGIN_ROOT=rel would source and run these."""
+    src = directory / "rel" / "src" / "curamoir"
+    planted(directory / "rel" / "src", marker)
+    (src / "launcher.sh").write_text(
+        f"echo planted-launcher >> {shlex.quote(str(marker))}\n"
+        "curamoir_choose_python() { CURAMOIR_PYTHON=true; }\n"
+        "curamoir_no_python_message() { :; }\n"
+        f"curamoir_exec_module() {{ echo planted-exec >> {shlex.quote(str(marker))}; exit 0; }}\n",
+        encoding="utf-8")
+
+
+RM_RF = '{"hook_event_name": "PreToolUse", "tool_name": "Bash", ' \
+        '"tool_input": {"command": "rm -rf build/"}, "cwd": "."}'
+
+
+@pytest.mark.parametrize("given", ["relative", "elsewhere"])
+@pytest.mark.parametrize("name", LAUNCHERS)
+def test_no_launcher_takes_its_root_from_claude_plugin_root(tmp_path, name, given):
+    """Relative, CLAUDE_PLUGIN_ROOT would be read against the working
+    directory (the open repository); absolute, it may name another copy of
+    the code. Either way the launcher runs its own copy, and pretooluse
+    still denies `rm -rf`."""
+    marker = tmp_path / "ran.txt"
+    work = tmp_path / "work"
+    work.mkdir()
+    (work / ".git").mkdir()
+    planted_root(work, marker)
+    other = tmp_path / "other"
+    other.mkdir()
+    planted_root(other, marker)
+    root = "rel" if given == "relative" else str(other / "rel")
+    env = {**os.environ, "CLAUDE_PLUGIN_ROOT": root, "HOME": str(tmp_path),
+           "CURAMOIR_JOB": "sweep"}
+    env.pop("PYTHONPATH", None)
+
+    done = launch(name, work, env, stdin=RM_RF if name.endswith("pretooluse") else "{}")
+
+    assert not marker.exists(), f"{name} ran planted code: {marker.read_text()}"
+    assert done.returncode == 0, done.stderr
+    if name.endswith("pretooluse"):
+        decision = json.loads(done.stdout)["hookSpecificOutput"]
+        assert decision["permissionDecision"] == "deny"
+
+
+@pytest.mark.parametrize("name", [n for n in LAUNCHERS if n != "curamoir-lint"])
+def test_no_launcher_reads_claude_plugin_root(name):
+    """The lint never did; since cm-6f0 no launcher does. Comments may name it."""
+    code = [line for line in (SCRIPTS / name).read_text(encoding="utf-8").splitlines()
+            if not line.lstrip().startswith("#")]
+    assert not any("CLAUDE_PLUGIN_ROOT" in line for line in code)
+
+
+def test_doctor_reports_no_qualifying_interpreter_as_an_error_whatever_the_version_probe_says(
+        tmp_path, monkeypatch):
+    """A python3 too old for -I (before 3.4) cannot report its version to
+    doctor's probe, which reads as a warning; but no launcher would run it,
+    so /curamoir:doctor must exit non-zero."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    for tool in ("bash", "dirname"):
+        (bin_dir / tool).symlink_to(shutil.which(tool))
+    # Unknown -P (the launchers' probe) and unknown -I (doctor's): exit 2.
+    script = bin_dir / "python3"
+    script.write_text('#!/bin/sh\necho "Unknown option: $1" >&2\nexit 2\n', encoding="utf-8")
+    script.chmod(0o755)
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "pyproject.toml").write_text("", encoding="utf-8")
+    from curamoir.scaffold import init_repo
+    init_repo(repo)
+    from curamoir.doctor import diagnose
+    monkeypatch.setenv("PATH", str(bin_dir))
+    (python,) = [f for f in diagnose(repo) if f.check == "python3"]
+    # Before cm-6f0's fix this was a warning: "unreadable version". (The hook
+    # probes are errors too here, rightly: no hook can run.)
+    assert python.level == "error" and "qualifies" in python.detail, python
+
+    done = subprocess.run(
+        [sys.executable, "-I", "-c",
+         "import sys; sys.path.insert(0, sys.argv[1]); from curamoir.cli import main; "
+         "raise SystemExit(main(['doctor', '--repo', sys.argv[2]]))",
+         str(ROOT / "src"), str(repo)],
+        env={"PATH": str(bin_dir), "HOME": str(tmp_path)},
+        capture_output=True, text=True, timeout=120)
+
+    assert done.returncode != 0, done.stdout
