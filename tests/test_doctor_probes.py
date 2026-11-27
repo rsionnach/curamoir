@@ -153,11 +153,54 @@ def test_doctor_probes_the_interpreter_the_wrappers_would_actually_use():
 
     from curamoir.doctor import WRAPPER_INTERPRETERS
 
-    for wrapper in sorted(Path("scripts").iterdir()):
-        text = wrapper.read_text(encoding="utf-8")
-        match = re.search(r"for interpreter in ([^;]+); do", text)
-        if not match:
-            continue
-        assert tuple(match.group(1).split()) == WRAPPER_INTERPRETERS, (
-            f"{wrapper} tries a different order than doctor probes"
-        )
+    text = Path("src/curamoir/launcher.sh").read_text(encoding="utf-8")
+    match = re.search(r'^CURAMOIR_PYTHON_CANDIDATES="([^"]+)"$', text, re.MULTILINE)
+    assert match, "src/curamoir/launcher.sh no longer names its candidates"
+    assert tuple(match.group(1).split()) == WRAPPER_INTERPRETERS, (
+        "the launchers try a different order than doctor probes")
+
+
+def test_doctors_probe_and_versioned_names_agree_with_the_launchers_and_pyproject():
+    """doctor copies the launchers' probe and their unprobed names rather than
+    parse shell: a copy that drifted would report "ok" for an interpreter
+    every launcher skips, hooks that fail open while looking installed. Both
+    floors, and the versioned names, are pinned to launcher.sh and to
+    pyproject's requires-python (cm-6f0, provenance)."""
+    import re
+    import tomllib
+
+    from curamoir.doctor import _QUALIFIES, _VERSIONED_INTERPRETERS, MINIMUM_PYTHON
+
+    requires = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))[
+        "project"]["requires-python"]
+    floor = tuple(int(part) for part in re.fullmatch(r">=(\d+)\.(\d+)", requires).groups())
+    text = Path("src/curamoir/launcher.sh").read_text(encoding="utf-8")
+
+    probe = re.search(r"""^\s*"\$1" (-P -E -c) '([^']+)'""", text, re.MULTILINE)
+    assert probe, "src/curamoir/launcher.sh no longer probes unversioned names"
+    assert (*probe.group(1).split(), probe.group(2)) == _QUALIFIES
+    assert _QUALIFIES[-1] == f"import sys; raise SystemExit(sys.version_info < {floor})"
+    assert floor == MINIMUM_PYTHON
+    shown = re.search(r'^CURAMOIR_PYTHON_FLOOR="([^"]+)"$', text, re.MULTILINE).group(1)
+    assert shown == ".".join(map(str, floor))
+
+    unprobed = re.search(r"^\s*(python[0-9.]+(?: \| python[0-9.]+)*)\) return 0 ;;$",
+                         text, re.MULTILINE)
+    assert unprobed, "src/curamoir/launcher.sh no longer names its unprobed interpreters"
+    assert tuple(unprobed.group(1).split(" | ")) == _VERSIONED_INTERPRETERS
+    assert all(tuple(map(int, name.removeprefix("python").split("."))) >= floor
+               for name in _VERSIONED_INTERPRETERS)
+
+
+def test_doctor_reports_a_set_pythonpath_through_diagnose(tmp_path, monkeypatch):
+    """The ruling is that doctor reports it, not that a helper can: the check
+    must be one diagnose runs (cm-6f0, provenance)."""
+    (tmp_path / "pyproject.toml").write_text("", encoding="utf-8")
+    init_repo(tmp_path)
+    monkeypatch.setenv("PYTHONPATH", "vendor")
+
+    result = finding(diagnose(tmp_path), "PYTHONPATH")
+
+    assert result.level == "warning" and "ignored" in result.detail
+    monkeypatch.delenv("PYTHONPATH")
+    assert not [f for f in diagnose(tmp_path) if f.check == "PYTHONPATH"]

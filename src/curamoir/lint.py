@@ -32,7 +32,7 @@ it did find is not lost — including what a skipped rule found in the files it
 did search; for any other runner error stdout is empty and the reason is on
 stderr. (The one gap: if the interpreter cannot import this module
 at all, Python itself exits 1. The wrapper picks the interpreter carefully —
-cm-bzb — and this module keeps to syntax that imports on 3.9 for that reason.)
+cm-bzb, and since cm-6f0 only one at or above the floor.)
 
 **Standalone (E2-R5).** No model, no network, no cúramóir install: the import
 graph is this module, `rules`, `principles` and `config` — stdlib plus PyYAML,

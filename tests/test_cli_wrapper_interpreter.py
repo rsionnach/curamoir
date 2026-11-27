@@ -63,7 +63,7 @@ def run_wrapper(tmp_path, interpreters):
 
 
 def ran_the_cli(lines):
-    return [line.split()[0] for line in lines if "-m curamoir.cli" in line]
+    return [line.split()[0] for line in lines if line.split()[-2:-1] == ["curamoir.cli"]]
 
 
 def test_the_cli_runs_with_the_first_interpreter_that_has_pyyaml(tmp_path):

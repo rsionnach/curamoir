@@ -1086,10 +1086,10 @@ def run_fix_step(sandbox, prompt, model=None, timeout=DEFAULT_TIMEOUT,
     git_state = snapshot_git_state(sandbox)
     environment = scrubbed_environment()
     environment["PWD"] = path
-    # The hook's launcher takes its root from CLAUDE_PLUGIN_ROOT when set,
-    # and one inherited from another plugin would run that plugin's code as
-    # the denylist: the root the --settings name, always, on both runner
-    # kinds (the --settings are loaded on both).
+    # The root the --settings name, always, on both runner kinds (the
+    # --settings are loaded on both). The hook's launcher no longer reads
+    # it (cm-6f0: it takes its root from its own location), but nothing in
+    # the fix agent's environment should name another plugin's code.
     environment["CLAUDE_PLUGIN_ROOT"] = str(PLUGIN_ROOT)
     if not _keeps_run_tokens(runner, tools):
         for name in HOSTED_RUN_TOKEN_VARIABLES:

@@ -4,21 +4,17 @@
 # install, so `curamoir` is not on the import path.
 set -u
 
-root="${CLAUDE_PLUGIN_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+# The root is this script's own location, never CLAUDE_PLUGIN_ROOT (cm-6f0): a
+# relative value is read against the working directory, the open repository,
+# and an inherited one names some other copy of the code. Claude Code runs
+# this file by its path under the plugin root, so the two agree.
+root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-# Most specific first. The loop used to be `python3 python`, which takes the
-# first interpreter that EXISTS rather than one that can run this code — so on a
-# machine whose `python3` predates the floor in pyproject.toml, every hook died
-# on an import and, because command hooks fail OPEN, protected nothing while
-# looking installed. Naming the versioned binaries first costs nothing (a
-# `command -v` each) and picks the right one wherever a conforming interpreter
-# is installed alongside an older default. /curamoir:doctor still reports the
-# case where none is.
-for interpreter in python3.14 python3.13 python3.12 python3 python; do
-  if command -v "$interpreter" >/dev/null 2>&1; then
-    PYTHONPATH="${root}/src${PYTHONPATH:+:${PYTHONPATH}}" \
-      exec "$interpreter" -m curamoir.hooks.sessionstart
-  fi
-done
+# Interpreter selection, the flags and the bootstrap live in one file all
+# seven launchers source, src/curamoir/launcher.sh (cm-6f0): see it for why every launch is `-P -E`.
+# With no interpreter that qualifies, or no such file, exit 0: no decision,
+# and the normal flow applies. Never noisily: hooks fail open.
+. "${root}/src/curamoir/launcher.sh" 2>/dev/null || exit 0
+curamoir_choose_python || exit 0
+curamoir_exec_module "${root}/src" curamoir.hooks.sessionstart
 
-exit 0
