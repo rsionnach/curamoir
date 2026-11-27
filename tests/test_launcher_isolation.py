@@ -32,20 +32,38 @@ LAUNCHERS = (*(f"curamoir-hook-{hook}" for hook in HOOKS), "curamoir", "curamoir
 ARGS = {"curamoir": ["--help"], "curamoir-lint": ["--repo", "."]}
 
 
-def planted(directory, marker):
-    """A working directory holding a planted curamoir/ package (every module a
-    launcher runs, and its __init__), a planted yaml.py, and a planted yaml.py
-    and json.py under a relative PYTHONPATH entry, `vendor`."""
+#: Each way planted code used to run, as (vector, the module name it writes).
+#: test_each_planted_vector_is_live shows each one runs without the isolation.
+VECTORS = {
+    "package": "curamoir",           # curamoir/ in the working directory
+    "cwd-json": "json",              # a stdlib module every hook imports
+    "cwd-yaml": "yaml",              # what the PyYAML probe imports
+    "pythonpath-json": "json",       # under a relative PYTHONPATH entry
+    "pythonpath-yaml": "yaml",
+    "pythonpath-sitecustomize": "sitecustomize",  # run at startup, even by a probe
+}
+
+
+def planted(directory, marker, vectors=VECTORS):
+    """A working directory holding the planted `vectors` (all of them by
+    default): a curamoir/ package (every module a launcher runs, and its
+    __init__), a json.py and a yaml.py, and a json.py, yaml.py and
+    sitecustomize.py under a relative PYTHONPATH entry, `vendor`. Each writes
+    its module name to `marker`."""
     body = f"open({str(marker)!r}, 'a').write(__name__ + chr(10))\n"
-    package = directory / "curamoir"
-    (package / "hooks").mkdir(parents=True)
-    for module in ("__init__", "cli", "lint", "hooks/__init__",
-                   *(f"hooks/{hook}" for hook in HOOKS)):
-        (package / f"{module}.py").write_text(body, encoding="utf-8")
-    (directory / "yaml.py").write_text(body, encoding="utf-8")
-    (directory / "vendor").mkdir()
-    for name in ("yaml", "json"):
-        (directory / "vendor" / f"{name}.py").write_text(body, encoding="utf-8")
+    if "package" in vectors:
+        package = directory / "curamoir"
+        (package / "hooks").mkdir(parents=True)
+        for module in ("__init__", "cli", "lint", "hooks/__init__",
+                       *(f"hooks/{hook}" for hook in HOOKS)):
+            (package / f"{module}.py").write_text(body, encoding="utf-8")
+    (directory / "vendor").mkdir(exist_ok=True)
+    for vector in vectors:
+        place, _, name = vector.partition("-")
+        if place == "cwd":
+            (directory / f"{name}.py").write_text(body, encoding="utf-8")
+        elif place == "pythonpath":
+            (directory / "vendor" / f"{name}.py").write_text(body, encoding="utf-8")
 
 
 def launch(name, cwd, env, stdin="{}"):
@@ -53,27 +71,36 @@ def launch(name, cwd, env, stdin="{}"):
                           input=stdin, capture_output=True, text=True, timeout=60)
 
 
+@pytest.mark.parametrize("interpreters", ["host", "unversioned-only"])
 @pytest.mark.parametrize("name", LAUNCHERS)
-def test_no_launcher_or_probe_runs_planted_code(tmp_path, name):
+def test_no_launcher_or_probe_runs_planted_code(tmp_path, name, interpreters):
+    """`unversioned-only`: PATH holds only a `python3` (a stand-in that runs
+    this interpreter), so the floor probe runs too, with a sitecustomize.py
+    on the relative PYTHONPATH entry that any probe without -E would run."""
     marker = tmp_path / "ran.txt"
     work = tmp_path / "work"
     work.mkdir()
     planted(work, marker)
-    env = {**os.environ, "PYTHONPATH": "vendor", "CLAUDE_PLUGIN_ROOT": str(ROOT),
-           "HOME": str(tmp_path)}
+    if interpreters == "host":
+        env = {**os.environ, "CLAUDE_PLUGIN_ROOT": str(ROOT), "HOME": str(tmp_path)}
+    else:
+        env, log = stand_ins(tmp_path, ["python3"])
+    env["PYTHONPATH"] = "vendor"
 
     done = launch(name, work, env)
 
     assert not marker.exists(), f"{name} ran planted code: {marker.read_text()}"
     assert done.returncode == 0, done.stderr
+    if interpreters == "unversioned-only":
+        assert log.read_text().splitlines()[0].startswith("python3 -P -E -c import sys;")
 
 
 @pytest.mark.parametrize("name", LAUNCHERS)
-def test_the_planted_files_would_run_without_the_isolation(tmp_path, name):
-    """The fixture is live: run as the launchers used to (`-m`, the working
-    directory first, PYTHONPATH honoured), the planted code runs."""
+def test_the_planted_package_would_run_without_the_isolation(tmp_path, name):
+    """The package is live for every launcher: run as the launchers used to
+    (`-m`, the working directory first, PYTHONPATH honoured), it runs."""
     marker = tmp_path / "ran.txt"
-    planted(tmp_path, marker)
+    planted(tmp_path, marker, vectors=["package"])
     module = {"curamoir": "curamoir.cli", "curamoir-lint": "curamoir.lint"}.get(
         name, "curamoir.hooks." + name.removeprefix("curamoir-hook-"))
 
@@ -81,7 +108,24 @@ def test_the_planted_files_would_run_without_the_isolation(tmp_path, name):
                    env={**os.environ, "PYTHONPATH": f"{ROOT / 'src'}:vendor"},
                    capture_output=True, text=True, timeout=60)
 
-    assert marker.exists()
+    assert "curamoir" in marker.read_text().splitlines()
+
+
+@pytest.mark.parametrize("vector", [v for v in VECTORS if v != "package"])
+def test_each_planted_vector_is_live(tmp_path, vector):
+    """Each other vector, planted alone, runs when Python is started as it
+    used to be: a hook as `-m` (json, sitecustomize), the PyYAML probe as a
+    plain `-c "import yaml"` (yaml), with PYTHONPATH honoured."""
+    marker = tmp_path / "ran.txt"
+    planted(tmp_path, marker, vectors=[vector])
+    old_way = (["-c", "import yaml"] if vector.endswith("yaml")
+               else ["-m", "curamoir.hooks.stop"])
+
+    subprocess.run([sys.executable, *old_way], cwd=tmp_path, input="{}",
+                   env={**os.environ, "PYTHONPATH": f"{ROOT / 'src'}:vendor"},
+                   capture_output=True, text=True, timeout=60)
+
+    assert VECTORS[vector] in marker.read_text().splitlines()
 
 
 # --- which interpreter qualifies ---------------------------------------------
@@ -89,7 +133,7 @@ def test_the_planted_files_would_run_without_the_isolation(tmp_path, name):
 def stand_ins(tmp_path, names, behaviour=""):
     """A PATH holding only bash and stand-ins for `names`, each logging its
     arguments and then running this interpreter. `behaviour` is shell run
-    before that, with "$@" the arguments."""
+    before that, with "$@" the arguments and "$real" this interpreter."""
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     for tool in ("bash", "dirname", "sed"):
@@ -97,14 +141,18 @@ def stand_ins(tmp_path, names, behaviour=""):
     log = tmp_path / "calls.log"
     for name in names:
         script = bin_dir / name
-        script.write_text(f'#!/bin/sh\nprintf "%s\\n" "{name} $*" >> "{log}"\n{behaviour}\n'
-                          f'exec "{sys.executable}" "$@"\n', encoding="utf-8")
+        script.write_text(f'#!/bin/sh\nreal="{sys.executable}"\n'
+                          f'printf "%s\\n" "{name} $*" >> "{log}"\n{behaviour}\n'
+                          'exec "$real" "$@"\n', encoding="utf-8")
         script.chmod(0o755)
     return {"PATH": str(bin_dir), "HOME": str(tmp_path), "CLAUDE_PLUGIN_ROOT": str(ROOT)}, log
 
 
-#: A python3 that is below the floor but has -P (3.11): the floor probe exits 1.
-BELOW_THE_FLOOR = 'case "$*" in *version_info*) exit 1 ;; esac'
+#: A python3 that is below the floor but has -P (3.11): it runs the floor
+#: probe's own code, as a real 3.11.9 would, so the floor the probe states
+#: decides (a probe whose floor drifted to 3.11 would let it through).
+BELOW_THE_FLOOR = ('case "$4" in *version_info*) exec "$real" -P -E -c '
+                   '"$(printf %s "$4" | sed "s/sys.version_info/(3, 11, 9)/")" ;; esac')
 #: A python3 with no -P at all (before 3.11): Python exits 2 on the unknown flag.
 NO_SAFE_PATH = 'case "$1" in -P) echo "Unknown option: -P" >&2; exit 2 ;; esac'
 
@@ -201,8 +249,9 @@ def test_no_launcher_starts_python_outside_the_selection_file(name):
     assert len(sourced) == 1, f"{name} does not source the selection file once"
     for line in code:
         # The selection file's own name and functions are what a launcher may say.
+        # CURAMOIR_PYTHON is set and used only inside those functions.
         bare = re.sub(r"curamoir_\w+", "", line.replace("curamoir/launcher.sh", ""))
-        assert not re.search(r"python|\bexec\b|-m curamoir|\s-c\s", bare), (
+        assert not re.search(r"python|\bexec\b|-m curamoir|\s-c\s", bare, re.IGNORECASE), (
             f"{name} starts an interpreter itself: {line!r}")
     assert re.search(r"^\s*curamoir_exec_module ", text, re.MULTILINE)
 
@@ -253,6 +302,10 @@ def test_a_missing_selection_file_is_guarded(tmp_path, name, code):
     assert done.returncode == code and done.stdout == ""
     if code:
         assert "cannot load" in done.stderr.splitlines()[-1]
+    else:
+        # The guard itself, not the next line's `|| exit 0` after a
+        # `command not found`: a hook says nothing.
+        assert done.stderr == ""
 
 
 # --- the root is the launcher's own location (cm-6f0, edge cases) -----------------
