@@ -169,8 +169,18 @@ the result as if the prompt had said nothing.
   Code will run it (`/bin/sh -c`, in the clone, with that environment),
   denies an `rm -rf` (require_denying_hooks): from a checkout a PATH with
   no Python at the floor, a launcher that cannot run or a missing
-  src/curamoir/launcher.sh is otherwise a silent hook. pretooluse_settings
-  itself refuses a hooks.json that registers no hook for Bash. A toolset
+  src/curamoir/launcher.sh is otherwise a silent hook. Only an answer
+  Claude Code would act on counts: exit code 0 and a `hookSpecificOutput`
+  with `hookEventName` PreToolUse and `permissionDecision` deny.
+  pretooluse_settings itself refuses a hooks.json that registers no hook
+  for Bash, or a hook for Bash that is not a plain command hook (`type`
+  command, and no field but `type`, `command` and `timeout`: an `async`
+  or `if` hook could answer that check and still not block the call). An
+  entry covers Bash when it has no matcher, an empty one, `*`, or a
+  `|`-separated list of plain tool names with `Bash` in it; a matcher
+  with any regular-expression syntax is not counted, since Claude Code's
+  dialect is not Python's (_covers_bash). These are a reading of the
+  hooks reference, not checked against the real CLI. A toolset
   without Bash, which the hook's matcher never fires for, is not checked.
   That the real CLI runs these hooks was checked once by hand
   (2026-10-27, Claude Code 2.1.286, `-p --restricted --tools Bash
@@ -473,6 +483,16 @@ _SELF_TEST_COMMAND = "rm -rf curamoir-denylist-self-test"
 #: usable `timeout` of its own (hooks.json's PreToolUse hook declares 5,
 #: and Claude Code lets a hook that runs past its timeout fail open).
 _HOOK_SELF_TEST_TIMEOUT = 10
+
+#: The only fields a hook for Bash may have (pretooluse_settings): what the
+#: check before the agent starts runs and bounds, and nothing that changes
+#: whether Claude Code waits for the hook (`async`), when it runs it (`if`)
+#: or how (`shell`).
+_BASH_HOOK_FIELDS = frozenset({"type", "command", "timeout"})
+
+#: A tool's name as a matcher may list it for _covers_bash: letters, digits
+#: and underscores, so no regular-expression syntax and no whitespace.
+_PLAIN_TOOL_NAME = re.compile(r"[A-Za-z0-9_]+")
 
 #: The variable the denylist hook knows a job by (hooks/_entry.py's
 #: _JOB_VARIABLE; job_guard.JOB_VARIABLE, which run_guarded sets). Its own
@@ -887,7 +907,16 @@ def pretooluse_settings(root=PLUGIN_ROOT, *, installed=plugin_files.INSTALLED,
     AttributeError, which the callers would not turn into a refusal), and
     when no entry that covers Bash (_covers_bash) has a hook: settings
     with no hook for Bash are no denylist, and the E4-R4b guards will
-    register `Edit|Write` entries beside it.
+    register `Edit|Write` entries beside it. ValueError, too, when a hook
+    of an entry that covers Bash is not a plain command hook: `type`
+    "command", and no field but _BASH_HOOK_FIELDS. WHY: require_denying_hooks
+    runs the `command` within the `timeout` and reads nothing else, so a
+    hook that is `async` (Claude Code does not wait for it), has an `if`
+    (it runs for some Bash calls only), names a `shell` or is another
+    `type` could deny there and still not block the agent's `rm -rf`
+    (a reading of the hooks reference, not checked against the real CLI).
+    Hooks of an entry that does not cover Bash are not the denylist and
+    are not held to this.
 
     Nothing here runs a command to see that it denies: that needs the fix
     step's environment and working directory, so run_fix_step does it
@@ -919,6 +948,7 @@ def pretooluse_settings(root=PLUGIN_ROOT, *, installed=plugin_files.INSTALLED,
             raise ValueError(f"hooks/hooks.json's PreToolUse entry {entry!r} is not an object "
                              "with a `hooks` list (and a string `matcher`, if it has one), "
                              "so the denylist cannot be loaded")
+        for_bash = _covers_bash(entry.get("matcher"))
         hooks = []
         for hook in entry["hooks"]:
             command = hook.get("command") if isinstance(hook, dict) else None
@@ -926,6 +956,12 @@ def pretooluse_settings(root=PLUGIN_ROOT, *, installed=plugin_files.INSTALLED,
                 raise ValueError(f"hooks/hooks.json's PreToolUse hook {hook!r} is not an "
                                  "object with a string `command`, so the denylist cannot be "
                                  "loaded")
+            if for_bash and (hook.get("type") != "command" or set(hook) - _BASH_HOOK_FIELDS):
+                raise ValueError(f"hooks/hooks.json's PreToolUse hook {hook!r} for Bash is not "
+                                 "a plain command hook (`type` \"command\", and no field but "
+                                 f"{', '.join(sorted(_BASH_HOOK_FIELDS))}), so it could pass the "
+                                 "check before the agent starts and still not block a call; "
+                                 "the denylist cannot be loaded")
             if not command.startswith(_ROOT_IN_COMMAND):
                 raise ValueError(f"hooks/hooks.json's PreToolUse command {command!r} does not "
                                  f"start with {_ROOT_IN_COMMAND}, so it cannot be loaded "
@@ -944,20 +980,22 @@ def pretooluse_settings(root=PLUGIN_ROOT, *, installed=plugin_files.INSTALLED,
 
 
 def _covers_bash(matcher):
-    """Whether a PreToolUse entry with `matcher` fires for a Bash call: no
-    matcher, an empty one or `*` matches every tool; anything else is read
-    as a regular expression that must match `Bash` whole, which is also
-    true of an exact name and of a `|`-separated list of names. Read
-    strictly on purpose: an entry Claude Code might match more loosely is
-    not counted as the denylist (pretooluse_settings) and is not what
-    require_denying_hooks runs; one that is not a valid expression covers
-    nothing."""
+    """Whether a PreToolUse entry with `matcher` is counted as firing for a
+    Bash call: no matcher, an empty one or `*` matches every tool; any
+    other must be a `|`-separated list of plain tool names
+    (_PLAIN_TOOL_NAME, nothing around them) one of which is exactly
+    `Bash`. WHY no more: Claude Code's matcher dialect is not Python's
+    (`(?i)bash`, `\\ABash\\Z` and `(?P<t>Bash)` match here and are errors or
+    something else there), so only the forms that mean the same in both
+    are counted, and the matcher is never run as a regular expression
+    here. An entry with any other matcher (`Bash.*`, `bash`, ` Bash`) is
+    not refused for it: it is not counted as the denylist
+    (pretooluse_settings, which refuses a hooks.json with no entry that
+    is) and is not what require_denying_hooks runs."""
     if matcher in (None, "", "*"):
         return True
-    try:
-        return re.fullmatch(matcher, "Bash") is not None
-    except re.error:
-        return False
+    names = matcher.split("|")
+    return "Bash" in names and all(_PLAIN_TOOL_NAME.fullmatch(name) for name in names)
 
 
 def _installed_hook_command(rest, python):
@@ -1014,7 +1052,16 @@ def require_denying_hooks(settings, cwd, environment):
     that the command answers. And the hook denies only inside a job, which
     is `environment`'s to say. So the one check that covers all of it is
     to ask the hook, and to start no agent with Bash on any other answer
-    than `permissionDecision: deny`.
+    than the one Claude Code acts on: exit code 0 with, on stdout, a JSON
+    object whose `hookSpecificOutput` has `hookEventName` "PreToolUse" and
+    `permissionDecision` "deny". A deny printed with another exit code, or
+    without that event name, is one Claude Code would not honour (a
+    reading of the hooks reference, not checked against the real CLI), so
+    it is refused like silence.
+
+    Every hook of every entry that covers Bash is asked, and each must
+    deny: any of them may be the one that is cúramóir's. They are plain
+    command hooks, which pretooluse_settings has seen to.
 
     The hook only reads the payload and prints: nothing is deleted, and
     nothing is written into `cwd`. It needs no `.curamoir/` there (the job
@@ -1058,11 +1105,17 @@ def _require_deny(hook, payload, cwd, environment):
             raise ValueError(f"{ran_as} could not be run ({error}){not_started}") from error
     stdout = _text(ran.stdout)
     try:
-        decision = json.loads(stdout)["hookSpecificOutput"]["permissionDecision"]
+        answer = json.loads(stdout)["hookSpecificOutput"]
+        denied = (answer["hookEventName"] == "PreToolUse"
+                  and answer["permissionDecision"] == "deny")
     except (ValueError, KeyError, TypeError):
-        decision = None
-    if decision != "deny":
-        raise ValueError(f"{ran_as} did not deny it: exit code {ran.returncode}, stdout "
+        denied = False
+    # Exit 0 too: Claude Code reads a hook's JSON only then (any other code
+    # but 2 is an error that does not block the call).
+    if ran.returncode != 0 or not denied:
+        raise ValueError(f"{ran_as} did not deny it as Claude Code reads a hook (a zero exit "
+                         "and a hookSpecificOutput for PreToolUse whose permissionDecision "
+                         f"is deny): exit code {ran.returncode}, stdout "
                          f"{stdout[-300:]!r}, stderr {_text(ran.stderr)[-300:]!r}{not_started}")
 
 

@@ -697,3 +697,210 @@ def test_without_bash_the_fix_step_starts_as_before_whatever_the_hook_would_say(
 
     assert run.exit_code == 0 and marker.exists()
     assert "Bash" not in run.argv[run.argv.index("--tools") + 1]
+
+
+# --- what the check promises, held one property at a time (cm-60c, R5 edge cases 2) -------
+#
+# Stand-in hooks: a plugin root under tmp_path whose scripts/ holds small
+# shell scripts, and a hooks.json naming them, both reached through the
+# seams the tests above use (pretooluse_settings' `root`, and
+# plugin_files.HOOKS_JSON). The repository's own hooks.json and launchers
+# are never touched.
+
+#: What cúramóir's hook prints for a refusal (hooks/pretooluse.py's _deny),
+#: with a stand-in reason.
+DENY = {"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
+                               "permissionDecisionReason": "stand-in"}}
+
+
+def printing(answer):
+    """Shell that reads the payload and prints `answer` as JSON."""
+    return f"cat >/dev/null\nprintf '%s' {shlex.quote(json.dumps(answer))}\n"
+
+
+def stand_in_hooks(tmp_path, monkeypatch, scripts, entries=None):
+    """Make the fix step load stand-in hooks: `scripts` maps a name to the
+    body of a /bin/sh script at <root>/scripts/<name>; `entries` is
+    hooks.json's PreToolUse list (default: one Bash entry with a plain
+    command hook per script, timeout 5). Returns the root."""
+    from curamoir import plugin_files
+
+    root = tmp_path / "stand-in plugin"
+    (root / "scripts").mkdir(parents=True)
+    for name, body in scripts.items():
+        (root / "scripts" / name).write_text(f"#!/bin/sh\n{body}", encoding="utf-8")
+        (root / "scripts" / name).chmod(0o755)
+    if entries is None:
+        entries = [{"matcher": "Bash", "hooks": [stand_in_hook(name) for name in scripts]}]
+    registered = tmp_path / "stand-in-hooks.json"
+    registered.write_text(json.dumps({"hooks": {"PreToolUse": entries}}), encoding="utf-8")
+    monkeypatch.setattr(plugin_files, "HOOKS_JSON", registered)
+    settings_from(monkeypatch, root=root, installed=False)
+    return root
+
+
+def stand_in_hook(name, timeout=5):
+    """hooks.json's hook object for stand_in_hooks' script `name`."""
+    return {"type": "command", "command": f'"${{CLAUDE_PLUGIN_ROOT}}"/scripts/{name}',
+            "timeout": timeout}
+
+
+def hosted_fix_step_in(sandbox, script, prompt="p", model="m"):
+    """The hosted fix step with Bash in `sandbox`, for a test that needs
+    the clone's path."""
+    return run_fix_step(sandbox, prompt, model=model, claude=str(script), runner=HOSTED,
+                        tools=fix_tools(HOSTED, "pytest -q"), test_command="pytest -q")
+
+
+def test_the_hook_is_asked_in_the_clone_with_the_fix_steps_environment(
+        repo, tmp_path, monkeypatch):
+    """The user's ruling: a deny in the fix step's environment. The stand-in
+    hook denies only when its working directory is the clone and it sees
+    what run_fix_step built, not what the sweep's own process has:
+    CLAUDE_PLUGIN_ROOT as PLUGIN_ROOT (the parent's names another plugin)
+    and the hosted UV_FROZEN (absent from the parent). Asked anywhere else,
+    or with the parent's environment, it is silent and the step is refused."""
+    committed(repo)
+    monkeypatch.setenv(VARIABLE, "sweep")
+    monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", str(tmp_path / "some-other-plugin"))
+    monkeypatch.delenv("UV_FROZEN", raising=False)
+    root = stand_in_hooks(tmp_path, monkeypatch, {})
+    script, marker = started_marker(tmp_path)
+
+    with prepare_sandbox(repo.repo, "HEAD", parent=tmp_path) as sandbox:
+        (root / "scripts" / "particular").write_text(
+            "#!/bin/sh\ncat >/dev/null\n"
+            'echo "cwd=$(pwd -P) CLAUDE_PLUGIN_ROOT=$CLAUDE_PLUGIN_ROOT UV_FROZEN=$UV_FROZEN" >&2\n'
+            f'[ "$(pwd -P)" = {shlex.quote(os.path.realpath(sandbox.path))} ] || exit 0\n'
+            f'[ "$CLAUDE_PLUGIN_ROOT" = {shlex.quote(str(fix_step.PLUGIN_ROOT))} ] || exit 0\n'
+            '[ "$UV_FROZEN" = 1 ] || exit 0\n'
+            f"printf '%s' {shlex.quote(json.dumps(DENY))}\n", encoding="utf-8")
+        (root / "scripts" / "particular").chmod(0o755)
+        (tmp_path / "stand-in-hooks.json").write_text(json.dumps({"hooks": {"PreToolUse": [
+            {"matcher": "Bash", "hooks": [stand_in_hook("particular")]}]}}), encoding="utf-8")
+
+        run = hosted_fix_step_in(sandbox, script)
+
+    assert run.exit_code == 0 and marker.exists()
+
+
+def test_the_hook_is_asked_with_the_payload_claude_code_sends(repo, tmp_path, monkeypatch):
+    """What the hook reads on stdin is a PreToolUse payload for the Bash
+    self-test command, `cwd` (the clone) included: cúramóir's hook finds
+    its repository from that field."""
+    committed(repo)
+    monkeypatch.setenv(VARIABLE, "sweep")
+    log = tmp_path / "payload.json"
+    stand_in_hooks(tmp_path, monkeypatch, {"recording": (
+        f"cat >{shlex.quote(str(log))}\nprintf '%s' {shlex.quote(json.dumps(DENY))}\n")})
+    script, marker = started_marker(tmp_path)
+
+    with prepare_sandbox(repo.repo, "HEAD", parent=tmp_path) as sandbox:
+        run = hosted_fix_step_in(sandbox, script)
+        clone = str(sandbox.path)
+
+    assert run.exit_code == 0 and marker.exists()
+    assert json.loads(log.read_text(encoding="utf-8")) == {
+        "hook_event_name": "PreToolUse", "tool_name": "Bash",
+        "tool_input": {"command": fix_step._SELF_TEST_COMMAND}, "cwd": clone}
+
+
+def test_a_hook_slower_than_its_declared_timeout_is_refused(repo, tmp_path, monkeypatch):
+    """Claude Code lets a hook that runs past its own `timeout` fail open,
+    so that timeout bounds the check, not the longer fallback: a hook that
+    denies after 2.5 s with a declared timeout of 1 is refused."""
+    committed(repo)
+    monkeypatch.setenv(VARIABLE, "sweep")
+    assert fix_step._HOOK_SELF_TEST_TIMEOUT > 3
+    stand_in_hooks(tmp_path, monkeypatch, {"slow": "sleep 2.5\n" + printing(DENY)}, entries=[
+        {"matcher": "Bash", "hooks": [stand_in_hook("slow", timeout=1)]}])
+    script, marker = started_marker(tmp_path)
+
+    refused_hosted_fix_step(repo, tmp_path, script, marker, "did not answer within 1 seconds")
+
+
+def test_a_prompt_and_a_model_named_like_the_settings_flag_do_not_hide_the_settings(
+        repo, tmp_path, monkeypatch):
+    """The settings the check reads back from the argv are the value of the
+    LAST `--settings`: the prompt and the model come before the flag and
+    may be that very word. With both, the real hook is still found, asked,
+    and the agent starts."""
+    committed(repo)
+    monkeypatch.setenv(VARIABLE, "sweep")
+    script, marker = started_marker(tmp_path)
+
+    with prepare_sandbox(repo.repo, "HEAD", parent=tmp_path) as sandbox:
+        run = hosted_fix_step_in(sandbox, script, prompt="--settings", model="--settings")
+
+    assert run.exit_code == 0 and marker.exists()
+    assert run.argv[2] == run.argv[4] == "--settings"
+    assert fix_step._argv_settings(list(run.argv)) == fix_step.pretooluse_settings()
+
+
+@pytest.mark.parametrize("entries", [
+    [{"matcher": "Bash", "hooks": [stand_in_hook("denies"), stand_in_hook("silent")]}],
+    [{"matcher": "Bash", "hooks": [stand_in_hook("denies")]},
+     {"matcher": "Edit|Bash", "hooks": [stand_in_hook("silent")]}]],
+    ids=["second-hook-of-the-entry", "second-entry"])
+def test_every_hook_that_covers_bash_is_checked_not_only_the_first(
+        repo, tmp_path, monkeypatch, entries):
+    """Each hook is a command Claude Code runs for a Bash call, and the
+    denylist is whichever of them cúramóir's is: one that denies beside one
+    that says nothing is refused, and the refusal names the silent one."""
+    committed(repo)
+    monkeypatch.setenv(VARIABLE, "sweep")
+    stand_in_hooks(tmp_path, monkeypatch,
+                   {"denies": printing(DENY), "silent": "cat >/dev/null\n"}, entries=entries)
+    script, marker = started_marker(tmp_path)
+
+    message = refused_hosted_fix_step(repo, tmp_path, script, marker, "did not deny")
+
+    assert "scripts/silent" in message and "exit code 0" in message
+
+
+def _without(answer, key):
+    return {"hookSpecificOutput": {name: value for name, value
+                                   in answer["hookSpecificOutput"].items() if name != key}}
+
+
+@pytest.mark.parametrize("body, exit_code", [
+    (printing(DENY) + "exit 1\n", 1),
+    (printing(_without(DENY, "hookEventName")), 0),
+    (printing({"hookSpecificOutput": dict(DENY["hookSpecificOutput"],
+                                          hookEventName="PostToolUse")}), 0),
+    (printing([DENY]), 0)],
+    ids=["deny-with-exit-1", "no-hookEventName", "another-hookEventName", "not-an-object"])
+def test_a_deny_claude_code_would_not_honour_is_refused(
+        repo, tmp_path, monkeypatch, body, exit_code):
+    """Claude Code reads a hook's JSON only on exit 0, and a PreToolUse
+    decision only from a `hookSpecificOutput` whose `hookEventName` is
+    PreToolUse: a deny printed with exit 1, or without that name, would
+    let the call through, so it does not pass the check either."""
+    committed(repo)
+    monkeypatch.setenv(VARIABLE, "sweep")
+    stand_in_hooks(tmp_path, monkeypatch, {"almost": body})
+    script, marker = started_marker(tmp_path)
+
+    message = refused_hosted_fix_step(repo, tmp_path, script, marker, "did not deny")
+
+    assert "scripts/almost" in message and f"exit code {exit_code}" in message
+
+
+def test_the_stand_in_deny_is_what_the_real_hook_prints_for_the_self_test(repo, tmp_path):
+    """DENY above stands in for cúramóir's hook: the real one, asked the
+    check's own question inside a job, exits 0 with the same
+    `hookEventName` and `permissionDecision`, so the stricter reading
+    refuses no healthy run."""
+    committed(repo)
+    payload = json.dumps({"hook_event_name": "PreToolUse", "tool_name": "Bash",
+                          "tool_input": {"command": fix_step._SELF_TEST_COMMAND},
+                          "cwd": str(repo.repo)})
+
+    ran = subprocess.run([str(REPO_ROOT / "scripts" / "curamoir-hook-pretooluse")],
+                         input=payload, capture_output=True, text=True, cwd=repo.repo,
+                         env=dict(os.environ, **{VARIABLE: "sweep"}))
+
+    answer = json.loads(ran.stdout)["hookSpecificOutput"]
+    assert ran.returncode == 0, ran.stderr
+    assert {key: answer[key] for key in ("hookEventName", "permissionDecision")} == {
+        key: DENY["hookSpecificOutput"][key] for key in ("hookEventName", "permissionDecision")}

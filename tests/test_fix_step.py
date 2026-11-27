@@ -284,6 +284,92 @@ def test_a_malformed_hooks_json_is_a_value_error_naming_the_file(tmp_path, monke
         pretooluse_settings()
 
 
+#: Fields that would make Claude Code not wait for a hook, not run it for
+#: every Bash call, or not run it as the command the self-test runs.
+NOT_A_PLAIN_COMMAND_HOOK = [
+    {"async": True}, {"async": False}, {"if": "Bash(git *)"}, {"shell": "powershell"},
+    {"type": "prompt"}, {"type": None}, {"statusMessage": "checking"}]
+
+
+def _hook_with(changes):
+    """_entry's hook with `changes` applied; a None value removes the key."""
+    hook = dict(_entry()["hooks"][0], **changes)
+    return {key: value for key, value in hook.items() if value is not None}
+
+
+@pytest.mark.parametrize("changes", NOT_A_PLAIN_COMMAND_HOOK, ids=json.dumps)
+def test_a_bash_hook_that_is_not_a_plain_command_hook_is_refused(tmp_path, monkeypatch, changes):
+    """cm-60c: the check before the agent starts runs a hook's `command`
+    within its `timeout` and reads nothing else, so a Bash hook with any
+    other field (`async`, which Claude Code does not wait for; `if`, which
+    narrows when it fires; `shell`; a `type` that is not `command`, or
+    none) could pass it and still not block an `rm -rf`. Refused."""
+    hooks_json(tmp_path, monkeypatch, {"hooks": {"PreToolUse": [
+        {"matcher": "Bash", "hooks": [_hook_with(changes)]}]}})
+
+    with pytest.raises(ValueError, match=r"hooks/hooks\.json.*plain command hook"):
+        pretooluse_settings()
+
+
+def test_a_second_bash_hook_that_is_not_a_plain_command_hook_is_refused(tmp_path, monkeypatch):
+    """Every hook of every entry that covers Bash, not only the first."""
+    hooks_json(tmp_path, monkeypatch, {"hooks": {"PreToolUse": [
+        _entry(), {"matcher": "Edit|Bash", "hooks": [
+            _hook_with({}), _hook_with({"async": True})]}]}})
+
+    with pytest.raises(ValueError, match=r"hooks/hooks\.json.*plain command hook"):
+        pretooluse_settings()
+
+
+@pytest.mark.parametrize("changes", NOT_A_PLAIN_COMMAND_HOOK, ids=json.dumps)
+def test_a_hook_for_another_tool_is_not_held_to_the_bash_hooks_shape(
+        tmp_path, monkeypatch, changes):
+    """The restriction is the denylist's: an entry that does not cover Bash
+    (the E4-R4b `Edit|Write` guards to come) loads as registered beside a
+    healthy Bash one."""
+    other = {"matcher": "Edit|Write", "hooks": [_hook_with(changes)]}
+    hooks_json(tmp_path, monkeypatch, {"hooks": {"PreToolUse": [other, _entry()]}})
+
+    loaded, bash = pretooluse_settings(tmp_path)["hooks"]["PreToolUse"]
+
+    assert loaded["matcher"] == "Edit|Write" and bash["matcher"] == "Bash"
+    (hook,) = loaded["hooks"]
+    assert {key: value for key, value in hook.items() if key != "command"} == {
+        key: value for key, value in other["hooks"][0].items() if key != "command"}
+
+
+@pytest.mark.parametrize("matcher, covers", [
+    (None, True), ("", True), ("*", True), ("Bash", True), ("Edit|Bash", True),
+    ("Bash|Write", True), ("Edit|Bash|Write", True),
+    ("Edit|Write", False), ("bash", False), ("BASH", False), ("Bash.*", False), (".*", False),
+    ("(?i)bash", False), (r"\ABash\Z", False), ("(?P<t>Bash)", False), ("Ba++sh", False),
+    ("(?x) B a s h", False), ("^Bash$", False), ("(Bash)", False), ("Bas[h]", False),
+    (" Bash", False), ("Bash ", False), ("Edit | Bash", False), ("Bash\n", False),
+    ("Bash|", False), ("|Bash", False), ("Bash||Edit", False), ("Bash|Edit.*", False),
+    ("Bashful", False), ("mcp__x__Bash", False), ("**", False)])
+def test_only_a_matcher_of_plain_names_covers_bash(matcher, covers):
+    """Claude Code's matcher dialect is not Python's, so a matcher counts as
+    covering Bash only in the forms that mean the same in both: none, an
+    empty one, `*`, or a `|`-separated list of plain tool names one of which
+    is exactly `Bash`. Any regular-expression syntax, however it would match
+    here, does not count."""
+    from curamoir.fix_step import _covers_bash
+
+    assert _covers_bash(matcher) is covers
+
+
+@pytest.mark.parametrize("matcher", ["(?i)bash", r"\ABash\Z", "(?P<t>Bash)", "Bash.*"])
+def test_a_hooks_json_whose_only_bash_entry_is_a_regular_expression_is_refused(
+        tmp_path, monkeypatch, matcher):
+    """Such an entry is not counted as the denylist and would not be asked
+    before the agent starts, so with no other entry for Bash there is no
+    denylist to load."""
+    hooks_json(tmp_path, monkeypatch, {"hooks": {"PreToolUse": [_entry(matcher)]}})
+
+    with pytest.raises(ValueError, match=r"hooks/hooks\.json.*registers no hook for Bash"):
+        pretooluse_settings()
+
+
 def test_the_allow_rules_reach_only_the_repo(tmp_path):
     """S1: an unscoped `Read` or `Edit` in --allowedTools approves that tool on
     every path, so under dontAsk the agent could edit ~/.bashrc or read
