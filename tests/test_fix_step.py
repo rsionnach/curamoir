@@ -84,6 +84,15 @@ E3_R2 = ("Fixes MUST be scoped: only files with violations; no refactors beyond 
          "principle permitting it.")
 
 
+@pytest.fixture(autouse=True)
+def inside_a_job(monkeypatch):
+    """CURAMOIR_JOB as job_guard.run_guarded sets it for every run that
+    reaches run_fix_step: with Bash in the toolset the fix step is refused
+    without it (cm-60c; tests/test_job_env.py has that refusal and the
+    check of the hook that follows it)."""
+    monkeypatch.setenv("CURAMOIR_JOB", "sweep")
+
+
 def flat(text):
     return " ".join(text.split())
 
@@ -212,6 +221,67 @@ def test_a_plugin_root_with_spaces_and_quotes_is_one_word_in_the_hook_command(tm
     command = pretooluse_settings(root)["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
 
     assert shlex.split(command) == [str(root / "scripts" / "curamoir-hook-pretooluse")]
+
+
+def hooks_json(tmp_path, monkeypatch, document):
+    """Point plugin_files.HOOKS_JSON at a file holding `document`."""
+    from curamoir import plugin_files
+
+    path = tmp_path / "hooks.json"
+    path.write_text(json.dumps(document), encoding="utf-8")
+    monkeypatch.setattr(plugin_files, "HOOKS_JSON", path)
+
+
+def _entry(matcher="Bash", **hook):
+    return {"matcher": matcher, "hooks": [
+        {"type": "command", "command": '"${CLAUDE_PLUGIN_ROOT}"/scripts/curamoir-hook-pretooluse',
+         "timeout": 5, **hook}]}
+
+
+@pytest.mark.parametrize("entries", [
+    [], [{"matcher": "Bash", "hooks": []}], [_entry("Edit|Write")],
+    [_entry("Edit|Write"), {"matcher": "Bash", "hooks": []}]],
+    ids=["no-entries", "bash-entry-with-no-hooks", "edit-write-only", "neither"])
+def test_a_hooks_json_that_registers_nothing_for_bash_is_refused(tmp_path, monkeypatch, entries):
+    """cm-60c: settings whose PreToolUse has no hook for Bash are no
+    denylist, and the E4-R4b guards will register `Edit|Write` entries
+    beside it. Refused, so no fix step runs with such settings."""
+    hooks_json(tmp_path, monkeypatch, {"hooks": {"PreToolUse": entries}})
+
+    with pytest.raises(ValueError, match=r"hooks/hooks\.json.*Bash"):
+        pretooluse_settings()
+
+
+def test_an_entry_for_another_tool_beside_the_bash_one_is_loaded(tmp_path, monkeypatch):
+    """The refusal above is for no Bash hook at all: an `Edit|Write` entry
+    beside the Bash one loads with it, as registered."""
+    hooks_json(tmp_path, monkeypatch, {"hooks": {"PreToolUse": [_entry("Edit|Write"), _entry()]}})
+
+    assert [entry["matcher"] for entry in pretooluse_settings()["hooks"]["PreToolUse"]] == [
+        "Edit|Write", "Bash"]
+
+
+@pytest.mark.parametrize("document", [
+    {}, [], {"hooks": []}, {"hooks": {}}, {"hooks": {"PreToolUse": {}}},
+    {"hooks": {"PreToolUse": ["Bash"]}},
+    {"hooks": {"PreToolUse": [{"matcher": "Bash"}]}},
+    {"hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": {}}]}},
+    {"hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": ["a command"]}]}},
+    {"hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": [{"type": "command"}]}]}},
+    {"hooks": {"PreToolUse": [_entry(command=None)]}},
+    {"hooks": {"PreToolUse": [_entry(command=3)]}},
+    {"hooks": {"PreToolUse": [_entry(matcher=7)]}},
+], ids=["no-hooks", "a-list", "hooks-a-list", "no-pretooluse", "pretooluse-an-object",
+        "entry-a-string", "entry-without-hooks", "entry-hooks-an-object", "hook-a-string",
+        "hook-without-command", "command-null", "command-a-number", "matcher-a-number"])
+def test_a_malformed_hooks_json_is_a_value_error_naming_the_file(tmp_path, monkeypatch, document):
+    """The callers turn a ValueError into a refusal; a KeyError, TypeError
+    or AttributeError from a hooks.json of the wrong shape would crash them
+    instead."""
+    hooks_json(tmp_path, monkeypatch, document)
+
+    with pytest.raises(ValueError, match=r"hooks/hooks\.json"):
+        pretooluse_settings()
 
 
 def test_the_allow_rules_reach_only_the_repo(tmp_path):

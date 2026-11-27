@@ -160,12 +160,30 @@ the result as if the prompt had said nothing.
   the run's environment, though the hook's launcher does not read it (it
   takes its root from its own location, cm-6f0): so that nothing in the
   fix agent's environment names another plugin's code. Held by a stand-in `claude`
-  that loads hooks only from this flag (tests/test_job_env.py). That the
-  real CLI runs them was checked once by hand (2026-10-27, Claude Code
-  2.1.286, `-p --restricted --tools Bash --permission-mode dontAsk`,
-  CURAMOIR_JOB=sweep): `rm -rf build` ran without these settings and was
-  refused with the denylist's own message with them. No test calls a
-  model, so re-check by hand when Claude Code changes `--restricted`.
+  that loads hooks only from this flag (tests/test_job_env.py).
+  A command hook that says nothing, or cannot run, ALLOWS the call, and
+  the hook denies only when CURAMOIR_JOB is set. So before an agent with
+  Bash starts, run_fix_step refuses (ValueError, no agent started,
+  nothing spent) unless its environment has a non-empty CURAMOIR_JOB and
+  every hook command in these settings that covers Bash, run as Claude
+  Code will run it (`/bin/sh -c`, in the clone, with that environment),
+  denies an `rm -rf` (require_denying_hooks): from a checkout a PATH with
+  no Python at the floor, a launcher that cannot run or a missing
+  src/curamoir/launcher.sh is otherwise a silent hook. pretooluse_settings
+  itself refuses a hooks.json that registers no hook for Bash. A toolset
+  without Bash, which the hook's matcher never fires for, is not checked.
+  That the real CLI runs these hooks was checked once by hand
+  (2026-10-27, Claude Code 2.1.286, `-p --restricted --tools Bash
+  --permission-mode dontAsk`, CURAMOIR_JOB=sweep): `rm -rf build` ran
+  without these settings and was refused with the denylist's own message
+  with them. Limit: `--restricted` still loads the machine's managed
+  settings, and a managed setting that disables hooks (`disableAllHooks`,
+  `allowManagedHooksOnly`) could stop the `--settings` hook from running,
+  which nothing here detects: the check above runs the command, not the
+  CLI. This is a reading of those settings, NOT verified against the real
+  CLI. No test calls a model, so re-check by hand when Claude Code
+  changes `--restricted`, and on a machine with such managed settings
+  that the `--settings` hook still runs.
 - `--disable-slash-commands` ("Disable all skills and commands for this
   session"): the fix agent is handed its instructions here, so no skill —
   including /curamoir:sweep, which would run the lint itself — can be
@@ -193,7 +211,9 @@ The process runs in a session of its own with the inherited `GIT_*`
 variables dropped and the rest kept, CURAMOIR_JOB included (set by
 job_guard.run_guarded for the run: the E0-R5 denylist's signal in a clone
 that has no lock, cm-a2s), which the denylist loaded by `--settings`
-(above) reads, and CLAUDE_PLUGIN_ROOT set to PLUGIN_ROOT. At the timeout
+(above) reads, and CLAUDE_PLUGIN_ROOT set to PLUGIN_ROOT. With Bash in the
+toolset the step is refused when CURAMOIR_JOB is missing or empty (the
+`--settings` bullet; cm-60c). At the timeout
 its whole process group is killed (git_guard.run_in_group), so on the
 local runner nothing it started goes on editing the sandbox while the
 review reads it. On the hosted runner a Bash child that leaves the group
@@ -297,6 +317,7 @@ import re
 import shlex
 import subprocess
 import sys
+import tempfile
 from dataclasses import dataclass
 from typing import Optional
 
@@ -441,6 +462,23 @@ _HOOK_LAUNCHER = re.compile(r"/scripts/curamoir-hook-([a-z]+)")
 #: 5-second timeout. Python starts in well under a second, so this only
 #: bounds a hung interpreter.
 _HOOK_IMPORT_TIMEOUT = 10
+
+#: The Bash command run_fix_step asks each loaded hook about before a fix
+#: agent with Bash starts (require_denying_hooks): one the denylist must
+#: refuse inside a job. It is only text in the payload the hook reads: the
+#: hook judges a command and never runs it.
+_SELF_TEST_COMMAND = "rm -rf curamoir-denylist-self-test"
+
+#: Seconds a hook gets to answer that check when its entry declares no
+#: usable `timeout` of its own (hooks.json's PreToolUse hook declares 5,
+#: and Claude Code lets a hook that runs past its timeout fail open).
+_HOOK_SELF_TEST_TIMEOUT = 10
+
+#: The variable the denylist hook knows a job by (hooks/_entry.py's
+#: _JOB_VARIABLE; job_guard.JOB_VARIABLE, which run_guarded sets). Its own
+#: copy of the name, as the hook keeps one, rather than an import of
+#: job_guard for a name; tests/test_job_env.py holds the three together.
+_JOB_VARIABLE = "CURAMOIR_JOB"
 
 #: The tools Claude Code checks file permission rules for ("checks file
 #: permissions against `Edit(path)` and `Read(path)` rules only"): the
@@ -843,7 +881,17 @@ def pretooluse_settings(root=PLUGIN_ROOT, *, installed=plugin_files.INSTALLED,
     (plugin_files.HOOKS_JSON), so the fix step denies what an interactive
     session denies. OSError or ValueError when they cannot be read or a
     command cannot be written: a fix step whose denylist could not be
-    loaded never runs.
+    loaded never runs. ValueError, naming hooks/hooks.json, when the file
+    has another shape than `{"hooks": {"PreToolUse": [{"matcher": ...,
+    "hooks": [{"command": "..."}]}]}}` (never a KeyError, TypeError or
+    AttributeError, which the callers would not turn into a refusal), and
+    when no entry that covers Bash (_covers_bash) has a hook: settings
+    with no hook for Bash are no denylist, and the E4-R4b guards will
+    register `Edit|Write` entries beside it.
+
+    Nothing here runs a command to see that it denies: that needs the fix
+    step's environment and working directory, so run_fix_step does it
+    (require_denying_hooks), for both forms below.
 
     From the plugin checkout each command's `"${CLAUDE_PLUGIN_ROOT}"` is
     replaced by `root`, shell-quoted, so the hook is the checkout's own
@@ -859,12 +907,25 @@ def pretooluse_settings(root=PLUGIN_ROOT, *, installed=plugin_files.INSTALLED,
     no interpreter to name, or one that cannot import the module under `-I`
     is a ValueError, never a guess."""
     registered = json.loads(plugin_files.HOOKS_JSON.read_text(encoding="utf-8"))
-    entries = registered["hooks"]["PreToolUse"]
+    events = registered.get("hooks") if isinstance(registered, dict) else None
+    entries = events.get("PreToolUse") if isinstance(events, dict) else None
+    if not isinstance(entries, list):
+        raise ValueError("hooks/hooks.json has no `hooks.PreToolUse` list, so the denylist "
+                         "cannot be loaded")
     loaded = []
     for entry in entries:
+        if not (isinstance(entry, dict) and isinstance(entry.get("hooks"), list)
+                and isinstance(entry.get("matcher", ""), str)):
+            raise ValueError(f"hooks/hooks.json's PreToolUse entry {entry!r} is not an object "
+                             "with a `hooks` list (and a string `matcher`, if it has one), "
+                             "so the denylist cannot be loaded")
         hooks = []
         for hook in entry["hooks"]:
-            command = hook["command"]
+            command = hook.get("command") if isinstance(hook, dict) else None
+            if not isinstance(command, str):
+                raise ValueError(f"hooks/hooks.json's PreToolUse hook {hook!r} is not an "
+                                 "object with a string `command`, so the denylist cannot be "
+                                 "loaded")
             if not command.startswith(_ROOT_IN_COMMAND):
                 raise ValueError(f"hooks/hooks.json's PreToolUse command {command!r} does not "
                                  f"start with {_ROOT_IN_COMMAND}, so it cannot be loaded "
@@ -876,7 +937,27 @@ def pretooluse_settings(root=PLUGIN_ROOT, *, installed=plugin_files.INSTALLED,
                 written = shlex.quote(str(root)) + rest
             hooks.append(dict(hook, command=written))
         loaded.append(dict(entry, hooks=hooks))
+    if not any(entry["hooks"] and _covers_bash(entry.get("matcher")) for entry in loaded):
+        raise ValueError("hooks/hooks.json's PreToolUse registers no hook for Bash, so "
+                         "there is no denylist to load")
     return {"hooks": {"PreToolUse": loaded}}
+
+
+def _covers_bash(matcher):
+    """Whether a PreToolUse entry with `matcher` fires for a Bash call: no
+    matcher, an empty one or `*` matches every tool; anything else is read
+    as a regular expression that must match `Bash` whole, which is also
+    true of an exact name and of a `|`-separated list of names. Read
+    strictly on purpose: an entry Claude Code might match more loosely is
+    not counted as the denylist (pretooluse_settings) and is not what
+    require_denying_hooks runs; one that is not a valid expression covers
+    nothing."""
+    if matcher in (None, "", "*"):
+        return True
+    try:
+        return re.fullmatch(matcher, "Bash") is not None
+    except re.error:
+        return False
 
 
 def _installed_hook_command(rest, python):
@@ -912,6 +993,77 @@ def _installed_hook_command(rest, python):
                          f"PreToolUse launcher {rest!r} runs, so the denylist cannot be "
                          "loaded: " + probe.stderr.decode("utf-8", "backslashreplace")[-300:])
     return f"{shlex.quote(python)} -I -m {module}"
+
+
+def require_denying_hooks(settings, cwd, environment):
+    """Raise ValueError unless every PreToolUse hook command in `settings`
+    (pretooluse_settings', as the argv carries them) whose entry covers
+    Bash (_covers_bash) denies _SELF_TEST_COMMAND when run as Claude Code
+    will run it for the fix agent: through `/bin/sh -c`, in `cwd` (the
+    clone), with `environment` (the fix step's process's, which a hook
+    inherits), a PreToolUse payload for that Bash command on stdin, and
+    the hook's own `timeout`.
+
+    WHY (cm-60c): a command hook that exits 0 with no output, exits with a
+    shell's 126 or 127, or runs past its timeout ALLOWS the call. From a
+    checkout the command is the launcher script, which exits 0 in silence
+    when PATH holds no Python at or above the floor (the sweep's own
+    interpreter need not be on PATH) or src/curamoir/launcher.sh is
+    missing, and cannot run at all without its exec bit; installed, the
+    import probe (_installed_hook_command) shows the module imports, not
+    that the command answers. And the hook denies only inside a job, which
+    is `environment`'s to say. So the one check that covers all of it is
+    to ask the hook, and to start no agent with Bash on any other answer
+    than `permissionDecision: deny`.
+
+    The hook only reads the payload and prints: nothing is deleted, and
+    nothing is written into `cwd`. It needs no `.curamoir/` there (the job
+    variable is its signal). Whether it asks `dcg` or its own tables
+    (hooks/pretooluse.py), `rm -rf` is refused: a `dcg` that allows falls
+    back to the tables.
+
+    Limit: this shows the command denies, not that the real CLI runs it
+    (module docstring, `--settings`: checked by hand)."""
+    payload = json.dumps({"hook_event_name": "PreToolUse", "tool_name": "Bash",
+                          "tool_input": {"command": _SELF_TEST_COMMAND}, "cwd": cwd})
+    for entry in settings["hooks"]["PreToolUse"]:
+        if _covers_bash(entry.get("matcher")):
+            for hook in entry["hooks"]:
+                _require_deny(hook, payload, cwd, environment)
+
+
+def _require_deny(hook, payload, cwd, environment):
+    """require_denying_hooks for one hook (an entry's `hooks` item)."""
+    command = hook["command"]
+    declared = hook.get("timeout")
+    timeout = (declared if isinstance(declared, (int, float)) and not isinstance(declared, bool)
+               and declared > 0 else _HOOK_SELF_TEST_TIMEOUT)
+    ran_as = (f"the PreToolUse hook command {command} (run through /bin/sh -c in {cwd} with "
+              f"the fix step's environment, asked about `{_SELF_TEST_COMMAND}`)")
+    not_started = ("; a hook that does not deny allows the call, so no fix agent is started "
+                   "with Bash")
+    # A file, not a pipe, for stdin: run_in_group passes `stdin` to the
+    # process as it is, and kills the whole group at the timeout, so a
+    # launcher's child that hangs does not outlive the check.
+    with tempfile.TemporaryFile() as stdin:
+        stdin.write(payload.encode("utf-8"))
+        stdin.seek(0)
+        try:
+            ran = run_in_group(["/bin/sh", "-c", command], cwd=cwd, env=environment,
+                               timeout=timeout, stdin=stdin)
+        except subprocess.TimeoutExpired as expired:
+            raise ValueError(f"{ran_as} did not answer within {timeout} seconds, stderr "
+                             f"{_text(expired.stderr)[-300:]!r}{not_started}") from expired
+        except OSError as error:
+            raise ValueError(f"{ran_as} could not be run ({error}){not_started}") from error
+    stdout = _text(ran.stdout)
+    try:
+        decision = json.loads(stdout)["hookSpecificOutput"]["permissionDecision"]
+    except (ValueError, KeyError, TypeError):
+        decision = None
+    if decision != "deny":
+        raise ValueError(f"{ran_as} did not deny it: exit code {ran.returncode}, stdout "
+                         f"{stdout[-300:]!r}, stderr {_text(ran.stderr)[-300:]!r}{not_started}")
 
 
 def fix_step_argv(prompt, model, repo, max_turns=DEFAULT_MAX_TURNS, claude="claude",
@@ -1073,11 +1225,22 @@ def run_fix_step(sandbox, prompt, model=None, timeout=DEFAULT_TIMEOUT,
     and no agent started, if `sandbox` is not a Sandbox: the step never runs
     in a checkout.
 
+    With Bash in `tools`, and only then (the denylist hook's matcher is
+    Bash, so without it nothing more runs than before): ValueError, and no
+    agent started, when the environment built here has no non-empty
+    CURAMOIR_JOB (the hook denies only inside a job, and both callers run
+    under job_guard.run_guarded, which sets it), or when a hook command the
+    argv's `--settings` carry does not deny an `rm -rf` when run as Claude
+    Code will run it, in the sandbox with that environment
+    (require_denying_hooks; cm-60c): a hook that says nothing allows the
+    call.
+
     `before_call`, when given, is called with no arguments after every
     step that can fail without a call (the config read, the argv, the
-    snapshot) and immediately before the `claude` process is started: the
-    point after which the call may have spent money. The sweep notes the
-    call's provisional cost there (fix_scope, "The line's cost")."""
+    snapshot, the two checks above) and immediately before the `claude`
+    process is started: the point after which the call may have spent
+    money. The sweep notes the call's provisional cost there (fix_scope,
+    "The line's cost")."""
     require_sandbox(sandbox)
     path = str(sandbox.path)
     if model is None:
@@ -1097,6 +1260,15 @@ def run_fix_step(sandbox, prompt, model=None, timeout=DEFAULT_TIMEOUT,
             environment.pop(name, None)
     if runner.hosted and "Bash" in tools:
         environment.update(_hosted_environment(environment, path))
+    if "Bash" in tools:
+        # The only toolset the hook can fire for (its matcher is Bash), so
+        # the only one checked: without Bash nothing more runs than before.
+        if not environment.get(_JOB_VARIABLE):
+            raise ValueError(
+                f"{_JOB_VARIABLE} is not set in the fix step's environment, and the "
+                "PreToolUse denylist denies only inside a job: a fix agent is given Bash "
+                "only in a run started through job_guard.run_guarded, which sets it")
+        require_denying_hooks(_argv_settings(argv), path, environment)
     if before_call is not None:
         before_call()
     try:
@@ -1109,6 +1281,16 @@ def run_fix_step(sandbox, prompt, model=None, timeout=DEFAULT_TIMEOUT,
                           git_state=git_state)
     return FixStepRun(tuple(argv), result.returncode, _text(result.stdout),
                       _text(result.stderr), git_state=git_state)
+
+
+def _argv_settings(argv):
+    """The `--settings` object in `argv` (fix_step_argv's), read back from
+    the command line itself so what require_denying_hooks checks is what
+    the agent is started with. The LAST `--settings` is the flag: the
+    prompt and the model come before it and could be that very word, and
+    nothing after its value can be."""
+    flag = len(argv) - 1 - argv[::-1].index("--settings")
+    return json.loads(argv[flag + 1])
 
 
 def _keeps_run_tokens(runner, tools):
