@@ -284,6 +284,25 @@ def test_a_malformed_hooks_json_is_a_value_error_naming_the_file(tmp_path, monke
         pretooluse_settings()
 
 
+@pytest.mark.parametrize("installed", [False, True], ids=["checkout", "installed"])
+@pytest.mark.parametrize("command", [
+    "/opt/curamoir/scripts/curamoir-hook-pretooluse",
+    "${CLAUDE_PLUGIN_ROOT}/scripts/curamoir-hook-pretooluse",
+    "curamoir-hook-pretooluse",
+], ids=["absolute-path", "unquoted-placeholder", "bare-name"])
+def test_a_hook_command_that_does_not_start_with_the_quoted_plugin_root_is_refused(
+        tmp_path, monkeypatch, command, installed):
+    """cm-60c (R5 provenance): the plugin root is written in place of the
+    leading `"${CLAUDE_PLUGIN_ROOT}"` and nothing else, so a command that
+    does not start with exactly that (quotes included) has no place to
+    write it. Refused in both layouts, never cut at that length and
+    loaded as whatever is left."""
+    hooks_json(tmp_path, monkeypatch, {"hooks": {"PreToolUse": [_entry(command=command)]}})
+
+    with pytest.raises(ValueError, match=r"hooks/hooks\.json.*does not start with"):
+        pretooluse_settings(installed=installed, python=sys.executable)
+
+
 #: Fields that would make Claude Code not wait for a hook, not run it for
 #: every Bash call, or not run it as the command the self-test runs.
 NOT_A_PLAIN_COMMAND_HOOK = [

@@ -46,6 +46,7 @@ from tests.harness import Harness
 from tests.hooks.test_pretooluse_entrypoint import REPO_ROOT
 from tests.test_job_guard import CEILING, listing, october, seed_spend
 from tests.test_lock_slot import CHILD_SECONDS, with_body
+from tests.test_plugin_files import is_a_deny_claude_code_acts_on
 
 #: A literal on purpose, not job_guard.JOB_VARIABLE: the hook reads this
 #: name, so a rename on one side only must fail here.
@@ -412,8 +413,7 @@ def test_the_real_hook_denies_rm_rf_inside_the_fix_steps_lockless_clone(repo, tm
     assert seen["curamoir"] and not seen["lock"], "the clone must have .curamoir/ and no lock"
     assert seen["returncode"] == 0, seen["stderr"]
     assert seen["stdout"].strip(), "the hook allowed rm -rf in the clone: " + seen["stderr"]
-    decision = json.loads(seen["stdout"])["hookSpecificOutput"]
-    assert decision["permissionDecision"] == "deny"
+    assert is_a_deny_claude_code_acts_on(seen["returncode"], seen["stdout"]), seen["stdout"]
 
 
 #: A stand-in `claude` that loads PreToolUse hooks the way the real fix
@@ -472,7 +472,7 @@ def test_the_fix_steps_own_settings_load_the_denylist_that_denies_rm_rf(
     (answer,) = seen["answers"]
     assert answer["returncode"] == 0, answer["stderr"]
     assert answer["stdout"].strip(), "the hook allowed rm -rf in the clone: " + answer["stderr"]
-    assert json.loads(answer["stdout"])["hookSpecificOutput"]["permissionDecision"] == "deny"
+    assert is_a_deny_claude_code_acts_on(answer["returncode"], answer["stdout"]), answer["stdout"]
 
 
 # --- the denylist is checked before the agent starts (cm-60c, R5 edge cases) --------------
@@ -558,7 +558,7 @@ def test_a_healthy_copy_of_the_checkout_starts_the_hosted_fix_step(repo, tmp_pat
     assert shlex.split(settings["hooks"]["PreToolUse"][0]["hooks"][0]["command"]) == [
         str(root / "scripts" / "curamoir-hook-pretooluse")]
     (answer,) = json.loads(log.read_text(encoding="utf-8"))["answers"]
-    assert json.loads(answer["stdout"])["hookSpecificOutput"]["permissionDecision"] == "deny"
+    assert is_a_deny_claude_code_acts_on(answer["returncode"], answer["stdout"]), answer["stdout"]
 
 
 def _no_launcher_sh(root):
@@ -641,7 +641,7 @@ def test_the_installed_hook_command_is_checked_through_the_fix_steps_spawn(
     assert shlex.split(settings["hooks"]["PreToolUse"][0]["hooks"][0]["command"]) == [
         sys.executable, "-I", "-m", "curamoir.hooks.pretooluse"]
     (answer,) = json.loads(log.read_text(encoding="utf-8"))["answers"]
-    assert json.loads(answer["stdout"])["hookSpecificOutput"]["permissionDecision"] == "deny"
+    assert is_a_deny_claude_code_acts_on(answer["returncode"], answer["stdout"]), answer["stdout"]
 
 
 def test_an_installed_hook_that_imports_but_says_nothing_never_starts_the_agent(
@@ -784,10 +784,13 @@ def test_the_hook_is_asked_in_the_clone_with_the_fix_steps_environment(
     assert run.exit_code == 0 and marker.exists()
 
 
-def test_the_hook_is_asked_with_the_payload_claude_code_sends(repo, tmp_path, monkeypatch):
-    """What the hook reads on stdin is a PreToolUse payload for the Bash
-    self-test command, `cwd` (the clone) included: cúramóir's hook finds
-    its repository from that field."""
+def test_the_self_tests_payload_names_the_event_the_tool_the_command_and_the_clone(
+        repo, tmp_path, monkeypatch):
+    """What the hook reads on stdin is the self-test's own payload, pinned
+    as it is written: the two fields cúramóir's hook reads (`tool_input`,
+    the self-test command, and `cwd`, the clone, from which it finds its
+    repository) and the event and tool names. It is not a payload captured
+    from Claude Code, which sends more fields than these."""
     committed(repo)
     monkeypatch.setenv(VARIABLE, "sweep")
     log = tmp_path / "payload.json"
@@ -902,5 +905,7 @@ def test_the_stand_in_deny_is_what_the_real_hook_prints_for_the_self_test(repo, 
 
     answer = json.loads(ran.stdout)["hookSpecificOutput"]
     assert ran.returncode == 0, ran.stderr
+    assert is_a_deny_claude_code_acts_on(ran.returncode, ran.stdout)
+    assert is_a_deny_claude_code_acts_on(0, json.dumps(DENY))
     assert {key: answer[key] for key in ("hookEventName", "permissionDecision")} == {
         key: DENY["hookSpecificOutput"][key] for key in ("hookEventName", "permissionDecision")}
