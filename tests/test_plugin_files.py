@@ -138,6 +138,37 @@ def is_a_deny_claude_code_acts_on(returncode, stdout):
             and specific.get("permissionDecision") == "deny")
 
 
+def _answer(decision="deny", event="PreToolUse"):
+    return json.dumps({"hookSpecificOutput": {"hookEventName": event,
+                                              "permissionDecision": decision}})
+
+
+@pytest.mark.parametrize("returncode, stdout, acted_on", [
+    (0, _answer(), True),
+    (0, _answer(event="preToolUse"), False),
+    (0, _answer(event="PostToolUse"), False),
+    (0, json.dumps({"hookSpecificOutput": {"permissionDecision": "deny"}}), False),
+    (1, _answer(), False),
+    (2, _answer(), False),
+    (0, _answer(decision="allow"), False),
+    (0, _answer(decision="ask"), False),
+    (0, "", False),
+    (0, "denied", False),
+    (0, json.dumps([_answer()]), False),
+    (0, json.dumps({"hookSpecificOutput": "deny"}), False),
+    (0, json.dumps({"decision": "block"}), False),
+], ids=["the-real-shape", "event-in-another-case", "another-event", "no-event", "exit-1",
+        "exit-2", "allow", "ask", "nothing", "not-json", "a-list", "output-a-string",
+        "the-legacy-shape"])
+def test_only_exit_0_with_a_pretooluse_deny_is_a_deny_claude_code_acts_on(
+        returncode, stdout, acted_on):
+    """cm-60c (R5 provenance): the helper the acceptance tests judge a
+    hook's answer by is held to both things it was written for, the exit
+    code and the event name, so it cannot drift back to reading
+    `permissionDecision` alone with every test that uses it still green."""
+    assert is_a_deny_claude_code_acts_on(returncode, stdout) is acted_on
+
+
 def test_installed_the_hook_runs_the_module_with_the_running_interpreter():
     """No launcher script and no checkout: the interpreter running the sweep
     has cúramóir importable (it is running it), so the hook is that
