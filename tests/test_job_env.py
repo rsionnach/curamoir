@@ -23,14 +23,17 @@ between `try:` and the read could tell the two placements apart.
 
 import json
 import os
+import shlex
+import shutil
 import signal
 import subprocess
 import sys
 import time
+from functools import partial
 
 import pytest
 
-from curamoir import job_guard
+from curamoir import fix_step, job_guard
 from curamoir.config import LOCAL_RUNNER, Runner, RunnerKind
 from curamoir.fix_step import fix_tools, run_fix_step
 from curamoir.git_guard import prepare_sandbox
@@ -43,6 +46,7 @@ from tests.harness import Harness
 from tests.hooks.test_pretooluse_entrypoint import REPO_ROOT
 from tests.test_job_guard import CEILING, listing, october, seed_spend
 from tests.test_lock_slot import CHILD_SECONDS, with_body
+from tests.test_plugin_files import is_a_deny_claude_code_acts_on
 
 #: A literal on purpose, not job_guard.JOB_VARIABLE: the hook reads this
 #: name, so a rename on one side only must fail here.
@@ -409,8 +413,7 @@ def test_the_real_hook_denies_rm_rf_inside_the_fix_steps_lockless_clone(repo, tm
     assert seen["curamoir"] and not seen["lock"], "the clone must have .curamoir/ and no lock"
     assert seen["returncode"] == 0, seen["stderr"]
     assert seen["stdout"].strip(), "the hook allowed rm -rf in the clone: " + seen["stderr"]
-    decision = json.loads(seen["stdout"])["hookSpecificOutput"]
-    assert decision["permissionDecision"] == "deny"
+    assert is_a_deny_claude_code_acts_on(seen["returncode"], seen["stdout"]), seen["stdout"]
 
 
 #: A stand-in `claude` that loads PreToolUse hooks the way the real fix
@@ -469,4 +472,440 @@ def test_the_fix_steps_own_settings_load_the_denylist_that_denies_rm_rf(
     (answer,) = seen["answers"]
     assert answer["returncode"] == 0, answer["stderr"]
     assert answer["stdout"].strip(), "the hook allowed rm -rf in the clone: " + answer["stderr"]
-    assert json.loads(answer["stdout"])["hookSpecificOutput"]["permissionDecision"] == "deny"
+    assert is_a_deny_claude_code_acts_on(answer["returncode"], answer["stdout"]), answer["stdout"]
+
+
+# --- the denylist is checked before the agent starts (cm-60c, R5 edge cases) --------------
+#
+# A command hook that says nothing, or cannot run, ALLOWS the call. So before
+# a fix agent with Bash starts, run_fix_step runs each hook command its own
+# --settings carry, as Claude Code will, and refuses unless it denies. Every
+# test here goes through the real run_fix_step with a stand-in `claude` that
+# only records that it was started: a refusal must leave no such record.
+
+HOSTED = Runner(RunnerKind.HOSTED)
+
+
+def started_marker(tmp_path):
+    """A stand-in `claude` that writes `started` beside itself, and that
+    file's path: absent after a run, the agent was never started."""
+    marker = tmp_path / "started"
+    script = stand_in_claude(tmp_path, f"open({str(marker)!r}, 'w').write('started')")
+    return script, marker
+
+
+def hosted_fix_step(repo, tmp_path, script, **options):
+    """The hosted fix step with Bash, as sweep_job calls it, in a clone of
+    `repo`. The caller sets CURAMOIR_JOB (or leaves it unset on purpose).
+    Returns (FixStepRun, the number of before_call calls)."""
+    called = []
+    options.setdefault("tools", fix_tools(HOSTED, "pytest -q"))
+    with prepare_sandbox(repo.repo, "HEAD", parent=tmp_path) as sandbox:
+        run = run_fix_step(sandbox, "p", model="m", claude=str(script), runner=HOSTED,
+                           test_command="pytest -q",
+                           before_call=lambda: called.append(True), **options)
+    return run, len(called)
+
+
+def refused_hosted_fix_step(repo, tmp_path, script, marker, match):
+    """The same call, which must raise ValueError matching `match` before
+    before_call and before the stand-in starts. Returns the message."""
+    called = []
+    with (prepare_sandbox(repo.repo, "HEAD", parent=tmp_path) as sandbox,
+          pytest.raises(ValueError, match=match) as refused):
+        run_fix_step(sandbox, "p", model="m", claude=str(script), runner=HOSTED,
+                     tools=fix_tools(HOSTED, "pytest -q"), test_command="pytest -q",
+                     before_call=lambda: called.append(True))
+    assert not marker.exists(), "the agent was started with a denylist that does not deny"
+    assert called == [], "before_call ran, so the call was noted as possibly spent"
+    return str(refused.value)
+
+
+def plugin_copy(tmp_path):
+    """A copy of what the checkout's PreToolUse hook command needs (its
+    launcher and src/curamoir), for a test to break: the repository's own
+    files are never touched."""
+    root = tmp_path / "plugin copy"
+    (root / "scripts").mkdir(parents=True)
+    shutil.copy2(REPO_ROOT / "scripts" / "curamoir-hook-pretooluse", root / "scripts")
+    shutil.copytree(REPO_ROOT / "src" / "curamoir", root / "src" / "curamoir",
+                    ignore=shutil.ignore_patterns("__pycache__"))
+    return root
+
+
+def settings_from(monkeypatch, **options):
+    """Make the fix step build its --settings with pretooluse_settings'
+    own seams (`root`, `installed`, `python`): the real function, other
+    arguments."""
+    monkeypatch.setattr(fix_step, "pretooluse_settings",
+                        partial(fix_step.pretooluse_settings, **options))
+
+
+def test_a_healthy_copy_of_the_checkout_starts_the_hosted_fix_step(repo, tmp_path, monkeypatch):
+    """The control for the three breakages below: the copy, unbroken, passes
+    the check, the agent starts, and the hook it loads is the copy's."""
+    committed(repo)
+    monkeypatch.setenv(VARIABLE, "sweep")
+    root = plugin_copy(tmp_path)
+    settings_from(monkeypatch, root=root)
+    log = tmp_path / "hooks.json"
+    script = stand_in_claude(tmp_path, SETTINGS_LOADING_CLAUDE.format(log=str(log)))
+
+    run, before_calls = hosted_fix_step(repo, tmp_path, script)
+
+    assert run.exit_code == 0 and before_calls == 1
+    settings = json.loads(run.argv[run.argv.index("--settings") + 1])
+    assert shlex.split(settings["hooks"]["PreToolUse"][0]["hooks"][0]["command"]) == [
+        str(root / "scripts" / "curamoir-hook-pretooluse")]
+    (answer,) = json.loads(log.read_text(encoding="utf-8"))["answers"]
+    assert is_a_deny_claude_code_acts_on(answer["returncode"], answer["stdout"]), answer["stdout"]
+
+
+def _no_launcher_sh(root):
+    (root / "src" / "curamoir" / "launcher.sh").unlink()
+
+
+def _launcher_not_executable(root):
+    (root / "scripts" / "curamoir-hook-pretooluse").chmod(0o644)
+
+
+def _launcher_missing(root):
+    (root / "scripts" / "curamoir-hook-pretooluse").unlink()
+
+
+@pytest.mark.parametrize("breakage, exit_code", [
+    (_no_launcher_sh, 0), (_launcher_not_executable, 126), (_launcher_missing, 127)],
+    ids=["no-launcher.sh", "launcher-not-executable", "launcher-missing"])
+def test_a_checkout_whose_hook_cannot_run_never_starts_a_fix_agent_with_bash(
+        repo, tmp_path, monkeypatch, breakage, exit_code):
+    """From a checkout the hook command is the launcher script. Without
+    src/curamoir/launcher.sh it exits 0 in silence; without its exec bit, or
+    missing, the shell exits 126 or 127: each is a hook that allows
+    `rm -rf`. The fix step is refused, and says what came back."""
+    committed(repo)
+    monkeypatch.setenv(VARIABLE, "sweep")
+    root = plugin_copy(tmp_path)
+    breakage(root)
+    settings_from(monkeypatch, root=root)
+    script, marker = started_marker(tmp_path)
+
+    message = refused_hosted_fix_step(repo, tmp_path, script, marker, "did not deny")
+
+    assert "curamoir-hook-pretooluse" in message
+    assert f"exit code {exit_code}" in message
+
+
+@pytest.mark.parametrize("python3", [None, "#!/bin/sh\nexit 1\n"],
+                         ids=["no-python", "python3-below-the-floor"])
+def test_a_path_with_no_qualifying_python_never_starts_a_fix_agent_with_bash(
+        repo, tmp_path, monkeypatch, python3):
+    """The sweep's own interpreter need not be on PATH (an editable install
+    started as /path/.venv/bin/curamoir), and the launcher takes its Python
+    from PATH: with none at 3.12 or later there (none at all, or a `python3`
+    whose floor probe fails) it exits 0 in silence. The repository's real
+    launcher, a PATH that holds only what it and git need."""
+    committed(repo)
+    monkeypatch.setenv(VARIABLE, "sweep")
+    script, marker = started_marker(tmp_path)
+    bare = tmp_path / "bare-bin"
+    bare.mkdir()
+    for name in ("env", "bash", "sh", "dirname", "git"):
+        (bare / name).symlink_to(shutil.which(name))
+    if python3 is not None:
+        (bare / "python3").write_text(python3, encoding="utf-8")
+        (bare / "python3").chmod(0o755)
+    monkeypatch.setenv("PATH", str(bare))
+
+    message = refused_hosted_fix_step(repo, tmp_path, script, marker, "did not deny")
+
+    assert "exit code 0" in message and "curamoir-hook-pretooluse" in message
+
+
+def test_the_installed_hook_command_is_checked_through_the_fix_steps_spawn(
+        repo, tmp_path, monkeypatch):
+    """The installed form (`python -I -m curamoir.hooks.pretooluse`) through
+    the real run_fix_step, not only at the command level: it passes the
+    check, the agent starts, and that command denies in the clone. (The
+    interpreter is the test's own; tests/plugin/test_installed_package.py
+    builds a real wheel.)"""
+    committed(repo)
+    monkeypatch.setenv(VARIABLE, "sweep")
+    settings_from(monkeypatch, installed=True, python=sys.executable)
+    log = tmp_path / "hooks.json"
+    script = stand_in_claude(tmp_path, SETTINGS_LOADING_CLAUDE.format(log=str(log)))
+
+    run, before_calls = hosted_fix_step(repo, tmp_path, script)
+
+    assert run.exit_code == 0 and before_calls == 1
+    settings = json.loads(run.argv[run.argv.index("--settings") + 1])
+    assert shlex.split(settings["hooks"]["PreToolUse"][0]["hooks"][0]["command"]) == [
+        sys.executable, "-I", "-m", "curamoir.hooks.pretooluse"]
+    (answer,) = json.loads(log.read_text(encoding="utf-8"))["answers"]
+    assert is_a_deny_claude_code_acts_on(answer["returncode"], answer["stdout"]), answer["stdout"]
+
+
+def test_an_installed_hook_that_imports_but_says_nothing_never_starts_the_agent(
+        repo, tmp_path, monkeypatch):
+    """The installed form's import probe passes for an interpreter that can
+    import the module and still does not answer as the hook (here a stand-in
+    that runs this interpreter for `-c` and exits 0 in silence for `-m`):
+    only running the command shows it, so the check does."""
+    committed(repo)
+    monkeypatch.setenv(VARIABLE, "sweep")
+    python = tmp_path / "python"
+    python.write_text(
+        "#!/bin/sh\nfor a in \"$@\"; do [ \"$a\" = -m ] && exit 0; done\n"
+        f"exec {shlex.quote(sys.executable)} \"$@\"\n", encoding="utf-8")
+    python.chmod(0o755)
+    settings_from(monkeypatch, installed=True, python=str(python))
+    script, marker = started_marker(tmp_path)
+
+    message = refused_hosted_fix_step(repo, tmp_path, script, marker, "did not deny")
+
+    assert "-I -m curamoir.hooks.pretooluse" in message and "exit code 0" in message
+
+
+@pytest.mark.parametrize("value", [None, ""], ids=["unset", "empty"])
+def test_a_fix_agent_with_bash_is_refused_outside_a_job(repo, tmp_path, monkeypatch, value):
+    """The hook denies only when CURAMOIR_JOB is set and not empty: a fix
+    step started outside run_guarded would load a denylist that allows
+    everything. Refused before the agent starts."""
+    committed(repo)
+    if value is not None:
+        monkeypatch.setenv(VARIABLE, value)
+    script, marker = started_marker(tmp_path)
+
+    refused_hosted_fix_step(repo, tmp_path, script, marker, VARIABLE)
+
+
+@pytest.mark.parametrize("runner", [LOCAL_RUNNER, HOSTED], ids=["local", "hosted"])
+def test_without_bash_the_fix_step_starts_as_before_whatever_the_hook_would_say(
+        repo, tmp_path, monkeypatch, runner):
+    """The hook's matcher is Bash, so without Bash in the toolset it can
+    never fire: no CURAMOIR_JOB is required and the hook command is not run
+    first (here it is a copy with no launcher, which the check would
+    refuse). The local runner and the hosted run with no test command."""
+    committed(repo)
+    root = plugin_copy(tmp_path)
+    _launcher_missing(root)
+    settings_from(monkeypatch, root=root)
+    script, marker = started_marker(tmp_path)
+
+    with prepare_sandbox(repo.repo, "HEAD", parent=tmp_path) as sandbox:
+        run = run_fix_step(sandbox, "p", model="m", claude=str(script), runner=runner,
+                           tools=fix_tools(runner, None))
+
+    assert run.exit_code == 0 and marker.exists()
+    assert "Bash" not in run.argv[run.argv.index("--tools") + 1]
+
+
+# --- what the check promises, held one property at a time (cm-60c, R5 edge cases 2) -------
+#
+# Stand-in hooks: a plugin root under tmp_path whose scripts/ holds small
+# shell scripts, and a hooks.json naming them, both reached through the
+# seams the tests above use (pretooluse_settings' `root`, and
+# plugin_files.HOOKS_JSON). The repository's own hooks.json and launchers
+# are never touched.
+
+#: What cúramóir's hook prints for a refusal (hooks/pretooluse.py's _deny),
+#: with a stand-in reason.
+DENY = {"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
+                               "permissionDecisionReason": "stand-in"}}
+
+
+def printing(answer):
+    """Shell that reads the payload and prints `answer` as JSON."""
+    return f"cat >/dev/null\nprintf '%s' {shlex.quote(json.dumps(answer))}\n"
+
+
+def stand_in_hooks(tmp_path, monkeypatch, scripts, entries=None):
+    """Make the fix step load stand-in hooks: `scripts` maps a name to the
+    body of a /bin/sh script at <root>/scripts/<name>; `entries` is
+    hooks.json's PreToolUse list (default: one Bash entry with a plain
+    command hook per script, timeout 5). Returns the root."""
+    from curamoir import plugin_files
+
+    root = tmp_path / "stand-in plugin"
+    (root / "scripts").mkdir(parents=True)
+    for name, body in scripts.items():
+        (root / "scripts" / name).write_text(f"#!/bin/sh\n{body}", encoding="utf-8")
+        (root / "scripts" / name).chmod(0o755)
+    if entries is None:
+        entries = [{"matcher": "Bash", "hooks": [stand_in_hook(name) for name in scripts]}]
+    registered = tmp_path / "stand-in-hooks.json"
+    registered.write_text(json.dumps({"hooks": {"PreToolUse": entries}}), encoding="utf-8")
+    monkeypatch.setattr(plugin_files, "HOOKS_JSON", registered)
+    settings_from(monkeypatch, root=root, installed=False)
+    return root
+
+
+def stand_in_hook(name, timeout=5):
+    """hooks.json's hook object for stand_in_hooks' script `name`."""
+    return {"type": "command", "command": f'"${{CLAUDE_PLUGIN_ROOT}}"/scripts/{name}',
+            "timeout": timeout}
+
+
+def hosted_fix_step_in(sandbox, script, prompt="p", model="m"):
+    """The hosted fix step with Bash in `sandbox`, for a test that needs
+    the clone's path."""
+    return run_fix_step(sandbox, prompt, model=model, claude=str(script), runner=HOSTED,
+                        tools=fix_tools(HOSTED, "pytest -q"), test_command="pytest -q")
+
+
+def test_the_hook_is_asked_in_the_clone_with_the_fix_steps_environment(
+        repo, tmp_path, monkeypatch):
+    """The user's ruling: a deny in the fix step's environment. The stand-in
+    hook denies only when its working directory is the clone and it sees
+    what run_fix_step built, not what the sweep's own process has:
+    CLAUDE_PLUGIN_ROOT as PLUGIN_ROOT (the parent's names another plugin)
+    and the hosted UV_FROZEN (absent from the parent). Asked anywhere else,
+    or with the parent's environment, it is silent and the step is refused."""
+    committed(repo)
+    monkeypatch.setenv(VARIABLE, "sweep")
+    monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", str(tmp_path / "some-other-plugin"))
+    monkeypatch.delenv("UV_FROZEN", raising=False)
+    root = stand_in_hooks(tmp_path, monkeypatch, {})
+    script, marker = started_marker(tmp_path)
+
+    with prepare_sandbox(repo.repo, "HEAD", parent=tmp_path) as sandbox:
+        (root / "scripts" / "particular").write_text(
+            "#!/bin/sh\ncat >/dev/null\n"
+            'echo "cwd=$(pwd -P) CLAUDE_PLUGIN_ROOT=$CLAUDE_PLUGIN_ROOT UV_FROZEN=$UV_FROZEN" >&2\n'
+            f'[ "$(pwd -P)" = {shlex.quote(os.path.realpath(sandbox.path))} ] || exit 0\n'
+            f'[ "$CLAUDE_PLUGIN_ROOT" = {shlex.quote(str(fix_step.PLUGIN_ROOT))} ] || exit 0\n'
+            '[ "$UV_FROZEN" = 1 ] || exit 0\n'
+            f"printf '%s' {shlex.quote(json.dumps(DENY))}\n", encoding="utf-8")
+        (root / "scripts" / "particular").chmod(0o755)
+        (tmp_path / "stand-in-hooks.json").write_text(json.dumps({"hooks": {"PreToolUse": [
+            {"matcher": "Bash", "hooks": [stand_in_hook("particular")]}]}}), encoding="utf-8")
+
+        run = hosted_fix_step_in(sandbox, script)
+
+    assert run.exit_code == 0 and marker.exists()
+
+
+def test_the_self_tests_payload_names_the_event_the_tool_the_command_and_the_clone(
+        repo, tmp_path, monkeypatch):
+    """What the hook reads on stdin is the self-test's own payload, pinned
+    as it is written: the two fields cúramóir's hook reads (`tool_input`,
+    the self-test command, and `cwd`, the clone, from which it finds its
+    repository) and the event and tool names. It is not a payload captured
+    from Claude Code, which sends more fields than these."""
+    committed(repo)
+    monkeypatch.setenv(VARIABLE, "sweep")
+    log = tmp_path / "payload.json"
+    stand_in_hooks(tmp_path, monkeypatch, {"recording": (
+        f"cat >{shlex.quote(str(log))}\nprintf '%s' {shlex.quote(json.dumps(DENY))}\n")})
+    script, marker = started_marker(tmp_path)
+
+    with prepare_sandbox(repo.repo, "HEAD", parent=tmp_path) as sandbox:
+        run = hosted_fix_step_in(sandbox, script)
+        clone = str(sandbox.path)
+
+    assert run.exit_code == 0 and marker.exists()
+    assert json.loads(log.read_text(encoding="utf-8")) == {
+        "hook_event_name": "PreToolUse", "tool_name": "Bash",
+        "tool_input": {"command": fix_step._SELF_TEST_COMMAND}, "cwd": clone}
+
+
+def test_a_hook_slower_than_its_declared_timeout_is_refused(repo, tmp_path, monkeypatch):
+    """Claude Code lets a hook that runs past its own `timeout` fail open,
+    so that timeout bounds the check, not the longer fallback: a hook that
+    denies after 2.5 s with a declared timeout of 1 is refused."""
+    committed(repo)
+    monkeypatch.setenv(VARIABLE, "sweep")
+    assert fix_step._HOOK_SELF_TEST_TIMEOUT > 3
+    stand_in_hooks(tmp_path, monkeypatch, {"slow": "sleep 2.5\n" + printing(DENY)}, entries=[
+        {"matcher": "Bash", "hooks": [stand_in_hook("slow", timeout=1)]}])
+    script, marker = started_marker(tmp_path)
+
+    refused_hosted_fix_step(repo, tmp_path, script, marker, "did not answer within 1 seconds")
+
+
+def test_a_prompt_and_a_model_named_like_the_settings_flag_do_not_hide_the_settings(
+        repo, tmp_path, monkeypatch):
+    """The settings the check reads back from the argv are the value of the
+    LAST `--settings`: the prompt and the model come before the flag and
+    may be that very word. With both, the real hook is still found, asked,
+    and the agent starts."""
+    committed(repo)
+    monkeypatch.setenv(VARIABLE, "sweep")
+    script, marker = started_marker(tmp_path)
+
+    with prepare_sandbox(repo.repo, "HEAD", parent=tmp_path) as sandbox:
+        run = hosted_fix_step_in(sandbox, script, prompt="--settings", model="--settings")
+
+    assert run.exit_code == 0 and marker.exists()
+    assert run.argv[2] == run.argv[4] == "--settings"
+    assert fix_step._argv_settings(list(run.argv)) == fix_step.pretooluse_settings()
+
+
+@pytest.mark.parametrize("entries", [
+    [{"matcher": "Bash", "hooks": [stand_in_hook("denies"), stand_in_hook("silent")]}],
+    [{"matcher": "Bash", "hooks": [stand_in_hook("denies")]},
+     {"matcher": "Edit|Bash", "hooks": [stand_in_hook("silent")]}]],
+    ids=["second-hook-of-the-entry", "second-entry"])
+def test_every_hook_that_covers_bash_is_checked_not_only_the_first(
+        repo, tmp_path, monkeypatch, entries):
+    """Each hook is a command Claude Code runs for a Bash call, and the
+    denylist is whichever of them cúramóir's is: one that denies beside one
+    that says nothing is refused, and the refusal names the silent one."""
+    committed(repo)
+    monkeypatch.setenv(VARIABLE, "sweep")
+    stand_in_hooks(tmp_path, monkeypatch,
+                   {"denies": printing(DENY), "silent": "cat >/dev/null\n"}, entries=entries)
+    script, marker = started_marker(tmp_path)
+
+    message = refused_hosted_fix_step(repo, tmp_path, script, marker, "did not deny")
+
+    assert "scripts/silent" in message and "exit code 0" in message
+
+
+def _without(answer, key):
+    return {"hookSpecificOutput": {name: value for name, value
+                                   in answer["hookSpecificOutput"].items() if name != key}}
+
+
+@pytest.mark.parametrize("body, exit_code", [
+    (printing(DENY) + "exit 1\n", 1),
+    (printing(_without(DENY, "hookEventName")), 0),
+    (printing({"hookSpecificOutput": dict(DENY["hookSpecificOutput"],
+                                          hookEventName="PostToolUse")}), 0),
+    (printing([DENY]), 0)],
+    ids=["deny-with-exit-1", "no-hookEventName", "another-hookEventName", "not-an-object"])
+def test_a_deny_claude_code_would_not_honour_is_refused(
+        repo, tmp_path, monkeypatch, body, exit_code):
+    """Claude Code reads a hook's JSON only on exit 0, and a PreToolUse
+    decision only from a `hookSpecificOutput` whose `hookEventName` is
+    PreToolUse: a deny printed with exit 1, or without that name, would
+    let the call through, so it does not pass the check either."""
+    committed(repo)
+    monkeypatch.setenv(VARIABLE, "sweep")
+    stand_in_hooks(tmp_path, monkeypatch, {"almost": body})
+    script, marker = started_marker(tmp_path)
+
+    message = refused_hosted_fix_step(repo, tmp_path, script, marker, "did not deny")
+
+    assert "scripts/almost" in message and f"exit code {exit_code}" in message
+
+
+def test_the_stand_in_deny_is_what_the_real_hook_prints_for_the_self_test(repo, tmp_path):
+    """DENY above stands in for cúramóir's hook: the real one, asked the
+    check's own question inside a job, exits 0 with the same
+    `hookEventName` and `permissionDecision`, so the stricter reading
+    refuses no healthy run."""
+    committed(repo)
+    payload = json.dumps({"hook_event_name": "PreToolUse", "tool_name": "Bash",
+                          "tool_input": {"command": fix_step._SELF_TEST_COMMAND},
+                          "cwd": str(repo.repo)})
+
+    ran = subprocess.run([str(REPO_ROOT / "scripts" / "curamoir-hook-pretooluse")],
+                         input=payload, capture_output=True, text=True, cwd=repo.repo,
+                         env=dict(os.environ, **{VARIABLE: "sweep"}))
+
+    answer = json.loads(ran.stdout)["hookSpecificOutput"]
+    assert ran.returncode == 0, ran.stderr
+    assert is_a_deny_claude_code_acts_on(ran.returncode, ran.stdout)
+    assert is_a_deny_claude_code_acts_on(0, json.dumps(DENY))
+    assert {key: answer[key] for key in ("hookEventName", "permissionDecision")} == {
+        key: DENY["hookSpecificOutput"][key] for key in ("hookEventName", "permissionDecision")}
